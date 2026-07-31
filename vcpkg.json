@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "project-hs",
+  "version-string": "0.2.0",
+  "builtin-baseline": "c1d80d9cb071c3f4a98c67c1196b137cc5b72918",
+  "dependencies": []
+}
