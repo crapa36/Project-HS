@@ -8,12 +8,47 @@
 
 # Generated build and test output
 /Build/
+/build/
+/out/
 /Output/
 /Artifacts/
+/Results/
+/TestResults/
+/Testing/
+/Saved/
 /Library/
+/Cooked/
+/Generated/
+/Shaders/
+/Fonts/
+/D3D12/
+/CMakeFiles/
+/CMakeCache.txt
+/CMakeUserPresets.json
+/cmake_install.cmake
+/compile_commands.json
+/CTestTestfile.cmake
+/CPackConfig.cmake
+/CPackSourceConfig.cmake
+/build.ninja
+/.ninja_deps
+/.ninja_log
+/*.exe
+/*.dll
+/*.lib
+/*.exp
+/*.ilk
+/*.pdb
+/*.obj
+result.json
+timeline.csv
+events.ndjson
 *.log
 *.dmp
 *.tmp
+
+# Local planning documents
+/Docs/
 
 # Operating system files
 .DS_Store
