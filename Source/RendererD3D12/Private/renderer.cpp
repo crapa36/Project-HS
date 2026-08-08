@@ -5,13 +5,26 @@
 #include <D3D12MemAlloc.h>
 
 #include <Windows.h>
+#ifdef DrawText
+#undef DrawText
+#endif
+#include <d2d1.h>
 #include <d3d12.h>
+#include <dwrite_3.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
 #include <DirectXMath.h>
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include <imgui.h>
+#include <imgui_impl_dx12.h>
+#include <imgui_impl_win32.h>
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
+                                                             LPARAM);
+#endif
 
 #include <algorithm>
 #include <array>
@@ -25,12 +38,14 @@
 #include <format>
 #include <fstream>
 #include <limits>
-#include <numbers>
 #include <span>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#pragma comment(lib, "d2d1.lib")
+#pragma comment(lib, "dwrite.lib")
 
 namespace hs
 {
@@ -41,28 +56,33 @@ using Microsoft::WRL::ComPtr;
 
 constexpr std::uint32_t kFrameCount = 3;
 constexpr std::uint32_t kParticleCount = 10'000;
-constexpr std::uint32_t kMaxParticleSpawnCommands = 256;
-constexpr std::uint32_t kInstanceDataOffset = 512;
-constexpr std::uint32_t kParticleSpawnDataOffset = 64 * 1024;
+constexpr std::uint32_t kUiWidth = 1'920;
+constexpr std::uint32_t kUiHeight = 1'080;
+constexpr std::uint32_t kPostTextureDescriptorCount = 10;
+constexpr std::uint32_t kCharacterDescriptorCount = 2;
+constexpr std::uint32_t kCharacterTextureSize = 2'048;
+constexpr std::uint32_t kTextureDescriptorCount =
+    kPostTextureDescriptorCount + kCharacterDescriptorCount;
+constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
+constexpr std::uint32_t kFrameUploadSize = 576 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kStage1RenderPassCount * 2);
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
-struct Vertex
-{
-    DirectX::XMFLOAT3 position;
-    DirectX::XMFLOAT3 normal;
-};
+using Vertex = SkinnedVertex;
 
 struct GpuInstance
 {
-    DirectX::XMFLOAT4 position_scale;
+    DirectX::XMFLOAT4 position;
+    DirectX::XMFLOAT4 scale;
     std::uint32_t color{};
     std::uint32_t mesh{};
     float yaw{};
     float padding{};
 };
+
+static_assert(sizeof(GpuInstance) == 48);
 
 struct FrameConstants
 {
@@ -72,7 +92,7 @@ struct FrameConstants
     DirectX::XMFLOAT4 light_color;
     DirectX::XMFLOAT4 screen_size;
     DirectX::XMFLOAT4X4 shadow_view_projection[3];
-    DirectX::XMFLOAT4X4 archer_bones[2];
+    DirectX::XMFLOAT4X4 archer_bones[kMaxCharacterBones];
     DirectX::XMFLOAT4 render_options;
     DirectX::XMUINT4 particle_options;
 };
@@ -99,9 +119,6 @@ struct GpuParticleSpawnCommand
     DirectX::XMUINT4 metadata;
 };
 
-static_assert(kParticleSpawnDataOffset +
-                  sizeof(GpuParticleSpawnCommand) * kMaxParticleSpawnCommands <=
-              128 * 1024);
 
 struct AllocationResource
 {
@@ -145,9 +162,20 @@ struct FrameContext
 {
     ComPtr<ID3D12CommandAllocator> allocator;
     AllocationResource upload;
+    AllocationResource ui_upload;
     std::byte *mapped{};
+    std::size_t upload_size{kFrameUploadSize};
+    std::byte *ui_mapped{};
     std::uint64_t fence_value{};
     bool timestamps_recorded{};
+    bool ui_initialized{};
+};
+
+struct UiCpuSurface
+{
+    ComPtr<IWICBitmap> bitmap;
+    ComPtr<ID2D1RenderTarget> target;
+    ComPtr<ID2D1SolidColorBrush> brush;
 };
 
 [[nodiscard]] Result HResultFailure(std::string_view operation, HRESULT result)
@@ -193,6 +221,20 @@ struct FrameContext
     return std::filesystem::path(std::wstring_view(path.data(), length)).parent_path();
 }
 
+[[nodiscard]] std::string Utf8(std::wstring_view text)
+{
+    if (text.empty()) return {};
+    const auto size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
+                                          static_cast<int>(text.size()), nullptr, 0,
+                                          nullptr, nullptr);
+    if (size <= 0) return {};
+    std::string result(static_cast<std::size_t>(size), '\0');
+    WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
+                        static_cast<int>(text.size()), result.data(), size,
+                        nullptr, nullptr);
+    return result;
+}
+
 [[nodiscard]] Result ReadBinary(const std::filesystem::path &path,
                                 std::vector<std::byte> &bytes)
 {
@@ -206,6 +248,162 @@ struct FrameContext
     bytes.resize(static_cast<std::size_t>(size));
     stream.seekg(0);
     stream.read(reinterpret_cast<char *>(bytes.data()), size);
+    return Result::Success();
+}
+
+struct DdsPixelFormat
+{
+    std::uint32_t size;
+    std::uint32_t flags;
+    std::uint32_t four_cc;
+    std::uint32_t rgb_bit_count;
+    std::uint32_t red_mask;
+    std::uint32_t green_mask;
+    std::uint32_t blue_mask;
+    std::uint32_t alpha_mask;
+};
+
+struct DdsHeader
+{
+    std::uint32_t size;
+    std::uint32_t flags;
+    std::uint32_t height;
+    std::uint32_t width;
+    std::uint32_t pitch;
+    std::uint32_t depth;
+    std::uint32_t mip_count;
+    std::array<std::uint32_t, 11> reserved;
+    DdsPixelFormat pixel_format;
+    std::uint32_t caps;
+    std::array<std::uint32_t, 4> remaining_caps;
+};
+
+[[nodiscard]] Result LoadRgbaDds(const std::filesystem::path &path,
+                                 std::uint32_t &width, std::uint32_t &height,
+                                 std::span<const std::byte> &pixels,
+                                 std::vector<std::byte> &storage)
+{
+    if (auto loaded = ReadBinary(path, storage); !loaded)
+    {
+        return loaded;
+    }
+    constexpr std::uint32_t dds_magic = 0x20534444;
+    if (storage.size() < sizeof(dds_magic) + sizeof(DdsHeader))
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character DDS header is truncated.");
+    }
+    std::uint32_t magic{};
+    DdsHeader header{};
+    std::memcpy(&magic, storage.data(), sizeof(magic));
+    std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
+    const auto pixel_bytes = static_cast<std::uint64_t>(header.width) * header.height * 4;
+    if (magic != dds_magic || header.size != 124 || header.pixel_format.size != 32 ||
+        header.pixel_format.rgb_bit_count != 32 || header.width == 0 ||
+        header.height == 0 || header.pitch != header.width * 4 ||
+        sizeof(magic) + sizeof(header) + pixel_bytes != storage.size())
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character DDS layout is invalid.");
+    }
+    width = header.width;
+    height = header.height;
+    pixels = std::span(storage).subspan(sizeof(magic) + sizeof(header));
+    return Result::Success();
+}
+
+[[nodiscard]] Result LoadCharacterAsset(
+    const std::filesystem::path &path, std::vector<SkinnedVertex> &vertices,
+    std::vector<CharacterClipHeader> &clips,
+    std::vector<float> &upper_body_weights,
+    std::vector<std::array<float, 16>> &matrices, std::uint32_t &bone_count,
+    float &ground_offset, std::uint32_t &material_count)
+{
+    std::vector<std::byte> bytes;
+    if (auto read = ReadBinary(path, bytes); !read)
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               std::format("Missing character asset: {}", path.string()));
+    }
+    if (bytes.size() < sizeof(CharacterAssetHeader))
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character asset header is truncated.");
+    }
+    CharacterAssetHeader header;
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    const auto expected_clips_offset =
+        sizeof(header) + header.vertex_count * sizeof(SkinnedVertex);
+    const auto expected_matrices_offset =
+        expected_clips_offset + header.clip_count * sizeof(CharacterClipHeader) +
+        header.bone_count * sizeof(float);
+    if (header.magic !=
+            std::array<char, 8>{'H', 'S', 'C', 'H', 'A', 'R', '1', '\0'} ||
+        header.version != kCharacterAssetVersion || header.vertex_count == 0 ||
+        header.bone_count == 0 || header.bone_count > kMaxCharacterBones ||
+        header.material_count == 0 ||
+        header.material_count > kMaxCharacterMaterials ||
+        header.clip_count != static_cast<std::uint32_t>(CharacterAnimationClip::Count) ||
+        header.vertices_offset != sizeof(header) ||
+        header.clips_offset != expected_clips_offset ||
+        header.upper_body_weights_offset !=
+            expected_clips_offset + header.clip_count * sizeof(CharacterClipHeader) ||
+        header.matrices_offset != expected_matrices_offset ||
+        !std::isfinite(header.bounds_min[1]) ||
+        !std::isfinite(header.bounds_max[1]) ||
+        header.bounds_min[1] >= header.bounds_max[1] ||
+        sizeof(header) + header.payload_size != bytes.size() ||
+        Crc32(std::span(bytes.data() + sizeof(header), header.payload_size)) !=
+            header.payload_crc32)
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character asset layout or checksum is invalid.");
+    }
+
+    vertices.resize(header.vertex_count);
+    std::memcpy(vertices.data(), bytes.data() + header.vertices_offset,
+                vertices.size() * sizeof(vertices.front()));
+    clips.resize(header.clip_count);
+    std::memcpy(clips.data(), bytes.data() + header.clips_offset,
+                clips.size() * sizeof(clips.front()));
+    upper_body_weights.resize(header.bone_count);
+    std::memcpy(upper_body_weights.data(), bytes.data() + header.upper_body_weights_offset,
+                upper_body_weights.size() * sizeof(float));
+    if (!std::ranges::any_of(upper_body_weights, [](float value) { return value > 0.0f; }) ||
+        !std::ranges::any_of(upper_body_weights, [](float value) { return value == 0.0f; }) ||
+        !std::ranges::all_of(upper_body_weights, [](float value) {
+            return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
+        }))
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character upper-body mask is invalid.");
+    }
+    const auto matrix_bytes = bytes.size() - header.matrices_offset;
+    if (matrix_bytes % sizeof(matrices.front()) != 0)
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character animation matrices are misaligned.");
+    }
+    matrices.resize(matrix_bytes / sizeof(matrices.front()));
+    std::memcpy(matrices.data(), bytes.data() + header.matrices_offset, matrix_bytes);
+    std::array<bool, static_cast<std::size_t>(CharacterAnimationClip::Count)> found{};
+    for (const auto &clip : clips)
+    {
+        const auto clip_index = static_cast<std::size_t>(clip.clip);
+        const auto matrix_count =
+            static_cast<std::uint64_t>(clip.frame_count) * header.bone_count;
+        if (clip_index >= found.size() || std::exchange(found[clip_index], true) ||
+            clip.frame_count < 2 || !(clip.duration_seconds > 0.0f) ||
+            static_cast<std::uint64_t>(clip.first_matrix) + matrix_count >
+                matrices.size())
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Character animation clip table is invalid.");
+        }
+    }
+    bone_count = header.bone_count;
+    material_count = header.material_count;
+    ground_offset = -header.bounds_min[1];
     return Result::Success();
 }
 
@@ -230,6 +428,22 @@ constexpr std::array<Vertex, 36> kCubeVertices = {
     Vertex{{0.5f, -0.5f, -0.5f}, {0, -1, 0}},  Vertex{{0.5f, -0.5f, 0.5f}, {0, -1, 0}},
 };
 
+std::filesystem::file_time_type LatestShaderWrite()
+{
+    std::filesystem::file_time_type latest{};
+    std::error_code error;
+    const auto directory = ExecutableDirectory() / "Shaders";
+    for (const auto &entry : std::filesystem::directory_iterator(directory, error))
+    {
+        if (error) break;
+        if (!entry.is_regular_file(error) || entry.path().extension() != ".dxil")
+            continue;
+        const auto write = entry.last_write_time(error);
+        if (!error) latest = std::max(latest, write);
+    }
+    return latest;
+}
+
 } // namespace
 
 struct D3D12Renderer::Impl
@@ -239,8 +453,12 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreateDepthAndShadow();
     [[nodiscard]] Result CreatePostProcessTargets();
     [[nodiscard]] Result CreatePipeline();
+    [[nodiscard]] Result ReloadPipeline();
     [[nodiscard]] Result CreateGpuData();
+    [[nodiscard]] Result CreateCharacterTextures();
     [[nodiscard]] Result CreateUiTexture();
+    [[nodiscard]] Result RasterizeUi(std::uint32_t frame_index,
+                                     std::span<const UiModel> models);
     [[nodiscard]] Result CreateAllocation(AllocationResource &output,
                                           const D3D12MA::ALLOCATION_DESC &allocation,
                                           const D3D12_RESOURCE_DESC &resource,
@@ -270,6 +488,9 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
     ComPtr<ID3D12DescriptorHeap> dsv_heap;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    ComPtr<ID3D12DescriptorHeap> imgui_heap;
+#endif
     ComPtr<ID3D12GraphicsCommandList> command_list;
     ComPtr<ID3D12GraphicsCommandList7> enhanced_command_list;
     ComPtr<ID3D12Fence> fence;
@@ -281,6 +502,9 @@ struct D3D12Renderer::Impl
     AllocationResource depth;
     AllocationResource shadow;
     AllocationResource vertices;
+    AllocationResource archer_vertices;
+    AllocationResource archer_diffuse;
+    AllocationResource archer_normal;
     AllocationResource particles;
     std::array<AllocationResource, 2> particle_alive;
     AllocationResource particle_dead;
@@ -294,7 +518,15 @@ struct D3D12Renderer::Impl
     AllocationResource oit_revealage;
     AllocationResource post_a;
     AllocationResource post_b;
-    AllocationResource ui_texture;
+    std::array<AllocationResource, kFrameCount> ui_textures;
+    std::array<UiCpuSurface, kFrameCount> ui_surfaces;
+    ComPtr<IWICImagingFactory> ui_wic_factory;
+    ComPtr<ID2D1Factory> ui_d2d_factory;
+    ComPtr<IDWriteFactory5> ui_dwrite_factory;
+    ComPtr<IDWriteFontCollection1> ui_font_collection;
+    std::wstring ui_font_family;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT ui_footprint{};
+    std::uint32_t ui_rows{};
     AllocationResource timestamp_readback;
     std::uint64_t *mapped_timestamps{};
     ComPtr<ID3D12QueryHeap> timestamp_heap;
@@ -313,6 +545,14 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> ui_pipeline;
     ComPtr<ID3D12CommandSignature> draw_signature;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+    D3D12_VERTEX_BUFFER_VIEW archer_vertex_view{};
+    std::vector<CharacterClipHeader> archer_clips;
+    std::vector<std::array<float, 16>> archer_matrices;
+    std::vector<float> archer_upper_body_weights;
+    std::uint32_t archer_vertex_count{};
+    std::uint32_t archer_bone_count{};
+    std::uint32_t archer_material_count{};
+    float archer_ground_offset{};
     RenderGraphBuilder graph;
     UINT rtv_stride{};
     UINT dsv_stride{};
@@ -334,6 +574,11 @@ struct D3D12Renderer::Impl
     bool particle_input_is_a{true};
     bool initialized{};
     bool com_initialized{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    bool imgui_initialized{};
+    std::filesystem::file_time_type shader_write{};
+    std::chrono::steady_clock::time_point next_shader_check{};
+#endif
     Tick last_particle_tick{};
 };
 
@@ -442,6 +687,21 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
         return HResultFailure("SelectAdapter", result);
     }
 
+    DXGI_ADAPTER_DESC3 adapter_description{};
+    adapter->GetDesc3(&adapter_description);
+    LARGE_INTEGER driver_version{};
+    const auto has_driver = SUCCEEDED(
+        adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &driver_version));
+    const auto driver = static_cast<std::uint64_t>(driver_version.QuadPart);
+    std::ofstream(config.artifact_directory / "adapter.txt", std::ios::trunc)
+        << Utf8(adapter_description.Description) << '\n'
+        << (has_driver
+                ? std::format("{}.{}.{}.{}", (driver >> 48) & 0xFFFF,
+                              (driver >> 32) & 0xFFFF, (driver >> 16) & 0xFFFF,
+                              driver & 0xFFFF)
+                : std::string("unknown"))
+        << '\n';
+
     result = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device));
     if (FAILED(result))
     {
@@ -498,7 +758,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
 
         D3D12MA::ALLOCATION_DESC upload_allocation{};
         upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-        const auto upload_description = BufferDescription(128 * 1024);
+        const auto upload_description = BufferDescription(kFrameUploadSize);
         if (auto created = CreateAllocation(frame.upload, upload_allocation, upload_description,
                                             D3D12_RESOURCE_STATE_GENERIC_READ);
             !created)
@@ -702,7 +962,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     {
         D3D12_DESCRIPTOR_HEAP_DESC description{};
         description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        description.NumDescriptors = 10;
+        description.NumDescriptors = kTextureDescriptorCount * kFrameCount;
         description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
         const auto result = device->CreateDescriptorHeap(&description, IID_PPV_ARGS(&srv_heap));
         if (FAILED(result))
@@ -713,35 +973,36 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
             device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
 
-    auto srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
-    auto create_srv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-        view.Format = format;
-        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        view.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(resource, &view, srv);
-        srv.ptr += srv_stride;
-    };
-    create_srv(gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-    create_srv(gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_srv(gbuffer_position.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    D3D12_SHADER_RESOURCE_VIEW_DESC shadow_view{};
-    shadow_view.Format = DXGI_FORMAT_R32_FLOAT;
-    shadow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-    shadow_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    shadow_view.Texture2DArray.MipLevels = 1;
-    shadow_view.Texture2DArray.ArraySize = 3;
-    device->CreateShaderResourceView(shadow.resource.Get(), &shadow_view, srv);
-    srv.ptr += srv_stride;
-    create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
-    create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    if (ui_texture.resource)
+    for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
     {
-        create_srv(ui_texture.resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+        auto srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        srv.ptr += static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount * srv_stride;
+        auto create_srv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = format;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(resource, &view, srv);
+            srv.ptr += srv_stride;
+        };
+        create_srv(gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        create_srv(gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(gbuffer_position.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        D3D12_SHADER_RESOURCE_VIEW_DESC shadow_view{};
+        shadow_view.Format = DXGI_FORMAT_R32_FLOAT;
+        shadow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        shadow_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        shadow_view.Texture2DArray.MipLevels = 1;
+        shadow_view.Texture2DArray.ArraySize = 3;
+        device->CreateShaderResourceView(shadow.resource.Get(), &shadow_view, srv);
+        srv.ptr += srv_stride;
+        create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+        create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(ui_textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
     }
     return Result::Success();
 }
@@ -814,13 +1075,20 @@ Result D3D12Renderer::Impl::CreatePipeline()
 {
     D3D12_DESCRIPTOR_RANGE1 texture_range{};
     texture_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    texture_range.NumDescriptors = 10;
+    texture_range.NumDescriptors = kPostTextureDescriptorCount;
     texture_range.BaseShaderRegister = 2;
     texture_range.RegisterSpace = 0;
     texture_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
                           D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
 
-    std::array<D3D12_ROOT_PARAMETER1, 13> parameters{};
+    D3D12_DESCRIPTOR_RANGE1 character_range{};
+    character_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    character_range.NumDescriptors = kCharacterDescriptorCount;
+    character_range.BaseShaderRegister = 14;
+    character_range.RegisterSpace = 0;
+    character_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
+
+    std::array<D3D12_ROOT_PARAMETER1, 14> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     parameters[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -857,8 +1125,11 @@ Result D3D12Renderer::Impl::CreatePipeline()
     parameters[12].Descriptor = {13, 0,
                                  D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    parameters[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[13].DescriptorTable = {1, &character_range};
+    parameters[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-    std::array<D3D12_STATIC_SAMPLER_DESC, 2> samplers{};
+    std::array<D3D12_STATIC_SAMPLER_DESC, 3> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -876,6 +1147,10 @@ Result D3D12Renderer::Impl::CreatePipeline()
     samplers[1].MaxLOD = D3D12_FLOAT32_MAX;
     samplers[1].ShaderRegister = 1;
     samplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    samplers[2] = samplers[0];
+    samplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[2].ShaderRegister = 2;
 
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
     root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -945,6 +1220,16 @@ Result D3D12Renderer::Impl::CreatePipeline()
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
          0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"BLENDINDICES", 0, DXGI_FORMAT_R16G16B16A16_UINT, 0, 24,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"BLENDWEIGHT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 48,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"TANGENT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 56,
+         D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72,
          D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
     };
 
@@ -1082,7 +1367,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
         return pipeline_result;
     }
     post.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    post.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    post.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
     post.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
     post.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
     post.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
@@ -1104,6 +1389,44 @@ Result D3D12Renderer::Impl::CreatePipeline()
     result = device->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&draw_signature));
     return SUCCEEDED(result) ? Result::Success()
                              : HResultFailure("CreateCommandSignature", result);
+}
+
+Result D3D12Renderer::Impl::ReloadPipeline()
+{
+    if (auto waited = WaitForGpu(); !waited)
+        return waited;
+    auto previous_root = std::move(root_signature);
+    auto previous_scene = std::move(scene_pipeline);
+    auto previous_shadow = std::move(shadow_pipeline);
+    auto previous_particle = std::move(particle_pipeline);
+    auto previous_particle_compute = std::move(particle_compute_pipeline);
+    auto previous_deferred = std::move(deferred_pipeline);
+    auto previous_composite = std::move(composite_pipeline);
+    auto previous_bloom = std::move(bloom_pipeline);
+    auto previous_tone_map = std::move(tone_map_pipeline);
+    auto previous_outline = std::move(outline_pipeline);
+    auto previous_fxaa = std::move(fxaa_pipeline);
+    auto previous_ui = std::move(ui_pipeline);
+    auto previous_signature = std::move(draw_signature);
+
+    auto result = CreatePipeline();
+    if (!result)
+    {
+        root_signature = std::move(previous_root);
+        scene_pipeline = std::move(previous_scene);
+        shadow_pipeline = std::move(previous_shadow);
+        particle_pipeline = std::move(previous_particle);
+        particle_compute_pipeline = std::move(previous_particle_compute);
+        deferred_pipeline = std::move(previous_deferred);
+        composite_pipeline = std::move(previous_composite);
+        bloom_pipeline = std::move(previous_bloom);
+        tone_map_pipeline = std::move(previous_tone_map);
+        outline_pipeline = std::move(previous_outline);
+        fxaa_pipeline = std::move(previous_fxaa);
+        ui_pipeline = std::move(previous_ui);
+        draw_signature = std::move(previous_signature);
+    }
+    return result;
 }
 
 Result D3D12Renderer::Impl::CreateGpuData()
@@ -1128,6 +1451,39 @@ Result D3D12Renderer::Impl::CreateGpuData()
     vertices.resource->Unmap(0, nullptr);
     vertex_view = {vertices.resource->GetGPUVirtualAddress(), sizeof(kCubeVertices),
                    sizeof(Vertex)};
+
+    std::vector<SkinnedVertex> cooked_vertices;
+    if (auto loaded = LoadCharacterAsset(
+            ExecutableDirectory() / "Cooked" / "stage1_archer.meshbin",
+            cooked_vertices, archer_clips, archer_upper_body_weights,
+            archer_matrices, archer_bone_count,
+            archer_ground_offset, archer_material_count);
+        !loaded)
+    {
+        return loaded;
+    }
+    archer_vertex_count = static_cast<std::uint32_t>(cooked_vertices.size());
+    const auto archer_vertex_bytes = cooked_vertices.size() * sizeof(cooked_vertices.front());
+    const auto archer_description = BufferDescription(archer_vertex_bytes);
+    if (auto created = CreateAllocation(archer_vertices, upload_allocation,
+                                        archer_description,
+                                        D3D12_RESOURCE_STATE_GENERIC_READ);
+        !created)
+    {
+        return created;
+    }
+    mapped = nullptr;
+    result = archer_vertices.resource->Map(0, &no_read,
+                                           reinterpret_cast<void **>(&mapped));
+    if (FAILED(result))
+    {
+        return HResultFailure("Map archer vertex buffer", result);
+    }
+    std::memcpy(mapped, cooked_vertices.data(), archer_vertex_bytes);
+    archer_vertices.resource->Unmap(0, nullptr);
+    archer_vertex_view = {archer_vertices.resource->GetGPUVirtualAddress(),
+                          static_cast<UINT>(archer_vertex_bytes),
+                          sizeof(SkinnedVertex)};
 
     D3D12MA::ALLOCATION_DESC default_allocation{};
     default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -1175,91 +1531,174 @@ Result D3D12Renderer::Impl::CreateGpuData()
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 }
 
+Result D3D12Renderer::Impl::CreateCharacterTextures()
+{
+    auto result = frames[0].allocator->Reset();
+    if (FAILED(result))
+    {
+        return HResultFailure("Reset character texture allocator", result);
+    }
+    result = command_list->Reset(frames[0].allocator.Get(), nullptr);
+    if (FAILED(result))
+    {
+        return HResultFailure("Reset character texture command list", result);
+    }
+
+    std::vector<AllocationResource> uploads;
+    uploads.reserve(static_cast<std::size_t>(archer_material_count) * 2);
+    const auto cooked = ExecutableDirectory() / "Cooked";
+    auto upload_array = [&](AllocationResource &texture,
+                            std::wstring_view prefix) -> Result {
+        D3D12_RESOURCE_DESC texture_description{};
+        texture_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture_description.Width = kCharacterTextureSize;
+        texture_description.Height = kCharacterTextureSize;
+        texture_description.DepthOrArraySize =
+            static_cast<std::uint16_t>(archer_material_count);
+        texture_description.MipLevels = 1;
+        texture_description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        texture_description.SampleDesc = {1, 0};
+        texture_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        D3D12MA::ALLOCATION_DESC default_allocation{};
+        default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (auto created = CreateAllocation(texture, default_allocation,
+                                            texture_description,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+            !created)
+        {
+            return created;
+        }
+
+        for (std::uint32_t index = 0; index < archer_material_count; ++index)
+        {
+            std::vector<std::byte> storage;
+            std::span<const std::byte> pixels;
+            std::uint32_t source_width{};
+            std::uint32_t source_height{};
+            const auto path = cooked / (std::wstring(prefix) + std::to_wstring(index) +
+                                        L".dds");
+            if (auto loaded = LoadRgbaDds(path, source_width, source_height, pixels,
+                                          storage);
+                !loaded)
+            {
+                return loaded;
+            }
+            D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+            UINT rows{};
+            UINT64 row_size{};
+            UINT64 upload_size{};
+            device->GetCopyableFootprints(&texture_description, index, 1, 0,
+                                          &footprint, &rows, &row_size,
+                                          &upload_size);
+            uploads.emplace_back();
+            D3D12MA::ALLOCATION_DESC upload_allocation{};
+            upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+            if (auto created = CreateAllocation(uploads.back(), upload_allocation,
+                                                BufferDescription(upload_size),
+                                                D3D12_RESOURCE_STATE_GENERIC_READ);
+                !created)
+            {
+                return created;
+            }
+            std::byte *mapped{};
+            D3D12_RANGE no_read{};
+            result = uploads.back().resource->Map(
+                0, &no_read, reinterpret_cast<void **>(&mapped));
+            if (FAILED(result))
+            {
+                return HResultFailure("Map character texture upload", result);
+            }
+            for (std::uint32_t row = 0; row < kCharacterTextureSize; ++row)
+            {
+                auto *destination = mapped + footprint.Offset +
+                                    static_cast<std::size_t>(row) *
+                                        footprint.Footprint.RowPitch;
+                const auto source_row = static_cast<std::uint64_t>(row) *
+                                        source_height / kCharacterTextureSize;
+                for (std::uint32_t column = 0; column < kCharacterTextureSize;
+                     ++column)
+                {
+                    const auto source_column =
+                        static_cast<std::uint64_t>(column) * source_width /
+                        kCharacterTextureSize;
+                    std::memcpy(destination + static_cast<std::size_t>(column) * 4,
+                                pixels.data() +
+                                    (source_row * source_width + source_column) * 4,
+                                4);
+                }
+            }
+            uploads.back().resource->Unmap(0, nullptr);
+
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = texture.resource.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.SubresourceIndex = index;
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = uploads.back().resource.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            source.PlacedFootprint = footprint;
+            command_list->CopyTextureRegion(&destination, 0, 0, 0, &source,
+                                            nullptr);
+        }
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture.resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        command_list->ResourceBarrier(1, &barrier);
+        return Result::Success();
+    };
+
+    if (auto uploaded = upload_array(archer_diffuse, L"archer_diffuse_");
+        !uploaded)
+    {
+        return uploaded;
+    }
+    if (auto uploaded = upload_array(archer_normal, L"archer_normal_"); !uploaded)
+    {
+        return uploaded;
+    }
+    result = command_list->Close();
+    if (FAILED(result))
+    {
+        return HResultFailure("Close character texture upload", result);
+    }
+    ID3D12CommandList *lists[] = {command_list.Get()};
+    queue->ExecuteCommandLists(1, lists);
+    if (auto waited = WaitForGpu(); !waited)
+    {
+        return waited;
+    }
+
+    for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
+    {
+        auto handle = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += (static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount +
+                       kPostTextureDescriptorCount) * srv_stride;
+        auto create_view = [&](ID3D12Resource *texture, DXGI_FORMAT format) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = format;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2DArray.MipLevels = 1;
+            view.Texture2DArray.ArraySize = archer_material_count;
+            device->CreateShaderResourceView(texture, &view, handle);
+            handle.ptr += srv_stride;
+        };
+        create_view(archer_diffuse.resource.Get(),
+                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        create_view(archer_normal.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+    }
+    return Result::Success();
+}
+
 Result D3D12Renderer::Impl::CreateUiTexture()
 {
-    constexpr std::uint32_t texture_width = 512;
-    constexpr std::uint32_t texture_height = 96;
-    BITMAPINFO bitmap_info{};
-    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bitmap_info.bmiHeader.biWidth = texture_width;
-    bitmap_info.bmiHeader.biHeight = -static_cast<LONG>(texture_height);
-    bitmap_info.bmiHeader.biPlanes = 1;
-    bitmap_info.bmiHeader.biBitCount = 32;
-    bitmap_info.bmiHeader.biCompression = BI_RGB;
-
-    void *bitmap_pixels{};
-    const auto screen = GetDC(nullptr);
-    const auto bitmap =
-        CreateDIBSection(screen, &bitmap_info, DIB_RGB_COLORS, &bitmap_pixels, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (!bitmap || !bitmap_pixels)
-    {
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "CreateDIBSection for UI failed.");
-    }
-
-    std::array<wchar_t, 32'768> module_path{};
-    const auto module_length =
-        GetModuleFileNameW(nullptr, module_path.data(), static_cast<DWORD>(module_path.size()));
-    if (module_length == 0 || module_length == module_path.size())
-    {
-        DeleteObject(bitmap);
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Cannot resolve the executable directory.");
-    }
-    const auto font_path =
-        std::filesystem::path(module_path.data()).parent_path() / L"Fonts" / L"NotoSansKR.ttf";
-    if (AddFontResourceExW(font_path.c_str(), FR_PRIVATE, nullptr) == 0)
-    {
-        DeleteObject(bitmap);
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Bundled Noto Sans KR font is missing or invalid.");
-    }
-
-    const auto device_context = CreateCompatibleDC(nullptr);
-    if (!device_context)
-    {
-        RemoveFontResourceExW(font_path.c_str(), FR_PRIVATE, nullptr);
-        DeleteObject(bitmap);
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Cannot create the Korean UI device context.");
-    }
-    const auto old_bitmap = SelectObject(device_context, bitmap);
-    const auto font = CreateFontW(-42, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, HANGUL_CHARSET,
-                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Noto Sans KR");
-    if (!old_bitmap || !font)
-    {
-        DeleteDC(device_context);
-        RemoveFontResourceExW(font_path.c_str(), FR_PRIVATE, nullptr);
-        DeleteObject(bitmap);
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Cannot create the Korean UI font surface.");
-    }
-    const auto old_font = SelectObject(device_context, font);
-    SetBkMode(device_context, TRANSPARENT);
-    SetTextColor(device_context, RGB(245, 248, 255));
-    constexpr wchar_t text[] = L"프로젝트 HS  |  STAGE 1";
-    TextOutW(device_context, 8, 18, text, static_cast<int>(std::size(text) - 1));
-    SelectObject(device_context, old_font);
-    SelectObject(device_context, old_bitmap);
-    DeleteObject(font);
-    DeleteDC(device_context);
-    RemoveFontResourceExW(font_path.c_str(), FR_PRIVATE, nullptr);
-
-    auto *pixel_bytes = static_cast<std::uint8_t *>(bitmap_pixels);
-    for (std::size_t index = 0; index < texture_width * texture_height; ++index)
-    {
-        const auto blue = pixel_bytes[index * 4 + 0];
-        const auto green = pixel_bytes[index * 4 + 1];
-        const auto red = pixel_bytes[index * 4 + 2];
-        pixel_bytes[index * 4 + 3] = std::max({red, green, blue});
-    }
-
     D3D12_RESOURCE_DESC texture_description{};
     texture_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    texture_description.Width = texture_width;
-    texture_description.Height = texture_height;
+    texture_description.Width = kUiWidth;
+    texture_description.Height = kUiHeight;
     texture_description.DepthOrArraySize = 1;
     texture_description.MipLevels = 1;
     texture_description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1267,78 +1706,201 @@ Result D3D12Renderer::Impl::CreateUiTexture()
     texture_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
     D3D12MA::ALLOCATION_DESC default_allocation{};
     default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    if (auto created = CreateAllocation(ui_texture, default_allocation, texture_description,
-                                        D3D12_RESOURCE_STATE_COPY_DEST);
-        !created)
-    {
-        DeleteObject(bitmap);
-        return created;
-    }
-
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
-    UINT rows{};
     UINT64 row_size{};
     UINT64 total_size{};
-    device->GetCopyableFootprints(&texture_description, 0, 1, 0, &footprint, &rows, &row_size,
-                                  &total_size);
-    AllocationResource upload;
+    device->GetCopyableFootprints(&texture_description, 0, 1, 0, &ui_footprint, &ui_rows,
+                                  &row_size, &total_size);
     D3D12MA::ALLOCATION_DESC upload_allocation{};
     upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-    if (auto created = CreateAllocation(upload, upload_allocation, BufferDescription(total_size),
-                                        D3D12_RESOURCE_STATE_GENERIC_READ);
-        !created)
+    for (std::size_t frame_index = 0; frame_index < frames.size(); ++frame_index)
     {
-        DeleteObject(bitmap);
-        return created;
+        if (auto created = CreateAllocation(ui_textures[frame_index], default_allocation,
+                                            texture_description, D3D12_RESOURCE_STATE_COMMON);
+            !created)
+            return created;
+        auto &frame = frames[frame_index];
+        if (auto created = CreateAllocation(frame.ui_upload, upload_allocation,
+                                            BufferDescription(total_size),
+                                            D3D12_RESOURCE_STATE_GENERIC_READ);
+            !created)
+            return created;
+        D3D12_RANGE no_read{};
+        const auto map_result = frame.ui_upload.resource->Map(
+            0, &no_read, reinterpret_cast<void **>(&frame.ui_mapped));
+        if (FAILED(map_result)) return HResultFailure("Map UI upload", map_result);
     }
-    std::byte *mapped{};
-    D3D12_RANGE no_read{};
-    auto result = upload.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
-    if (FAILED(result))
-    {
-        DeleteObject(bitmap);
-        return HResultFailure("Map UI upload", result);
-    }
-    for (std::uint32_t row = 0; row < texture_height; ++row)
-    {
-        std::memcpy(mapped + footprint.Offset + row * footprint.Footprint.RowPitch,
-                    pixel_bytes + row * texture_width * 4, texture_width * 4);
-    }
-    upload.resource->Unmap(0, nullptr);
-    DeleteObject(bitmap);
 
-    result = frames[0].allocator->Reset();
-    if (FAILED(result) ||
-        FAILED(command_list->Reset(frames[0].allocator.Get(), nullptr)))
-    {
-        return HResultFailure("Reset UI upload commands", FAILED(result) ? result : E_FAIL);
-    }
-    if (enhanced)
-    {
-        TransitionTexture(ui_texture.resource.Get(), D3D12_RESOURCE_STATE_COMMON,
-                          D3D12_RESOURCE_STATE_COPY_DEST, D3D12_BARRIER_LAYOUT_COMMON,
-                          D3D12_BARRIER_LAYOUT_COPY_DEST);
-    }
-    D3D12_TEXTURE_COPY_LOCATION destination{};
-    destination.pResource = ui_texture.resource.Get();
-    destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = upload.resource.Get();
-    source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    source.PlacedFootprint = footprint;
-    command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-    TransitionTexture(ui_texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
-                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-                      D3D12_BARRIER_LAYOUT_COPY_DEST,
-                      D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
-    result = command_list->Close();
+    auto result = CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&ui_wic_factory));
+    if (FAILED(result)) return HResultFailure("Create WIC UI factory", result);
+    result = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
+                               ui_d2d_factory.ReleaseAndGetAddressOf());
+    if (FAILED(result)) return HResultFailure("Create Direct2D UI factory", result);
+
+    ComPtr<IDWriteFactory> base_dwrite_factory;
+    result = DWriteCreateFactory(
+        DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+        reinterpret_cast<IUnknown **>(base_dwrite_factory.ReleaseAndGetAddressOf()));
+    if (FAILED(result) || FAILED(base_dwrite_factory.As(&ui_dwrite_factory)))
+        return HResultFailure("Create DirectWrite UI factory", FAILED(result) ? result : E_FAIL);
+
+    const auto font_path = ExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf";
+    ComPtr<IDWriteFontFile> font_file;
+    ComPtr<IDWriteFontSetBuilder1> font_builder;
+    ComPtr<IDWriteFontSet> font_set;
+    result = ui_dwrite_factory->CreateFontFileReference(font_path.c_str(), nullptr, &font_file);
+    if (SUCCEEDED(result)) result = ui_dwrite_factory->CreateFontSetBuilder(&font_builder);
+    if (SUCCEEDED(result)) result = font_builder->AddFontFile(font_file.Get());
+    if (SUCCEEDED(result)) result = font_builder->CreateFontSet(&font_set);
+    if (SUCCEEDED(result))
+        result = ui_dwrite_factory->CreateFontCollectionFromFontSet(font_set.Get(),
+                                                                    &ui_font_collection);
     if (FAILED(result))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Bundled Noto Sans KR font is missing or invalid.");
+
+    ComPtr<IDWriteFontFamily> font_family;
+    ComPtr<IDWriteLocalizedStrings> family_names;
+    if (ui_font_collection->GetFontFamilyCount() == 0 ||
+        FAILED(ui_font_collection->GetFontFamily(0, &font_family)) ||
+        FAILED(font_family->GetFamilyNames(&family_names)))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Bundled Noto Sans KR font has no family name.");
+    UINT32 family_name_index{};
+    BOOL family_name_exists{};
+    family_names->FindLocaleName(L"ko-kr", &family_name_index, &family_name_exists);
+    if (!family_name_exists) family_name_index = 0;
+    UINT32 family_name_length{};
+    family_names->GetStringLength(family_name_index, &family_name_length);
+    ui_font_family.resize(family_name_length + 1);
+    family_names->GetString(family_name_index, ui_font_family.data(), family_name_length + 1);
+    ui_font_family.resize(family_name_length);
+
+    D2D1_RENDER_TARGET_PROPERTIES properties{};
+    properties.type = D2D1_RENDER_TARGET_TYPE_SOFTWARE;
+    properties.pixelFormat = {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED};
+    properties.dpiX = properties.dpiY = 96.0f;
+    properties.minLevel = D2D1_FEATURE_LEVEL_DEFAULT;
+    for (auto &surface : ui_surfaces)
     {
-        return HResultFailure("Close UI upload commands", result);
+        result = ui_wic_factory->CreateBitmap(kUiWidth, kUiHeight,
+                                              GUID_WICPixelFormat32bppPBGRA,
+                                              WICBitmapCacheOnLoad, &surface.bitmap);
+        if (SUCCEEDED(result))
+            result = ui_d2d_factory->CreateWicBitmapRenderTarget(
+                surface.bitmap.Get(), properties, &surface.target);
+        if (SUCCEEDED(result))
+            result = surface.target->CreateSolidColorBrush(
+                D2D1_COLOR_F{1, 1, 1, 1}, &surface.brush);
+        if (FAILED(result)) return HResultFailure("Create DirectWrite UI surface", result);
+        surface.target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     }
-    ID3D12CommandList *lists[] = {command_list.Get()};
-    queue->ExecuteCommandLists(1, lists);
-    return WaitForGpu();
+    return Result::Success();
+}
+
+Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
+                                        std::span<const UiModel> models)
+{
+    auto &surface = ui_surfaces[frame_index];
+    surface.target->BeginDraw();
+    surface.target->SetTransform(D2D1_MATRIX_3X2_F{1, 0, 0, 1, 0, 0});
+    surface.target->Clear(D2D1_COLOR_F{0, 0, 0, 0});
+
+    const auto color_of = [](std::uint32_t packed) {
+        constexpr float inverse_byte = 1.0f / 255.0f;
+        return D2D1_COLOR_F{static_cast<float>(packed & 0xff) * inverse_byte,
+                            static_cast<float>((packed >> 8) & 0xff) * inverse_byte,
+                            static_cast<float>((packed >> 16) & 0xff) * inverse_byte,
+                            static_cast<float>((packed >> 24) & 0xff) * inverse_byte};
+    };
+    for (const auto &model : models.first(std::min<std::size_t>(models.size(), 32)))
+    {
+        const auto element_width = std::max(model.size_pixels.x, 0.0f);
+        const auto element_height = std::max(model.size_pixels.y, 0.0f);
+        const D2D1_RECT_F rectangle{model.anchor_pixels.x, model.anchor_pixels.y,
+                                    model.anchor_pixels.x + element_width,
+                                    model.anchor_pixels.y + element_height};
+        surface.brush->SetColor(color_of(model.color_rgba));
+        switch (model.kind)
+        {
+        case UiModel::Kind::Panel:
+            if (element_width > 0 && element_height > 0)
+                surface.target->FillRectangle(rectangle, surface.brush.Get());
+            break;
+        case UiModel::Kind::Button:
+            if (element_width > 0 && element_height > 0)
+            {
+                const D2D1_ROUNDED_RECT rounded{rectangle, 6.0f, 6.0f};
+                surface.target->FillRoundedRectangle(rounded, surface.brush.Get());
+            }
+            break;
+        case UiModel::Kind::Bar:
+            if (element_width > 0 && element_height > 0)
+            {
+                surface.brush->SetColor(D2D1_COLOR_F{0.02f, 0.025f, 0.035f, 0.72f});
+                surface.target->FillRectangle(rectangle, surface.brush.Get());
+                auto filled = rectangle;
+                filled.right = filled.left +
+                               element_width * std::clamp(model.value, 0.0f, 1.0f);
+                surface.brush->SetColor(color_of(model.color_rgba));
+                surface.target->FillRectangle(filled, surface.brush.Get());
+            }
+            break;
+        case UiModel::Kind::Text: break;
+        }
+
+        const auto end = std::find(model.utf8_text.begin(), model.utf8_text.end(), '\0');
+        const auto byte_count = static_cast<int>(end - model.utf8_text.begin());
+        if (byte_count == 0) continue;
+        const auto wide_count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                                     model.utf8_text.data(), byte_count,
+                                                     nullptr, 0);
+        if (wide_count <= 0) continue;
+        std::wstring text(static_cast<std::size_t>(wide_count), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, model.utf8_text.data(),
+                            byte_count, text.data(), wide_count);
+        ComPtr<IDWriteTextFormat> format;
+        const auto font_size = static_cast<float>(
+            std::clamp<std::uint16_t>(model.font_pixels, 8, 128));
+        const auto format_result = ui_dwrite_factory->CreateTextFormat(
+            ui_font_family.c_str(), ui_font_collection.Get(), DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, font_size, L"ko-kr",
+            &format);
+        if (FAILED(format_result))
+            return HResultFailure("Create UI text format", format_result);
+        format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        const D2D1_RECT_F text_rectangle{
+            model.anchor_pixels.x, model.anchor_pixels.y,
+            model.anchor_pixels.x +
+                (element_width > 0 ? element_width : kUiWidth - model.anchor_pixels.x),
+            model.anchor_pixels.y +
+                (element_height > 0 ? element_height : font_size * 1.6f)};
+        surface.brush->SetColor(D2D1_COLOR_F{1, 1, 1, 1});
+        surface.target->DrawText(text.data(), static_cast<UINT32>(text.size()), format.Get(),
+                                 text_rectangle, surface.brush.Get(),
+                                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                                 DWRITE_MEASURING_MODE_NATURAL);
+    }
+
+    const auto draw_result = surface.target->EndDraw();
+    if (FAILED(draw_result)) return HResultFailure("Rasterize UI", draw_result);
+
+    WICRect lock_rectangle{0, 0, static_cast<INT>(kUiWidth), static_cast<INT>(kUiHeight)};
+    ComPtr<IWICBitmapLock> bitmap_lock;
+    auto result = surface.bitmap->Lock(&lock_rectangle, WICBitmapLockRead, &bitmap_lock);
+    UINT stride{};
+    UINT byte_count{};
+    BYTE *pixels{};
+    if (SUCCEEDED(result)) result = bitmap_lock->GetStride(&stride);
+    if (SUCCEEDED(result)) result = bitmap_lock->GetDataPointer(&byte_count, &pixels);
+    if (FAILED(result)) return HResultFailure("Lock UI pixels", result);
+    auto &frame = frames[frame_index];
+    for (std::uint32_t row = 0; row < ui_rows; ++row)
+    {
+        std::memcpy(frame.ui_mapped + ui_footprint.Offset + row * ui_footprint.Footprint.RowPitch,
+                    pixels + static_cast<std::size_t>(row) * stride, kUiWidth * 4);
+    }
+    return Result::Success();
 }
 
 Result D3D12Renderer::Impl::WaitForFrame(FrameContext &frame)
@@ -1580,8 +2142,70 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     {
         return result;
     }
+    if (auto result = impl_->CreateCharacterTextures(); !result)
+    {
+        return result;
+    }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    D3D12_DESCRIPTOR_HEAP_DESC description{};
+    description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    description.NumDescriptors = 1;
+    description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    if (FAILED(impl_->device->CreateDescriptorHeap(&description,
+                                                    IID_PPV_ARGS(&impl_->imgui_heap))))
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_devtools",
+                               "Cannot create Dear ImGui descriptor heap.");
+    }
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::GetIO().IniFilename = nullptr;
+    ImGui::StyleColorsDark();
+    if (!ImGui_ImplWin32_Init(static_cast<HWND>(config.window)))
+    {
+        ImGui::DestroyContext();
+        return Result::Failure(ErrorCode::InvalidState, "hs_devtools",
+                               "Cannot initialize Dear ImGui Win32 backend.");
+    }
+    ImGui_ImplDX12_InitInfo info{};
+    info.Device = impl_->device.Get();
+    info.CommandQueue = impl_->queue.Get();
+    info.NumFramesInFlight = kFrameCount;
+    info.RTVFormat = kBackBufferFormat;
+    info.DSVFormat = kDepthFormat;
+    info.SrvDescriptorHeap = impl_->imgui_heap.Get();
+    info.LegacySingleSrvCpuDescriptor =
+        impl_->imgui_heap->GetCPUDescriptorHandleForHeapStart();
+    info.LegacySingleSrvGpuDescriptor =
+        impl_->imgui_heap->GetGPUDescriptorHandleForHeapStart();
+    if (!ImGui_ImplDX12_Init(&info))
+    {
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        return Result::Failure(ErrorCode::InvalidState, "hs_devtools",
+                               "Cannot initialize Dear ImGui D3D12 backend.");
+    }
+    impl_->imgui_initialized = true;
+    impl_->shader_write = LatestShaderWrite();
+    impl_->next_shader_check = std::chrono::steady_clock::now();
+#endif
     impl_->initialized = true;
     return Result::Success();
+}
+
+void D3D12Renderer::HandleWindowMessage(const NativeWindowMessage &message) noexcept
+{
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (impl_->imgui_initialized)
+    {
+        ImGui_ImplWin32_WndProcHandler(static_cast<HWND>(impl_->config.window),
+                                       message.message,
+                                       static_cast<WPARAM>(message.wparam),
+                                       static_cast<LPARAM>(message.lparam));
+    }
+#else
+    (void)message;
+#endif
 }
 
 Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
@@ -1633,9 +2257,41 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     return impl_->CreatePostProcessTargets();
 }
 
+Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
+{
+    if (!impl_->initialized)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Renderer not initialized.");
+
+    const auto render_scale = std::clamp(options.render_scale_percent, 75u, 100u);
+    const auto shadow_resolution = std::clamp(options.shadow_resolution, 1024u, 2048u);
+    const auto recreate_targets = render_scale != impl_->config.render_scale_percent ||
+                                  shadow_resolution != impl_->config.shadow_resolution;
+    impl_->config.vsync = options.vsync;
+    impl_->config.bloom = options.bloom;
+    impl_->config.outline = options.outline;
+    impl_->config.render_scale_percent = render_scale;
+    impl_->config.shadow_resolution = shadow_resolution;
+    impl_->config.particle_percentage =
+        std::clamp(options.particle_percentage, 50u, 100u);
+    if (!recreate_targets)
+        return Result::Success();
+    if (auto result = impl_->WaitForGpu(); !result)
+        return result;
+
+    impl_->render_width = std::max(impl_->width * render_scale / 100u, 1u);
+    impl_->render_height = std::max(impl_->height * render_scale / 100u, 1u);
+    impl_->depth.Reset();
+    impl_->shadow.Reset();
+    if (auto result = impl_->CreateDepthAndShadow(); !result)
+        return result;
+    return impl_->CreatePostProcessTargets();
+}
+
 Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                              std::span<const PresentationEvent> events,
                              std::span<const ParticleSpawnCommand> particle_spawns,
+                             const DevToolsFrameData &devtools,
                              RendererFrameResult &frame_result)
 {
     if (!impl_->initialized)
@@ -1643,6 +2299,25 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Renderer not initialized.");
     }
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (std::chrono::steady_clock::now() >= impl_->next_shader_check)
+    {
+        impl_->next_shader_check = std::chrono::steady_clock::now() +
+                                   std::chrono::milliseconds(250);
+        const auto write = LatestShaderWrite();
+        if (write != std::filesystem::file_time_type{} && write != impl_->shader_write)
+        {
+            impl_->shader_write = write;
+            const auto reloaded = impl_->ReloadPipeline();
+            std::ofstream(impl_->config.artifact_directory / "shader_hot_reload.log",
+                          std::ios::app)
+                << (reloaded ? "applied\n"
+                             : std::format("rejected {}; previous PSO retained\n",
+                                           reloaded.Message()));
+        }
+    }
+#endif
 
     const auto back_buffer_index = impl_->swap_chain->GetCurrentBackBufferIndex();
     auto &frame = impl_->frames[back_buffer_index];
@@ -1652,21 +2327,136 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
 
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
-    const auto instance_count =
-        std::min<std::size_t>(snapshot.instances.size(), static_cast<std::size_t>(256));
+    const auto particle_spawn_data_offset =
+        (kInstanceDataOffset + sizeof(GpuInstance) * snapshot.instances.size() + 255u) &
+        ~std::size_t{255u};
+    const auto required_upload_size = particle_spawn_data_offset +
+        sizeof(GpuParticleSpawnCommand) * std::max<std::size_t>(particle_spawns.size(), 1);
+    if (required_upload_size > frame.upload_size)
+    {
+        std::size_t new_size = frame.upload_size;
+        while (new_size < required_upload_size) new_size *= 2;
+        frame.upload.resource->Unmap(0, nullptr);
+        frame.mapped = nullptr;
+        frame.upload.Reset();
+        D3D12MA::ALLOCATION_DESC upload_allocation{};
+        upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto result = impl_->CreateAllocation(
+                frame.upload, upload_allocation, BufferDescription(new_size),
+                D3D12_RESOURCE_STATE_GENERIC_READ);
+            !result)
+        {
+            return result;
+        }
+        D3D12_RANGE no_read{};
+        const auto mapped = frame.upload.resource->Map(
+            0, &no_read, reinterpret_cast<void **>(&frame.mapped));
+        if (FAILED(mapped)) return HResultFailure("Map grown frame upload", mapped);
+        frame.upload_size = new_size;
+    }
+    std::uint8_t debug_command{};
+    std::uint64_t debug_value{};
+    std::uint32_t debug_secondary{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    ImGui::SetNextWindowSize(ImVec2(430.0f, 720.0f), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Project HS DevTools");
+    ImGui::Text("Tick: %llu", static_cast<unsigned long long>(snapshot.header.tick));
+    ImGui::Text("Checksum: %llu",
+                static_cast<unsigned long long>(snapshot.header.checksum));
+    ImGui::Text("Instances: %zu", snapshot.instances.size());
+    ImGui::Text("Render entities: %zu", snapshot.instances.size());
+    ImGui::Text("UI models: %zu", snapshot.ui.size());
+    ImGui::Text("GPU particles: %u / %u", impl_->last_particle_count,
+                kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) /
+                    100u);
+    D3D12MA::Budget local_budget{};
+    impl_->allocator->GetBudget(&local_budget, nullptr);
+    ImGui::Text("Video memory: %.1f / %.1f MiB",
+                static_cast<double>(local_budget.UsageBytes) / (1024.0 * 1024.0),
+                static_cast<double>(local_budget.BudgetBytes) / (1024.0 * 1024.0));
+    ImGui::Text("Threads: Main / Simulation / Render + %u workers",
+                devtools.worker_count);
+    ImGui::Text("Queues I/P/V/G/D: %u/%u/%u/%u/%u",
+                devtools.input_queue_depth, devtools.presentation_queue_depth,
+                devtools.particle_queue_depth, devtools.graphics_queue_depth,
+                devtools.debug_queue_depth);
+    ImGui::Text("Dropped I/P/V: %llu/%llu/%llu",
+                static_cast<unsigned long long>(devtools.dropped_input),
+                static_cast<unsigned long long>(devtools.dropped_presentation),
+                static_cast<unsigned long long>(devtools.dropped_particles));
+    ImGui::SeparatorText("Simulation");
+    if (ImGui::Button("Start Session")) debug_command = 1;
+    if (ImGui::Button("Pause / Resume")) debug_command = 15;
+    if (ImGui::Button("Grant 100 XP")) { debug_command = 6; debug_value = 100; }
+    if (ImGui::Button("Damage Player 10")) { debug_command = 3; debug_value = 10; }
+    ImGui::SameLine();
+    if (ImGui::Button("Heal Player 10")) { debug_command = 4; debug_value = 10; }
+    if (ImGui::Button("Damage Final Boss 1000")) { debug_command = 5; debug_value = 1000; }
+    if (ImGui::Button("Spawn Melee")) { debug_command = 10; debug_value = 0; }
+    ImGui::SameLine();
+    if (ImGui::Button("Spawn Ranged")) { debug_command = 10; debug_value = 1; }
+    ImGui::SameLine();
+    if (ImGui::Button("Spawn Suicide")) { debug_command = 10; debug_value = 2; }
+    if (ImGui::Button("Growth 5m")) { debug_command = 2; debug_value = 18'000; }
+    ImGui::SameLine();
+    if (ImGui::Button("Growth 10m")) { debug_command = 2; debug_value = 36'000; }
+    ImGui::SameLine();
+    if (ImGui::Button("Growth 15m")) { debug_command = 2; debug_value = 54'000; }
+    if (ImGui::Button("Spawn 5m Boss")) { debug_command = 11; debug_value = 0; }
+    ImGui::SameLine();
+    if (ImGui::Button("Spawn 10m Boss")) { debug_command = 11; debug_value = 1; }
+    ImGui::SameLine();
+    if (ImGui::Button("Spawn Final Boss")) { debug_command = 11; debug_value = 2; }
+
+    static int skill = 1;
+    static int upgrade{};
+    static int relic{};
+    static int stat{};
+    ImGui::SeparatorText("Build controls");
+    ImGui::SliderInt("Skill", &skill, 1, 8);
+    if (ImGui::Button("Grant Skill")) { debug_command = 7; debug_value = skill; }
+    ImGui::SliderInt("Upgrade", &upgrade, 0, 7);
+    if (ImGui::Button("Grant Upgrade")) {
+        debug_command = 8;
+        debug_value = skill;
+        debug_secondary = static_cast<std::uint32_t>(upgrade);
+    }
+    ImGui::SliderInt("Relic", &relic, 0, 11);
+    if (ImGui::Button("Grant Relic")) { debug_command = 9; debug_value = relic; }
+    ImGui::SliderInt("Stat", &stat, 0, 5);
+    if (ImGui::Button("Assign Stat")) { debug_command = 13; debug_value = stat; }
+    ImGui::SameLine();
+    if (ImGui::Button("Reroll")) debug_command = 14;
+    ImGui::SeparatorText("RenderGraph");
+    constexpr std::string_view passes[]{
+        "GPU Particle Spawn/Update", "3-cascade Directional Shadow", "GBuffer+Depth",
+        "Deferred Cel Lighting", "Forward Transparent/OIT", "OIT Composite", "Bloom",
+        "ToneMap", "Screen-space Outline", "FXAA", "Game UI"};
+    for (const auto pass : passes)
+        ImGui::BulletText("%.*s", static_cast<int>(pass.size()), pass.data());
+    ImGui::End();
+    ImGui::Render();
+#endif
+    if (auto result = impl_->RasterizeUi(back_buffer_index, snapshot.ui); !result)
+    {
+        return result;
+    }
+    const auto instance_count = snapshot.instances.size();
 
     auto *constants = reinterpret_cast<FrameConstants *>(frame.mapped);
     auto *instances = reinterpret_cast<GpuInstance *>(frame.mapped + kInstanceDataOffset);
     auto *gpu_particle_spawns =
-        reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + kParticleSpawnDataOffset);
+        reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + particle_spawn_data_offset);
     const auto particle_capacity =
         kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) / 100u;
     std::uint32_t gpu_particle_spawn_count{};
     std::uint32_t total_particles_to_spawn{};
     for (const auto &source : particle_spawns)
     {
-        if (gpu_particle_spawn_count == kMaxParticleSpawnCommands ||
-            total_particles_to_spawn == particle_capacity)
+        if (total_particles_to_spawn == particle_capacity)
         {
             break;
         }
@@ -1772,43 +2562,109 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             &constants->shadow_view_projection[cascade],
             DirectX::XMMatrixTranspose(light_view * light_projection));
     }
-    DirectX::XMStoreFloat4x4(&constants->archer_bones[0],
-                             DirectX::XMMatrixTranspose(DirectX::XMMatrixIdentity()));
-    const auto pose_time =
-        snapshot.poses.empty() ? 0.0f : snapshot.poses.front().normalized_time;
-    const auto bone_rotation =
-        std::sin(pose_time * std::numbers::pi_v<float> * 2.0f) * 0.22f;
-    const auto animated_bone =
-        DirectX::XMMatrixTranslation(0.0f, 0.5f, 0.0f) *
-        DirectX::XMMatrixRotationZ(bone_rotation) *
-        DirectX::XMMatrixTranslation(0.0f, -0.5f, 0.0f);
-    DirectX::XMStoreFloat4x4(&constants->archer_bones[1],
-                             DirectX::XMMatrixTranspose(animated_bone));
+    for (auto &bone : constants->archer_bones)
+    {
+        DirectX::XMStoreFloat4x4(
+            &bone, DirectX::XMMatrixTranspose(DirectX::XMMatrixIdentity()));
+    }
+    const auto pose = snapshot.poses.empty() ? AnimationPoseRef{} : snapshot.poses.front();
+    const auto blend_transform = [](DirectX::XMMATRIX first, DirectX::XMMATRIX second,
+                                    float weight, DirectX::XMMATRIX &output) {
+        DirectX::XMVECTOR first_scale, first_rotation, first_translation;
+        DirectX::XMVECTOR second_scale, second_rotation, second_translation;
+        if (!DirectX::XMMatrixDecompose(&first_scale, &first_rotation,
+                                        &first_translation, first) ||
+            !DirectX::XMMatrixDecompose(&second_scale, &second_rotation,
+                                        &second_translation, second))
+            return false;
+        output = DirectX::XMMatrixScalingFromVector(
+                     DirectX::XMVectorLerp(first_scale, second_scale, weight)) *
+                 DirectX::XMMatrixRotationQuaternion(
+                     DirectX::XMQuaternionSlerp(first_rotation, second_rotation, weight)) *
+                 DirectX::XMMatrixTranslationFromVector(
+                     DirectX::XMVectorLerp(first_translation, second_translation, weight));
+        return true;
+    };
+    const auto sample = [&](CharacterAnimationClip clip, float time,
+                            std::uint32_t bone_index, DirectX::XMMATRIX &output) {
+        const auto found = std::ranges::find(impl_->archer_clips, clip,
+                                              &CharacterClipHeader::clip);
+        if (found == impl_->archer_clips.end()) return false;
+        const auto normalized = found->looping ? time - std::floor(time)
+                                               : std::clamp(time, 0.0f, 1.0f);
+        const auto frame_position = normalized * static_cast<float>(found->frame_count - 1);
+        const auto first_frame = static_cast<std::uint32_t>(frame_position);
+        const auto second_frame = std::min(first_frame + 1, found->frame_count - 1);
+        DirectX::XMFLOAT4X4 first{}, second{};
+        std::memcpy(&first, impl_->archer_matrices[
+            found->first_matrix + first_frame * impl_->archer_bone_count + bone_index].data(),
+            sizeof(first));
+        std::memcpy(&second, impl_->archer_matrices[
+            found->first_matrix + second_frame * impl_->archer_bone_count + bone_index].data(),
+            sizeof(second));
+        return blend_transform(
+            DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&first)),
+            DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&second)),
+            frame_position - static_cast<float>(first_frame), output);
+    };
+    for (std::uint32_t bone_index = 0; bone_index < impl_->archer_bone_count; ++bone_index)
+    {
+        DirectX::XMMATRIX base, secondary, upper;
+        if (!sample(pose.clip, pose.normalized_time, bone_index, base) ||
+            !sample(pose.secondary_clip, pose.secondary_normalized_time,
+                    bone_index, secondary) ||
+            !blend_transform(base, secondary,
+                             std::clamp(pose.secondary_weight, 0.0f, 1.0f), base))
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Cooked animation transform cannot be blended.");
+        }
+        const auto upper_weight = std::clamp(pose.upper_body_weight, 0.0f, 1.0f) *
+                                  impl_->archer_upper_body_weights[bone_index];
+        if (upper_weight > 0.0f &&
+            (!sample(pose.upper_body_clip, pose.upper_body_normalized_time,
+                     bone_index, upper) ||
+             !blend_transform(base, upper, upper_weight, base)))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Cooked upper-body animation cannot be blended.");
+        DirectX::XMStoreFloat4x4(&constants->archer_bones[bone_index],
+                                 DirectX::XMMatrixTranspose(base));
+    }
     constants->render_options = {
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
         impl_->config.outline ? 1.0f : 0.0f,
         static_cast<float>(particle_delta_ticks) / 60.0f};
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
-                                   total_particles_to_spawn, 0};
+                                   total_particles_to_spawn,
+                                   impl_->archer_material_count};
     for (std::size_t index = 0; index < instance_count; ++index)
     {
         const auto &source = snapshot.instances[index];
         auto position = source.position;
         auto yaw_value = source.yaw;
-        if (snapshots.has_previous && snapshots.previous.instances.size() == instance_count)
+        if (snapshots.has_previous &&
+            snapshots.previous.instances.size() == instance_count &&
+            source.stable_id != 0 &&
+            snapshots.previous.instances[index].stable_id == source.stable_id)
         {
             const auto &previous = snapshots.previous.instances[index];
             position.x = std::lerp(previous.position.x, source.position.x, interpolation);
             position.y = std::lerp(previous.position.y, source.position.y, interpolation);
             position.z = std::lerp(previous.position.z, source.position.z, interpolation);
-            yaw_value = std::lerp(previous.yaw, source.yaw, interpolation);
+            const auto yaw_delta = std::remainder(
+                source.yaw - previous.yaw,
+                2.0f * DirectX::XM_PI);
+            yaw_value = previous.yaw + yaw_delta * interpolation;
         }
-        instances[index] = {{position.x, position.y + source.scale.y * 0.5f, position.z, 1.0f},
+        const auto vertical_offset = source.mesh == RenderMesh::Archer
+                                         ? impl_->archer_ground_offset
+                                         : source.scale.y * 0.5f;
+        instances[index] = {{position.x, position.y + vertical_offset, position.z, 1.0f},
+                            {source.scale.x, source.scale.y, source.scale.z, 0.0f},
                             source.color_rgba,
                             static_cast<std::uint32_t>(source.mesh),
                             yaw_value,
                             0.0f};
-        instances[index].position_scale.w = 1.0f;
     }
 
     auto result = frame.allocator->Reset();
@@ -1821,6 +2677,29 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         return HResultFailure("Reset command list", result);
     }
+
+    auto &ui_texture = impl_->ui_textures[back_buffer_index];
+    impl_->TransitionTexture(
+        ui_texture.resource.Get(),
+        frame.ui_initialized ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+                             : D3D12_RESOURCE_STATE_COMMON,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+        frame.ui_initialized ? D3D12_BARRIER_LAYOUT_SHADER_RESOURCE
+                             : D3D12_BARRIER_LAYOUT_COMMON,
+        D3D12_BARRIER_LAYOUT_COPY_DEST);
+    D3D12_TEXTURE_COPY_LOCATION ui_destination{};
+    ui_destination.pResource = ui_texture.resource.Get();
+    ui_destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION ui_source{};
+    ui_source.pResource = frame.ui_upload.resource.Get();
+    ui_source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    ui_source.PlacedFootprint = impl_->ui_footprint;
+    impl_->command_list->CopyTextureRegion(&ui_destination, 0, 0, 0, &ui_source, nullptr);
+    impl_->TransitionTexture(ui_texture.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                             D3D12_BARRIER_LAYOUT_COPY_DEST,
+                             D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+    frame.ui_initialized = true;
 
     const D3D12_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(impl_->render_width),
                                   static_cast<float>(impl_->render_height), 0.0f, 1.0f};
@@ -1856,12 +2735,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto dsv = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
     ID3D12DescriptorHeap *descriptor_heaps[] = {impl_->srv_heap.Get()};
     impl_->command_list->SetDescriptorHeaps(1, descriptor_heaps);
+    auto texture_table = impl_->srv_heap->GetGPUDescriptorHandleForHeapStart();
+    texture_table.ptr += static_cast<UINT64>(back_buffer_index) *
+                         kTextureDescriptorCount * impl_->srv_stride;
+    auto character_table = texture_table;
+    character_table.ptr += static_cast<UINT64>(kPostTextureDescriptorCount) *
+                           impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(13, character_table);
     const auto draw_fullscreen =
         [&](ID3D12PipelineState *pipeline, D3D12_CPU_DESCRIPTOR_HANDLE target) {
             impl_->command_list->OMSetRenderTargets(1, &target, FALSE, nullptr);
             impl_->command_list->SetPipelineState(pipeline);
-            impl_->command_list->SetGraphicsRootDescriptorTable(
-                5, impl_->srv_heap->GetGPUDescriptorHandleForHeapStart());
+            impl_->command_list->SetGraphicsRootDescriptorTable(5, texture_table);
             impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             impl_->command_list->DrawInstanced(3, 1, 0, 0);
         };
@@ -1908,7 +2793,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto post_b = impl_->graph.ImportTexture(
         {impl_->post_b.resource.Get()}, initial_color_access, "PostB");
     const auto ui = impl_->graph.ImportTexture(
-        {impl_->ui_texture.resource.Get()}, Access::ShaderRead, "UiTexture");
+        {ui_texture.resource.Get()}, Access::ShaderRead, "UiTexture");
     const auto back_buffer = impl_->graph.ImportTexture(
         {impl_->back_buffers[back_buffer_index].Get()}, Access::Present, "BackBuffer");
 
@@ -1935,7 +2820,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->SetComputeRootUnorderedAccessView(
             10, impl_->particle_counters.resource->GetGPUVirtualAddress());
         impl_->command_list->SetComputeRootShaderResourceView(
-            11, frame.upload.resource->GetGPUVirtualAddress() + kParticleSpawnDataOffset);
+            11, frame.upload.resource->GetGPUVirtualAddress() + particle_spawn_data_offset);
 
         const auto dispatch_phase = [&](std::uint32_t phase, std::uint32_t item_count) {
             impl_->command_list->SetComputeRoot32BitConstant(6, phase, 0);
@@ -1982,10 +2867,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->RSSetViewports(1, &shadow_viewport);
         impl_->command_list->RSSetScissorRects(1, &shadow_scissor);
         impl_->command_list->SetPipelineState(impl_->shadow_pipeline.Get());
-        impl_->command_list->SetGraphicsRootShaderResourceView(
-            1, frame.upload.resource->GetGPUVirtualAddress() + kInstanceDataOffset);
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
         auto handle = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += impl_->dsv_stride;
         for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
@@ -1994,8 +2876,25 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                                         0, nullptr);
             impl_->command_list->OMSetRenderTargets(0, nullptr, FALSE, &handle);
             impl_->command_list->SetGraphicsRoot32BitConstant(6, cascade, 0);
-            impl_->command_list->DrawInstanced(static_cast<UINT>(kCubeVertices.size()),
-                                               static_cast<UINT>(instance_count), 0, 0);
+            if (instance_count != 0)
+            {
+                impl_->command_list->SetGraphicsRootShaderResourceView(
+                    1, frame.upload.resource->GetGPUVirtualAddress() +
+                           kInstanceDataOffset);
+                impl_->command_list->IASetVertexBuffers(
+                    0, 1, &impl_->archer_vertex_view);
+                impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
+            }
+            if (instance_count > 1)
+            {
+                impl_->command_list->SetGraphicsRootShaderResourceView(
+                    1, frame.upload.resource->GetGPUVirtualAddress() +
+                           kInstanceDataOffset + sizeof(GpuInstance));
+                impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
+                impl_->command_list->DrawInstanced(
+                    static_cast<UINT>(kCubeVertices.size()),
+                    static_cast<UINT>(instance_count - 1), 0, 0);
+            }
             handle.ptr += impl_->dsv_stride;
         }
         impl_->command_list->RSSetViewports(1, &viewport);
@@ -2021,12 +2920,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             gbuffer_base_rtv, gbuffer_normal_rtv, gbuffer_position_rtv};
         impl_->command_list->OMSetRenderTargets(3, targets, FALSE, &dsv);
         impl_->command_list->SetPipelineState(impl_->scene_pipeline.Get());
-        impl_->command_list->SetGraphicsRootShaderResourceView(
-            1, frame.upload.resource->GetGPUVirtualAddress() + kInstanceDataOffset);
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
-        impl_->command_list->DrawInstanced(static_cast<UINT>(kCubeVertices.size()),
-                                           static_cast<UINT>(instance_count), 0, 0);
+        if (instance_count != 0)
+        {
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                1, frame.upload.resource->GetGPUVirtualAddress() +
+                       kInstanceDataOffset);
+            impl_->command_list->IASetVertexBuffers(0, 1,
+                                                    &impl_->archer_vertex_view);
+            impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
+        }
+        if (instance_count > 1)
+        {
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                1, frame.upload.resource->GetGPUVirtualAddress() +
+                       kInstanceDataOffset + sizeof(GpuInstance));
+            impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
+            impl_->command_list->DrawInstanced(
+                static_cast<UINT>(kCubeVertices.size()),
+                static_cast<UINT>(instance_count - 1), 0, 0);
+        }
     });
 
     auto lighting_pass = impl_->graph.AddPass("Deferred Cel Lighting", QueueHint::Direct);
@@ -2140,7 +3053,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->graph.SetFinalAccess(oit_revealage, Access::ShaderRead);
     impl_->graph.SetFinalAccess(post_a, Access::ShaderRead);
     impl_->graph.SetFinalAccess(post_b, Access::ShaderRead);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->graph.SetFinalAccess(back_buffer, Access::RenderTarget);
+#else
     impl_->graph.SetFinalAccess(back_buffer, Access::Present);
+#endif
 
     if (auto graph_result = impl_->graph.Execute(
             impl_->command_list.Get(), impl_->enhanced_command_list.Get(),
@@ -2151,6 +3068,19 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         return graph_result;
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->command_list->RSSetViewports(1, &output_viewport);
+    impl_->command_list->RSSetScissorRects(1, &output_scissor);
+    impl_->command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+    ID3D12DescriptorHeap *imgui_heaps[] = {impl_->imgui_heap.Get()};
+    impl_->command_list->SetDescriptorHeaps(1, imgui_heaps);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), impl_->command_list.Get());
+    impl_->TransitionTexture(impl_->back_buffers[back_buffer_index].Get(),
+                             D3D12_RESOURCE_STATE_RENDER_TARGET,
+                             D3D12_RESOURCE_STATE_PRESENT,
+                             D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+                             D3D12_BARRIER_LAYOUT_PRESENT);
+#endif
     impl_->transient_textures_common = false;
     impl_->particles_initialized = true;
     impl_->particle_input_is_a = !impl_->particle_input_is_a;
@@ -2179,7 +3109,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
 
     ++impl_->frame_number;
-    frame_result = {impl_->frame_number, snapshot.header.tick};
+    frame_result = {impl_->frame_number, snapshot.header.tick,
+#if defined(HS_DEVELOPMENT_TOOLS)
+                    ImGui::GetIO().WantCaptureMouse,
+                    ImGui::GetIO().WantCaptureKeyboard,
+#else
+                    false, false,
+#endif
+                    debug_command, debug_value, debug_secondary};
     impl_->CountValidationErrors();
     return Result::Success();
 }
@@ -2357,6 +3294,16 @@ Result D3D12Renderer::Shutdown()
         result = impl_->WaitForGpu();
         impl_->CountValidationErrors();
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (impl_->imgui_initialized)
+    {
+        ImGui_ImplDX12_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+        impl_->imgui_initialized = false;
+    }
+    impl_->imgui_heap.Reset();
+#endif
     for (auto &frame : impl_->frames)
     {
         if (frame.upload.resource && frame.mapped)
@@ -2364,11 +3311,20 @@ Result D3D12Renderer::Shutdown()
             frame.upload.resource->Unmap(0, nullptr);
             frame.mapped = nullptr;
         }
+        if (frame.ui_upload.resource && frame.ui_mapped)
+        {
+            frame.ui_upload.resource->Unmap(0, nullptr);
+            frame.ui_mapped = nullptr;
+        }
         frame.upload.Reset();
+        frame.ui_upload.Reset();
     }
     impl_->depth.Reset();
     impl_->shadow.Reset();
     impl_->vertices.Reset();
+    impl_->archer_vertices.Reset();
+    impl_->archer_diffuse.Reset();
+    impl_->archer_normal.Reset();
     impl_->particles.Reset();
     for (auto &alive : impl_->particle_alive)
     {
@@ -2385,7 +3341,20 @@ Result D3D12Renderer::Shutdown()
     impl_->oit_revealage.Reset();
     impl_->post_a.Reset();
     impl_->post_b.Reset();
-    impl_->ui_texture.Reset();
+    for (auto &texture : impl_->ui_textures)
+    {
+        texture.Reset();
+    }
+    for (auto &surface : impl_->ui_surfaces)
+    {
+        surface.brush.Reset();
+        surface.target.Reset();
+        surface.bitmap.Reset();
+    }
+    impl_->ui_font_collection.Reset();
+    impl_->ui_dwrite_factory.Reset();
+    impl_->ui_d2d_factory.Reset();
+    impl_->ui_wic_factory.Reset();
     if (impl_->timestamp_readback.resource && impl_->mapped_timestamps)
     {
         D3D12_RANGE no_write{};

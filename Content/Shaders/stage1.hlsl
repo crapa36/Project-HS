@@ -6,7 +6,7 @@ cbuffer FrameConstants : register(b0)
     float4 LightColor;
     float4 ScreenSize;
     float4x4 ShadowViewProjection[3];
-    float4x4 ArcherBones[2];
+    row_major float4x4 ArcherBones[128];
     float4 RenderOptions;
     uint4 ParticleOptions;
 };
@@ -18,7 +18,8 @@ cbuffer PassConstants : register(b1)
 
 struct InstanceData
 {
-    float4 PositionScale;
+    float4 Position;
+    float4 Scale;
     uint Color;
     uint Mesh;
     float Yaw;
@@ -65,13 +66,21 @@ Texture2D<float> OitRevealage : register(t8);
 Texture2D<float4> PostA : register(t9);
 Texture2D<float4> PostB : register(t10);
 Texture2D<float4> UiTexture : register(t11);
+Texture2DArray<float4> ArcherDiffuse : register(t14);
+Texture2DArray<float4> ArcherNormal : register(t15);
 SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
+SamplerState MaterialSampler : register(s2);
 
 struct SceneInput
 {
     float3 Position : POSITION;
     float3 Normal : NORMAL;
+    uint4 BoneIndices : BLENDINDICES;
+    float4 BoneWeights : BLENDWEIGHT;
+    float2 Uv : TEXCOORD;
+    float4 Tangent : TANGENT;
+    uint Material : MATERIAL;
 };
 
 struct SceneOutput
@@ -80,6 +89,10 @@ struct SceneOutput
     float3 WorldNormal : NORMAL;
     float3 WorldPosition : TEXCOORD0;
     float4 Color : COLOR0;
+    nointerpolation uint Mesh : TEXCOORD1;
+    float2 Uv : TEXCOORD2;
+    float4 WorldTangent : TEXCOORD3;
+    nointerpolation uint Material : TEXCOORD4;
 };
 
 float4 UnpackColor(uint packed)
@@ -91,55 +104,111 @@ float4 UnpackColor(uint packed)
         ((packed >> 24) & 0xff) / 255.0);
 }
 
-float3 SkinArcher(float3 position, uint mesh)
+void SkinArcher(inout float3 position, inout float3 normal, inout float3 tangent,
+                SceneInput input, uint mesh)
 {
     if (mesh != 0)
     {
-        return position;
+        return;
     }
-    float weight = saturate(position.y + 0.5);
-    float3 skinned = mul(ArcherBones[1], float4(position, 1.0)).xyz;
-    return lerp(position, skinned, weight);
+    const float4x4 skin =
+        ArcherBones[input.BoneIndices.x] * input.BoneWeights.x +
+        ArcherBones[input.BoneIndices.y] * input.BoneWeights.y +
+        ArcherBones[input.BoneIndices.z] * input.BoneWeights.z +
+        ArcherBones[input.BoneIndices.w] * input.BoneWeights.w;
+    position = mul(skin, float4(position, 1.0)).xyz;
+    normal = normalize(mul((float3x3)skin, normal));
+    tangent = normalize(mul((float3x3)skin, tangent));
+}
+
+float3 ShapePlaceholder(float3 position, uint mesh)
+{
+    // Runtime-only primitives: boxes, tapered boxes, wedges, and planes.
+    if (mesh == 2) // ranged enemy: narrow column
+    {
+        position.xz *= 0.72;
+    }
+    else if (mesh == 3) // suicide enemy: tapered warning shape
+    {
+        position.xz *= lerp(1.0, 0.28, saturate(position.y + 0.5));
+    }
+    else if (mesh == 5 || mesh == 6) // projectiles: arrow-like wedge
+    {
+        position.x *= lerp(0.25, 1.0, saturate(0.5 - position.z));
+        position.y *= 0.55;
+    }
+    else if (mesh == 7) // area: ground plane
+    {
+        position.y *= 0.1;
+    }
+    else if (mesh == 8) // pickup: tilted marker
+    {
+        const float sine = 0.70710678;
+        const float cosine = 0.70710678;
+        position.xy = float2(position.x * cosine - position.y * sine,
+                             position.x * sine + position.y * cosine);
+    }
+    else if (mesh == 9) // test ground
+    {
+        position.y *= 0.1;
+    }
+    return position;
 }
 
 float3 InstanceWorldPosition(InstanceData instance, float3 position)
 {
-    float3 scale = instance.Mesh == 0 ? float3(0.8, 1.8, 0.8) : float3(0.75, 1.1, 0.75);
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    float3 local = SkinArcher(position, instance.Mesh) * scale;
+    float3 local = ShapePlaceholder(position, instance.Mesh) * instance.Scale.xyz;
     float3 rotated = float3(
         local.x * cosine_yaw + local.z * sine_yaw,
         local.y,
         -local.x * sine_yaw + local.z * cosine_yaw);
-    return instance.PositionScale.xyz + rotated;
+    return instance.Position.xyz + rotated;
 }
 
 SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
 {
     InstanceData instance = Instances[instance_id];
+    float3 local_position = input.Position;
+    float3 local_normal = input.Normal;
+    float3 local_tangent = input.Tangent.xyz;
+    SkinArcher(local_position, local_normal, local_tangent, input, instance.Mesh);
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    float3 world = InstanceWorldPosition(instance, input.Position);
-    float3 normal = float3(
-        input.Normal.x * cosine_yaw + input.Normal.z * sine_yaw,
-        input.Normal.y,
-        -input.Normal.x * sine_yaw + input.Normal.z * cosine_yaw);
+    float3 world = InstanceWorldPosition(instance, local_position);
+    local_normal /= max(instance.Scale.xyz, 0.0001);
+    float3 normal = normalize(float3(
+        local_normal.x * cosine_yaw + local_normal.z * sine_yaw,
+        local_normal.y,
+        -local_normal.x * sine_yaw + local_normal.z * cosine_yaw));
+    float3 tangent = normalize(float3(
+        local_tangent.x * cosine_yaw + local_tangent.z * sine_yaw,
+        local_tangent.y,
+        -local_tangent.x * sine_yaw + local_tangent.z * cosine_yaw));
 
     SceneOutput output;
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = normal;
     output.WorldPosition = world;
     output.Color = UnpackColor(instance.Color);
+    output.Mesh = instance.Mesh;
+    output.Uv = input.Uv;
+    output.WorldTangent = float4(tangent, input.Tangent.w);
+    output.Material = input.Material;
     return output;
 }
 
 float4 ShadowVS(SceneInput input, uint instance_id : SV_InstanceID) : SV_Position
 {
     InstanceData instance = Instances[instance_id];
-    float3 world = InstanceWorldPosition(instance, input.Position);
+    float3 local_position = input.Position;
+    float3 local_normal = input.Normal;
+    float3 local_tangent = input.Tangent.xyz;
+    SkinArcher(local_position, local_normal, local_tangent, input, instance.Mesh);
+    float3 world = InstanceWorldPosition(instance, local_position);
     return mul(float4(world, 1.0), ShadowViewProjection[PassValue]);
 }
 
@@ -150,11 +219,48 @@ struct GBufferOutput
     float4 Position : SV_Target2;
 };
 
+float4 SampleArcherDiffuse(uint material, float2 uv)
+{
+    const uint slice = min(material, max(ParticleOptions.w, 1u) - 1u);
+    return ArcherDiffuse.SampleLevel(MaterialSampler, float3(uv, slice), 0);
+}
+
+float3 SampleArcherNormal(uint material, float2 uv)
+{
+    const uint slice = min(material, max(ParticleOptions.w, 1u) - 1u);
+    return ArcherNormal.SampleLevel(MaterialSampler, float3(uv, slice), 0).xyz;
+}
+
 GBufferOutput ScenePS(SceneOutput input)
 {
     GBufferOutput output;
     output.BaseColor = input.Color;
-    output.Normal = float4(normalize(input.WorldNormal) * 0.5 + 0.5, 1.0);
+    float3 world_normal = normalize(input.WorldNormal);
+    if (input.Mesh == 0)
+    {
+        const uint material = input.Material;
+        const float4 base_color = SampleArcherDiffuse(material, input.Uv);
+        clip(base_color.a - 0.2);
+        output.BaseColor = float4(base_color.rgb, 1.0);
+        const float3 tangent_normal =
+            SampleArcherNormal(material, input.Uv) * 2.0 - 1.0;
+        const float3 tangent = normalize(input.WorldTangent.xyz);
+        const float3 bitangent =
+            normalize(cross(world_normal, tangent)) * input.WorldTangent.w;
+        world_normal = normalize(tangent * tangent_normal.x +
+                                 bitangent * tangent_normal.y +
+                                 world_normal * tangent_normal.z);
+    }
+    if (input.Mesh == 9)
+    {
+        const float2 distance_to_line =
+            abs(frac(input.WorldPosition.xz + 0.5) - 0.5) /
+            max(fwidth(input.WorldPosition.xz), 0.0001);
+        const float grid = 1.0 - saturate(min(distance_to_line.x,
+                                              distance_to_line.y));
+        output.BaseColor.rgb = lerp(input.Color.rgb, 1.0, grid);
+    }
+    output.Normal = float4(world_normal * 0.5 + 0.5, 1.0);
     output.Position = float4(input.WorldPosition, 1.0);
     return output;
 }
@@ -202,8 +308,9 @@ float4 DeferredPS(FullScreenOutput input) : SV_Target0
     float stepped_diffuse = diffuse > 0.55 ? 1.0 : (diffuse > 0.05 ? 0.62 : 0.28);
     float rim = pow(1.0 - saturate(normal.y), 3.0);
     float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world)) : 1.0;
-    float3 color =
-        base.rgb * stepped_diffuse * visibility * LightColor.rgb + base.rgb * rim * 0.22;
+    float3 color = base.rgb *
+                       (0.35 + stepped_diffuse * visibility * LightColor.rgb) +
+                   base.rgb * rim * 0.22;
     float3 arena = float3(0.035, 0.055, 0.085);
     return float4(lerp(arena, color, base.a), 1.0);
 }
@@ -513,12 +620,17 @@ float4 FxaaPS(FullScreenOutput input) : SV_Target0
 
 float4 UiPS(FullScreenOutput input) : SV_Target0
 {
-    float2 origin = float2(0.035, 0.035);
-    float2 extent = float2(0.36, 0.09);
-    float2 local = (input.Uv - origin) / extent;
-    if (any(local < 0.0) || any(local > 1.0))
+    const float reference_aspect = 1920.0 / 1080.0;
+    const float output_aspect = ScreenSize.x / ScreenSize.y;
+    float2 reference_uv = input.Uv;
+    if (output_aspect > reference_aspect)
     {
-        discard;
+        reference_uv.x = (reference_uv.x - 0.5) * output_aspect / reference_aspect + 0.5;
     }
-    return UiTexture.SampleLevel(LinearClamp, local, 0);
+    else
+    {
+        reference_uv.y = (reference_uv.y - 0.5) * reference_aspect / output_aspect + 0.5;
+    }
+    if (any(reference_uv < 0.0) || any(reference_uv > 1.0)) discard;
+    return UiTexture.SampleLevel(LinearClamp, reference_uv, 0);
 }
