@@ -157,6 +157,10 @@ void TestSnapshotExchange()
                   {{static_cast<float>(sequence), 0, 0}, 0, {}, 0xFFFFFFFFu,
                    hs::RenderMesh::Enemy}),
               "snapshot instance");
+        Check(slot->storage->AddInstance(
+                  {{static_cast<float>(sequence), 0, 1}, 0, {}, 0xFFFFFFFFu,
+                   hs::RenderMesh::Pickup}),
+              "snapshot grows beyond its initial reserve");
         exchange.Publish(*slot, sequence);
         const auto pair = consumer.AcquireLatest();
         Check(pair.has_current && pair.current.header.tick == sequence, "snapshot newest");
@@ -176,10 +180,11 @@ hs::GameplayChecksum RunSimulation()
     hs::GameplayChecksum checksum{};
     for (hs::Tick tick = 1; tick <= 240; ++tick)
     {
-        hs::InputFrame input;
+        hs::InputFrame input{};
         input.target_tick = tick;
-        input.held.normalized_move = tick <= 120 ? hs::Float2{1.0f, 1.0f}
-                                                 : hs::Float2{-1.0f, 0.0f};
+        input.held.move_held = true;
+        input.held.move_target_world = tick <= 120 ? hs::Float3{30.0f, 0.0f, 30.0f}
+                                                    : hs::Float3{-30.0f, 0.0f, 0.0f};
         checksum = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep).checksum;
     }
     Check(simulation.Shutdown().Succeeded(), "simulation shutdown");
@@ -195,7 +200,7 @@ void TestGameplayDeterminism()
     std::uint32_t particle_count{};
     for (hs::Tick tick = 1; tick <= 180; ++tick)
     {
-        hs::InputFrame particle_input;
+        hs::InputFrame particle_input{};
         particle_input.target_tick = tick;
         (void)particle_simulation.TickFixed(particle_input, hs::FixedStepClock::kFixedStep);
         for (const auto &spawn : particle_simulation.PendingParticleSpawns())
@@ -211,12 +216,13 @@ void TestGameplayDeterminism()
     Check(particle_simulation.Shutdown().Succeeded(), "particle simulation shutdown");
 
     hs::GameSimulation simulation;
-    Check(simulation.Initialize({1}).Succeeded(), "diagonal simulation initialize");
-    hs::InputFrame input;
-    input.held.normalized_move = {1.0f, 1.0f};
+    Check(simulation.Initialize({1}).Succeeded(), "cursor movement simulation initialize");
+    hs::InputFrame input{};
+    input.held.move_held = true;
+    input.held.move_target_world = {30.0f, 0.0f, 30.0f};
     const auto first = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-    Check(first.tick == 1 && first.checksum != 0, "diagonal simulation tick");
-    Check(simulation.Shutdown().Succeeded(), "diagonal simulation shutdown");
+    Check(first.tick == 1 && first.checksum != 0, "cursor movement simulation tick");
+    Check(simulation.Shutdown().Succeeded(), "cursor movement simulation shutdown");
 }
 
 } // namespace
