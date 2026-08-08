@@ -1,0 +1,126 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "level",
+  "entries": [
+    {
+      "id": "level.arena",
+      "arena": {
+        "width_m": 120,
+        "depth_m": 120,
+        "plane": "XZ",
+        "shape": "square",
+        "obstacles": false,
+        "height_differences": false,
+        "clamp_players_and_enemies_to_boundary": true,
+        "solid_player_enemy_collision": false,
+        "enemy_soft_separation": true,
+        "enemy_body_contact_damage": false
+      },
+      "session": {
+        "growth_start_seconds": 0,
+        "first_mid_boss_seconds": 300,
+        "second_mid_boss_seconds": 600,
+        "final_boss_seconds": 900,
+        "final_boss_time_limit_seconds": null,
+        "stop_new_normal_enemy_spawns_at_final_boss": true,
+        "preserve_existing_world_at_final_boss": true,
+        "allow_growth_during_final_boss": true
+      },
+      "outcome": {
+        "final_boss_death_is_victory": true,
+        "player_death_is_defeat": true,
+        "same_tick_player_and_final_boss_death_is_victory": true,
+        "same_tick_player_and_mid_boss_death_is_defeat_if_final_boss_alive": true,
+        "resolution_order": ["apply_damage_and_healing", "confirm_deaths", "check_final_boss_death", "check_player_death"],
+        "revival": false,
+        "mid_run_save": false
+      },
+      "pause": {
+        "states": ["level_up_card", "level_up_stats", "relic_selection", "manual_escape"],
+        "pause_simulation": true,
+        "continue_rendering": true,
+        "continue_menu_input": true,
+        "realign_clock_on_resume": true,
+        "pause_on_focus_loss": false,
+        "clear_input_on_focus_loss": true,
+        "continue_audio_on_focus_loss": true
+      },
+      "experience": {
+        "rewards": [
+          {"source_id": "enemy.melee", "xp": 1},
+          {"source_id": "enemy.ranged", "xp": 2},
+          {"source_id": "enemy.suicide", "xp": 2},
+          {"source_id": "boss.mid_5m", "xp": 100},
+          {"source_id": "boss.mid_10m", "xp": 200},
+          {"source_id": "boss.final_15m", "xp": 0}
+        ],
+        "next_level_formula": "20 + 7 * (L - 1) + floor(1.5 * (L - 1)^2)",
+        "level_cap": null,
+        "pickup_magnet_tracking": true,
+        "utility_pickup_base_chance": 0.01,
+        "utility_pickup_miss_increment": 0.001,
+        "target_level_at_15_minutes": 25,
+        "target_level_choices_at_15_minutes": 24,
+        "forced_level_correction": false
+      },
+      "cards": {
+        "candidate_count": 3,
+        "choose_count": 1,
+        "minimum_unacquired_active_candidates_before_slots_full": 1,
+        "active_slot_count": 4,
+        "upgrades_selected_per_skill": 4,
+        "fallback_stat_point_cards": true,
+        "extra_stat_points_per_stat_card": 1,
+        "base_stat_points_per_level": 1,
+        "require_all_stat_points_spent": true,
+        "seeded_fisher_yates": true,
+        "duplicate_concrete_cards_on_screen": false,
+        "skip": false,
+        "banish": false
+      },
+      "rerolls": {
+        "shared_initial_count": 3,
+        "shared_between_level_and_relic_choices": true,
+        "replace_all_candidate_cards": true,
+        "candidate_count": 3,
+        "exclude_current_cards_when_enough_candidates": true,
+        "can_skip_acquisition_or_stat_allocation": false
+      },
+      "capacities": [
+        {"kind": "normal_enemies", "designed_operating_count": 800, "hard_capacity": null},
+        {"kind": "bosses", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "player_projectiles", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "enemy_projectiles", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "all_projectiles", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "experience_pickups", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "non_experience_pickups", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "mid_boss_relic_chests", "designed_operating_count": null, "hard_capacity": null},
+        {"kind": "gpu_particles", "designed_operating_count": null, "hard_capacity": 10000}
+      ],
+      "capacity_rules": [
+        "Release에서는 기존 항목을 유지하고 새 생성만 거부한다.",
+        "Debug/Test에서는 종류별 초당 1회로 제한한 구조화 진단 로그를 남긴다.",
+        "용량 초과 자체는 자동 실패가 아니며 실험 assertion이 실패 여부를 정한다.",
+        "경험치 획득물은 생성 상한과 병합 없이 모두 개별 유지한다."
+      ],
+      "rules": [
+        "중간 보스는 이전 중간 보스의 생존 여부와 무관하게 예정 시각에 등장한다.",
+        "중간 보스 전투 중에도 GrowthTime, 일반 적 연속 생성, 대형 웨이브 생성이 진행된다.",
+        "여러 레벨이 동시에 오르면 각 레벨의 카드 선택과 스탯 배분을 한 번씩 순서대로 반복한다."
+      ],
+      "unlock_framework": {
+        "active_skill_count": 8,
+        "relic_count": 12,
+        "all_first_version_content_unlocked": true,
+        "unlock_condition_data": true,
+        "unlock_notifications": true,
+        "collection_display": true,
+        "permanent_stat_growth": false,
+        "cloud_save": false,
+        "online": false,
+        "telemetry": false
+      }
+    }
+  ]
+}

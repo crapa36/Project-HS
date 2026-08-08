@@ -1,0 +1,85 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "enemies",
+  "spawn_scaling": {
+    "completed_minutes_formula": "floor(GrowthTime / 60)",
+    "hp_formula": "round(base_hp * (1 + 0.15 * completed_minutes))",
+    "damage_formula": "round(base_damage * (1 + 0.05 * completed_minutes))",
+    "hp_fraction_per_completed_minute": 0.15,
+    "damage_fraction_per_completed_minute": 0.05,
+    "updates_existing_enemies": false,
+    "applies_to_bosses": false
+  },
+  "common_rules": [
+    "적 몸체 접촉에는 피해가 없다.",
+    "플레이어와 적은 서로 통과할 수 있다.",
+    "적끼리만 soft separation을 적용한다.",
+    "일반 적은 예고 중 방향을 바꾸지 않는다."
+  ],
+  "entries": [
+    {
+      "id": "enemy.melee",
+      "display_name": "근접",
+      "base_hp": 15,
+      "movement_speed_mps": 1.445,
+      "xp_reward": 1,
+      "mesh_asset_id": "procedural.mesh.enemy.melee",
+      "material_id": "material.enemy.melee",
+      "logic_id": "straight_chase_melee",
+      "parameters": [
+        {"key": "attack_range", "value": 1, "unit": "meters"},
+        {"key": "telegraph_duration", "value": 0.35, "unit": "seconds"},
+        {"key": "base_damage", "value": 10, "unit": "damage"},
+        {"key": "reattack_interval", "value": 1.2, "unit": "seconds"}
+      ],
+      "rules": [
+        "플레이어를 직선 추적하고 1m 안에서 정지한다.",
+        "예고 종료 뒤 현재 공격 범위를 다시 검사하고 범위를 벗어나면 공격을 취소한다."
+      ]
+    },
+    {
+      "id": "enemy.ranged",
+      "display_name": "원거리",
+      "base_hp": 12,
+      "movement_speed_mps": 1.19,
+      "xp_reward": 2,
+      "mesh_asset_id": "procedural.mesh.enemy.ranged",
+      "material_id": "material.enemy.ranged",
+      "logic_id": "approach_and_shoot_projectile",
+      "parameters": [
+        {"key": "maximum_hold_distance", "value": 12, "unit": "meters"},
+        {"key": "telegraph_duration", "value": 0.5, "unit": "seconds"},
+        {"key": "base_damage", "value": 8, "unit": "damage"},
+        {"key": "projectile_speed", "value": 5.5, "unit": "meters_per_second"},
+        {"key": "projectile_range", "value": 18, "unit": "meters"},
+        {"key": "reattack_interval", "value": 2.2, "unit": "seconds"}
+      ],
+      "rules": [
+        "12m 밖이면 접근하고 12m 이내에서는 정지하며 플레이어에게서 멀어지는 이동은 하지 않는다.",
+        "공격 시작 시 조준 방향을 고정하고 예고 종료 뒤 투사체를 발사한다."
+      ]
+    },
+    {
+      "id": "enemy.suicide",
+      "display_name": "자폭",
+      "base_hp": 13,
+      "movement_speed_mps": 1.9125,
+      "xp_reward": 2,
+      "mesh_asset_id": "procedural.mesh.enemy.suicide",
+      "material_id": "material.enemy.suicide",
+      "logic_id": "straight_chase_self_destruct",
+      "parameters": [
+        {"key": "stop_distance", "value": 2.2, "unit": "meters"},
+        {"key": "telegraph_duration", "value": 0.8, "unit": "seconds"},
+        {"key": "explosion_radius", "value": 3, "unit": "meters"},
+        {"key": "base_damage", "value": 25, "unit": "damage"}
+      ],
+      "rules": [
+        "플레이어를 직선 추적하고 2.2m 안에서 정지해 예고한다.",
+        "예고 종료 때 반경 3m 안의 플레이어에게 한 번 피해를 주고 자신을 제거한다.",
+        "예고 중 처치되면 폭발하지 않는다."
+      ]
+    }
+  ]
+}

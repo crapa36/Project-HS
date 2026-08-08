@@ -1,0 +1,27 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "materials",
+  "entries": [
+    {"id": "material.character.archer", "asset_id": "procedural.material.character.archer", "domain": "opaque", "purpose": "궁수 캐릭터"},
+    {"id": "material.enemy.melee", "asset_id": "procedural.material.enemy.melee", "domain": "opaque", "purpose": "근접 일반 적"},
+    {"id": "material.enemy.ranged", "asset_id": "procedural.material.enemy.ranged", "domain": "opaque", "purpose": "원거리 일반 적"},
+    {"id": "material.enemy.suicide", "asset_id": "procedural.material.enemy.suicide", "domain": "opaque", "purpose": "자폭 일반 적"},
+    {"id": "material.boss.mid_5m", "asset_id": "procedural.material.boss.mid_5m", "domain": "opaque", "purpose": "5분 중간 보스"},
+    {"id": "material.boss.mid_10m", "asset_id": "procedural.material.boss.mid_10m", "domain": "opaque", "purpose": "10분 중간 보스"},
+    {"id": "material.boss.final_15m", "asset_id": "procedural.material.boss.final_15m", "domain": "opaque", "purpose": "최종 보스"},
+    {"id": "material.projectile.arrow", "asset_id": "procedural.material.projectile.arrow", "domain": "masked", "purpose": "플레이어 화살과 파편"},
+    {"id": "material.effect.area", "asset_id": "procedural.material.effect.area", "domain": "transparent_oit", "purpose": "장판, 둔화 지대, 범위 예고"},
+    {"id": "material.effect.additive", "asset_id": "procedural.material.effect.additive", "domain": "additive", "purpose": "폭발, 화상, 발광 효과"},
+    {"id": "material.ui", "asset_id": "procedural.material.ui", "domain": "game_ui", "purpose": "HUD, 카드, 설정, 컬렉션, 결과 화면"}
+  ],
+  "rendering_rules": [
+    "2단 확산광",
+    "단계형 스펙큘러",
+    "림라이트",
+    "깊이/노멀 기반 화면 공간 외곽선",
+    "불투명, 마스크, 투명 OIT, 가산 재질",
+    "전역 방향광 1개와 그림자",
+    "Bloom, ToneMap, FXAA"
+  ]
+}

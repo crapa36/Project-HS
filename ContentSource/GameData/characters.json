@@ -1,0 +1,55 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "characters",
+  "entries": [
+    {
+      "id": "character.archer",
+      "display_name": "궁수",
+      "playable": true,
+      "stat_profile_id": "stats.archer",
+      "mesh_asset_id": "character.archer.erika",
+      "material_id": "material.character.archer",
+      "starting_level": 1,
+      "starting_basic_attack_level": 1,
+      "starting_active_skill_ids": [],
+      "starting_relic_ids": [],
+      "starting_unspent_stat_points": 0,
+      "starting_shared_rerolls": 3,
+      "movement": {
+        "input": "RMB",
+        "stop_distance_m": 0.15,
+        "normalize_direction_each_tick": true,
+        "stop_on_release": true,
+        "automatic_path_following": false
+      },
+      "aiming": {
+        "basic_attack_input": "LMB",
+        "active_skill_slots": ["Q", "W", "E", "R"],
+        "attack_direction": "exact_cursor_world_direction",
+        "clamp_ground_target_to_max_range": true,
+        "face_move_direction_when_idle": true,
+        "face_aim_direction_when_attacking": true
+      },
+      "camera": {
+        "yaw_degrees": 45,
+        "pitch_degrees": 55,
+        "vertical_fov_degrees": 45,
+        "rotation_enabled": false,
+        "minimum_distance_percent": 80,
+        "maximum_distance_percent": 120,
+        "tracks_player": true
+      },
+      "rules": [
+        "플레이어와 모든 적은 경기장 경계를 넘을 수 없다.",
+        "플레이어와 적은 서로 통과할 수 있다.",
+        "회피, 질주, 마나, 에너지, 충전 공통 자원은 없다.",
+        "몸 회전 보간은 공격 판정 방향에 영향을 주지 않는다.",
+        "게임 행동은 행동당 키 1개만 지정한다.",
+        "이미 사용 중인 키를 다른 행동에 지정하면 두 행동의 키를 서로 교환한다.",
+        "이동 RMB와 Esc는 고정이며 재설정할 수 없다.",
+        "마우스와 키보드 외 입력 장치는 지원하지 않는다."
+      ]
+    }
+  ]
+}

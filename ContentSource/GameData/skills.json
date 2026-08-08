@@ -1,0 +1,234 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "skills",
+  "active_skill_limit": 4,
+  "automatic_slot_order": ["Q", "W", "E", "R"],
+  "acquisition_level": 1,
+  "maximum_level": 5,
+  "upgrade_choices_per_skill": 4,
+  "common_rules": [
+    "Pressed edge에서 습득 상태이고 쿨타임이 0이며 다른 액티브 동작 중이 아닐 때만 시전을 시작한다.",
+    "사용 불가 입력은 예약하지 않고 무시한다.",
+    "충전 사격 외 스킬은 시전 승인 tick에, 충전 사격은 발사 tick에 쿨타임을 시작한다.",
+    "즉시 투사체와 위치 지정 스킬의 동작은 시전 tick에 끝난다.",
+    "직접 생성한 투사체, 폭발, 지대는 원본이며 강화와 유물이 만든 것은 파생 효과다.",
+    "별도 수치가 없는 파생 화살은 원본 속도, 충돌 반경, 새 생성 지점부터의 전체 사거리를 사용한다.",
+    "파생 효과는 같은 스킬의 상태를 부여할 수 있지만 새 파생 투사체나 파생 폭발을 만들 수 없다.",
+    "대상당 적중 한도는 같은 시전의 원본과 파생 화살을 합산한다.",
+    "보스는 피해, 출혈, 화상, 둔화를 받지만 흡인, 밀치기, 정렬 이동에는 면역이다.",
+    "일반 적 관통 화살은 보스 첫 적중에서 소멸한다.",
+    "지속 피해 지대는 활성 시점에 첫 피해를 주고 0.5초마다 지속시간 미만에서 적용한다.",
+    "표식 지속시간은 4초이며 조건을 만족하는 첫 효과에 소비된다."
+  ],
+  "entries": [
+    {
+      "id": "skill.basic_attack",
+      "display_name": "기본 공격",
+      "skill_type": "basic",
+      "logic_id": "basic_projectile_cadence",
+      "input": "LMB",
+      "projectile_asset_id": "procedural.mesh.projectile.arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.basic_attack",
+      "parameters": [
+        {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+        {"key": "projectile_speed", "value": 32, "unit": "meters_per_second"},
+        {"key": "range", "value": 18, "unit": "meters"},
+        {"key": "collision_radius", "value": 0.18, "unit": "meters"},
+        {"key": "pierce", "value": 0, "unit": "count"},
+        {"key": "starting_level", "value": 1, "unit": "level"},
+        {"key": "maximum_level", "value": 5, "unit": "level"},
+        {"key": "selected_upgrades_per_session", "value": 4, "unit": "count"}
+      ],
+      "rules": [
+        "첫 적에게 적중하면 소멸한다.",
+        "이동 중 속도 감소가 없다.",
+        "LMB를 처음 누른 tick에 즉시 1회 발사한다.",
+        "기본 공격 간격은 1/기본 공격 속도다.",
+        "한 tick에는 최대 1회 발사하고 남은 시간을 다음 tick으로 보존한다.",
+        "cadence마다 BasicAttackSequence를 1 올리며 추가 화살은 cadence와 sequence를 올리지 않는다.",
+        "강화 8의 3발은 직접 생성 화살이며 -15°부터 +15° 순서로 기본 화살 발사 순서를 부여한다.",
+        "파생, 귀환, 분기 화살은 기본 화살 발사 순서에서 제외한다."
+      ]
+    },
+    {
+      "id": "skill.piercing_shot",
+      "display_name": "관통 사격",
+      "skill_type": "active",
+      "logic_id": "piercing_projectile",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.piercing_arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.skill.piercing_shot",
+      "parameters": [
+        {"key": "cooldown", "value": 4.5, "unit": "seconds"},
+        {"key": "damage_multiplier", "value": 3, "unit": "multiplier"},
+        {"key": "projectile_speed", "value": 30, "unit": "meters_per_second"},
+        {"key": "range", "value": 24, "unit": "meters"},
+        {"key": "collision_radius", "value": 0.3, "unit": "meters"},
+        {"key": "maximum_hits_per_target", "value": 1, "unit": "count"}
+      ],
+      "rules": ["모든 일반 적을 관통한다."]
+    },
+    {
+      "id": "skill.multishot",
+      "display_name": "다중 사격",
+      "skill_type": "active",
+      "logic_id": "uniform_fan_projectiles",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.multishot_arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.skill.multishot",
+      "parameters": [
+        {"key": "cooldown", "value": 5.5, "unit": "seconds"},
+        {"key": "fan_angle", "value": 50, "unit": "degrees"},
+        {"key": "projectile_count", "value": 5, "unit": "count"},
+        {"key": "damage_multiplier_per_arrow", "value": 1.2, "unit": "multiplier"},
+        {"key": "projectile_speed", "value": 25, "unit": "meters_per_second"},
+        {"key": "range", "value": 16, "unit": "meters"},
+        {"key": "pierce_per_arrow", "value": 1, "unit": "count"},
+        {"key": "maximum_hits_per_target", "value": 2, "unit": "count"}
+      ],
+      "rules": ["50도 부채꼴에 5발을 균등하게 배치한다."]
+    },
+    {
+      "id": "skill.charged_shot",
+      "display_name": "충전 사격",
+      "skill_type": "active",
+      "logic_id": "hold_release_linear_charge",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.charged_arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.skill.charged_shot",
+      "parameters": [
+        {"key": "maximum_charge_time", "value": 1.5, "unit": "seconds"},
+        {"key": "minimum_damage_multiplier", "value": 1.2, "unit": "multiplier"},
+        {"key": "maximum_damage_multiplier", "value": 4.5, "unit": "multiplier"},
+        {"key": "minimum_range", "value": 12, "unit": "meters"},
+        {"key": "maximum_range", "value": 28, "unit": "meters"},
+        {"key": "minimum_collision_radius", "value": 0.25, "unit": "meters"},
+        {"key": "maximum_collision_radius", "value": 0.55, "unit": "meters"},
+        {"key": "projectile_speed", "value": 35, "unit": "meters_per_second"},
+        {"key": "damage_loss_per_pierce", "value": 0.1, "unit": "fraction"},
+        {"key": "minimum_pierce_damage_multiplier", "value": 0.6, "unit": "multiplier"},
+        {"key": "movement_speed_multiplier_while_charging", "value": 0.7, "unit": "multiplier"},
+        {"key": "cooldown", "value": 7, "unit": "seconds"}
+      ],
+      "rules": [
+        "키를 누르는 동안 충전하고 키를 떼면 발사한다.",
+        "피해, 사거리, 충돌 반경은 충전율에 따라 선형 증가한다.",
+        "모든 일반 적을 관통한다.",
+        "충전 중 기본 공격과 다른 스킬을 사용할 수 없다.",
+        "쿨타임은 발사 시점부터 시작한다."
+      ]
+    },
+    {
+      "id": "skill.explosive_arrow",
+      "display_name": "폭발 화살",
+      "skill_type": "active",
+      "logic_id": "projectile_to_area_explosion",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.explosive_arrow",
+      "material_id": "material.effect.additive",
+      "particle_id": "particle.skill.explosive_arrow",
+      "parameters": [
+        {"key": "cooldown", "value": 6.5, "unit": "seconds"},
+        {"key": "projectile_speed", "value": 22, "unit": "meters_per_second"},
+        {"key": "range", "value": 18, "unit": "meters"},
+        {"key": "explosion_radius", "value": 3, "unit": "meters"},
+        {"key": "explosion_damage_multiplier", "value": 2.8, "unit": "multiplier"}
+      ],
+      "rules": ["첫 적 또는 최대 사거리 끝점에서 폭발한다."]
+    },
+    {
+      "id": "skill.ricochet_arrow",
+      "display_name": "도탄 화살",
+      "skill_type": "active",
+      "logic_id": "nearest_unhit_target_ricochet",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.ricochet_arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.skill.ricochet_arrow",
+      "parameters": [
+        {"key": "cooldown", "value": 6, "unit": "seconds"},
+        {"key": "damage_multiplier", "value": 1.8, "unit": "multiplier"},
+        {"key": "initial_range", "value": 18, "unit": "meters"},
+        {"key": "ricochet_search_radius", "value": 6, "unit": "meters"},
+        {"key": "maximum_ricochets", "value": 5, "unit": "count"}
+      ],
+      "rules": ["적중 후 아직 적중하지 않은 최근접 대상에게 도탄한다."]
+    },
+    {
+      "id": "skill.arrow_rain",
+      "display_name": "화살비",
+      "skill_type": "active",
+      "logic_id": "targeted_periodic_area",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.effect.arrow_rain",
+      "material_id": "material.effect.area",
+      "particle_id": "particle.skill.arrow_rain",
+      "parameters": [
+        {"key": "target_range", "value": 20, "unit": "meters"},
+        {"key": "cooldown", "value": 9, "unit": "seconds"},
+        {"key": "activation_delay", "value": 0.4, "unit": "seconds"},
+        {"key": "radius", "value": 4, "unit": "meters"},
+        {"key": "duration", "value": 3, "unit": "seconds"},
+        {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+        {"key": "damage_multiplier_per_tick", "value": 0.7, "unit": "multiplier"},
+        {"key": "total_damage_ticks", "value": 6, "unit": "count"}
+      ],
+      "rules": ["위치 지정 스킬이며 활성 직후부터 피해를 준다."]
+    },
+    {
+      "id": "skill.trap",
+      "display_name": "덫",
+      "skill_type": "active",
+      "logic_id": "forward_roll_leave_trap",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.effect.trap",
+      "material_id": "material.effect.area",
+      "particle_id": "particle.skill.trap",
+      "parameters": [
+        {"key": "forward_roll_distance", "value": 5, "unit": "meters"},
+        {"key": "forward_roll_duration", "value": 0.25, "unit": "seconds"},
+        {"key": "cooldown", "value": 8, "unit": "seconds"},
+        {"key": "activation_delay", "value": 0.6, "unit": "seconds"},
+        {"key": "active_duration", "value": 12, "unit": "seconds"},
+        {"key": "detection_radius", "value": 2, "unit": "meters"},
+        {"key": "explosion_radius", "value": 3, "unit": "meters"},
+        {"key": "damage_multiplier", "value": 2.2, "unit": "multiplier"},
+        {"key": "slow_fraction", "value": 0.3, "unit": "fraction"},
+        {"key": "slow_duration", "value": 3, "unit": "seconds"}
+      ],
+      "rules": [
+        "조준 방향으로 5m 전진하고 출발 위치에 덫을 남긴다.",
+        "적이 감지 반경에 처음 들어오면 즉시 발동하고 범위 피해를 적용한 뒤 소모한다.",
+        "유지시간이 끝나거나 덫이 소모되면 제거한다."
+      ]
+    },
+    {
+      "id": "skill.retreat_shot",
+      "display_name": "후퇴 사격",
+      "skill_type": "active",
+      "logic_id": "forced_retreat_and_projectile",
+      "input": "automatic_slot",
+      "projectile_asset_id": "procedural.mesh.projectile.retreat_arrow",
+      "material_id": "material.projectile.arrow",
+      "particle_id": "particle.skill.retreat_shot",
+      "parameters": [
+        {"key": "forced_move_duration", "value": 0.2, "unit": "seconds"},
+        {"key": "forced_move_distance", "value": 5, "unit": "meters"},
+        {"key": "damage_multiplier", "value": 2.2, "unit": "multiplier"},
+        {"key": "cooldown", "value": 7, "unit": "seconds"},
+        {"key": "projectile_range", "value": 16, "unit": "meters"},
+        {"key": "pierce", "value": 1, "unit": "count"}
+      ],
+      "rules": [
+        "조준 반대 방향으로 강제 이동하며 동시에 조준 방향으로 화살을 발사한다.",
+        "강제 이동 종료까지 액티브 동작 상태다.",
+        "이동 중 무적이 없다."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "particles",
+  "gpu_capacity": 10000,
+  "entries": [
+    {"id": "particle.basic_attack", "asset_id": "procedural.particle.basic_attack", "purpose": "기본 공격 투사체와 적중"},
+    {"id": "particle.skill.piercing_shot", "asset_id": "procedural.particle.skill.piercing_shot", "purpose": "관통 사격 투사체, 궤적, 분기"},
+    {"id": "particle.skill.multishot", "asset_id": "procedural.particle.skill.multishot", "purpose": "다중 사격 부채꼴과 분기"},
+    {"id": "particle.skill.charged_shot", "asset_id": "procedural.particle.skill.charged_shot", "purpose": "충전 사격 충전, 투사체, 폭발"},
+    {"id": "particle.skill.explosive_arrow", "asset_id": "procedural.particle.skill.explosive_arrow", "purpose": "폭발 화살, 재폭발, 파편"},
+    {"id": "particle.skill.ricochet_arrow", "asset_id": "procedural.particle.skill.ricochet_arrow", "purpose": "도탄 화살 연쇄와 귀환"},
+    {"id": "particle.skill.arrow_rain", "asset_id": "procedural.particle.skill.arrow_rain", "purpose": "화살비 지대와 불장판"},
+    {"id": "particle.skill.trap", "asset_id": "procedural.particle.skill.trap", "purpose": "덫, 연결선, 폭발"},
+    {"id": "particle.skill.retreat_shot", "asset_id": "procedural.particle.skill.retreat_shot", "purpose": "후퇴 사격 궤적과 착지"},
+    {"id": "particle.status.bleed", "asset_id": "procedural.particle.status.bleed", "purpose": "출혈 상태"},
+    {"id": "particle.status.burn", "asset_id": "procedural.particle.status.burn", "purpose": "화상 상태"},
+    {"id": "particle.status.slow", "asset_id": "procedural.particle.status.slow", "purpose": "둔화 상태"},
+    {"id": "particle.boss.telegraph", "asset_id": "procedural.particle.boss.telegraph", "purpose": "보스 등장과 공격 예고, 진행 방향, 범위, 안전 틈"}
+  ],
+  "rules": [
+    "위험 예고는 색상 외에도 형태, 진행 방향, 영향 범위, 안전 틈을 함께 표시한다."
+  ]
+}

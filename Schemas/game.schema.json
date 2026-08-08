@@ -1,0 +1,856 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://projecths.local/schemas/game.schema.json",
+  "title": "Project HS GameData v1",
+  "oneOf": [
+    {"$ref": "#/$defs/characters_document"},
+    {"$ref": "#/$defs/skills_document"},
+    {"$ref": "#/$defs/upgrades_document"},
+    {"$ref": "#/$defs/relics_document"},
+    {"$ref": "#/$defs/enemies_document"},
+    {"$ref": "#/$defs/bosses_document"},
+    {"$ref": "#/$defs/spawn_schedule_document"},
+    {"$ref": "#/$defs/stats_document"},
+    {"$ref": "#/$defs/level_document"},
+    {"$ref": "#/$defs/materials_document"},
+    {"$ref": "#/$defs/particles_document"},
+    {"$ref": "#/$defs/audio_cues_document"},
+    {"$ref": "#/$defs/ui_strings_document"}
+  ],
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$"
+    },
+    "asset_id": {
+      "type": "string",
+      "pattern": "^procedural(?:[._-][a-z0-9]+)+$"
+    },
+    "string_array": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "parameter_value": {
+      "oneOf": [
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "string"},
+        {"type": "array", "minItems": 1, "items": {"type": "number"}},
+        {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      ]
+    },
+    "parameter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "value", "unit"],
+      "properties": {
+        "key": {"$ref": "#/$defs/stable_id"},
+        "value": {"$ref": "#/$defs/parameter_value"},
+        "unit": {"type": "string", "minLength": 1}
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/parameter"}
+    },
+    "characters_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "characters"},
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/character"}
+        }
+      }
+    },
+    "character": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "display_name", "playable", "stat_profile_id", "mesh_asset_id",
+        "material_id", "starting_level", "starting_basic_attack_level",
+        "starting_active_skill_ids", "starting_relic_ids",
+        "starting_unspent_stat_points", "starting_shared_rerolls", "movement",
+        "aiming", "camera", "rules"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "playable": {"type": "boolean"},
+        "stat_profile_id": {"$ref": "#/$defs/stable_id"},
+        "mesh_asset_id": {"$ref": "#/$defs/asset_id"},
+        "material_id": {"$ref": "#/$defs/stable_id"},
+        "starting_level": {"type": "integer", "minimum": 1},
+        "starting_basic_attack_level": {"type": "integer", "minimum": 1},
+        "starting_active_skill_ids": {"type": "array", "items": {"$ref": "#/$defs/stable_id"}},
+        "starting_relic_ids": {"type": "array", "items": {"$ref": "#/$defs/stable_id"}},
+        "starting_unspent_stat_points": {"type": "integer", "minimum": 0},
+        "starting_shared_rerolls": {"type": "integer", "minimum": 0},
+        "movement": {"$ref": "#/$defs/character_movement"},
+        "aiming": {"$ref": "#/$defs/character_aiming"},
+        "camera": {"$ref": "#/$defs/camera"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "character_movement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "stop_distance_m", "normalize_direction_each_tick", "stop_on_release", "automatic_path_following"],
+      "properties": {
+        "input": {"const": "RMB"},
+        "stop_distance_m": {"type": "number", "minimum": 0},
+        "normalize_direction_each_tick": {"type": "boolean"},
+        "stop_on_release": {"type": "boolean"},
+        "automatic_path_following": {"type": "boolean"}
+      }
+    },
+    "character_aiming": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["basic_attack_input", "active_skill_slots", "attack_direction", "clamp_ground_target_to_max_range", "face_move_direction_when_idle", "face_aim_direction_when_attacking"],
+      "properties": {
+        "basic_attack_input": {"const": "LMB"},
+        "active_skill_slots": {"type": "array", "prefixItems": [{"const": "Q"}, {"const": "W"}, {"const": "E"}, {"const": "R"}], "items": false},
+        "attack_direction": {"const": "exact_cursor_world_direction"},
+        "clamp_ground_target_to_max_range": {"type": "boolean"},
+        "face_move_direction_when_idle": {"type": "boolean"},
+        "face_aim_direction_when_attacking": {"type": "boolean"}
+      }
+    },
+    "camera": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["yaw_degrees", "pitch_degrees", "vertical_fov_degrees", "rotation_enabled", "minimum_distance_percent", "maximum_distance_percent", "tracks_player"],
+      "properties": {
+        "yaw_degrees": {"type": "number"},
+        "pitch_degrees": {"type": "number"},
+        "vertical_fov_degrees": {"type": "number", "exclusiveMinimum": 0},
+        "rotation_enabled": {"type": "boolean"},
+        "minimum_distance_percent": {"type": "number", "exclusiveMinimum": 0},
+        "maximum_distance_percent": {"type": "number", "exclusiveMinimum": 0},
+        "tracks_player": {"type": "boolean"}
+      }
+    },
+    "skills_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "active_skill_limit", "automatic_slot_order", "acquisition_level", "maximum_level", "upgrade_choices_per_skill", "common_rules", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "skills"},
+        "active_skill_limit": {"type": "integer", "minimum": 1},
+        "automatic_slot_order": {"type": "array", "prefixItems": [{"const": "Q"}, {"const": "W"}, {"const": "E"}, {"const": "R"}], "items": false},
+        "acquisition_level": {"type": "integer", "minimum": 1},
+        "maximum_level": {"type": "integer", "minimum": 1},
+        "upgrade_choices_per_skill": {"type": "integer", "minimum": 1},
+        "common_rules": {"$ref": "#/$defs/string_array"},
+        "entries": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/skill"}}
+      }
+    },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "skill_type", "logic_id", "input", "projectile_asset_id", "material_id", "particle_id", "parameters", "rules"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "skill_type": {"enum": ["basic", "active"]},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "input": {"enum": ["LMB", "automatic_slot"]},
+        "projectile_asset_id": {"$ref": "#/$defs/asset_id"},
+        "material_id": {"$ref": "#/$defs/stable_id"},
+        "particle_id": {"$ref": "#/$defs/stable_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "upgrades_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "groups"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "upgrades"},
+        "groups": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/upgrade_group"}}
+      }
+    },
+    "upgrade_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill_id", "entries"],
+      "properties": {
+        "skill_id": {"$ref": "#/$defs/stable_id"},
+        "entries": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"$ref": "#/$defs/upgrade"}}
+      }
+    },
+    "upgrade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "logic_id", "parameters", "rule"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 8},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rule": {"type": "string", "minLength": 1}
+      }
+    },
+    "relics_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "average_relics_per_session_target", "maximum_relic_slots", "duplicate_acquisition_allowed", "all_unlocked_in_first_version", "box_rules", "healing_pickup", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "relics"},
+        "average_relics_per_session_target": {"type": "integer", "minimum": 0},
+        "maximum_relic_slots": {"type": "null"},
+        "duplicate_acquisition_allowed": {"type": "boolean"},
+        "all_unlocked_in_first_version": {"type": "boolean"},
+        "box_rules": {"$ref": "#/$defs/relic_box_rules"},
+        "healing_pickup": {"$ref": "#/$defs/healing_pickup"},
+        "entries": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"$ref": "#/$defs/relic"}}
+      }
+    },
+    "relic_box_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["guaranteed_boxes_per_mid_boss", "mid_boss_maximum_hp_heal_fraction", "normal_enemy_base_probability_percent", "normal_enemy_probability_increment_per_kill_percent", "normal_enemy_probability_cap_percent", "hard_pity", "reset_kill_counter_on_box_spawn", "maximum_choices_per_box", "stable_id_sort_before_seeded_shuffle", "stop_normal_box_rolls_after_all_acquired"],
+      "properties": {
+        "guaranteed_boxes_per_mid_boss": {"type": "integer", "minimum": 0},
+        "mid_boss_maximum_hp_heal_fraction": {"type": "number", "minimum": 0},
+        "normal_enemy_base_probability_percent": {"type": "number", "minimum": 0},
+        "normal_enemy_probability_increment_per_kill_percent": {"type": "number", "minimum": 0},
+        "normal_enemy_probability_cap_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "hard_pity": {"type": "boolean"},
+        "reset_kill_counter_on_box_spawn": {"type": "boolean"},
+        "maximum_choices_per_box": {"type": "integer", "minimum": 1},
+        "stable_id_sort_before_seeded_shuffle": {"type": "boolean"},
+        "stop_normal_box_rolls_after_all_acquired": {"type": "boolean"}
+      }
+    },
+    "healing_pickup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["normal_enemy_drop_probability_percent", "maximum_hp_heal_fraction", "independent_from_other_rewards", "can_coexist_with_xp_and_relic_box"],
+      "properties": {
+        "normal_enemy_drop_probability_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "maximum_hp_heal_fraction": {"type": "number", "minimum": 0},
+        "independent_from_other_rewards": {"type": "boolean"},
+        "can_coexist_with_xp_and_relic_box": {"type": "boolean"}
+      }
+    },
+    "relic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ordinal", "logic_id", "icon_asset_id", "parameters", "rule"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 12},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "icon_asset_id": {"$ref": "#/$defs/asset_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rule": {"type": "string", "minLength": 1}
+      }
+    },
+    "enemies_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "spawn_scaling", "common_rules", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "enemies"},
+        "spawn_scaling": {"$ref": "#/$defs/spawn_scaling"},
+        "common_rules": {"$ref": "#/$defs/string_array"},
+        "entries": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/enemy"}}
+      }
+    },
+    "spawn_scaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed_minutes_formula", "hp_formula", "damage_formula", "hp_fraction_per_completed_minute", "damage_fraction_per_completed_minute", "updates_existing_enemies", "applies_to_bosses"],
+      "properties": {
+        "completed_minutes_formula": {"type": "string"},
+        "hp_formula": {"type": "string"},
+        "damage_formula": {"type": "string"},
+        "hp_fraction_per_completed_minute": {"type": "number", "minimum": 0},
+        "damage_fraction_per_completed_minute": {"type": "number", "minimum": 0},
+        "updates_existing_enemies": {"type": "boolean"},
+        "applies_to_bosses": {"type": "boolean"}
+      }
+    },
+    "enemy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "base_hp", "movement_speed_mps", "xp_reward", "mesh_asset_id", "material_id", "logic_id", "parameters", "rules"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "base_hp": {"type": "integer", "minimum": 1},
+        "movement_speed_mps": {"type": "number", "exclusiveMinimum": 0},
+        "xp_reward": {"type": "integer", "minimum": 0},
+        "mesh_asset_id": {"$ref": "#/$defs/asset_id"},
+        "material_id": {"$ref": "#/$defs/stable_id"},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "bosses_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "common", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "bosses"},
+        "common": {"$ref": "#/$defs/boss_common"},
+        "entries": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/boss"}}
+      }
+    },
+    "boss_common": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spawn_warning_seconds", "spawn_location", "preferred_pattern_weight", "other_pattern_weight", "maximum_same_pattern_repeats", "body_contact_damage", "time_scaling", "affected_by_damage", "affected_by_bleed", "affected_by_burn", "affected_by_slow", "immune_to_pull", "immune_to_push", "immune_to_alignment_move"],
+      "properties": {
+        "spawn_warning_seconds": {"type": "number", "minimum": 0},
+        "spawn_location": {"type": "string"},
+        "preferred_pattern_weight": {"type": "integer", "minimum": 1},
+        "other_pattern_weight": {"type": "integer", "minimum": 1},
+        "maximum_same_pattern_repeats": {"type": "integer", "minimum": 1},
+        "body_contact_damage": {"type": "boolean"},
+        "time_scaling": {"type": "boolean"},
+        "affected_by_damage": {"type": "boolean"},
+        "affected_by_bleed": {"type": "boolean"},
+        "affected_by_burn": {"type": "boolean"},
+        "affected_by_slow": {"type": "boolean"},
+        "immune_to_pull": {"type": "boolean"},
+        "immune_to_push": {"type": "boolean"},
+        "immune_to_alignment_move": {"type": "boolean"}
+      }
+    },
+    "boss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "spawn_growth_seconds", "hp", "xp_reward", "target_kill_seconds", "mesh_asset_id", "material_id", "single_pattern_recovery_seconds", "phase2_pattern_interval_seconds", "phase2_cycle_recovery_seconds", "preference_rule", "patterns", "phase_transition", "reward"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "spawn_growth_seconds": {"type": "number", "minimum": 0},
+        "hp": {"type": "integer", "minimum": 1},
+        "xp_reward": {"type": "integer", "minimum": 0},
+        "target_kill_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "mesh_asset_id": {"$ref": "#/$defs/asset_id"},
+        "material_id": {"$ref": "#/$defs/stable_id"},
+        "single_pattern_recovery_seconds": {"type": ["number", "null"], "minimum": 0},
+        "phase2_pattern_interval_seconds": {"type": ["number", "null"], "minimum": 0},
+        "phase2_cycle_recovery_seconds": {"type": ["number", "null"], "minimum": 0},
+        "preference_rule": {"type": "string", "minLength": 1},
+        "patterns": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/boss_pattern"}},
+        "phase_transition": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/boss_phase_transition"}]},
+        "reward": {"$ref": "#/$defs/boss_reward"}
+      }
+    },
+    "boss_pattern": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "phase", "logic_id", "parameters", "rules"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "phase": {"type": "integer", "minimum": 1, "maximum": 2},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "boss_phase_transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hp_fraction", "invulnerability_seconds", "remove_enemy_projectiles", "remove_enemy_areas", "keep_normal_enemies", "keep_mid_bosses", "keep_pickups", "keep_player_projectiles", "keep_player_areas"],
+      "properties": {
+        "hp_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "invulnerability_seconds": {"type": "number", "minimum": 0},
+        "remove_enemy_projectiles": {"type": "boolean"},
+        "remove_enemy_areas": {"type": "boolean"},
+        "keep_normal_enemies": {"type": "boolean"},
+        "keep_mid_bosses": {"type": "boolean"},
+        "keep_pickups": {"type": "boolean"},
+        "keep_player_projectiles": {"type": "boolean"},
+        "keep_player_areas": {"type": "boolean"}
+      }
+    },
+    "boss_reward": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relic_chest_count", "maximum_hp_heal_fraction"],
+      "properties": {
+        "relic_chest_count": {"type": "integer", "minimum": 0},
+        "maximum_hp_heal_fraction": {"type": "number", "minimum": 0}
+      }
+    },
+    "spawn_schedule_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "tick_rate_hz", "continuous_intervals", "compositions", "waves", "placement", "rules"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "spawn_schedule"},
+        "tick_rate_hz": {"type": "integer", "minimum": 1},
+        "continuous_intervals": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/spawn_interval"}},
+        "compositions": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/spawn_composition"}},
+        "waves": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/spawn_wave"}},
+        "placement": {"$ref": "#/$defs/spawn_placement"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "spawn_interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_seconds", "end_seconds", "rate_per_second"],
+      "properties": {
+        "start_seconds": {"type": "number", "minimum": 0},
+        "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "rate_per_second": {"type": "number", "minimum": 0}
+      }
+    },
+    "spawn_composition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_seconds", "melee_weight", "ranged_weight", "suicide_weight"],
+      "properties": {
+        "start_seconds": {"type": "number", "minimum": 0},
+        "melee_weight": {"type": "integer", "minimum": 0},
+        "ranged_weight": {"type": "integer", "minimum": 0},
+        "suicide_weight": {"type": "integer", "minimum": 0}
+      }
+    },
+    "spawn_wave": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_seconds", "total_count", "duration_seconds", "duration_ticks"],
+      "properties": {
+        "start_seconds": {"type": "number", "minimum": 0},
+        "total_count": {"type": "integer", "minimum": 1},
+        "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "duration_ticks": {"type": "integer", "minimum": 1}
+      }
+    },
+    "spawn_placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_player_distance_m", "maximum_player_distance_m", "require_inside_arena", "require_outside_max_zoom_view", "fallback_warning_seconds", "fallback_location"],
+      "properties": {
+        "minimum_player_distance_m": {"type": "number", "minimum": 0},
+        "maximum_player_distance_m": {"type": "number", "minimum": 0},
+        "require_inside_arena": {"type": "boolean"},
+        "require_outside_max_zoom_view": {"type": "boolean"},
+        "fallback_warning_seconds": {"type": "number", "minimum": 0},
+        "fallback_location": {"type": "string", "minLength": 1}
+      }
+    },
+    "stats_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "stats"},
+        "entries": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/stat_profile"}}
+      }
+    },
+    "stat_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "maximum_points_per_stat", "base_values", "allocations", "combat", "statuses", "derived_effect_rules", "rules"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "maximum_points_per_stat": {"type": "integer", "minimum": 1},
+        "base_values": {"$ref": "#/$defs/base_stats"},
+        "allocations": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/stat_allocation"}},
+        "combat": {"$ref": "#/$defs/combat_rules"},
+        "statuses": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/status"}},
+        "derived_effect_rules": {"$ref": "#/$defs/string_array"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "base_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximum_hp", "current_hp", "attack_power", "basic_attack_rate_per_second", "movement_speed_mps", "magnet_radius_m", "global_cooldown_reduction"],
+      "properties": {
+        "maximum_hp": {"type": "number", "exclusiveMinimum": 0},
+        "current_hp": {"type": "number", "minimum": 0},
+        "attack_power": {"type": "number", "exclusiveMinimum": 0},
+        "basic_attack_rate_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "movement_speed_mps": {"type": "number", "exclusiveMinimum": 0},
+        "magnet_radius_m": {"type": "number", "minimum": 0},
+        "global_cooldown_reduction": {"type": "number", "minimum": 0}
+      }
+    },
+    "stat_allocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display_name", "operation", "amount_per_point", "formula", "immediate_current_hp_restore_per_point", "applies_to"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "display_name": {"type": "string", "minLength": 1},
+        "operation": {"enum": ["base_fraction_per_point", "percentage_points_per_point", "absolute_per_point"]},
+        "amount_per_point": {"type": "number"},
+        "formula": {"type": "string", "minLength": 1},
+        "immediate_current_hp_restore_per_point": {"type": "number", "minimum": 0},
+        "applies_to": {"$ref": "#/$defs/stable_id"}
+      }
+    },
+    "combat_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_damage_formula", "final_damage_rounding", "minimum_final_damage", "cooldown_formula", "minimum_cooldown_seconds", "skill_cooldown_upgrade_multiplier", "critical_hits", "armor", "hit_invulnerability", "player_hit_knockback", "maximum_basic_attacks_per_tick"],
+      "properties": {
+        "raw_damage_formula": {"type": "string"},
+        "final_damage_rounding": {"type": "string"},
+        "minimum_final_damage": {"type": "integer", "minimum": 1},
+        "cooldown_formula": {"type": "string"},
+        "minimum_cooldown_seconds": {"type": "number", "minimum": 0},
+        "skill_cooldown_upgrade_multiplier": {"type": "number", "minimum": 0},
+        "critical_hits": {"type": "boolean"},
+        "armor": {"type": "boolean"},
+        "hit_invulnerability": {"type": "boolean"},
+        "player_hit_knockback": {"type": "boolean"},
+        "maximum_basic_attacks_per_tick": {"type": "integer", "minimum": 1}
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "logic_id", "parameters", "rules"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "logic_id": {"$ref": "#/$defs/stable_id"},
+        "parameters": {"$ref": "#/$defs/parameters"},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "level_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "level"},
+        "entries": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/level"}}
+      }
+    },
+    "level": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "arena", "session", "outcome", "pause", "experience", "cards", "rerolls", "capacities", "capacity_rules", "rules", "unlock_framework"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "arena": {"$ref": "#/$defs/arena"},
+        "session": {"$ref": "#/$defs/session"},
+        "outcome": {"$ref": "#/$defs/outcome"},
+        "pause": {"$ref": "#/$defs/pause"},
+        "experience": {"$ref": "#/$defs/experience"},
+        "cards": {"$ref": "#/$defs/cards"},
+        "rerolls": {"$ref": "#/$defs/rerolls"},
+        "capacities": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"$ref": "#/$defs/capacity"}},
+        "capacity_rules": {"$ref": "#/$defs/string_array"},
+        "rules": {"$ref": "#/$defs/string_array"},
+        "unlock_framework": {"$ref": "#/$defs/unlock_framework"}
+      }
+    },
+    "arena": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width_m", "depth_m", "plane", "shape", "obstacles", "height_differences", "clamp_players_and_enemies_to_boundary", "solid_player_enemy_collision", "enemy_soft_separation", "enemy_body_contact_damage"],
+      "properties": {
+        "width_m": {"type": "number", "exclusiveMinimum": 0},
+        "depth_m": {"type": "number", "exclusiveMinimum": 0},
+        "plane": {"const": "XZ"},
+        "shape": {"const": "square"},
+        "obstacles": {"type": "boolean"},
+        "height_differences": {"type": "boolean"},
+        "clamp_players_and_enemies_to_boundary": {"type": "boolean"},
+        "solid_player_enemy_collision": {"type": "boolean"},
+        "enemy_soft_separation": {"type": "boolean"},
+        "enemy_body_contact_damage": {"type": "boolean"}
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["growth_start_seconds", "first_mid_boss_seconds", "second_mid_boss_seconds", "final_boss_seconds", "final_boss_time_limit_seconds", "stop_new_normal_enemy_spawns_at_final_boss", "preserve_existing_world_at_final_boss", "allow_growth_during_final_boss"],
+      "properties": {
+        "growth_start_seconds": {"type": "number", "minimum": 0},
+        "first_mid_boss_seconds": {"type": "number", "minimum": 0},
+        "second_mid_boss_seconds": {"type": "number", "minimum": 0},
+        "final_boss_seconds": {"type": "number", "minimum": 0},
+        "final_boss_time_limit_seconds": {"type": ["number", "null"], "minimum": 0},
+        "stop_new_normal_enemy_spawns_at_final_boss": {"type": "boolean"},
+        "preserve_existing_world_at_final_boss": {"type": "boolean"},
+        "allow_growth_during_final_boss": {"type": "boolean"}
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["final_boss_death_is_victory", "player_death_is_defeat", "same_tick_player_and_final_boss_death_is_victory", "same_tick_player_and_mid_boss_death_is_defeat_if_final_boss_alive", "resolution_order", "revival", "mid_run_save"],
+      "properties": {
+        "final_boss_death_is_victory": {"type": "boolean"},
+        "player_death_is_defeat": {"type": "boolean"},
+        "same_tick_player_and_final_boss_death_is_victory": {"type": "boolean"},
+        "same_tick_player_and_mid_boss_death_is_defeat_if_final_boss_alive": {"type": "boolean"},
+        "resolution_order": {"$ref": "#/$defs/string_array"},
+        "revival": {"type": "boolean"},
+        "mid_run_save": {"type": "boolean"}
+      }
+    },
+    "pause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["states", "pause_simulation", "continue_rendering", "continue_menu_input", "realign_clock_on_resume", "pause_on_focus_loss", "clear_input_on_focus_loss", "continue_audio_on_focus_loss"],
+      "properties": {
+        "states": {"$ref": "#/$defs/string_array"},
+        "pause_simulation": {"type": "boolean"},
+        "continue_rendering": {"type": "boolean"},
+        "continue_menu_input": {"type": "boolean"},
+        "realign_clock_on_resume": {"type": "boolean"},
+        "pause_on_focus_loss": {"type": "boolean"},
+        "clear_input_on_focus_loss": {"type": "boolean"},
+        "continue_audio_on_focus_loss": {"type": "boolean"}
+      }
+    },
+    "experience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rewards", "next_level_formula", "level_cap", "pickup_magnet_tracking", "utility_pickup_base_chance", "utility_pickup_miss_increment", "target_level_at_15_minutes", "target_level_choices_at_15_minutes", "forced_level_correction"],
+      "properties": {
+        "rewards": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/xp_reward"}},
+        "next_level_formula": {"type": "string", "minLength": 1},
+        "level_cap": {"type": "null"},
+        "pickup_magnet_tracking": {"type": "boolean"},
+        "utility_pickup_base_chance": {"type": "number", "minimum": 0, "maximum": 1},
+        "utility_pickup_miss_increment": {"type": "number", "minimum": 0, "maximum": 1},
+        "target_level_at_15_minutes": {"type": "integer", "minimum": 1},
+        "target_level_choices_at_15_minutes": {"type": "integer", "minimum": 0},
+        "forced_level_correction": {"type": "boolean"}
+      }
+    },
+    "xp_reward": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "xp"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/stable_id"},
+        "xp": {"type": "integer", "minimum": 0}
+      }
+    },
+    "cards": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_count", "choose_count", "minimum_unacquired_active_candidates_before_slots_full", "active_slot_count", "upgrades_selected_per_skill", "fallback_stat_point_cards", "extra_stat_points_per_stat_card", "base_stat_points_per_level", "require_all_stat_points_spent", "seeded_fisher_yates", "duplicate_concrete_cards_on_screen", "skip", "banish"],
+      "properties": {
+        "candidate_count": {"type": "integer", "minimum": 1},
+        "choose_count": {"type": "integer", "minimum": 1},
+        "minimum_unacquired_active_candidates_before_slots_full": {"type": "integer", "minimum": 0},
+        "active_slot_count": {"type": "integer", "minimum": 1},
+        "upgrades_selected_per_skill": {"type": "integer", "minimum": 1},
+        "fallback_stat_point_cards": {"type": "boolean"},
+        "extra_stat_points_per_stat_card": {"type": "integer", "minimum": 0},
+        "base_stat_points_per_level": {"type": "integer", "minimum": 0},
+        "require_all_stat_points_spent": {"type": "boolean"},
+        "seeded_fisher_yates": {"type": "boolean"},
+        "duplicate_concrete_cards_on_screen": {"type": "boolean"},
+        "skip": {"type": "boolean"},
+        "banish": {"type": "boolean"}
+      }
+    },
+    "rerolls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shared_initial_count", "shared_between_level_and_relic_choices", "replace_all_candidate_cards", "candidate_count", "exclude_current_cards_when_enough_candidates", "can_skip_acquisition_or_stat_allocation"],
+      "properties": {
+        "shared_initial_count": {"type": "integer", "minimum": 0},
+        "shared_between_level_and_relic_choices": {"type": "boolean"},
+        "replace_all_candidate_cards": {"type": "boolean"},
+        "candidate_count": {"type": "integer", "minimum": 1},
+        "exclude_current_cards_when_enough_candidates": {"type": "boolean"},
+        "can_skip_acquisition_or_stat_allocation": {"type": "boolean"}
+      }
+    },
+    "capacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "designed_operating_count", "hard_capacity"],
+      "properties": {
+        "kind": {"$ref": "#/$defs/stable_id"},
+        "designed_operating_count": {"type": ["integer", "null"], "minimum": 0},
+        "hard_capacity": {"type": ["integer", "null"], "minimum": 1}
+      }
+    },
+    "unlock_framework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["active_skill_count", "relic_count", "all_first_version_content_unlocked", "unlock_condition_data", "unlock_notifications", "collection_display", "permanent_stat_growth", "cloud_save", "online", "telemetry"],
+      "properties": {
+        "active_skill_count": {"type": "integer", "minimum": 0},
+        "relic_count": {"type": "integer", "minimum": 0},
+        "all_first_version_content_unlocked": {"type": "boolean"},
+        "unlock_condition_data": {"type": "boolean"},
+        "unlock_notifications": {"type": "boolean"},
+        "collection_display": {"type": "boolean"},
+        "permanent_stat_growth": {"type": "boolean"},
+        "cloud_save": {"type": "boolean"},
+        "online": {"type": "boolean"},
+        "telemetry": {"type": "boolean"}
+      }
+    },
+    "materials_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "entries", "rendering_rules"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "materials"},
+        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/material"}},
+        "rendering_rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "material": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "asset_id", "domain", "purpose"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "asset_id": {"$ref": "#/$defs/asset_id"},
+        "domain": {"enum": ["opaque", "masked", "transparent_oit", "additive", "game_ui"]},
+        "purpose": {"type": "string", "minLength": 1}
+      }
+    },
+    "particles_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "gpu_capacity", "entries", "rules"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "particles"},
+        "gpu_capacity": {"type": "integer", "minimum": 1},
+        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/particle"}},
+        "rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "particle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "asset_id", "purpose"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "asset_id": {"$ref": "#/$defs/asset_id"},
+        "purpose": {"type": "string", "minLength": 1}
+      }
+    },
+    "audio_cues_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "maximum_source_voices", "submixes", "priority_order", "pause_behavior", "silent_mode_when_device_missing", "entries"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "audio_cues"},
+        "maximum_source_voices": {"type": "integer", "minimum": 1},
+        "submixes": {"type": "array", "prefixItems": [{"const": "Master"}, {"const": "BGM"}, {"const": "SFX"}, {"const": "UI"}], "items": false},
+        "priority_order": {"type": "array", "prefixItems": [{"const": "UI"}, {"const": "BossTelegraph"}, {"const": "Player"}, {"const": "Enemy"}, {"const": "Other"}], "items": false},
+        "pause_behavior": {"$ref": "#/$defs/audio_pause_behavior"},
+        "silent_mode_when_device_missing": {"type": "boolean"},
+        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/audio_cue"}}
+      }
+    },
+    "audio_pause_behavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pause_bgm", "pause_sfx", "pause_ui", "continue_all_on_focus_loss"],
+      "properties": {
+        "pause_bgm": {"type": "boolean"},
+        "pause_sfx": {"type": "boolean"},
+        "pause_ui": {"type": "boolean"},
+        "continue_all_on_focus_loss": {"type": "boolean"}
+      }
+    },
+    "audio_cue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "asset_id", "submix", "spatial", "preload", "streaming", "encoding", "priority"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "asset_id": {"$ref": "#/$defs/asset_id"},
+        "submix": {"enum": ["BGM", "SFX", "UI"]},
+        "spatial": {"type": "boolean"},
+        "preload": {"type": "boolean"},
+        "streaming": {"type": "boolean"},
+        "encoding": {"enum": ["PCM", "ADPCM"]},
+        "priority": {"enum": ["UI", "BossTelegraph", "Player", "Enemy", "Other"]}
+      }
+    },
+    "ui_strings_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["$schema", "schema_version", "category", "locale", "font_asset_id", "layout", "screen_flow", "screens", "entries", "hidden_hud_items", "accessibility_rules"],
+      "properties": {
+        "$schema": {"const": "../../Schemas/game.schema.json"},
+        "schema_version": {"const": 1},
+        "category": {"const": "ui_strings"},
+        "locale": {"const": "ko-KR"},
+        "font_asset_id": {"$ref": "#/$defs/asset_id"},
+        "layout": {"$ref": "#/$defs/ui_layout"},
+        "screen_flow": {"$ref": "#/$defs/string_array"},
+        "screens": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ui_screen"}},
+        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ui_string"}},
+        "hidden_hud_items": {"$ref": "#/$defs/string_array"},
+        "accessibility_rules": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "ui_layout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_width", "reference_height", "safe_margin_px", "preserve_reference_aspect_ratio", "uniform_scale"],
+      "properties": {
+        "reference_width": {"type": "integer", "minimum": 1},
+        "reference_height": {"type": "integer", "minimum": 1},
+        "safe_margin_px": {"type": "integer", "minimum": 0},
+        "preserve_reference_aspect_ratio": {"type": "boolean"},
+        "uniform_scale": {"type": "boolean"}
+      }
+    },
+    "ui_screen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "string_ids"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "string_ids": {"type": "array", "items": {"$ref": "#/$defs/stable_id"}}
+      }
+    },
+    "ui_string": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text"],
+      "properties": {
+        "id": {"$ref": "#/$defs/stable_id"},
+        "text": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

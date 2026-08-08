@@ -1,0 +1,222 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "bosses",
+  "common": {
+    "spawn_warning_seconds": 1.5,
+    "spawn_location": "farthest_valid_arena_edge",
+    "preferred_pattern_weight": 3,
+    "other_pattern_weight": 1,
+    "maximum_same_pattern_repeats": 2,
+    "body_contact_damage": false,
+    "time_scaling": false,
+    "affected_by_damage": true,
+    "affected_by_bleed": true,
+    "affected_by_burn": true,
+    "affected_by_slow": true,
+    "immune_to_pull": true,
+    "immune_to_push": true,
+    "immune_to_alignment_move": true
+  },
+  "entries": [
+    {
+      "id": "boss.mid_5m",
+      "display_name": "5분 중간 보스",
+      "spawn_growth_seconds": 300,
+      "hp": 600,
+      "xp_reward": 100,
+      "target_kill_seconds": 60,
+      "mesh_asset_id": "procedural.mesh.boss.mid_5m",
+      "material_id": "material.boss.mid_5m",
+      "single_pattern_recovery_seconds": 1.8,
+      "phase2_pattern_interval_seconds": null,
+      "phase2_cycle_recovery_seconds": null,
+      "preference_rule": "distance <= 7m: shockwave; distance > 7m: charge",
+      "patterns": [
+        {
+          "id": "pattern.mid_5m.charge",
+          "phase": 1,
+          "logic_id": "line_charge",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.9, "unit": "seconds"},
+            {"key": "distance", "value": 18, "unit": "meters"},
+            {"key": "speed", "value": 12, "unit": "meters_per_second"},
+            {"key": "damage", "value": 18, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.mid_5m.shockwave",
+          "phase": 1,
+          "logic_id": "expanding_shockwave_with_safe_gaps",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 1.35, "unit": "seconds"},
+            {"key": "start_radius", "value": 3, "unit": "meters"},
+            {"key": "end_radius", "value": 9.75, "unit": "meters"},
+            {"key": "safe_gap_count", "value": 4, "unit": "count"},
+            {"key": "safe_gap_angle", "value": 25, "unit": "degrees"},
+            {"key": "damage", "value": 15, "unit": "damage"}
+          ],
+          "rules": []
+        }
+      ],
+      "phase_transition": null,
+      "reward": {"relic_chest_count": 1, "maximum_hp_heal_fraction": 0.25}
+    },
+    {
+      "id": "boss.mid_10m",
+      "display_name": "10분 중간 보스",
+      "spawn_growth_seconds": 600,
+      "hp": 1375,
+      "xp_reward": 200,
+      "target_kill_seconds": 60,
+      "mesh_asset_id": "procedural.mesh.boss.mid_10m",
+      "material_id": "material.boss.mid_10m",
+      "single_pattern_recovery_seconds": 1.5,
+      "phase2_pattern_interval_seconds": null,
+      "phase2_cycle_recovery_seconds": null,
+      "preference_rule": "distance <= 7m: ground_areas; distance > 7m: fan_projectiles",
+      "patterns": [
+        {
+          "id": "pattern.mid_10m.fan_projectiles",
+          "phase": 1,
+          "logic_id": "fan_projectiles",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.6, "unit": "seconds"},
+            {"key": "fan_angle", "value": 70, "unit": "degrees"},
+            {"key": "projectile_count", "value": 7, "unit": "count"},
+            {"key": "projectile_speed", "value": 4.5, "unit": "meters_per_second"},
+            {"key": "damage", "value": 12, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.mid_10m.ground_areas",
+          "phase": 1,
+          "logic_id": "predicted_position_ground_areas",
+          "parameters": [
+            {"key": "area_count", "value": 3, "unit": "count"},
+            {"key": "radius", "value": 2.2, "unit": "meters"},
+            {"key": "telegraph_duration", "value": 1, "unit": "seconds"},
+            {"key": "duration", "value": 3, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "damage_per_tick", "value": 6, "unit": "damage"}
+          ],
+          "rules": []
+        }
+      ],
+      "phase_transition": null,
+      "reward": {"relic_chest_count": 1, "maximum_hp_heal_fraction": 0.25}
+    },
+    {
+      "id": "boss.final_15m",
+      "display_name": "최종 보스",
+      "spawn_growth_seconds": 900,
+      "hp": 4500,
+      "xp_reward": 0,
+      "target_kill_seconds": 150,
+      "mesh_asset_id": "procedural.mesh.boss.final_15m",
+      "material_id": "material.boss.final_15m",
+      "single_pattern_recovery_seconds": null,
+      "phase2_pattern_interval_seconds": 1.2,
+      "phase2_cycle_recovery_seconds": 2,
+      "preference_rule": "phase 1 distance <= 7m: shockwave; 7m < distance <= 14m: fan; distance > 14m: charge; phase 2 cycles all patterns",
+      "patterns": [
+        {
+          "id": "pattern.final.phase1_charge",
+          "phase": 1,
+          "logic_id": "line_charge",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.9, "unit": "seconds"},
+            {"key": "distance", "value": 20, "unit": "meters"},
+            {"key": "speed", "value": 14, "unit": "meters_per_second"},
+            {"key": "damage", "value": 25, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.final.phase1_fan",
+          "phase": 1,
+          "logic_id": "fan_projectiles",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.7, "unit": "seconds"},
+            {"key": "fan_angle", "value": 90, "unit": "degrees"},
+            {"key": "projectile_count", "value": 9, "unit": "count"},
+            {"key": "projectile_speed", "value": 5, "unit": "meters_per_second"},
+            {"key": "damage", "value": 14, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.final.phase1_shockwave",
+          "phase": 1,
+          "logic_id": "expanding_shockwave_with_safe_gaps",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.9, "unit": "seconds"},
+            {"key": "start_radius", "value": 4, "unit": "meters"},
+            {"key": "end_radius", "value": 14, "unit": "meters"},
+            {"key": "safe_gap_count", "value": 4, "unit": "count"},
+            {"key": "safe_gap_angle", "value": 25, "unit": "degrees"},
+            {"key": "damage", "value": 20, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.final.phase2_double_charge",
+          "phase": 2,
+          "logic_id": "double_retargeted_charge",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.6, "unit": "seconds"},
+            {"key": "charge_count", "value": 2, "unit": "count"},
+            {"key": "interval", "value": 0.4, "unit": "seconds"},
+            {"key": "distance", "value": 20, "unit": "meters"},
+            {"key": "speed", "value": 14, "unit": "meters_per_second"},
+            {"key": "damage", "value": 25, "unit": "damage"}
+          ],
+          "rules": ["두 번째 돌진 방향은 실행 직전에 플레이어 위치로 다시 정한다."]
+        },
+        {
+          "id": "pattern.final.phase2_double_fan",
+          "phase": 2,
+          "logic_id": "double_offset_fan_projectiles",
+          "parameters": [
+            {"key": "telegraph_duration", "value": 0.6, "unit": "seconds"},
+            {"key": "volley_count", "value": 2, "unit": "count"},
+            {"key": "interval", "value": 0.35, "unit": "seconds"},
+            {"key": "projectiles_per_volley", "value": 11, "unit": "count"},
+            {"key": "second_volley_angle_offset", "value": 8, "unit": "degrees"},
+            {"key": "projectile_speed", "value": 5, "unit": "meters_per_second"},
+            {"key": "damage", "value": 14, "unit": "damage"}
+          ],
+          "rules": []
+        },
+        {
+          "id": "pattern.final.phase2_ground_areas",
+          "phase": 2,
+          "logic_id": "predicted_position_ground_areas",
+          "parameters": [
+            {"key": "area_count", "value": 5, "unit": "count"},
+            {"key": "radius", "value": 2.5, "unit": "meters"},
+            {"key": "telegraph_duration", "value": 0.8, "unit": "seconds"},
+            {"key": "duration", "value": 4, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "damage_per_tick", "value": 10, "unit": "damage"}
+          ],
+          "rules": []
+        }
+      ],
+      "phase_transition": {
+        "hp_fraction": 0.5,
+        "invulnerability_seconds": 1.5,
+        "remove_enemy_projectiles": true,
+        "remove_enemy_areas": true,
+        "keep_normal_enemies": true,
+        "keep_mid_bosses": true,
+        "keep_pickups": true,
+        "keep_player_projectiles": true,
+        "keep_player_areas": true
+      },
+      "reward": {"relic_chest_count": 0, "maximum_hp_heal_fraction": 0}
+    }
+  ]
+}

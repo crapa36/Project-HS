@@ -1,0 +1,25 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "audio_cues",
+  "maximum_source_voices": 64,
+  "submixes": ["Master", "BGM", "SFX", "UI"],
+  "priority_order": ["UI", "BossTelegraph", "Player", "Enemy", "Other"],
+  "pause_behavior": {
+    "pause_bgm": true,
+    "pause_sfx": true,
+    "pause_ui": false,
+    "continue_all_on_focus_loss": true
+  },
+  "silent_mode_when_device_missing": true,
+  "entries": [
+    {"id": "audio.bgm.session", "asset_id": "procedural.audio.bgm.session", "submix": "BGM", "spatial": false, "preload": false, "streaming": true, "encoding": "ADPCM", "priority": "Other"},
+    {"id": "audio.ui.confirm", "asset_id": "procedural.audio.ui.confirm", "submix": "UI", "spatial": false, "preload": true, "streaming": false, "encoding": "PCM", "priority": "UI"},
+    {"id": "audio.ui.cancel", "asset_id": "procedural.audio.ui.cancel", "submix": "UI", "spatial": false, "preload": true, "streaming": false, "encoding": "PCM", "priority": "UI"},
+    {"id": "audio.player.basic_attack", "asset_id": "procedural.audio.player.basic_attack", "submix": "SFX", "spatial": true, "preload": true, "streaming": false, "encoding": "PCM", "priority": "Player"},
+    {"id": "audio.player.active_skill", "asset_id": "procedural.audio.player.active_skill", "submix": "SFX", "spatial": true, "preload": true, "streaming": false, "encoding": "PCM", "priority": "Player"},
+    {"id": "audio.enemy.attack", "asset_id": "procedural.audio.enemy.attack", "submix": "SFX", "spatial": true, "preload": true, "streaming": false, "encoding": "PCM", "priority": "Enemy"},
+    {"id": "audio.boss.telegraph", "asset_id": "procedural.audio.boss.telegraph", "submix": "SFX", "spatial": true, "preload": true, "streaming": false, "encoding": "PCM", "priority": "BossTelegraph"},
+    {"id": "audio.pickup", "asset_id": "procedural.audio.pickup", "submix": "SFX", "spatial": true, "preload": true, "streaming": false, "encoding": "PCM", "priority": "Other"}
+  ]
+}

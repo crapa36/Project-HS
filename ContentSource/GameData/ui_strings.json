@@ -1,0 +1,58 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "ui_strings",
+  "locale": "ko-KR",
+  "font_asset_id": "procedural.font.noto_sans_kr",
+  "layout": {
+    "reference_width": 1920,
+    "reference_height": 1080,
+    "safe_margin_px": 32,
+    "preserve_reference_aspect_ratio": true,
+    "uniform_scale": true
+  },
+  "screen_flow": ["launch", "main_menu", "game", "result", "main_menu"],
+  "screens": [
+    {"id": "main_menu", "string_ids": ["ui.main.start", "ui.main.collection", "ui.main.settings", "ui.main.exit"]},
+    {"id": "game", "string_ids": ["ui.hud.growth_timer", "ui.hud.boss_timer", "ui.hud.player_hp", "ui.hud.xp_level", "ui.hud.skills", "ui.hud.relics", "ui.hud.boss_hp"]},
+    {"id": "level_up_card", "string_ids": ["ui.overlay.level_up"]},
+    {"id": "level_up_stats", "string_ids": ["ui.overlay.stat_allocation"]},
+    {"id": "relic_selection", "string_ids": ["ui.overlay.relic_selection"]},
+    {"id": "manual_pause", "string_ids": ["ui.overlay.pause"]},
+    {"id": "result", "string_ids": ["ui.result.victory", "ui.result.defeat", "ui.result.final_level", "ui.result.kills", "ui.result.final_boss_time", "ui.result.total_damage", "ui.result.damage_taken", "ui.result.healing", "ui.result.basic_and_active", "ui.result.upgrades", "ui.result.relics", "ui.result.stats", "ui.result.seed"]}
+  ],
+  "entries": [
+    {"id": "ui.main.start", "text": "시작"},
+    {"id": "ui.main.collection", "text": "컬렉션"},
+    {"id": "ui.main.settings", "text": "설정"},
+    {"id": "ui.main.exit", "text": "종료"},
+    {"id": "ui.overlay.level_up", "text": "레벨업 카드 선택"},
+    {"id": "ui.overlay.stat_allocation", "text": "스탯 배분"},
+    {"id": "ui.overlay.relic_selection", "text": "유물 선택"},
+    {"id": "ui.overlay.pause", "text": "일시정지"},
+    {"id": "ui.hud.growth_timer", "text": "성장 시간"},
+    {"id": "ui.hud.boss_timer", "text": "보스전 시간"},
+    {"id": "ui.hud.player_hp", "text": "체력"},
+    {"id": "ui.hud.xp_level", "text": "경험치 / 레벨"},
+    {"id": "ui.hud.skills", "text": "LMB / Q / W / E / R"},
+    {"id": "ui.hud.relics", "text": "유물"},
+    {"id": "ui.hud.boss_hp", "text": "보스 체력"},
+    {"id": "ui.result.victory", "text": "승리"},
+    {"id": "ui.result.defeat", "text": "패배"},
+    {"id": "ui.result.final_level", "text": "최종 레벨"},
+    {"id": "ui.result.kills", "text": "처치 수"},
+    {"id": "ui.result.final_boss_time", "text": "최종 보스전 시간"},
+    {"id": "ui.result.total_damage", "text": "총 피해"},
+    {"id": "ui.result.damage_taken", "text": "받은 피해"},
+    {"id": "ui.result.healing", "text": "회복량"},
+    {"id": "ui.result.basic_and_active", "text": "기본 공격 · 액티브 스킬"},
+    {"id": "ui.result.upgrades", "text": "강화"},
+    {"id": "ui.result.relics", "text": "유물"},
+    {"id": "ui.result.stats", "text": "스탯 배분"},
+    {"id": "ui.result.seed", "text": "세션 시드"}
+  ],
+  "hidden_hud_items": ["normal_enemy_health_bars", "damage_numbers", "healing_numbers", "minimap", "tutorial"],
+  "accessibility_rules": [
+    "색만으로 위험을 구분하지 않고 예고 형태, 방향, 범위, 안전 틈을 함께 표시한다."
+  ]
+}

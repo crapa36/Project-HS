@@ -1,0 +1,682 @@
+{
+  "$schema": "../../Schemas/game.schema.json",
+  "schema_version": 1,
+  "category": "upgrades",
+  "groups": [
+    {
+      "skill_id": "skill.basic_attack",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "third_cadence_delayed_arrow",
+          "parameters": [
+            {"key": "cadence_interval", "value": 3, "unit": "count"},
+            {"key": "delay", "value": 0.08, "unit": "seconds"},
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"}
+          ],
+          "rule": "매 3번째 기본 공격 발사 후 0.08초에 같은 조준 방향으로 70% 추가 화살을 발사한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "additional_pierce",
+          "parameters": [{"key": "additional_targets", "value": 2, "unit": "count"}],
+          "rule": "기본 화살이 적 2명을 추가 관통한다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "first_hit_split",
+          "parameters": [
+            {"key": "angles", "value": [-30, 30], "unit": "degrees"},
+            {"key": "projectile_count", "value": 2, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.5, "unit": "multiplier"}
+          ],
+          "rule": "첫 적중 지점에서 원래 진행 방향 기준 ±30°로 각각 50% 화살 1발을 분기한다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "fourth_direct_arrow_bleed",
+          "parameters": [
+            {"key": "direct_arrow_interval", "value": 4, "unit": "count"},
+            {"key": "bleed_stacks", "value": 1, "unit": "count"}
+          ],
+          "rule": "매 4번째 기본 화살이 출혈 1중첩을 부여한다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "fourth_direct_arrow_burn",
+          "parameters": [{"key": "direct_arrow_interval", "value": 4, "unit": "count"}],
+          "rule": "매 4번째 기본 화살이 화상을 부여한다. 출혈 강화와 함께 선택하면 같은 화살에 두 상태가 적용된다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "first_hit_slow_and_reduce_longest_active_cooldown",
+          "parameters": [
+            {"key": "slow_fraction", "value": 0.2, "unit": "fraction"},
+            {"key": "slow_duration", "value": 1, "unit": "seconds"},
+            {"key": "cooldown_reduction", "value": 0.2, "unit": "seconds"}
+          ],
+          "rule": "첫 적중 대상에게 20% 둔화를 1초 부여하고 남은 쿨타임이 가장 긴 액티브 스킬 하나를 0.2초 단축한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "missed_arrow_return",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"},
+            {"key": "maximum_returns", "value": 1, "unit": "count"}
+          ],
+          "rule": "적에게 적중하지 않은 화살이 최대 사거리 지점에서 플레이어를 향해 70% 피해로 1회 귀환한다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "post_active_three_arrow_replacement",
+          "parameters": [
+            {"key": "activation_window", "value": 3, "unit": "seconds"},
+            {"key": "angles", "value": [-15, 0, 15], "unit": "degrees"},
+            {"key": "projectile_count", "value": 3, "unit": "count"},
+            {"key": "damage_multiplier_per_arrow", "value": 0.7, "unit": "multiplier"}
+          ],
+          "rule": "액티브 스킬 사용 후 3초 안에 발사하는 다음 기본 공격을 조준 방향 기준 -15°/0°/+15°의 70% 화살 3발로 변경한다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.piercing_shot",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "delayed_followup_arrow",
+          "parameters": [
+            {"key": "delay", "value": 0.08, "unit": "seconds"},
+            {"key": "damage_multiplier", "value": 0.6, "unit": "multiplier"}
+          ],
+          "rule": "발사 0.08초 후 같은 방향으로 60% 화살을 추가 발사한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "range_end_split",
+          "parameters": [
+            {"key": "angles", "value": [-20, 20], "unit": "degrees"},
+            {"key": "projectile_count", "value": 2, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.5, "unit": "multiplier"}
+          ],
+          "rule": "최대 사거리에서 진행 방향 기준 ±20°로 각각 50% 화살을 분기한다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "apply_bleed",
+          "parameters": [{"key": "bleed_stacks", "value": 2, "unit": "count"}],
+          "rule": "적중 대상에게 출혈 2중첩을 부여한다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "damaging_slow_trail",
+          "parameters": [
+            {"key": "width", "value": 1, "unit": "meters"},
+            {"key": "duration", "value": 2, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "damage_multiplier_per_tick", "value": 0.4, "unit": "multiplier"},
+            {"key": "slow_fraction", "value": 0.2, "unit": "fraction"},
+            {"key": "slow_duration", "value": 1, "unit": "seconds"}
+          ],
+          "rule": "화살 경로에 2초 동안 0.5초마다 40% 피해를 주고 20% 둔화를 1초 부여하는 지대를 남긴다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "per_three_pierces_perpendicular_arrows",
+          "parameters": [
+            {"key": "normal_enemy_pierce_interval", "value": 3, "unit": "count"},
+            {"key": "projectile_count", "value": 2, "unit": "count"},
+            {"key": "angle_from_direction", "value": 90, "unit": "degrees"},
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"}
+          ],
+          "rule": "일반 적 3명을 관통할 때마다 현재 위치에서 좌우 직각 방향으로 각각 70% 화살을 발사한다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "align_hit_normal_enemy",
+          "parameters": [{"key": "move_distance", "value": 1.5, "unit": "meters"}],
+          "rule": "적중한 일반 적을 진행 방향으로 1.5m 이동시킨다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "apply_and_transfer_burn_to_next_hit",
+          "parameters": [],
+          "rule": "첫 대상에게 화상을 부여하고 남은 화상을 다음 적중 대상에게 전달한다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "cooldown_multiplier",
+          "parameters": [{"key": "cooldown_multiplier", "value": 0.75, "unit": "multiplier"}],
+          "rule": "쿨타임을 25% 줄인다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.multishot",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "delayed_second_fan",
+          "parameters": [
+            {"key": "delay", "value": 0.25, "unit": "seconds"},
+            {"key": "fan_angle", "value": 50, "unit": "degrees"},
+            {"key": "projectile_count", "value": 5, "unit": "count"},
+            {"key": "damage_multiplier_per_arrow", "value": 0.6, "unit": "multiplier"}
+          ],
+          "rule": "0.25초 뒤 같은 50° 부채꼴에 화살당 60%인 5발의 2차 부채를 발사한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "original_arrow_first_hit_split",
+          "parameters": [
+            {"key": "angles", "value": [-25, 25], "unit": "degrees"},
+            {"key": "projectile_count_per_original", "value": 2, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.4, "unit": "multiplier"}
+          ],
+          "rule": "각 원본 화살의 첫 적중에서 진행 방향 기준 ±25°로 각각 40% 화살을 분기한다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "additional_pierce_per_arrow",
+          "parameters": [{"key": "additional_pierce", "value": 1, "unit": "count"}],
+          "rule": "각 화살의 관통 수를 1 늘린다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "rear_fan",
+          "parameters": [
+            {"key": "projectile_count", "value": 3, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.8, "unit": "multiplier"}
+          ],
+          "rule": "시전 방향 반대쪽으로 80% 화살 3발을 발사한다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "first_cast_hit_bleed",
+          "parameters": [{"key": "bleed_stacks", "value": 1, "unit": "count"}],
+          "rule": "대상의 해당 시전 첫 적중에 출혈 1중첩을 부여한다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "apply_burn_and_transfer_arrow",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"},
+            {"key": "maximum_transfers_per_cast", "value": 3, "unit": "count"}
+          ],
+          "rule": "적중 대상에게 화상을 부여하고 근처 비화상 적에게 70% 추적 화살과 화상을 전달한다. 시전당 최대 3회다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "close_target_hit_limit_and_push",
+          "parameters": [
+            {"key": "close_range", "value": 4, "unit": "meters"},
+            {"key": "maximum_hits_per_target", "value": 4, "unit": "count"},
+            {"key": "push_distance", "value": 1.5, "unit": "meters"}
+          ],
+          "rule": "플레이어 4m 이내 대상은 적중 한도가 4발이 되고 해당 시전의 첫 적중에 한 번 1.5m 밀쳐진다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "missed_arrow_retarget",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"},
+            {"key": "maximum_retargets", "value": 1, "unit": "count"}
+          ],
+          "rule": "빗나간 화살은 끝점 근처의 적에게 70% 피해로 1회 재추적한다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.charged_shot",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "extended_full_charge_explosion",
+          "parameters": [
+            {"key": "maximum_charge_time", "value": 2.2, "unit": "seconds"},
+            {"key": "maximum_damage_multiplier", "value": 5.4, "unit": "multiplier"},
+            {"key": "full_charge_end_explosion_damage_multiplier", "value": 1.8, "unit": "multiplier"}
+          ],
+          "rule": "최대 충전 시간이 2.2초가 되고 최대 피해가 540%가 되며 최대 충전 발사 끝점에 180% 폭발을 일으킨다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "faster_charge",
+          "parameters": [{"key": "charge_time_multiplier", "value": 0.65, "unit": "multiplier"}],
+          "rule": "동일 충전율 도달 시간을 35% 줄인다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "increase_minimum_charge_damage",
+          "parameters": [{"key": "minimum_damage_multiplier", "value": 1.8, "unit": "multiplier"}],
+          "rule": "최소 충전 피해를 공격력의 180%로 높인다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "remove_pierce_damage_decay",
+          "parameters": [],
+          "rule": "적을 관통해도 피해가 감소하지 않는다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "full_charge_bleed_or_rupture",
+          "parameters": [
+            {"key": "bleed_stacks", "value": 3, "unit": "count"},
+            {"key": "existing_bleed_stacks_for_rupture", "value": 5, "unit": "count"},
+            {"key": "rupture_damage_multiplier", "value": 1.5, "unit": "multiplier"}
+          ],
+          "rule": "완전 충전 적중 시 출혈 3중첩을 부여하고 이미 5중첩인 대상에는 150% 파열 피해를 준다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "boss_or_fifth_pierce_split",
+          "parameters": [
+            {"key": "normal_enemy_pierce_count", "value": 5, "unit": "count"},
+            {"key": "angles", "value": [-25, 25], "unit": "degrees"},
+            {"key": "projectile_count", "value": 2, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.5, "unit": "multiplier"}
+          ],
+          "rule": "보스 첫 적중 또는 일반 적 5명 관통 시 해당 지점에서 진행 방향 기준 ±25°로 각각 50% 화살을 분기한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "first_hit_burn_explosion",
+          "parameters": [
+            {"key": "radius", "value": 2, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 1.4, "unit": "multiplier"}
+          ],
+          "rule": "첫 적중 대상에게 화상을 부여하고 그 위치 반경 2m에 140% 폭발을 일으킨다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "full_charge_multi_kill_cooldown_refund",
+          "parameters": [
+            {"key": "minimum_normal_enemy_kills", "value": 3, "unit": "count"},
+            {"key": "current_cooldown_refund_fraction", "value": 0.4, "unit": "fraction"}
+          ],
+          "rule": "완전 충전 한 발로 일반 적을 3명 이상 처치하면 현재 쿨타임의 40%를 반환한다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.explosive_arrow",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "delayed_reexplosion",
+          "parameters": [
+            {"key": "delay", "value": 0.6, "unit": "seconds"},
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"}
+          ],
+          "rule": "주 폭발 0.6초 뒤 같은 위치에서 70% 재폭발한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "three_delayed_satellite_bombs",
+          "parameters": [
+            {"key": "bomb_count", "value": 3, "unit": "count"},
+            {"key": "angular_spacing", "value": 120, "unit": "degrees"},
+            {"key": "placement_radius", "value": 1.5, "unit": "meters"},
+            {"key": "delay", "value": 0.3, "unit": "seconds"},
+            {"key": "explosion_radius", "value": 1.5, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"}
+          ],
+          "rule": "주 폭발 중심에서 120° 간격, 반경 1.5m 위치에 소형 폭탄 3개를 놓고 0.3초 뒤 반경 1.5m로 각각 70% 피해를 준다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "eight_direction_fragments",
+          "parameters": [
+            {"key": "direction_count", "value": 8, "unit": "count"},
+            {"key": "damage_multiplier", "value": 0.4, "unit": "multiplier"}
+          ],
+          "rule": "주 폭발에서 8방향으로 각각 40% 파편을 발사한다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "explosion_leaves_burning_area",
+          "parameters": [
+            {"key": "radius", "value": 3, "unit": "meters"},
+            {"key": "duration", "value": 4, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "damage_multiplier_per_tick", "value": 0.35, "unit": "multiplier"}
+          ],
+          "rule": "폭발 위치에 반경 3m 불장판을 4초 남긴다. 0.5초마다 35% 피해와 화상을 적용한다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "apply_bleed_and_blood_explosions",
+          "parameters": [
+            {"key": "radius", "value": 1.5, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 0.8, "unit": "multiplier"},
+            {"key": "maximum_explosions_per_cast", "value": 8, "unit": "count"}
+          ],
+          "rule": "폭발에 맞은 적에게 출혈 1중첩을 부여하고 각 대상 위치에 반경 1.5m, 80% 혈폭을 일으킨다. 시전당 최대 8회다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "pre_explosion_pull",
+          "parameters": [
+            {"key": "duration", "value": 0.25, "unit": "seconds"},
+            {"key": "pull_radius", "value": 2.5, "unit": "meters"}
+          ],
+          "rule": "폭발 전 0.25초 동안 일반 적을 중심으로 2.5m 흡인한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "direct_hit_mark_other_active_explosion",
+          "parameters": [{"key": "explosion_damage_multiplier", "value": 1.8, "unit": "multiplier"}],
+          "rule": "직접 적중 대상에게 표식을 남기고 다음 다른 액티브 적중 시 180% 폭발한다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "cooldown_multiplier",
+          "parameters": [{"key": "cooldown_multiplier", "value": 0.75, "unit": "multiplier"}],
+          "rule": "쿨타임을 25% 줄인다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.ricochet_arrow",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "return_to_player_rehit",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"},
+            {"key": "maximum_rehit_targets", "value": 5, "unit": "count"}
+          ],
+          "rule": "마지막 지점에서 플레이어에게 70% 피해로 귀환하며 돌아오는 동안 최대 5대상을 재타격한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "first_ricochet_branch_chain",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.6, "unit": "multiplier"},
+            {"key": "maximum_targets", "value": 3, "unit": "count"}
+          ],
+          "rule": "첫 도탄 지점에서 60% 피해의 별도 3대상 분기 연쇄를 만든다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "apply_bleed_and_extend_ricochets",
+          "parameters": [
+            {"key": "additional_ricochets_per_bleeding_hit", "value": 1, "unit": "count"},
+            {"key": "maximum_additional_ricochets", "value": 3, "unit": "count"}
+          ],
+          "rule": "적중 대상에게 출혈 1중첩을 부여하고 도탄 수를 1 늘린다. 최대 +3이다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "apply_and_copy_burn_to_next_target",
+          "parameters": [],
+          "rule": "적중 대상에게 화상을 부여하고 남은 화상을 다음 도탄 대상에게 복제한다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "kill_small_arrows",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 0.45, "unit": "multiplier"},
+            {"key": "arrows_per_kill", "value": 3, "unit": "count"},
+            {"key": "maximum_arrows_per_cast", "value": 9, "unit": "count"}
+          ],
+          "rule": "처치 시 45% 소형 화살 3개를 생성하며 한 시전에서 최대 9개다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "last_basic_ricochet_kill_new_chain",
+          "parameters": [{"key": "new_chain_targets", "value": 3, "unit": "count"}],
+          "rule": "마지막 도탄으로 적을 처치하면 새로 최대 3명에게 도탄한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "returned_arrow_cooldown_reduction",
+          "parameters": [{"key": "cooldown_reduction", "value": 1.5, "unit": "seconds"}],
+          "rule": "귀환 화살을 플레이어가 회수하면 다른 액티브 중 가장 긴 남은 쿨타임을 1.5초 단축한다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "cooldown_multiplier",
+          "parameters": [{"key": "cooldown_multiplier", "value": 0.75, "unit": "multiplier"}],
+          "rule": "쿨타임을 25% 줄인다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.arrow_rain",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "delayed_forward_secondary_area",
+          "parameters": [
+            {"key": "delay", "value": 1, "unit": "seconds"},
+            {"key": "forward_offset", "value": 4, "unit": "meters"},
+            {"key": "radius", "value": 3, "unit": "meters"},
+            {"key": "duration", "value": 2, "unit": "seconds"},
+            {"key": "damage_multiplier_per_tick", "value": 0.5, "unit": "multiplier"}
+          ],
+          "rule": "1초 뒤 원래 중심에서 시전 방향으로 4m 앞에 반경 3m, 2초, tick당 50%인 2차 지대를 만든다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "first_damage_tick_pull",
+          "parameters": [{"key": "pull_radius", "value": 2, "unit": "meters"}],
+          "rule": "첫 피해 tick에 일반 적을 중심으로 2m 흡인한다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "third_area_hit_bleed",
+          "parameters": [
+            {"key": "hit_ordinal", "value": 3, "unit": "count"},
+            {"key": "bleed_stacks", "value": 2, "unit": "count"}
+          ],
+          "rule": "같은 대상의 해당 지대 3번째 적중에 출혈 2중첩을 부여한다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "apply_burn_and_create_fire_areas",
+          "parameters": [
+            {"key": "radius", "value": 1.5, "unit": "meters"},
+            {"key": "duration", "value": 2, "unit": "seconds"},
+            {"key": "damage_multiplier_per_tick", "value": 0.3, "unit": "multiplier"},
+            {"key": "maximum_areas_per_cast", "value": 4, "unit": "count"}
+          ],
+          "rule": "적중 대상에게 화상을 부여하고 그 위치에 반경 1.5m, 2초 불장판을 만든다. 0.5초마다 30% 피해, 시전당 최대 4개다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "tracking_arrow_each_damage_tick",
+          "parameters": [
+            {"key": "search_radius", "value": 7, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"}
+          ],
+          "rule": "매 피해 tick에 반경 7m 안의 최근접 적에게 100% 추적 화살을 발사한다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "area_slow",
+          "parameters": [
+            {"key": "slow_fraction", "value": 0.2, "unit": "fraction"},
+            {"key": "slow_duration", "value": 1, "unit": "seconds"}
+          ],
+          "rule": "지대 안 적에게 독립 20% 둔화를 1초 부여한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "area_kill_arrow_outside",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+            {"key": "maximum_triggers_per_cast", "value": 6, "unit": "count"}
+          ],
+          "rule": "지대 안에서 적을 처치하면 지대 밖 최근접 적에게 100% 화살을 발사하며 시전당 최대 6회다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "extend_area_and_leave_slow",
+          "parameters": [
+            {"key": "area_duration", "value": 4, "unit": "seconds"},
+            {"key": "additional_damage_ticks", "value": 2, "unit": "count"},
+            {"key": "post_area_duration", "value": 3, "unit": "seconds"},
+            {"key": "post_area_slow_fraction", "value": 0.4, "unit": "fraction"}
+          ],
+          "rule": "지대 지속시간을 4초로 늘려 피해 tick을 2회 추가하고 종료 뒤 같은 범위에 3초 동안 40% 둔화 지대를 남긴다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.trap",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "roll_path_traps",
+          "parameters": [
+            {"key": "trap_count", "value": 3, "unit": "count"},
+            {"key": "damage_multiplier_per_trap", "value": 0.9, "unit": "multiplier"}
+          ],
+          "rule": "구르는 경로에 덫 3개를 남긴다. 각 덫은 90% 피해를 준다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "landing_slow_area",
+          "parameters": [
+            {"key": "radius", "value": 3, "unit": "meters"},
+            {"key": "slow_fraction", "value": 0.35, "unit": "fraction"},
+            {"key": "duration", "value": 3, "unit": "seconds"}
+          ],
+          "rule": "구르기 도착 지점에 반경 3m 둔화 지대를 3초 남긴다. 지대 안 적은 35% 느려진다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "single_reactivation",
+          "parameters": [
+            {"key": "reactivation_delay", "value": 2, "unit": "seconds"},
+            {"key": "maximum_reactivations", "value": 1, "unit": "count"}
+          ],
+          "rule": "각 덫은 첫 발동 2초 뒤 1회 재활성한다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "trigger_bleed",
+          "parameters": [{"key": "bleed_stacks", "value": 3, "unit": "count"}],
+          "rule": "발동 대상에게 출혈 3중첩을 부여한다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "trigger_burn_and_fire_area",
+          "parameters": [
+            {"key": "area_radius", "value": 1.5, "unit": "meters"},
+            {"key": "area_duration", "value": 2, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "damage_multiplier_per_tick", "value": 0.4, "unit": "multiplier"}
+          ],
+          "rule": "발동 대상에게 화상을 부여하고 반경 1.5m에 2초 동안 0.5초마다 40% 피해를 주는 불장판을 만든다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "pre_explosion_pull_and_slow",
+          "parameters": [
+            {"key": "pull_radius", "value": 2, "unit": "meters"},
+            {"key": "slow_fraction", "value": 0.6, "unit": "fraction"},
+            {"key": "slow_duration", "value": 2, "unit": "seconds"}
+          ],
+          "rule": "폭발 전 일반 적을 2m 흡인하고 60% 둔화를 2초 부여한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "trigger_mark_other_active_damage",
+          "parameters": [{"key": "damage_multiplier", "value": 1.5, "unit": "multiplier"}],
+          "rule": "발동 대상에게 표식을 남기고 다음 다른 액티브 적중 시 150% 피해를 준다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "trap_kill_small_trap",
+          "parameters": [
+            {"key": "detection_radius", "value": 1.5, "unit": "meters"},
+            {"key": "explosion_radius", "value": 2, "unit": "meters"},
+            {"key": "activation_delay", "value": 0.6, "unit": "seconds"},
+            {"key": "active_duration", "value": 12, "unit": "seconds"},
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+            {"key": "maximum_small_traps_per_cast", "value": 3, "unit": "count"}
+          ],
+          "rule": "덫 처치 시 최근접 적 위치에 감지 반경 1.5m, 폭발 반경 2m, 활성 지연 0.6초, 유지 12초인 100% 소형 덫을 만들며 시전당 최대 3개다. 이 소형 덫은 활성 그룹 3개 한도에 포함되지 않는다."
+        }
+      ]
+    },
+    {
+      "skill_id": "skill.retreat_shot",
+      "entries": [
+        {
+          "ordinal": 1,
+          "logic_id": "replace_with_three_arrows",
+          "parameters": [
+            {"key": "projectile_count", "value": 3, "unit": "count"},
+            {"key": "damage_multiplier_per_arrow", "value": 0.9, "unit": "multiplier"}
+          ],
+          "rule": "한 발을 90% 화살 3발로 변경한다."
+        },
+        {
+          "ordinal": 2,
+          "logic_id": "small_trap_at_start",
+          "parameters": [{"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"}],
+          "rule": "이동 시작점에 120% 소형 덫을 남긴다."
+        },
+        {
+          "ordinal": 3,
+          "logic_id": "slow_trail",
+          "parameters": [
+            {"key": "duration", "value": 2, "unit": "seconds"},
+            {"key": "slow_fraction", "value": 0.25, "unit": "fraction"}
+          ],
+          "rule": "이동 궤적에 2초 동안 25% 둔화 지대를 남긴다."
+        },
+        {
+          "ordinal": 4,
+          "logic_id": "apply_bleed_and_tracking_arrow",
+          "parameters": [
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+            {"key": "maximum_triggers_per_cast", "value": 3, "unit": "count"}
+          ],
+          "rule": "적중 대상에게 출혈 1중첩을 부여하고 근처 적에게 100% 추적 화살을 발사한다. 시전당 최대 3회다."
+        },
+        {
+          "ordinal": 5,
+          "logic_id": "landing_damage_and_push",
+          "parameters": [
+            {"key": "radius", "value": 2.5, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"},
+            {"key": "push_distance", "value": 3, "unit": "meters"}
+          ],
+          "rule": "착지 지점에서 반경 2.5m, 120% 피해를 주고 일반 적을 3m 밀친다."
+        },
+        {
+          "ordinal": 6,
+          "logic_id": "next_other_active_cooldown_refund",
+          "parameters": [
+            {"key": "activation_window", "value": 3, "unit": "seconds"},
+            {"key": "cooldown_refund_fraction", "value": 0.3, "unit": "fraction"}
+          ],
+          "rule": "3초 안에 사용하는 다음 다른 액티브 스킬의 쿨타임을 30% 반환한다."
+        },
+        {
+          "ordinal": 7,
+          "logic_id": "boss_or_three_normal_hits_heal",
+          "parameters": [
+            {"key": "minimum_normal_enemy_hits", "value": 3, "unit": "count"},
+            {"key": "maximum_hp_heal_fraction", "value": 0.05, "unit": "fraction"}
+          ],
+          "rule": "보스 적중 또는 일반 적 3명 이상 적중 시 최대 체력의 5%를 회복한다."
+        },
+        {
+          "ordinal": 8,
+          "logic_id": "delayed_second_retreat_and_arrow",
+          "parameters": [
+            {"key": "delay_after_first_move", "value": 0.25, "unit": "seconds"},
+            {"key": "additional_move_distance", "value": 2.5, "unit": "meters"},
+            {"key": "damage_multiplier", "value": 0.5, "unit": "multiplier"}
+          ],
+          "rule": "첫 이동 종료 0.25초 뒤 조준 반대 방향으로 2.5m 추가 이동하며 조준 방향으로 50% 화살을 발사한다."
+        }
+      ]
+    }
+  ]
+}
