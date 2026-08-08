@@ -7,8 +7,11 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
 #include <hs/renderer/renderer.hpp>
+#include <hs/runtime/audio_engine.hpp>
+#include <hs/runtime/save_store.hpp>
 
 #include <Windows.h>
+#include <Psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -18,6 +21,7 @@
 #include <format>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -39,13 +43,69 @@ void WriteText(const std::filesystem::path &path, std::string_view text)
     stream << text;
 }
 
+std::filesystem::path ExecutableDirectory()
+{
+    std::array<wchar_t, 32'768> path{};
+    const auto size = GetModuleFileNameW(nullptr, path.data(),
+                                         static_cast<DWORD>(path.size()));
+    if (size == 0 || size == path.size())
+    {
+        return {};
+    }
+    return std::filesystem::path(path.data()).parent_path();
+}
+
+std::uint64_t WorkingSetBytes() noexcept
+{
+    PROCESS_MEMORY_COUNTERS counters{.cb = sizeof(PROCESS_MEMORY_COUNTERS)};
+    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
+        ? counters.WorkingSetSize : 0;
+}
+
 } // namespace
 
 ApplicationResult RunApplication(const ApplicationConfig &config)
 {
+    const auto executable_directory = ExecutableDirectory();
+    if (executable_directory.empty())
+    {
+        return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                "Cannot resolve the executable directory.")};
+    }
+    GameData game_data;
+    std::uint64_t content_hash{};
+    const auto cooked_game_data_path =
+        executable_directory / "Cooked" / "game_data.hsbin";
+    if (auto loaded = LoadCookedGameData(
+            cooked_game_data_path, game_data, &content_hash);
+        !loaded)
+    {
+        return {loaded};
+    }
+    SaveStore save_store(config.smoke
+                             ? std::optional<std::filesystem::path>(
+                                   config.artifact_directory / "Profile")
+                             : std::nullopt);
+    SettingsData settings;
+    if (auto loaded = save_store.LoadSettings(settings); !loaded)
+    {
+        return {loaded};
+    }
+    ProfileData profile;
+    if (auto loaded = save_store.LoadProfile(profile); !loaded)
+    {
+        return {loaded};
+    }
+    AudioEngine audio;
+    if (auto initialized = audio.Initialize(settings); !initialized)
+    {
+        return {initialized};
+    }
+
     RuntimeChannels channels;
+    channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem workers;
-    Window window(channels);
+    Window window(channels, settings.skill_virtual_keys);
     auto result =
         window.Create(config.width, config.height, config.visible, config.borderless);
     if (!result)
@@ -102,6 +162,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         channels.render_ready.store(true, std::memory_order_release);
         channels.render_ready.notify_all();
 
+        auto active_vsync = config.vsync;
+        auto active_frame_cap = config.frame_cap;
+
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         std::array<PresentationEvent, 256> event_storage{};
         std::vector<ParticleSpawnCommand> pending_particle_spawns;
@@ -118,6 +181,30 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto next_frame = std::chrono::steady_clock::now();
         for (;;)
         {
+            SettingsData renderer_settings;
+            bool apply_renderer_settings{};
+            while (channels.renderer_settings.TryPop(renderer_settings))
+                apply_renderer_settings = true;
+            if (apply_renderer_settings)
+            {
+                const RendererOptions options{
+                    renderer_settings.vsync, renderer_settings.bloom,
+                    renderer_settings.outline, renderer_settings.render_scale_percent,
+                    renderer_settings.shadow_resolution,
+                    renderer_settings.particle_percentage};
+                if (auto applied = renderer.ApplyOptions(options); !applied)
+                {
+                    set_failure(applied);
+                    break;
+                }
+                active_vsync = renderer_settings.vsync;
+                active_frame_cap = renderer_settings.frame_cap;
+            }
+            NativeWindowMessage window_message;
+            while (channels.window_messages.TryPop(window_message))
+            {
+                renderer.HandleWindowMessage(window_message);
+            }
             GraphicsCommand graphics_command;
             std::uint32_t resize_width{};
             std::uint32_t resize_height{};
@@ -145,6 +232,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                    channels.presentation_events.TryPop(event))
             {
                 event_storage[event_count++] = event;
+                if (event.kind == PresentationKind::Audio &&
+                    !channels.audio_events.TryPush(event))
+                {
+                    channels.dropped_presentation_events.fetch_add(1,
+                                                                   std::memory_order_relaxed);
+                }
                 event_lines.push_back(
                     std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{}}}\n",
                                 event.sequence, event.tick, static_cast<unsigned>(event.kind)));
@@ -177,12 +270,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     resized = true;
                 }
                 RendererFrameResult frame;
+                const DevToolsFrameData devtools{
+                    static_cast<std::uint32_t>(workers.WorkerCount()),
+                    static_cast<std::uint32_t>(channels.action_edges.Size()),
+                    static_cast<std::uint32_t>(channels.presentation_events.Size()),
+                    static_cast<std::uint32_t>(channels.particle_spawns.Size()),
+                    static_cast<std::uint32_t>(channels.graphics_commands.Size()),
+                    static_cast<std::uint32_t>(channels.debug_commands.Size()),
+                    channels.dropped_input_edges.load(std::memory_order_relaxed),
+                    channels.dropped_presentation_events.load(std::memory_order_relaxed),
+                    channels.dropped_particle_spawns.load(std::memory_order_relaxed)};
                 const auto frame_start = std::chrono::steady_clock::now();
                 if (auto rendered =
                         renderer.Render(
                             snapshots, std::span(event_storage.data(), event_count),
                             std::span(pending_particle_spawns.data(), particle_spawn_count),
-                            frame);
+                            devtools, frame);
                     !rendered)
                 {
                     set_failure(rendered);
@@ -196,13 +299,30 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         std::chrono::steady_clock::now() - frame_start)
                         .count();
                 channels.rendered_frames.store(frame.frame, std::memory_order_release);
+                channels.devtools_capture_mouse.store(frame.capture_mouse,
+                                                       std::memory_order_release);
+                channels.devtools_capture_keyboard.store(frame.capture_keyboard,
+                                                          std::memory_order_release);
+                if (frame.debug_command != 0)
+                {
+                    (void)channels.debug_commands.TryPush(
+                        {static_cast<DebugCommandKind>(frame.debug_command - 1),
+                         frame.debug_value, frame.debug_secondary, {}});
+                }
                 last_tick = frame.rendered_tick;
                 timeline_lines.push_back(
-                    std::format("{},{},{}\n", frame.frame, last_tick, frame_microseconds));
-                if (!config.vsync && config.frame_cap != 0 && !config.smoke)
+                    std::format("{},{},{},{},{},{}\n", frame.frame, last_tick,
+                                frame_microseconds, WorkingSetBytes(),
+                                snapshots.current.instances.size(),
+                                devtools.input_queue_depth +
+                                    devtools.presentation_queue_depth +
+                                    devtools.particle_queue_depth +
+                                    devtools.graphics_queue_depth +
+                                    devtools.debug_queue_depth));
+                if (!active_vsync && active_frame_cap != 0 && !config.smoke)
                 {
                     next_frame += std::chrono::nanoseconds(
-                        1'000'000'000ull / std::clamp(config.frame_cap, 30u, 120u));
+                        1'000'000'000ull / std::clamp(active_frame_cap, 30u, 120u));
                     std::this_thread::sleep_until(next_frame);
                     if (std::chrono::steady_clock::now() > next_frame +
                                                                    std::chrono::milliseconds(100))
@@ -270,7 +390,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         std::format("{} validation errors.", validation_errors)));
         }
 
-        std::string timeline = "frame,tick,cpu_us\n";
+        std::string timeline = "frame,tick,cpu_us,memory_bytes,ecs_count,queue_depth\n";
         for (const auto &line : timeline_lines)
         {
             timeline += line;
@@ -308,7 +428,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::jthread simulation_thread([&](std::stop_token) {
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
-        if (auto initialized = simulation.Initialize({1}); !initialized)
+        if (auto initialized = simulation.Initialize(
+                {config.seed, config.smoke, !config.smoke, settings}, game_data);
+            !initialized)
         {
             set_failure(initialized);
             channels.simulation_done.store(true, std::memory_order_release);
@@ -321,6 +443,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t observed_focus_epoch{};
         Sequence publish_sequence{};
         std::array<ActionEdge, 256> action_storage{};
+        auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
+        std::size_t next_timeline_action{};
+        if (!config.heartbeat_path.empty())
+        {
+            WriteText(config.heartbeat_path, "{\"tick\":0,\"state\":\"running\"}\n");
+        }
 
         while (!channels.stop_requested.load(std::memory_order_acquire))
         {
@@ -338,6 +466,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
             for (std::uint32_t local_tick = 0; local_tick < tick_count; ++local_tick)
             {
+                GameData updated_game_data;
+                while (channels.gameplay_data_updates.TryPop(updated_game_data))
+                {
+                    if (auto applied = simulation.ApplyGameData(updated_game_data); !applied)
+                    {
+                        set_failure(applied);
+                        break;
+                    }
+                }
+                SettingsData updated_settings;
+                while (channels.simulation_settings.TryPop(updated_settings))
+                    simulation.ApplySettings(updated_settings);
                 const auto focus_epoch = channels.focus_epoch.load(std::memory_order_acquire);
                 if (focus_epoch != observed_focus_epoch)
                 {
@@ -357,7 +497,65 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 input.target_tick = channels.completed_tick.load(std::memory_order_relaxed) + 1;
                 input.held = channels.held_input.load(std::memory_order_acquire);
                 input.ordered_edges = std::span(action_storage.data(), action_count);
+                if (next_timeline_action < config.timeline_actions.size() &&
+                    config.timeline_actions[next_timeline_action].target_tick < input.target_tick)
+                {
+                    set_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                                "Timeline action missed its target tick."));
+                    break;
+                }
+                while (next_timeline_action < config.timeline_actions.size() &&
+                       config.timeline_actions[next_timeline_action].target_tick ==
+                           input.target_tick)
+                {
+                    const auto &scheduled = config.timeline_actions[next_timeline_action++];
+                    if (auto applied = simulation.ApplyDebugCommand(
+                            {static_cast<DebugCommandKind>(scheduled.kind), scheduled.value,
+                             scheduled.secondary, scheduled.position});
+                        !applied)
+                    {
+                        set_failure(applied);
+                        break;
+                    }
+                }
+                if (channels.stop_requested.load(std::memory_order_acquire))
+                    break;
+                DebugCommand debug_command;
+                while (channels.debug_commands.TryPop(debug_command))
+                {
+                    if (auto applied = simulation.ApplyDebugCommand(debug_command); !applied)
+                    {
+                        set_failure(applied);
+                        break;
+                    }
+                }
                 const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
+                const auto probe = simulation.Probe();
+                channels.camera_target_x.store(probe.player_position.x,
+                                               std::memory_order_release);
+                channels.camera_target_z.store(probe.player_position.y,
+                                               std::memory_order_release);
+                channels.session_phase.store(static_cast<std::uint8_t>(tick.phase),
+                                             std::memory_order_release);
+                if ((tick.phase == SessionPhase::Victory ||
+                     tick.phase == SessionPhase::Defeat) &&
+                    tick.phase != previous_phase)
+                {
+                    channels.completed_run_kills.fetch_add(probe.kills,
+                                                           std::memory_order_relaxed);
+                    if (tick.phase == SessionPhase::Victory)
+                    {
+                        channels.completed_run_wins.fetch_add(1,
+                                                              std::memory_order_relaxed);
+                    }
+                    auto best = channels.best_level.load(std::memory_order_relaxed);
+                    while (best < probe.level &&
+                           !channels.best_level.compare_exchange_weak(
+                               best, probe.level, std::memory_order_relaxed))
+                    {
+                    }
+                }
+                previous_phase = tick.phase;
 
                 for (const auto &presentation : simulation.PendingPresentationEvents())
                 {
@@ -368,6 +566,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
                 simulation.ClearPresentationEvents();
+                for (const auto &ui_command : simulation.PendingUiCommands())
+                {
+                    if (!channels.ui_commands.TryPush(ui_command))
+                    {
+                        set_failure(Result::Failure(ErrorCode::InvalidState,
+                                                    "hs_runtime",
+                                                    "UI command queue capacity exceeded."));
+                        break;
+                    }
+                }
+                simulation.ClearUiCommands();
                 for (const auto &particle_spawn : simulation.PendingParticleSpawns())
                 {
                     if (!channels.particle_spawns.TryPush(particle_spawn))
@@ -379,6 +588,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 simulation.ClearParticleSpawns();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
+                    slot->storage->camera.distance = 28.0f *
+                        static_cast<float>(channels.camera_zoom_percent.load(
+                            std::memory_order_acquire)) / 100.0f;
                     if (simulation.WriteRenderSnapshot(*slot->storage))
                     {
                         channels.snapshots.Publish(*slot, ++publish_sequence);
@@ -393,6 +605,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 channels.completed_tick.store(tick.tick, std::memory_order_release);
                 channels.checksum.store(tick.checksum, std::memory_order_release);
+                if (!config.heartbeat_path.empty() && tick.tick % 60 == 0)
+                {
+                    WriteText(config.heartbeat_path,
+                              std::format("{{\"tick\":{},\"state\":\"running\"}}\n",
+                                          tick.tick));
+                }
+
+                if (tick.phase == SessionPhase::QuitRequested)
+                {
+                    channels.stop_requested.store(true, std::memory_order_release);
+                    break;
+                }
 
                 if (config.smoke && tick.tick >= config.maximum_ticks)
                 {
@@ -410,8 +634,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         {
             set_failure(shutdown);
         }
+        if (!config.heartbeat_path.empty())
+        {
+            WriteText(config.heartbeat_path,
+                      std::format("{{\"tick\":{},\"state\":\"finished\"}}\n",
+                                  channels.completed_tick.load(std::memory_order_acquire)));
+        }
         channels.simulation_done.store(true, std::memory_order_release);
     });
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+    std::error_code hot_reload_error;
+    auto observed_cooked_write =
+        std::filesystem::last_write_time(cooked_game_data_path, hot_reload_error);
+    auto next_hot_reload_check = std::chrono::steady_clock::now();
+#endif
 
     while (!channels.stop_requested.load(std::memory_order_acquire))
     {
@@ -420,6 +657,150 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             channels.stop_requested.store(true, std::memory_order_release);
             break;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (std::chrono::steady_clock::now() >= next_hot_reload_check)
+        {
+            next_hot_reload_check = std::chrono::steady_clock::now() +
+                                    std::chrono::milliseconds(250);
+            hot_reload_error.clear();
+            const auto write =
+                std::filesystem::last_write_time(cooked_game_data_path, hot_reload_error);
+            if (!hot_reload_error && write != observed_cooked_write)
+            {
+                observed_cooked_write = write;
+                std::ofstream log(config.artifact_directory / "hot_reload.log",
+                                  std::ios::app);
+                if (static_cast<SessionPhase>(channels.session_phase.load(
+                        std::memory_order_acquire)) != SessionPhase::MainMenu)
+                {
+                    log << "rejected active_gameplay\n";
+                }
+                else
+                {
+                    GameData replacement;
+                    std::uint64_t replacement_hash{};
+                    if (auto loaded = LoadCookedGameData(cooked_game_data_path,
+                                                         replacement,
+                                                         &replacement_hash);
+                        !loaded)
+                    {
+                        log << "rejected validation " << loaded.Message() << '\n';
+                    }
+                    else if (!channels.gameplay_data_updates.TryPush(replacement))
+                    {
+                        log << "rejected queue_full\n";
+                    }
+                    else
+                    {
+                        content_hash = replacement_hash;
+                        log << "applied content_hash=" << replacement_hash << '\n';
+                    }
+                }
+            }
+        }
+#endif
+        UiCommand ui_command;
+        bool settings_changed{};
+        while (channels.ui_commands.TryPop(ui_command))
+        {
+            switch (ui_command.kind)
+            {
+            case UiCommandKind::SetBorderless:
+                settings.borderless = ui_command.value != 0;
+                if (auto applied = window.SetBorderless(settings.borderless); !applied)
+                    set_failure(applied);
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetVsync:
+                settings.vsync = ui_command.value != 0;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetFrameCap:
+                settings.frame_cap = ui_command.value;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetRenderScale:
+                settings.render_scale_percent = ui_command.value;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetShadowResolution:
+                settings.shadow_resolution = ui_command.value;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetParticlePercentage:
+                settings.particle_percentage = ui_command.value;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetBloom:
+                settings.bloom = ui_command.value != 0;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetOutline:
+                settings.outline = ui_command.value != 0;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetMasterVolumePercent:
+                settings.master_volume = static_cast<float>(ui_command.value) / 100.0f;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetBgmVolumePercent:
+                settings.bgm_volume = static_cast<float>(ui_command.value) / 100.0f;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetSfxVolumePercent:
+                settings.sfx_volume = static_cast<float>(ui_command.value) / 100.0f;
+                settings_changed = true;
+                break;
+            case UiCommandKind::SetUiVolumePercent:
+                settings.ui_volume = static_cast<float>(ui_command.value) / 100.0f;
+                settings_changed = true;
+                break;
+            case UiCommandKind::BeginSkillRebind:
+                window.BeginSkillRebind(ui_command.value);
+                break;
+            }
+        }
+        if (settings_changed)
+        {
+            audio.ApplySettings(settings);
+            if (!channels.renderer_settings.TryPush(settings))
+                set_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                            "Renderer settings queue capacity exceeded."));
+            else if (auto saved = save_store.SaveSettings(settings); !saved)
+                set_failure(saved);
+        }
+        std::array<std::uint16_t, 4> rebound_keys;
+        if (window.ConsumeReboundSkillKeys(rebound_keys))
+        {
+            settings.skill_virtual_keys = rebound_keys;
+            if (!channels.simulation_settings.TryPush(settings))
+                set_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                            "Simulation settings queue capacity exceeded."));
+            else if (auto saved = save_store.SaveSettings(settings); !saved)
+                set_failure(saved);
+        }
+        PresentationEvent audio_event;
+        while (channels.audio_events.TryPop(audio_event))
+        {
+            audio.Play(audio_event);
+        }
+        audio.UpdateListener(
+            {channels.camera_target_x.load(std::memory_order_acquire), 0.0f,
+             channels.camera_target_z.load(std::memory_order_acquire)},
+            {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f});
+        const auto session_phase = static_cast<SessionPhase>(
+            channels.session_phase.load(std::memory_order_acquire));
+        if (session_phase == SessionPhase::Paused ||
+            session_phase == SessionPhase::CardSelection ||
+            session_phase == SessionPhase::StatAllocation ||
+            session_phase == SessionPhase::RelicSelection)
+        {
+            audio.PauseCombat();
+        }
+        else
+        {
+            audio.ResumeCombat();
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
@@ -427,6 +808,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.stop_requested.store(true, std::memory_order_release);
     simulation_thread.join();
     render_thread.join();
+    audio.Shutdown();
+
+    if (!config.smoke)
+    {
+        profile.best_level = channels.best_level.load(std::memory_order_relaxed);
+        profile.total_wins += channels.completed_run_wins.load(std::memory_order_relaxed);
+        profile.total_kills += channels.completed_run_kills.load(std::memory_order_relaxed);
+        if (auto saved = save_store.SaveProfile(profile); !saved)
+        {
+            set_failure(saved);
+        }
+    }
 
     {
         std::lock_guard lock(result_mutex);
@@ -447,21 +840,23 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         channels.dropped_particle_spawns.load() == 0;
 
     WriteText(config.artifact_directory / "spec.json",
-              std::format("{{\"scenario_id\":\"stage1\",\"seed\":1,\"maximum_ticks\":{},"
-                          "\"mode\":\"offscreen_render\"}}\n",
-                          config.maximum_ticks));
+              std::format("{{\"scenario_id\":\"runtime-smoke\",\"seed\":{},\"maximum_ticks\":{},"
+                          "\"content_hash\":{},\"mode\":\"offscreen_render\"}}\n",
+                          config.seed, config.maximum_ticks, content_hash));
     WriteText(config.artifact_directory / "result.json",
-              std::format("{{\"schema_version\":1,\"scenario_id\":\"stage1\","
+              std::format("{{\"schema_version\":1,\"scenario_id\":\"runtime-smoke\","
                           "\"mode\":\"offscreen_render\",\"execution_valid\":{},"
                           "\"assertions_passed\":{},"
                           "\"tick\":{},\"checksum\":{},\"rendered_frames\":{},"
                           "\"rendered_particles\":{},"
+                          "\"content_hash\":{},"
                           "\"worker_count\":{},"
                           "\"dropped_input_edges\":{},\"dropped_presentation_events\":{},"
                           "\"dropped_particle_spawns\":{},"
                           "\"user_review\":\"awaiting\"}}\n",
                           valid ? "true" : "false", valid ? "true" : "false", final_tick,
-                          checksum, rendered_frames, rendered_particles, workers.WorkerCount(),
+                          checksum, rendered_frames, rendered_particles, content_hash,
+                          workers.WorkerCount(),
                           channels.dropped_input_edges.load(),
                           channels.dropped_presentation_events.load(),
                           channels.dropped_particle_spawns.load()));
@@ -469,7 +864,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (!valid && result)
     {
         result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                 "Stage 1 execution assertions failed.");
+                                 "Runtime execution assertions failed.");
     }
     return {result, final_tick, checksum, rendered_frames};
 }

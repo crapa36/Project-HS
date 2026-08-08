@@ -14,26 +14,11 @@ namespace
 
 constexpr wchar_t kWindowClass[] = L"ProjectHS.Stage1";
 
-GameAction ActionForVirtualKey(USHORT key) noexcept
-{
-    switch (key)
-    {
-    case 'Q':
-        return GameAction::SkillQ;
-    case 'W':
-        return GameAction::SkillW;
-    case 'E':
-        return GameAction::SkillE;
-    case 'R':
-        return GameAction::SkillR;
-    default:
-        return GameAction::Pause;
-    }
-}
-
 } // namespace
 
-Window::Window(RuntimeChannels &channels) noexcept : channels_(&channels)
+Window::Window(RuntimeChannels &channels,
+               std::array<std::uint16_t, 4> skill_virtual_keys) noexcept
+    : channels_(&channels), skill_virtual_keys_(skill_virtual_keys)
 {
 }
 
@@ -66,6 +51,9 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
                                std::format("RegisterClassExW failed: {}", GetLastError()));
     }
 
+    borderless_ = borderless;
+    windowed_client_width_ = width;
+    windowed_client_height_ = height;
     auto style = borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW;
     auto x = CW_USEDEFAULT;
     auto y = CW_USEDEFAULT;
@@ -89,7 +77,7 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
     {
         AdjustWindowRect(&rectangle, style, FALSE);
     }
-    window_ = CreateWindowExW(0, kWindowClass, L"Project HS - Stage 1",
+    window_ = CreateWindowExW(0, kWindowClass, L"Project HS",
                               style, x, y,
                               rectangle.right - rectangle.left, rectangle.bottom - rectangle.top,
                               nullptr, nullptr, instance_, this);
@@ -98,6 +86,8 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                std::format("CreateWindowExW failed: {}", GetLastError()));
     }
+    if (!borderless && GetWindowRect(window_, &windowed_rect_))
+        has_windowed_rect_ = true;
 
     RAWINPUTDEVICE devices[] = {
         {HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD, RIDEV_INPUTSINK, window_},
@@ -141,7 +131,59 @@ bool Window::PumpMessages()
                 static_cast<float>(cursor.x) / static_cast<float>(client_width_) * 2.0f - 1.0f;
             const auto normalized_y =
                 1.0f - static_cast<float>(cursor.y) / static_cast<float>(client_height_) * 2.0f;
-            held_.aim_world = {normalized_x * 30.0f, 0.0f, normalized_y * 30.0f};
+            held_.cursor_normalized = {normalized_x, normalized_y};
+            constexpr float reference_width = 1'920.0f;
+            constexpr float reference_height = 1'080.0f;
+            constexpr float reference_aspect = reference_width / reference_height;
+            const auto output_aspect = static_cast<float>(client_width_) /
+                                       static_cast<float>(client_height_);
+            auto reference_u = (normalized_x + 1.0f) * 0.5f;
+            auto reference_v = (1.0f - normalized_y) * 0.5f;
+            if (output_aspect > reference_aspect)
+                reference_u = (reference_u - 0.5f) * output_aspect /
+                              reference_aspect + 0.5f;
+            else
+                reference_v = (reference_v - 0.5f) * reference_aspect /
+                              output_aspect + 0.5f;
+            held_.ui_cursor_pixels = {reference_u * reference_width,
+                                      reference_v * reference_height};
+
+            constexpr float yaw = 45.0f * 3.14159265358979323846f / 180.0f;
+            constexpr float pitch = 55.0f * 3.14159265358979323846f / 180.0f;
+            constexpr float vertical_fov = 45.0f * 3.14159265358979323846f / 180.0f;
+            const auto target_x = channels_->camera_target_x.load(std::memory_order_acquire);
+            const auto target_z = channels_->camera_target_z.load(std::memory_order_acquire);
+            const auto distance = 28.0f *
+                static_cast<float>(channels_->camera_zoom_percent.load(
+                    std::memory_order_acquire)) / 100.0f;
+            const auto forward_x = std::cos(pitch) * std::sin(yaw);
+            const auto forward_y = -std::sin(pitch);
+            const auto forward_z = std::cos(pitch) * std::cos(yaw);
+            const auto right_x = forward_z / std::cos(pitch);
+            const auto right_z = -forward_x / std::cos(pitch);
+            const auto up_x = forward_y * right_z;
+            const auto up_y = forward_z * right_x - forward_x * right_z;
+            const auto up_z = -forward_y * right_x;
+            const auto aspect = static_cast<float>(client_width_) /
+                                static_cast<float>(client_height_);
+            const auto tangent = std::tan(vertical_fov * 0.5f);
+            auto ray_x = forward_x + right_x * normalized_x * aspect * tangent +
+                         up_x * normalized_y * tangent;
+            auto ray_y = forward_y + up_y * normalized_y * tangent;
+            auto ray_z = forward_z + right_z * normalized_x * aspect * tangent +
+                         up_z * normalized_y * tangent;
+            const auto ray_length = std::sqrt(ray_x * ray_x + ray_y * ray_y +
+                                              ray_z * ray_z);
+            ray_x /= ray_length;
+            ray_y /= ray_length;
+            ray_z /= ray_length;
+            const auto eye_x = target_x - forward_x * distance;
+            const auto eye_y = -forward_y * distance;
+            const auto eye_z = target_z - forward_z * distance;
+            const auto ray_time = ray_y < -0.0001f ? -eye_y / ray_y : distance;
+            held_.aim_world = {eye_x + ray_x * ray_time, 0.0f,
+                               eye_z + ray_z * ray_time};
+            held_.move_target_world = held_.aim_world;
             UpdateHeldInput();
         }
     }
@@ -156,10 +198,73 @@ HWND Window::Handle() const noexcept
 void Window::StopInput() noexcept
 {
     accepting_input_ = false;
-    forward_ = backward_ = left_ = right_ = false;
     held_ = {};
     channels_->held_input.store(held_, std::memory_order_release);
     channels_->focus_epoch.fetch_add(1, std::memory_order_release);
+}
+
+void Window::BeginSkillRebind(std::uint32_t slot) noexcept
+{
+    if (slot < skill_virtual_keys_.size())
+    {
+        pending_rebind_slot_ = static_cast<std::uint8_t>(slot);
+    }
+}
+
+bool Window::ConsumeReboundSkillKeys(std::array<std::uint16_t, 4> &keys) noexcept
+{
+    if (!rebound_skill_keys_)
+        return false;
+    keys = *rebound_skill_keys_;
+    rebound_skill_keys_.reset();
+    return true;
+}
+
+Result Window::SetBorderless(bool borderless)
+{
+    if (!window_ || borderless == borderless_)
+        return Result::Success();
+
+    RECT target{};
+    DWORD style{};
+    if (borderless)
+    {
+        if (GetWindowRect(window_, &windowed_rect_))
+            has_windowed_rect_ = true;
+        MONITORINFO monitor{sizeof(MONITORINFO)};
+        if (!GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   "Cannot query the target monitor.");
+        target = monitor.rcMonitor;
+        style = WS_POPUP;
+    }
+    else
+    {
+        style = WS_OVERLAPPEDWINDOW;
+        if (has_windowed_rect_)
+        {
+            target = windowed_rect_;
+        }
+        else
+        {
+            target = {0, 0, static_cast<LONG>(windowed_client_width_),
+                      static_cast<LONG>(windowed_client_height_)};
+            AdjustWindowRect(&target, style, FALSE);
+        }
+    }
+
+    SetLastError(ERROR_SUCCESS);
+    const auto previous = SetWindowLongPtrW(window_, GWL_STYLE, style);
+    if (previous == 0 && GetLastError() != ERROR_SUCCESS)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               std::format("SetWindowLongPtrW failed: {}", GetLastError()));
+    if (!SetWindowPos(window_, nullptr, target.left, target.top,
+                      target.right - target.left, target.bottom - target.top,
+                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER))
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               std::format("SetWindowPos failed: {}", GetLastError()));
+    borderless_ = borderless;
+    return Result::Success();
 }
 
 LRESULT CALLBACK Window::WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
@@ -178,6 +283,26 @@ LRESULT CALLBACK Window::WindowProcedure(HWND window, UINT message, WPARAM wpara
 
 LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+#if !defined(NDEBUG)
+    switch (message)
+    {
+    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_MOUSEWHEEL:
+    case WM_KEYDOWN:
+    case WM_KEYUP:
+    case WM_SYSKEYDOWN:
+    case WM_SYSKEYUP:
+    case WM_CHAR:
+        (void)channels_->window_messages.TryPush(
+            {message, static_cast<std::uintptr_t>(wparam),
+             static_cast<std::intptr_t>(lparam)});
+        break;
+    }
+#endif
     switch (message)
     {
     case WM_INPUT:
@@ -187,7 +312,6 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         }
         return 0;
     case WM_KILLFOCUS:
-        forward_ = backward_ = left_ = right_ = false;
         held_ = {};
         channels_->held_input.store(held_, std::memory_order_release);
         channels_->focus_epoch.fetch_add(1, std::memory_order_release);
@@ -226,35 +350,44 @@ void Window::HandleRawInput(HRAWINPUT input)
     const auto &raw = *reinterpret_cast<const RAWINPUT *>(storage.data());
     if (raw.header.dwType == RIM_TYPEKEYBOARD)
     {
+        if (channels_->devtools_capture_keyboard.load(std::memory_order_acquire)) return;
         const auto key = raw.data.keyboard.VKey;
         const auto pressed = (raw.data.keyboard.Flags & RI_KEY_BREAK) == 0;
-        switch (key)
+        if (pending_rebind_slot_)
         {
-        case 'W':
-            forward_ = pressed;
-            break;
-        case 'S':
-            backward_ = pressed;
-            break;
-        case 'A':
-            left_ = pressed;
-            break;
-        case 'D':
-            right_ = pressed;
-            break;
-        case 'Q':
-        case 'E':
-        case 'R':
-        case VK_ESCAPE:
-            PushAction(ActionForVirtualKey(key), pressed ? EdgeKind::Pressed : EdgeKind::Released);
-            break;
-        default:
-            break;
+            if (pressed)
+            {
+                if (key != VK_ESCAPE && key != 0 && key <= 0xFE)
+                {
+                    const auto slot = static_cast<std::size_t>(*pending_rebind_slot_);
+                    const auto existing = std::ranges::find(skill_virtual_keys_, key);
+                    if (existing != skill_virtual_keys_.end())
+                        std::swap(*existing, skill_virtual_keys_[slot]);
+                    else
+                        skill_virtual_keys_[slot] = static_cast<std::uint16_t>(key);
+                }
+                pending_rebind_slot_.reset();
+                rebound_skill_keys_ = skill_virtual_keys_;
+            }
+            return;
+        }
+        if (key == VK_ESCAPE)
+        {
+            PushAction(GameAction::Pause,
+                       pressed ? EdgeKind::Pressed : EdgeKind::Released);
+        }
+        else if (const auto iterator = std::ranges::find(skill_virtual_keys_, key);
+                 iterator != skill_virtual_keys_.end())
+        {
+            const auto slot = static_cast<std::size_t>(iterator - skill_virtual_keys_.begin());
+            PushAction(static_cast<GameAction>(static_cast<unsigned>(GameAction::SkillQ) + slot),
+                       pressed ? EdgeKind::Pressed : EdgeKind::Released);
         }
         UpdateHeldInput();
     }
     else if (raw.header.dwType == RIM_TYPEMOUSE)
     {
+        if (channels_->devtools_capture_mouse.load(std::memory_order_acquire)) return;
         if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
         {
             held_.basic_attack_held = true;
@@ -265,22 +398,28 @@ void Window::HandleRawInput(HRAWINPUT input)
             held_.basic_attack_held = false;
             PushAction(GameAction::BasicAttack, EdgeKind::Released);
         }
+        if (raw.data.mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+        {
+            held_.move_held = true;
+        }
+        if (raw.data.mouse.usButtonFlags & RI_MOUSE_RIGHT_BUTTON_UP)
+        {
+            held_.move_held = false;
+        }
+        if (raw.data.mouse.usButtonFlags & RI_MOUSE_WHEEL)
+        {
+            const auto delta = static_cast<SHORT>(raw.data.mouse.usButtonData);
+            auto zoom = channels_->camera_zoom_percent.load(std::memory_order_relaxed);
+            zoom = delta > 0 ? (zoom > 80 ? zoom - 10 : 80)
+                             : (zoom < 120 ? zoom + 10 : 120);
+            channels_->camera_zoom_percent.store(zoom, std::memory_order_release);
+        }
         UpdateHeldInput();
     }
 }
 
 void Window::UpdateHeldInput() noexcept
 {
-    held_.normalized_move = {static_cast<float>(right_) - static_cast<float>(left_),
-                             static_cast<float>(forward_) - static_cast<float>(backward_)};
-    const auto length_squared = held_.normalized_move.x * held_.normalized_move.x +
-                                held_.normalized_move.y * held_.normalized_move.y;
-    if (length_squared > 1.0f)
-    {
-        const auto inverse_length = 1.0f / std::sqrt(length_squared);
-        held_.normalized_move.x *= inverse_length;
-        held_.normalized_move.y *= inverse_length;
-    }
     channels_->held_input.store(held_, std::memory_order_release);
 }
 

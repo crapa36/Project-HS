@@ -1,4 +1,5 @@
 #include <hs/runtime/application.hpp>
+#include <hs/runtime/save_store.hpp>
 
 #include <Windows.h>
 
@@ -20,6 +21,20 @@ namespace
 hs::ApplicationConfig ParseArguments(int argc, char **argv)
 {
     hs::ApplicationConfig config;
+    hs::SettingsData settings;
+    if (hs::SaveStore store; store.LoadSettings(settings))
+    {
+        config.width = settings.width;
+        config.height = settings.height;
+        config.borderless = settings.borderless;
+        config.vsync = settings.vsync;
+        config.frame_cap = settings.frame_cap;
+        config.render_scale_percent = settings.render_scale_percent;
+        config.shadow_resolution = settings.shadow_resolution;
+        config.particle_percentage = settings.particle_percentage;
+        config.bloom = settings.bloom;
+        config.outline = settings.outline;
+    }
 #if defined(HS_ENABLE_VALIDATION)
     config.validation = true;
 #endif
@@ -76,6 +91,11 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         {
             const auto value = argument.substr(8);
             std::from_chars(value.data(), value.data() + value.size(), config.maximum_ticks);
+        }
+        else if (argument.starts_with("--seed="))
+        {
+            const auto value = argument.substr(7);
+            std::from_chars(value.data(), value.data() + value.size(), config.seed);
         }
         else if (argument.starts_with("--frame-cap="))
         {
@@ -134,7 +154,7 @@ int main(int argc, char **argv)
         std::cerr << run.result.Subsystem() << ": " << run.result.Message() << '\n';
         return 1;
     }
-    std::cout << "stage1 tick=" << run.final_tick << " checksum=" << run.checksum
+    std::cout << "runtime tick=" << run.final_tick << " checksum=" << run.checksum
               << " frames=" << run.rendered_frames << '\n';
     return 0;
 }

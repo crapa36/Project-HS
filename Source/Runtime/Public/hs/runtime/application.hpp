@@ -4,9 +4,20 @@
 #include <hs/core/types.hpp>
 
 #include <filesystem>
+#include <vector>
 
 namespace hs
 {
+
+struct ApplicationTimelineAction
+{
+    Sequence sequence{};
+    Tick target_tick{};
+    std::uint8_t kind{};
+    std::uint64_t value{};
+    std::uint32_t secondary{};
+    Float2 position{};
+};
 
 struct ApplicationConfig
 {
@@ -26,9 +37,12 @@ struct ApplicationConfig
     std::uint32_t render_scale_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
+    std::uint64_t seed{1};
     Tick maximum_ticks{180};
     BarrierMode barrier_mode{BarrierMode::Automatic};
-    std::filesystem::path artifact_directory{"Artifacts/stage1"};
+    std::filesystem::path artifact_directory{"Artifacts/runtime"};
+    std::filesystem::path heartbeat_path;
+    std::vector<ApplicationTimelineAction> timeline_actions;
 };
 
 struct ApplicationResult

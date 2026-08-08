@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 namespace hs
 {
@@ -15,7 +16,8 @@ namespace hs
 class Window
 {
   public:
-    explicit Window(RuntimeChannels &channels) noexcept;
+    Window(RuntimeChannels &channels,
+           std::array<std::uint16_t, 4> skill_virtual_keys) noexcept;
     ~Window();
 
     Window(const Window &) = delete;
@@ -26,6 +28,10 @@ class Window
     [[nodiscard]] bool PumpMessages();
     [[nodiscard]] HWND Handle() const noexcept;
     void StopInput() noexcept;
+    void BeginSkillRebind(std::uint32_t slot) noexcept;
+    [[nodiscard]] bool ConsumeReboundSkillKeys(
+        std::array<std::uint16_t, 4> &keys) noexcept;
+    [[nodiscard]] Result SetBorderless(bool borderless);
 
   private:
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam,
@@ -39,12 +45,16 @@ class Window
     HWND window_{};
     HINSTANCE instance_{};
     HeldInputState held_{};
+    std::array<std::uint16_t, 4> skill_virtual_keys_{};
+    std::optional<std::uint8_t> pending_rebind_slot_;
+    std::optional<std::array<std::uint16_t, 4>> rebound_skill_keys_;
     Sequence input_sequence_{};
     bool accepting_input_{true};
-    bool forward_{};
-    bool backward_{};
-    bool left_{};
-    bool right_{};
+    bool borderless_{};
+    bool has_windowed_rect_{};
+    RECT windowed_rect_{};
+    std::uint32_t windowed_client_width_{1280};
+    std::uint32_t windowed_client_height_{720};
     std::uint32_t client_width_{1};
     std::uint32_t client_height_{1};
 };
