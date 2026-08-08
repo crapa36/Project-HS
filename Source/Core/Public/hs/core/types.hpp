@@ -35,6 +35,21 @@ struct AssetId
     std::uint64_t value{};
 };
 
+struct EntityId
+{
+    std::uint64_t value{};
+};
+
+struct SkillId
+{
+    std::uint32_t value{};
+};
+
+struct RelicId
+{
+    std::uint32_t value{};
+};
+
 enum class BarrierMode : std::uint8_t
 {
     Automatic,

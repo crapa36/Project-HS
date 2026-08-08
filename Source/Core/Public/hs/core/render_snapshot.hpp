@@ -1,5 +1,6 @@
 #pragma once
 
+#include <hs/core/cooked_format.hpp>
 #include <hs/core/types.hpp>
 
 #include <array>
@@ -16,6 +17,14 @@ enum class RenderMesh : std::uint8_t
 {
     Archer,
     Enemy,
+    EnemyRanged,
+    EnemySuicide,
+    Boss,
+    PlayerProjectile,
+    EnemyProjectile,
+    Area,
+    Pickup,
+    Ground,
 };
 
 struct RenderInstance
@@ -25,12 +34,20 @@ struct RenderInstance
     Float3 scale{1.0f, 1.0f, 1.0f};
     std::uint32_t color_rgba{0xFFFFFFFFu};
     RenderMesh mesh{};
+    std::uint64_t stable_id{};
 };
 
 struct AnimationPoseRef
 {
     std::uint32_t instance_index{};
+    CharacterAnimationClip clip{CharacterAnimationClip::Idle};
     float normalized_time{};
+    CharacterAnimationClip secondary_clip{CharacterAnimationClip::Run};
+    float secondary_normalized_time{};
+    float secondary_weight{};
+    CharacterAnimationClip upper_body_clip{CharacterAnimationClip::Idle};
+    float upper_body_normalized_time{};
+    float upper_body_weight{};
 };
 
 struct LightView
@@ -42,7 +59,21 @@ struct LightView
 
 struct UiModel
 {
-    std::array<char, 96> utf8_text{};
+    enum class Kind : std::uint8_t
+    {
+        Text,
+        Panel,
+        Button,
+        Bar,
+    };
+
+    Kind kind{Kind::Text};
+    Float2 anchor_pixels{32.0f, 32.0f};
+    Float2 size_pixels{};
+    std::uint32_t color_rgba{0xFFFFFFFFu};
+    float value{1.0f};
+    std::uint16_t font_pixels{28};
+    std::array<char, 512> utf8_text{};
 };
 
 struct CameraView

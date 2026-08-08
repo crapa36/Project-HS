@@ -33,8 +33,11 @@ struct ActionEdge
 
 struct HeldInputState
 {
-    Float2 normalized_move{};
+    Float3 move_target_world{};
     Float3 aim_world{};
+    Float2 cursor_normalized{};
+    Float2 ui_cursor_pixels{};
+    bool move_held{};
     bool basic_attack_held{};
 };
 
@@ -42,7 +45,7 @@ struct InputFrame
 {
     Tick target_tick{};
     HeldInputState held{};
-    std::span<const ActionEdge> ordered_edges;
+    std::span<const ActionEdge> ordered_edges{};
 };
 
 } // namespace hs
