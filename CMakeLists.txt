@@ -43,6 +43,22 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(flecs)
 
 FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+    URL_HASH SHA256=42F6E95CAD6EC532FD372391373363B62A14AF6D771056DBFC86160E6DFFF7AA
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG v1.91.9b
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+FetchContent_Declare(
     agility
     URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.4
     URL_HASH SHA256=D30F756CE05BB4B7705FC1B04A5DED32ED62F2C2A2B392AE8D3318181395C8BC
@@ -104,6 +120,7 @@ endfunction()
 
 add_library(
     hs_core STATIC
+    Source/Core/Private/cooked_format.cpp
     Source/Core/Private/fixed_step_clock.cpp
     Source/Core/Private/render_snapshot.cpp
     Source/Core/Private/snapshot_exchange.cpp
@@ -122,6 +139,7 @@ hs_configure_target(hs_jobs)
 
 add_library(
     hs_gameplay STATIC
+    Source/Gameplay/Private/game_data.cpp
     Source/Gameplay/Private/game_simulation.cpp
 )
 target_include_directories(hs_gameplay PUBLIC Source/Gameplay/Public)
@@ -136,10 +154,22 @@ add_library(
     Source/RendererD3D12/Private/render_graph.cpp
     Source/RendererD3D12/Private/renderer.cpp
 )
+target_sources(
+    hs_renderer_d3d12 PRIVATE
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui.cpp>
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_draw.cpp>
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_tables.cpp>
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/imgui_widgets.cpp>
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp>
+    $<$<CONFIG:Debug>:${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp>
+)
 target_include_directories(hs_renderer_d3d12 PUBLIC Source/RendererD3D12/Public)
 target_include_directories(
     hs_renderer_d3d12
     BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include"
+)
+target_include_directories(
+    hs_renderer_d3d12 PRIVATE "${imgui_SOURCE_DIR}" "${imgui_SOURCE_DIR}/backends"
 )
 target_link_libraries(
     hs_renderer_d3d12
@@ -147,6 +177,9 @@ target_link_libraries(
     PRIVATE D3D12MemoryAllocator WinPixEventRuntime d3d12 dxgi dxguid windowscodecs gdi32
 )
 target_compile_definitions(hs_renderer_d3d12 PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_definitions(
+    hs_renderer_d3d12 PRIVATE $<$<CONFIG:Debug>:HS_DEVELOPMENT_TOOLS=1>
+)
 if(HS_ENABLE_VALIDATION)
     target_compile_definitions(hs_renderer_d3d12 PRIVATE USE_PIX=1)
 else()
@@ -157,15 +190,26 @@ hs_configure_target(hs_renderer_d3d12)
 add_library(
     hs_runtime STATIC
     Source/Runtime/Private/application.cpp
+    Source/Runtime/Private/audio_engine.cpp
+    Source/Runtime/Private/experiment_spec.cpp
+    Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/window.cpp
+)
+target_sources(
+    hs_runtime PRIVATE
+    $<$<NOT:$<CONFIG:Release>>:${CMAKE_CURRENT_SOURCE_DIR}/Source/Runtime/Private/experiment_pipe.cpp>
 )
 target_include_directories(hs_runtime PUBLIC Source/Runtime/Public)
 target_link_libraries(
     hs_runtime
     PUBLIC hs_core
-    PRIVATE hs_gameplay hs_jobs hs_renderer_d3d12 user32 shell32
+    PRIVATE hs_gameplay hs_jobs hs_renderer_d3d12 nlohmann_json::nlohmann_json
+            user32 shell32 xaudio2 ole32 psapi
 )
 target_compile_definitions(hs_runtime PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_definitions(
+    hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
+)
 hs_configure_target(hs_runtime)
 
 find_program(
@@ -246,9 +290,12 @@ hs_configure_target(ProjectHS)
 add_dependencies(ProjectHS hs_runtime_assets)
 
 add_executable(hs_experiment Source/Apps/Experiment/main.cpp)
-target_link_libraries(hs_experiment PRIVATE hs_runtime)
+target_link_libraries(
+    hs_experiment PRIVATE hs_runtime hs_gameplay nlohmann_json::nlohmann_json dbghelp
+)
 target_compile_definitions(
     hs_experiment PRIVATE HS_ENABLE_VALIDATION=1 WIN32_LEAN_AND_MEAN NOMINMAX
+                          $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
 hs_configure_target(hs_experiment)
 add_dependencies(hs_experiment hs_runtime_assets)
@@ -284,24 +331,62 @@ set_target_properties(
 )
 
 add_executable(hs_content Source/Apps/Content/main.cpp)
-target_link_libraries(hs_content PRIVATE fbxsdk fbx_xml fbx_zlib ws2_32)
+target_link_libraries(
+    hs_content
+    PRIVATE hs_core hs_gameplay nlohmann_json::nlohmann_json
+            fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
+)
 add_dependencies(hs_content hs_shaders)
 target_compile_definitions(
     hs_content
     PRIVATE
         HS_COOKED_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/Cooked"
         HS_SHADER_DIRECTORY="${HS_SHADER_DIRECTORY}"
+        HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
+        HS_SCHEMA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
+        HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
+        HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
 )
 target_include_directories(hs_content SYSTEM PRIVATE "${HS_FBX_SDK_ROOT}/include")
 hs_configure_target(hs_content)
 
+file(GLOB HS_GAME_DATA_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData/*.json"
+)
+set(
+    HS_ARCHER_ASSET_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/Idle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/RunForward.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DrawArrow.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/AimRecoil.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DeathBackward.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/TurnLeft90.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/TurnRight90.fbx"
+)
+file(GLOB HS_ARCHER_TEXTURE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbm/*"
+)
+list(APPEND HS_ARCHER_ASSET_SOURCES ${HS_ARCHER_TEXTURE_SOURCES})
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
-    COMMAND "$<TARGET_FILE:hs_content>" --validate-only
-    DEPENDS hs_content hs_shaders
+    COMMAND "$<TARGET_FILE:hs_content>" --cook
+    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_white.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_1.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_2.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_3.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_4.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_5.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_1.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_2.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_3.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
     VERBATIM
 )
 add_custom_target(
@@ -310,6 +395,23 @@ add_custom_target(
 )
 add_dependencies(ProjectHS hs_cooked_content)
 add_dependencies(hs_experiment hs_cooked_content)
+
+add_executable(hs_tools Source/Apps/Tools/main.cpp)
+target_link_libraries(hs_tools PRIVATE nlohmann_json::nlohmann_json)
+target_compile_definitions(
+    hs_tools
+    PRIVATE
+        HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
+        HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
+        HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
+        HS_CONTENT_EXECUTABLE="$<TARGET_FILE:hs_content>"
+        HS_PROJECT_EXECUTABLE="$<TARGET_FILE:ProjectHS>"
+        HS_COOKED_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/Cooked"
+        HS_CMAKE_EXECUTABLE="${CMAKE_COMMAND}"
+        HS_BINARY_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}"
+)
+add_dependencies(hs_tools hs_content ProjectHS)
+hs_configure_target(hs_tools)
 
 if(HS_BUILD_TESTS)
     enable_testing()
@@ -320,6 +422,7 @@ if(HS_BUILD_TESTS)
     add_test(NAME foundation.stage1 COMMAND hs_tests)
     add_test(NAME adr.task_system COMMAND hs_tests)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
+    add_test(NAME tools.content-status COMMAND hs_tools status)
     add_test(
         NAME smoke.stage1
         COMMAND
@@ -344,6 +447,44 @@ if(HS_BUILD_TESTS)
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment
     )
     set_tests_properties(experiment.stage1 PROPERTIES TIMEOUT 120)
+
+    add_executable(hs_stage2_tests Tests/stage2_gameplay_tests.cpp)
+    target_link_libraries(hs_stage2_tests PRIVATE hs_core hs_gameplay)
+    hs_configure_target(hs_stage2_tests)
+    add_test(NAME gameplay.stage2 COMMAND hs_stage2_tests)
+    set_tests_properties(gameplay.stage2 PROPERTIES TIMEOUT 120)
+
+    add_executable(hs_stage2_runtime_tests Tests/stage2_runtime_tests.cpp)
+    target_link_libraries(hs_stage2_runtime_tests PRIVATE hs_runtime)
+    hs_configure_target(hs_stage2_runtime_tests)
+    add_test(NAME runtime.stage2 COMMAND hs_stage2_runtime_tests)
+    set_tests_properties(runtime.stage2 PROPERTIES TIMEOUT 30)
+    add_test(
+        NAME experiment.stage2
+        COMMAND
+            hs_experiment --simulation-only
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-stage2
+    )
+    set_tests_properties(experiment.stage2 PROPERTIES TIMEOUT 30)
+    add_test(
+        NAME experiment.pipe.stage2
+        COMMAND
+            hs_experiment --simulation-only --timeline-self-test
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-pipe-stage2
+    )
+    set_tests_properties(experiment.pipe.stage2 PROPERTIES TIMEOUT 30)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        add_test(
+            NAME shader-hot-reload.stage2
+            COMMAND
+                powershell -NoProfile -ExecutionPolicy Bypass
+                -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/shader_hot_reload.ps1"
+                -Executable "$<TARGET_FILE:ProjectHS>"
+                -Shader "${CMAKE_CURRENT_BINARY_DIR}/Shaders/scene_ps.dxil"
+                -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/shader-hot-reload"
+        )
+        set_tests_properties(shader-hot-reload.stage2 PROPERTIES TIMEOUT 45)
+    endif()
 endif()
 
 install(
@@ -380,10 +521,16 @@ install(
 install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_white.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     DESTINATION Cooked
     COMPONENT Runtime
+)
+install(
+    DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Cooked/"
+    DESTINATION Cooked
+    COMPONENT Runtime
+    FILES_MATCHING PATTERN "archer_*.dds"
 )
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)
 
