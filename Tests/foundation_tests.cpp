@@ -1,4 +1,5 @@
 #include <hs/core/fixed_step_clock.hpp>
+#include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
@@ -195,26 +196,6 @@ void TestGameplayDeterminism()
 {
     Check(RunSimulation() == RunSimulation(), "repeated gameplay checksum");
 
-    hs::GameSimulation particle_simulation;
-    Check(particle_simulation.Initialize({1}).Succeeded(), "particle simulation initialize");
-    std::uint32_t particle_count{};
-    for (hs::Tick tick = 1; tick <= 180; ++tick)
-    {
-        hs::InputFrame particle_input{};
-        particle_input.target_tick = tick;
-        (void)particle_simulation.TickFixed(particle_input, hs::FixedStepClock::kFixedStep);
-        for (const auto &spawn : particle_simulation.PendingParticleSpawns())
-        {
-            Check(spawn.tick == tick && spawn.sprite_count == 4,
-                  "particle spawn command contract");
-            particle_count += spawn.count;
-        }
-        particle_simulation.ClearParticleSpawns();
-        particle_simulation.ClearPresentationEvents();
-    }
-    Check(particle_count == 10'000, "particle demo count");
-    Check(particle_simulation.Shutdown().Succeeded(), "particle simulation shutdown");
-
     hs::GameSimulation simulation;
     Check(simulation.Initialize({1}).Succeeded(), "cursor movement simulation initialize");
     hs::InputFrame input{};
@@ -223,6 +204,20 @@ void TestGameplayDeterminism()
     const auto first = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
     Check(first.tick == 1 && first.checksum != 0, "cursor movement simulation tick");
     Check(simulation.Shutdown().Succeeded(), "cursor movement simulation shutdown");
+}
+
+void TestVfxEventParameters()
+{
+    const hs::VfxEventParameters expected{{0.6f, 0.0f, 0.8f}, 1.75f,
+                                          {4.0f, 0.3f, -2.0f},
+                                          static_cast<std::uint32_t>(
+                                              hs::VfxEventFlag::HasTarget)};
+    const auto decoded = hs::DecodeVfxParameters(hs::EncodeVfxParameters(expected));
+    Check(decoded.direction.x == expected.direction.x &&
+              decoded.direction.z == expected.direction.z &&
+              decoded.scale == expected.scale && decoded.target.x == expected.target.x &&
+              decoded.target.z == expected.target.z && decoded.flags == expected.flags,
+          "VFX event parameter round-trip");
 }
 
 } // namespace
@@ -235,6 +230,7 @@ int main()
         TestTaskSystem();
         TestSnapshotExchange();
         TestGameplayDeterminism();
+        TestVfxEventParameters();
         std::cout << "foundation_tests passed\n";
         return 0;
     }

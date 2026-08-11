@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <format>
+#include <filesystem>
 #include <iostream>
 #include <span>
 #include <stdexcept>
@@ -26,9 +27,25 @@ void Check(bool condition, std::string_view message)
     }
 }
 
+const hs::GameData &DefaultGameData()
+{
+    static const auto data = [] {
+        hs::GameData loaded;
+        Check(hs::LoadCookedGameData(
+                  std::filesystem::current_path() / "Cooked" / "game_data.hsbin",
+                  loaded).Succeeded(),
+              "load cooked game data");
+        return loaded;
+    }();
+    return data;
+}
+
 hs::GameData QuietGameData()
 {
     auto data = hs::GameData::Defaults();
+    data.relics = DefaultGameData().relics;
+    data.relic_names = DefaultGameData().relic_names;
+    data.relic_rules = DefaultGameData().relic_rules;
     for (auto &stage : data.spawn_stages)
     {
         stage.per_second = 0;
@@ -131,7 +148,96 @@ void TestStartingEnemyBalanceAndBoundary()
     (void)Tick(simulation);
     Check(simulation.Probe().normal_enemy_count == 1,
           "opening spawn emits the first enemy after sixty-seven ticks");
+    hs::RenderSnapshotStorage spawn_snapshot(32, 2, 2, 8);
+    Check(simulation.WriteRenderSnapshot(spawn_snapshot), "spawn snapshot");
+    const auto spawned_enemy = std::ranges::find_if(
+        spawn_snapshot.View().instances, [](const hs::RenderInstance &instance) {
+            return instance.mesh == hs::RenderMesh::Enemy ||
+                   instance.mesh == hs::RenderMesh::EnemyRanged ||
+                   instance.mesh == hs::RenderMesh::EnemySuicide;
+        });
+    const auto spawn_distance = spawned_enemy != spawn_snapshot.View().instances.end()
+                                    ? std::hypot(spawned_enemy->position.x,
+                                                 spawned_enemy->position.z)
+                                    : 0.0f;
+    Check(spawn_distance >= 20.0f && spawn_distance <= 30.0f,
+          "normal enemies spawn in the original twenty-to-thirty metre ring");
+    Check(std::ranges::none_of(
+              simulation.PendingPresentationEvents(), [](const hs::PresentationEvent &event) {
+                  return event.kind == hs::PresentationKind::Vfx;
+              }),
+          "normal enemy spawning has no warning effect");
     Check(simulation.Shutdown().Succeeded(), "starting balance shutdown");
+}
+
+bool HasVfx(const hs::GameSimulation &simulation, std::string_view id)
+{
+    return std::ranges::any_of(
+        simulation.PendingPresentationEvents(), [&](const hs::PresentationEvent &event) {
+            return event.kind == hs::PresentationKind::Vfx &&
+                   event.asset.value == hs::MakeAssetId(id).value;
+        });
+}
+
+void TestCombatVfxCoverage()
+{
+    auto data = QuietGameData();
+    data.enemies[0].move_speed = 0.0f;
+    hs::GameSimulation enemy;
+    Check(enemy.Initialize({0x564658u}, data).Succeeded(), "combat VFX initialize");
+    Debug(enemy, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {0.5f, 0.0f});
+    for (std::uint32_t tick = 0; tick < 30; ++tick) (void)Tick(enemy);
+    Check(HasVfx(enemy, "particle.enemy.melee.windup") &&
+              HasVfx(enemy, "particle.enemy.melee.hit") &&
+              HasVfx(enemy, "particle.common.player_hit"),
+          "melee windup, melee hit, and player hit effects are connected");
+    Debug(enemy, hs::DebugCommandKind::DamagePlayer, 1'000);
+    (void)Tick(enemy);
+    Check(HasVfx(enemy, "particle.common.player_death"),
+          "fatal damage emits the player death effect");
+    Check(enemy.Shutdown().Succeeded(), "combat VFX shutdown");
+
+    hs::SimulationConfig config{0x424F5353u};
+    config.stationary_combat_simulation = true;
+    hs::GameSimulation bosses;
+    Check(bosses.Initialize(config, QuietGameData()).Succeeded(),
+          "boss VFX initialize");
+    Debug(bosses, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::FiveMinute));
+    Debug(bosses, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::TenMinute));
+    for (std::uint32_t tick = 0; tick < 2'400; ++tick) (void)Tick(bosses);
+    Check(HasVfx(bosses, "particle.boss.dash.start") &&
+              HasVfx(bosses, "particle.boss.dash.impact") &&
+              HasVfx(bosses, "particle.boss.volley.release") &&
+              HasVfx(bosses, "particle.boss.area.activate") &&
+              HasVfx(bosses, "particle.boss.shockwave.release"),
+          "every boss attack family emits its dedicated effect");
+    Check(bosses.Shutdown().Succeeded(), "boss VFX shutdown");
+}
+
+void TestRelicDataIsCookedFromJson()
+{
+    const auto &data = DefaultGameData();
+    const auto &blood_and_fire = data.relics.bleed_burn_explosion;
+    Check(std::abs(blood_and_fire.radius - 5.0f) < 0.0001f &&
+              std::abs(blood_and_fire.damage_multiplier - 2.0f) < 0.0001f &&
+              std::abs(blood_and_fire.per_target_cooldown_seconds - 2.0f) < 0.0001f,
+          "blood and fire uses cooked JSON values");
+
+    const auto &counter = data.relics.damage_knockback;
+    Check(std::abs(counter.radius - 4.0f) < 0.0001f &&
+              std::abs(counter.push_distance - 3.0f) < 0.0001f &&
+              std::abs(counter.slow_fraction - 0.5f) < 0.0001f &&
+              std::abs(counter.slow_duration_seconds - 2.0f) < 0.0001f &&
+              std::abs(counter.cooldown_seconds - 0.1f) < 0.0001f,
+          "damage counter uses cooked JSON values");
+    Check(std::string_view(data.relic_names[3].data()) == "피와 불" &&
+              std::string_view(data.relic_names[9].data()) == "충격 반격" &&
+              !std::string_view(data.relic_rules[3].data()).empty() &&
+              !std::string_view(data.relic_rules[9].data()).empty(),
+          "relic UI text is cooked from JSON");
 }
 
 void TestExperienceBalance()
@@ -629,6 +735,37 @@ void TestTenMinuteBossApproachesAttackRange()
     Check(simulation.Shutdown().Succeeded(), "ten minute boss approach shutdown");
 }
 
+void TestTenMinuteBossGroundAreasStaySeparated()
+{
+    auto data = QuietGameData();
+    data.player_health = 1'000'000;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({144}, data).Succeeded(),
+          "ten minute ground area initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::TenMinute));
+    for (std::uint32_t tick = 0;
+         tick < 20'000 && simulation.Probe().enemy_area_count < 3; ++tick)
+        (void)Tick(simulation);
+    Check(simulation.Probe().enemy_area_count == 3,
+          "ten minute boss creates three ground areas");
+
+    hs::RenderSnapshotStorage snapshot(64, 2, 2, 8);
+    Check(simulation.WriteRenderSnapshot(snapshot), "ten minute ground area snapshot");
+    std::vector<hs::Float3> centers;
+    for (const auto &instance : snapshot.View().instances)
+        if (instance.mesh == hs::RenderMesh::Area && instance.color_rgba == 0x604040FFu &&
+            std::abs(instance.scale.x - 2.2f) < 0.0001f)
+            centers.push_back(instance.position);
+    Check(centers.size() == 3, "three ten minute ground areas are visible");
+    for (std::size_t left = 0; left < centers.size(); ++left)
+        for (std::size_t right = left + 1; right < centers.size(); ++right)
+            Check(std::hypot(centers[left].x - centers[right].x,
+                             centers[left].z - centers[right].z) >= 2.2f,
+                  "ten minute ground area overlap stays below fifty percent");
+    Check(simulation.Shutdown().Succeeded(), "ten minute ground area shutdown");
+}
+
 void TestQwerInputBuffer()
 {
     hs::GameSimulation simulation;
@@ -698,6 +835,12 @@ void TestPauseStopsTicks()
 
 void TestQwerSkills()
 {
+    const auto charged = hs::GameData::Defaults().skills[
+        static_cast<std::size_t>(hs::SkillKind::ChargedShot)];
+    Check(charged.cooldown_seconds == 2.0f &&
+              std::abs(charged.range - 16.8f) < 0.0001f &&
+              charged.pierce_count == 10,
+          "charged shot uses the shorter cooldown, range, and doubled pierce count");
     hs::GameSimulation simulation;
     Check(simulation.Initialize({13}, QuietGameData()).Succeeded(), "QWER initialize");
     for (const auto skill : {hs::SkillKind::PiercingShot, hs::SkillKind::MultiShot,
@@ -740,11 +883,19 @@ void TestQwerSkills()
         charging.player_position.x - before_charge.x,
         charging.player_position.y - before_charge.y);
     Check(charge_move > 0.1f && charge_move < 0.5f &&
-              charging.facing_direction.x > 0.99f,
-          "charged skill moves slowly and faces cursor aim");
+              charging.facing_direction.x > 0.65f &&
+              charging.facing_direction.y > 0.65f,
+          "charged skill moves slowly and faces its movement direction");
     (void)TickEdge(simulation, hs::GameAction::SkillE, hs::EdgeKind::Released,
                    sequence, held);
     Check(simulation.Probe().cooldown_ticks[2] > 0, "E releases charged skill");
+    const auto released = simulation.Probe();
+    const auto aim_x = 20.0f - released.player_position.x;
+    const auto aim_y = -released.player_position.y;
+    const auto aim_length = std::hypot(aim_x, aim_y);
+    Check((released.facing_direction.x * aim_x +
+           released.facing_direction.y * aim_y) / aim_length > 0.999f,
+          "charged skill turns toward aim only when released");
 
     for (std::uint32_t tick = 0; tick < 9; ++tick) (void)Tick(simulation, held);
 
@@ -752,6 +903,38 @@ void TestQwerSkills()
                    sequence, held);
     Check(simulation.Probe().cooldown_ticks[3] > 0, "R casts fourth skill");
     Check(simulation.Shutdown().Succeeded(), "QWER shutdown");
+}
+
+void TestChargedShotCancelsForLevelSelection()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({131}, QuietGameData()).Succeeded(),
+          "charged level-up initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Debug(simulation, hs::DebugCommandKind::GrantExperience, 20);
+    (void)Tick(simulation, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::CardSelection &&
+              simulation.Probe().cooldown_ticks[2] == 0 &&
+              simulation.Probe().player_projectile_count == 0,
+          "level selection cancels an active charge without firing or cooldown");
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released,
+                   sequence, held);
+    Debug(simulation, hs::DebugCommandKind::SelectCard, 0);
+    Debug(simulation, hs::DebugCommandKind::AssignStat,
+          static_cast<std::uint64_t>(hs::StatKind::AttackPower));
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released,
+                   sequence, held);
+    Check(simulation.Probe().cooldown_ticks[2] > 0,
+          "charged shot can start normally after level selection");
+    Check(simulation.Shutdown().Succeeded(), "charged level-up shutdown");
 }
 
 void TestCombatPresentationContracts()
@@ -789,6 +972,15 @@ void TestCombatPresentationContracts()
                              [](const hs::RenderInstance &instance) {
               return instance.mesh == hs::RenderMesh::PlayerProjectile;
           }), "first basic arrow is visible on its release snapshot");
+    Check(std::ranges::any_of(
+              simulation.PendingPresentationEvents(),
+              [](const hs::PresentationEvent &event) {
+                  return event.kind == hs::PresentationKind::Vfx &&
+                         event.asset.value ==
+                             hs::MakeAssetId("particle.basic_attack").value &&
+                         event.position.x > 0.5f && event.position.y > 1.0f;
+              }),
+          "basic attack VFX originates at the bow side instead of the character origin");
 
     held.basic_attack_held = false;
     for (std::uint32_t tick = 0; tick < 34; ++tick)
@@ -834,7 +1026,8 @@ void TestCombatPresentationContracts()
     Check(simulation.WriteRenderSnapshot(snapshot), "charge telegraph snapshot");
     Check(std::ranges::any_of(snapshot.View().instances, [](const hs::RenderInstance &instance) {
               return instance.mesh == hs::RenderMesh::Area &&
-                     instance.color_rgba == 0xFFFFFFFFu && instance.scale.z >= 12.0f;
+                     instance.color_rgba == 0xFFFFFFFFu &&
+                     instance.scale.z >= 4.2f && instance.scale.z < 5.0f;
           }), "charged shot renders a white range line");
     (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released,
                    sequence, held);
@@ -1247,6 +1440,8 @@ void TestRangedWarningAndExplosiveArea()
           "explosive area initialize");
     Debug(explosion_simulation, hs::DebugCommandKind::GrantSkill,
           static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow));
+    Debug(explosion_simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow), 3);
     Debug(explosion_simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
     Debug(explosion_simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 1.5f});
     hs::HeldInputState held;
@@ -1260,6 +1455,14 @@ void TestRangedWarningAndExplosiveArea()
     }
     Check(explosion_simulation.Probe().kills == 2,
           "explosive arrow impact damages every enemy in its radius");
+    hs::RenderSnapshotStorage fire_snapshot(128, 4, 2, 64);
+    Check(explosion_simulation.WriteRenderSnapshot(fire_snapshot),
+          "explosive fire area snapshot");
+    Check(std::ranges::any_of(
+              fire_snapshot.View().persistent_vfx, [](const auto &visual) {
+                  return visual.kind == hs::PersistentVfxKind::FireArea;
+              }),
+          "fire area uses a persistent ground visual distinct from explosion VFX");
     const auto combat_stats = explosion_simulation.Probe();
     Check(combat_stats.damage_by_skill[
               static_cast<std::size_t>(hs::SkillKind::ExplosiveArrow)] ==
@@ -1372,13 +1575,30 @@ void TestTrapRollsForwardAndLeavesOriginTrap()
                    sequence, held);
     Check(simulation.Probe().player_position.x > 0.0f,
           "trap skill starts a forward forced move");
-    hs::RenderSnapshotStorage snapshot(8, 2, 2, 8);
-    Check(simulation.WriteRenderSnapshot(snapshot), "trap roll snapshot");
-    Check(std::ranges::any_of(snapshot.View().instances, [](const auto &instance) {
-              return instance.mesh == hs::RenderMesh::Area &&
-                     instance.color_rgba == 0x6080D040u &&
-                     std::abs(instance.position.x) < 0.01f;
-          }), "trap remains at the roll origin");
+    Check(std::ranges::any_of(
+              simulation.PendingPresentationEvents(), [](const auto &event) {
+                  return event.kind == hs::PresentationKind::Vfx &&
+                         event.asset.value ==
+                             hs::MakeAssetId("particle.skill.trap").value &&
+                         std::abs(event.position.x) < 0.01f;
+              }),
+          "trap effect remains at the roll origin");
+    hs::RenderSnapshotStorage snapshot(64, 4, 2, 64);
+    Check(simulation.WriteRenderSnapshot(snapshot), "immediate trap snapshot");
+    Check(std::ranges::any_of(
+              snapshot.View().persistent_vfx, [](const auto &visual) {
+                  return visual.kind == hs::PersistentVfxKind::TrapPending &&
+                         std::abs(visual.position.x) < 0.01f;
+              }),
+          "trap has a persistent visual on the placement tick");
+    for (std::uint32_t tick = 0; tick < 40; ++tick) (void)Tick(simulation, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "armed trap snapshot");
+    Check(std::ranges::any_of(
+              snapshot.View().persistent_vfx, [](const auto &visual) {
+                  return visual.kind == hs::PersistentVfxKind::TrapArmed;
+              }),
+          "trap persistent visual changes when armed");
     Check(simulation.Shutdown().Succeeded(), "trap roll shutdown");
 }
 
@@ -1399,7 +1619,6 @@ std::vector<hs::GameplayChecksum> RunDeterministicOracle()
         held.aim_world = {30.0f, 0.0f, 0.0f};
         held.basic_attack_held = true;
         checksums.push_back(Tick(simulation, held).checksum);
-        simulation.ClearParticleSpawns();
         simulation.ClearPresentationEvents();
     }
     Check(simulation.Shutdown().Succeeded(), "determinism shutdown");
@@ -1816,6 +2035,74 @@ void TestAlternatingSkillRelicTelemetry()
           "alternating relic records activation and actual cooldown refund");
     Check(simulation.Shutdown().Succeeded(),
           "alternating relic telemetry shutdown");
+}
+
+void TestRemadeRelics()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1;
+    data.enemies[0].move_speed = 0.0f;
+    data.skills[static_cast<std::size_t>(hs::SkillKind::ArrowRain)]
+        .cooldown_seconds = 100.0f;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({223}, data).Succeeded(),
+          "remade relic initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::ArrowRain));
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::KillCooldownSurge));
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::CombatHitChain));
+
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    for (std::uint32_t tick = 0; tick < 20; ++tick) (void)Tick(simulation, held);
+    for (std::uint32_t enemy = 0; enemy < 20; ++enemy)
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0,
+              {3.0f + static_cast<float>(enemy) * 0.6f, 0.0f});
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    held.basic_attack_held = true;
+    for (std::uint32_t tick = 0;
+         tick < 1'200 && simulation.Probe().kills < 20; ++tick)
+        (void)Tick(simulation, held);
+    Check(simulation.Probe().kills == 20, "remade relic test kills twenty enemies");
+
+    const auto &balance = simulation.Probe().balance;
+    const auto activation = static_cast<std::size_t>(
+        hs::UpgradeEffectMetric::Activations);
+    const auto cooldown = static_cast<std::size_t>(
+        hs::UpgradeEffectMetric::CooldownTicksSaved);
+    const auto extra_targets = static_cast<std::size_t>(
+        hs::UpgradeEffectMetric::ExtraTargetsHit);
+    const auto surge = static_cast<std::size_t>(hs::RelicKind::KillCooldownSurge);
+    const auto chain = static_cast<std::size_t>(hs::RelicKind::CombatHitChain);
+    Check(balance.relic_effects[surge][activation] == 2 &&
+              balance.relic_effects[surge][cooldown] > 0,
+          "kill cooldown relic triggers twice and records actual saved cooldown");
+    Check(balance.relic_effects[chain][activation] == 1 &&
+              balance.relic_effects[chain][extra_targets] > 0,
+          "combat chain reaches additional targets after twelve direct hits");
+    Check(simulation.Shutdown().Succeeded(), "remade relic shutdown");
+
+    hs::GameSimulation revive;
+    Check(revive.Initialize({227}, QuietGameData()).Succeeded(),
+          "revive relic initialize");
+    Debug(revive, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::OnceRevive));
+    Debug(revive, hs::DebugCommandKind::DamagePlayer, 1'000);
+    (void)Tick(revive);
+    Check(revive.Probe().phase == hs::SessionPhase::Playing &&
+              revive.Probe().health == 50,
+          "fatal damage revives once at half maximum health");
+    Debug(revive, hs::DebugCommandKind::DamagePlayer, 1'000);
+    (void)Tick(revive);
+    Check(revive.Probe().phase == hs::SessionPhase::Defeat,
+          "revive relic cannot trigger a second time");
+    Check(revive.Shutdown().Succeeded(), "revive relic shutdown");
 }
 
 void TestTagWeightedCardSelection()
@@ -2277,6 +2564,8 @@ int main()
 {
     try
     {
+        TestRelicDataIsCookedFromJson();
+        TestCombatVfxCoverage();
         TestStartingEnemyBalanceAndBoundary();
         TestExperienceBalance();
         TestLevelUpSelectionInputGuard();
@@ -2291,9 +2580,11 @@ int main()
         TestSkillMovementPauseAndResume();
         TestBasicAttackStopsAtFirstEnemy();
         TestTenMinuteBossApproachesAttackRange();
+        TestTenMinuteBossGroundAreasStaySeparated();
         TestQwerInputBuffer();
         TestPauseStopsTicks();
         TestQwerSkills();
+        TestChargedShotCancelsForLevelSelection();
         TestCombatPresentationContracts();
         TestAttackSpeedAnimationRate();
         TestArrowRainTrackingProjectileMoves();
@@ -2308,6 +2599,7 @@ int main()
         TestCombatUpgradeCombinations();
         TestRelicCombinations();
         TestAlternatingSkillRelicTelemetry();
+        TestRemadeRelics();
         TestTimedBossEventsAndSpawnStop();
         TestLargeWaveSchedule();
         TestBossWarningExecutionAndPhaseCancellation();

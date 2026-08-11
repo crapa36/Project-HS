@@ -9,7 +9,7 @@ $legacy = Join-Path $Artifacts "legacy"
 $enhanced = Join-Path $Artifacts "enhanced"
 $options = Join-Path $Artifacts "options"
 
-function Test-Stage1Artifacts([string]$Directory, [int]$ExpectedParticles) {
+function Test-Stage1Artifacts([string]$Directory, [int]$ParticleCapacity) {
     $required = @(
         "result.json",
         "spec.json",
@@ -36,9 +36,9 @@ function Test-Stage1Artifacts([string]$Directory, [int]$ExpectedParticles) {
     }
     $particleStats = Get-Content (Join-Path $Directory "particle_stats.json") -Raw |
         ConvertFrom-Json
-    if ($particleStats.alive -ne $ExpectedParticles -or
-        $particleStats.capacity -ne $ExpectedParticles) {
-        throw "GPU particle lifecycle mismatch: alive=$($particleStats.alive), expected=$ExpectedParticles."
+    if ($particleStats.alive -gt $ParticleCapacity -or
+        $particleStats.capacity -ne $ParticleCapacity) {
+        throw "GPU particle lifecycle mismatch: alive=$($particleStats.alive), capacity=$($particleStats.capacity)."
     }
 }
 

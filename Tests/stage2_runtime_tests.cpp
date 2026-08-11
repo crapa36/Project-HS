@@ -2,6 +2,8 @@
 #include <hs/runtime/experiment_pipe.hpp>
 #include <hs/runtime/save_store.hpp>
 #include <hs/runtime/playtest_recording.hpp>
+#include <hs/core/cooked_format.hpp>
+#include "vfx_catalog.hpp"
 
 #include <Windows.h>
 
@@ -13,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace
 {
@@ -168,6 +171,105 @@ void TestNamedPipeIdempotencyAndTargetTick()
           "accepted command executes once");
 }
 
+void TestVfxCatalog()
+{
+    hs::VfxCatalog catalog;
+    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(),
+          "load cooked VFX catalog");
+    Check(catalog.SpriteCount() == 39, "load data-driven VFX sprite registry");
+
+    hs::PresentationEvent event;
+    event.sequence = 42;
+    event.tick = 10;
+    event.kind = hs::PresentationKind::Vfx;
+    event.asset = hs::MakeAssetId("particle.common.hit");
+    event.position = {1.0f, 2.0f, 3.0f};
+    hs::VfxEventParameters parameters;
+    parameters.direction = {1.0f, 0.0f, 0.0f};
+    parameters.scale = 2.0f;
+    event.parameters = hs::EncodeVfxParameters(parameters);
+
+    std::vector<hs::ParticleSpawnCommand> full;
+    std::vector<hs::ParticleSpawnCommand> half;
+    std::vector<hs::EffectLineSpawnCommand> lines;
+    Check(catalog.Expand(event, 100, full, lines).Succeeded() && !full.empty(),
+          "expand full-quality VFX");
+    Check(std::ranges::all_of(full, [](const auto &command) {
+              return command.renderer == hs::VfxRenderer::Mesh &&
+                     command.primitive == hs::VfxPrimitive::Shard;
+          }),
+          "hit VFX uses procedural mesh shards instead of sprites");
+    Check(catalog.Expand(event, 50, half, lines).Succeeded() && half.size() == full.size(),
+          "expand half-quality VFX");
+      for (std::size_t index = 0; index < full.size(); ++index)
+      {
+          Check(half[index].count == (full[index].count + 1) / 2,
+                "half-quality emitter count");
+          Check(full[index].seed == half[index].seed, "deterministic emitter seed");
+      }
+
+      constexpr std::array new_effects{
+          "particle.common.player_hit",
+          "particle.common.player_death",
+          "particle.enemy.melee.windup",
+          "particle.enemy.melee.hit",
+          "particle.boss.dash.start",
+          "particle.boss.dash.impact",
+          "particle.boss.volley.release",
+          "particle.boss.area.activate",
+          "particle.boss.shockwave.release",
+          "particle.skill.retreat_shot.move",
+          "particle.skill.damage_area.pulse",
+          "particle.skill.fire_area.pulse",
+          "particle.skill.arrow_rain.impact",
+          "particle.skill.arrow_rain.area_pulse",
+          "particle.skill.trap.idle",
+          "particle.status.slow_apply",
+          "particle.status.slow_area",
+      };
+      for (const auto *effect_id : new_effects)
+      {
+          event.asset = hs::MakeAssetId(effect_id);
+          std::vector<hs::ParticleSpawnCommand> particles;
+          std::vector<hs::EffectLineSpawnCommand> effect_lines;
+          Check(catalog.Find(event.asset) != nullptr,
+                "new VFX exists in cooked catalog");
+          Check(catalog.Expand(event, 100, particles, effect_lines).Succeeded() &&
+                    !particles.empty(),
+                "new VFX expands into particles");
+      }
+
+      event.asset = hs::MakeAssetId("particle.line.ricochet");
+    Check(!catalog.Expand(event, 100, full, lines).Succeeded(), "line target required");
+    parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
+    parameters.target = {4.0f, 0.0f, 5.0f};
+    event.parameters = hs::EncodeVfxParameters(parameters);
+    Check(catalog.Expand(event, 100, full, lines).Succeeded() && lines.size() == 1 &&
+              lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
+              lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
+          "expand line VFX");
+
+    const auto check_visual = [&](std::string_view id, hs::VfxRenderer renderer,
+                                  hs::VfxPrimitive primitive) {
+        event.asset = hs::MakeAssetId(id);
+        std::vector<hs::ParticleSpawnCommand> particles;
+        std::vector<hs::EffectLineSpawnCommand> ignored_lines;
+        Check(catalog.Expand(event, 100, particles, ignored_lines).Succeeded() &&
+                  std::ranges::any_of(particles, [&](const auto &command) {
+                      return command.renderer == renderer && command.primitive == primitive;
+                  }),
+              "VFX renderer and primitive survive content cook");
+    };
+    check_visual("particle.status.slow_area", hs::VfxRenderer::Ground,
+                 hs::VfxPrimitive::Rune);
+    check_visual("particle.skill.explosive_arrow.main", hs::VfxRenderer::Mesh,
+                 hs::VfxPrimitive::ShockShell);
+    check_visual("particle.skill.retreat_shot.move", hs::VfxRenderer::Segment,
+                 hs::VfxPrimitive::DashWake);
+    check_visual("particle.status.burn_apply", hs::VfxRenderer::Sprite,
+                 hs::VfxPrimitive::Soft);
+}
+
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
 {
     const auto directory = root / "playtest";
@@ -273,6 +375,7 @@ int main()
     std::filesystem::remove_all(root, error);
     try
     {
+        TestVfxCatalog();
         TestSaveRecovery(root);
         TestSettingsPersistence(root);
         TestExperimentSpecRoundTrip(root);
