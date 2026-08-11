@@ -4,6 +4,7 @@
 #include <hs/gameplay/gameplay_types.hpp>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 
@@ -69,9 +70,88 @@ struct WaveDefinition
     Tick duration_ticks{};
 };
 
+struct RelicDefinitions
+{
+    struct BleedKillHeal
+    {
+        float maximum_hp_heal_fraction{};
+        float internal_cooldown_seconds{};
+    } bleed_kill_heal;
+    struct BurnPropagation
+    {
+        float search_radius{};
+        float copied_burn_strength{};
+        std::uint32_t maximum_targets{};
+    } burn_propagation;
+    struct KillCooldownSurge
+    {
+        std::uint32_t kills_per_trigger{};
+        float cooldown_reduction_seconds{};
+    } kill_cooldown_surge;
+    struct BleedBurnExplosion
+    {
+        float radius{};
+        float damage_multiplier{};
+        float per_target_cooldown_seconds{};
+    } bleed_burn_explosion;
+    struct RadialBasicAttack
+    {
+        std::uint32_t cadence_interval{};
+        std::uint32_t direction_count{};
+        float damage_multiplier{};
+    } radial_basic_attack;
+    struct BasicKillTracker
+    {
+        float search_radius{};
+        float damage_multiplier{};
+        std::uint32_t maximum_triggers_per_attack{};
+    } basic_kill_tracker;
+    struct MovementEcho
+    {
+        float required_distance{};
+        float position_history_age_seconds{};
+        float damage_multiplier{};
+    } movement_echo;
+    struct AlternatingSkills
+    {
+        float window_seconds{};
+        float cooldown_refund_fraction{};
+    } alternating_skills;
+    struct DifferentSkillTracker
+    {
+        float window_seconds{};
+        float damage_multiplier{};
+        float per_target_cooldown_seconds{};
+    } different_skill_tracker;
+    struct DamageKnockback
+    {
+        float radius{};
+        float push_distance{};
+        float slow_fraction{};
+        float slow_duration_seconds{};
+        float cooldown_seconds{};
+    } damage_knockback;
+    struct OnceRevive
+    {
+        float health_fraction{};
+        float invulnerability_seconds{};
+        std::uint32_t maximum_triggers_per_session{};
+    } once_revive;
+    struct CombatHitChain
+    {
+        std::uint32_t direct_hits_per_trigger{};
+        float search_radius{};
+        std::uint32_t maximum_targets{};
+        float damage_multiplier{};
+    } combat_hit_chain;
+};
+
+inline constexpr std::size_t kRelicNameBytes = 64;
+inline constexpr std::size_t kRelicRuleBytes = 512;
+
 struct GameData
 {
-    std::uint32_t version{1};
+    std::uint32_t version{2};
     float arena_half_extent{60.0f};
     std::int32_t player_health{100};
     float player_attack{10.0f};
@@ -89,6 +169,9 @@ struct GameData
     std::array<BossDefinition, 3> bosses{};
     std::array<SpawnStage, 7> spawn_stages{};
     std::array<WaveDefinition, 5> waves{};
+    RelicDefinitions relics{};
+    std::array<std::array<char, kRelicNameBytes>, kRelicCount> relic_names{};
+    std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
 
     [[nodiscard]] static GameData Defaults() noexcept;
 };

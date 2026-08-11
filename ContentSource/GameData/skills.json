@@ -108,19 +108,19 @@
         {"key": "maximum_charge_time", "value": 1, "unit": "seconds"},
         {"key": "minimum_damage_multiplier", "value": 5, "unit": "multiplier"},
         {"key": "maximum_damage_multiplier", "value": 11.5, "unit": "multiplier"},
-        {"key": "minimum_range", "value": 14, "unit": "meters"},
-        {"key": "maximum_range", "value": 28, "unit": "meters"},
+        {"key": "minimum_range", "value": 4.2, "unit": "meters"},
+        {"key": "maximum_range", "value": 16.8, "unit": "meters"},
         {"key": "minimum_collision_radius", "value": 0.25, "unit": "meters"},
         {"key": "maximum_collision_radius", "value": 0.55, "unit": "meters"},
         {"key": "projectile_speed", "value": 35, "unit": "meters_per_second"},
-        {"key": "pierce", "value": 5, "unit": "count"},
+        {"key": "pierce", "value": 10, "unit": "count"},
         {"key": "movement_speed_multiplier_while_charging", "value": 0.7, "unit": "multiplier"},
-        {"key": "cooldown", "value": 4, "unit": "seconds"}
+        {"key": "cooldown", "value": 2, "unit": "seconds"}
       ],
       "rules": [
         "키를 누르는 동안 충전하고 키를 떼면 발사한다.",
         "피해, 사거리, 충돌 반경은 충전율에 따라 선형 증가한다.",
-        "최대 3명의 적을 추가 관통하며 관통 피해는 감소하지 않는다.",
+        "최대 10명의 적을 추가 관통하며 관통 피해는 감소하지 않는다.",
         "충전 중 이동속도는 70%가 된다.",
         "충전 중 기본 공격과 다른 스킬을 사용할 수 없다.",
         "쿨타임은 발사 시점부터 시작한다."

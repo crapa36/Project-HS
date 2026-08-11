@@ -74,6 +74,27 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         {
             config.character_preview = true;
         }
+        else if (argument == "--vfx-showcase")
+        {
+            config.vfx_showcase = true;
+        }
+        else if (argument.starts_with("--skill-vfx-capture="))
+        {
+            const auto value = argument.substr(20);
+            std::from_chars(value.data(), value.data() + value.size(),
+                            config.skill_vfx_capture);
+            config.smoke = true;
+            config.visible = false;
+            config.vsync = false;
+            config.frame_cap = 0;
+        }
+        else if (argument.starts_with("--skill-vfx-upgrade-mask="))
+        {
+            const auto value = argument.substr(25);
+            std::from_chars(value.data(), value.data() + value.size(),
+                            config.skill_vfx_upgrade_mask);
+            config.skill_vfx_upgrade_mask &= 0xFFu;
+        }
         else if (argument == "--record-playtest")
         {
             config.record_playtest = true;

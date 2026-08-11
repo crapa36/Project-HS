@@ -27,6 +27,7 @@
   "entries": [
     {
       "id": "relic.bleed_kill_heal",
+      "display_name": "피의 회복",
       "ordinal": 1,
       "logic_id": "bleeding_enemy_kill_heal",
       "icon_asset_id": "procedural.icon.relic.bleed_kill_heal",
@@ -34,10 +35,11 @@
         {"key": "maximum_hp_heal_fraction", "value": 0.005, "unit": "fraction"},
         {"key": "internal_cooldown", "value": 1, "unit": "seconds"}
       ],
-      "rule": "출혈 중인 적 처치 시 최대 체력의 0.5%를 회복한다. 내부 쿨타임 1초다."
+      "rule": "출혈 중인 적을 처치하면 최대 체력의 0.5%를 회복한다. 1초에 한 번만 발동한다."
     },
     {
       "id": "relic.burn_spread_on_kill",
+      "display_name": "번지는 불꽃",
       "ordinal": 2,
       "logic_id": "burning_enemy_kill_spread",
       "icon_asset_id": "procedural.icon.relic.burn_spread_on_kill",
@@ -46,36 +48,36 @@
         {"key": "maximum_targets", "value": 2, "unit": "count"},
         {"key": "copied_burn_strength", "value": 0.4, "unit": "multiplier"}
       ],
-      "rule": "화상 중인 적 처치 시 남은 화상의 40% 세기를 5m 안의 최대 2명에게 복제한다. 복제된 화상은 다시 전파되지 않는다."
+      "rule": "화상 중인 적을 처치하면 남은 화상의 40%를 5m 안의 적 최대 2명에게 옮긴다. 옮겨진 화상은 다시 전파되지 않는다."
     },
     {
-      "id": "relic.triple_slow_burst",
+      "id": "relic.kill_cooldown_surge",
+      "display_name": "사냥의 가속",
       "ordinal": 3,
-      "logic_id": "active_hit_triple_slow_burst",
-      "icon_asset_id": "procedural.icon.relic.triple_slow_burst",
+      "logic_id": "every_tenth_kill_reduce_active_cooldowns",
+      "icon_asset_id": "procedural.icon.relic.kill_cooldown_surge",
       "parameters": [
-        {"key": "minimum_independent_slows", "value": 3, "unit": "count"},
-        {"key": "radius", "value": 2, "unit": "meters"},
-        {"key": "slow_fraction", "value": 0.2, "unit": "fraction"},
-        {"key": "slow_duration", "value": 2, "unit": "seconds"},
-        {"key": "per_target_cooldown", "value": 2, "unit": "seconds"}
+        {"key": "kills_per_trigger", "value": 10, "unit": "count"},
+        {"key": "all_active_cooldown_reduction", "value": 1.0, "unit": "seconds"}
       ],
-      "rule": "독립 둔화가 3개 이상인 적을 액티브로 맞히면 대상 중심 반경 2m에 20% 둔화를 2초 부여한다. 대상별 쿨타임 2초다."
+      "rule": "적을 10명 처치할 때마다 모든 액티브 스킬의 남은 쿨타임을 1초 줄인다."
     },
     {
       "id": "relic.bleed_burn_explosion",
+      "display_name": "피와 불",
       "ordinal": 4,
       "logic_id": "burn_applied_to_bleeding_explosion",
       "icon_asset_id": "procedural.icon.relic.bleed_burn_explosion",
       "parameters": [
-        {"key": "radius", "value": 2.5, "unit": "meters"},
-        {"key": "damage_multiplier", "value": 12, "unit": "multiplier"},
+        {"key": "radius", "value": 5, "unit": "meters"},
+        {"key": "damage_multiplier", "value": 2, "unit": "multiplier"},
         {"key": "per_target_cooldown", "value": 2, "unit": "seconds"}
       ],
-      "rule": "출혈 중인 적에게 화상을 적용하면 대상 중심 반경 2.5m에 1200% 폭발을 일으킨다. 대상별 쿨타임 2초다."
+      "rule": "출혈 중인 적에게 화상을 적용하면 그 적을 중심으로 반경 5m에 공격력 200% 피해를 준다. 같은 대상에는 2초에 한 번 발동한다."
     },
     {
       "id": "relic.sixth_basic_radial",
+      "display_name": "팔방 사격",
       "ordinal": 5,
       "logic_id": "sixth_basic_attack_radial_arrows",
       "icon_asset_id": "procedural.icon.relic.sixth_basic_radial",
@@ -84,10 +86,11 @@
         {"key": "direction_count", "value": 8, "unit": "count"},
         {"key": "damage_multiplier", "value": 0.45, "unit": "multiplier"}
       ],
-      "rule": "매 6번째 기본 공격이 발사 시점에 8방향으로 각각 45% 화살을 발사한다."
+      "rule": "6번째 기본 공격마다 플레이어를 중심으로 8방향에 공격력 45% 화살을 발사한다."
     },
     {
       "id": "relic.basic_kill_tracking_arrow",
+      "display_name": "추격 본능",
       "ordinal": 6,
       "logic_id": "basic_kill_tracking_arrow",
       "icon_asset_id": "procedural.icon.relic.basic_kill_tracking_arrow",
@@ -96,10 +99,11 @@
         {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
         {"key": "maximum_triggers_per_original_attack", "value": 1, "unit": "count"}
       ],
-      "rule": "기본 공격으로 적을 처치하면 8m 안의 원 공격에 맞지 않은 최근접 적에게 100% 추적 화살을 발사한다. 원 공격당 1회다."
+      "rule": "기본 공격으로 적을 처치하면 8m 안의 아직 맞지 않은 적에게 공격력 100% 추적 화살을 한 발 발사한다."
     },
     {
       "id": "relic.movement_afterimage_arrow",
+      "display_name": "잔상 사격",
       "ordinal": 7,
       "logic_id": "movement_distance_afterimage_arrow",
       "icon_asset_id": "procedural.icon.relic.movement_afterimage_arrow",
@@ -108,10 +112,11 @@
         {"key": "position_history_age", "value": 1, "unit": "seconds"},
         {"key": "damage_multiplier", "value": 0.8, "unit": "multiplier"}
       ],
-      "rule": "누적 6m 이동 후 다음 기본 공격 시 1초 전 플레이어 위치에서 현재 조준 방향으로 80% 잔상 화살을 발사한다."
+      "rule": "6m 이동한 뒤 기본 공격하면 1초 전 위치에서 현재 조준 방향으로 공격력 80% 잔상 화살을 발사한다."
     },
     {
       "id": "relic.alternating_active_refund",
+      "display_name": "연계 숙련",
       "ordinal": 8,
       "logic_id": "different_active_within_window_refund",
       "icon_asset_id": "procedural.icon.relic.alternating_active_refund",
@@ -119,10 +124,11 @@
         {"key": "window", "value": 4, "unit": "seconds"},
         {"key": "cooldown_refund_fraction", "value": 0.15, "unit": "fraction"}
       ],
-      "rule": "직전에 사용한 액티브와 다른 액티브를 4초 안에 사용하면 새로 사용한 스킬의 쿨타임을 15% 반환한다."
+      "rule": "직전에 사용한 것과 다른 액티브 스킬을 4초 안에 사용하면 새로 사용한 스킬의 쿨타임을 15% 돌려받는다."
     },
     {
       "id": "relic.cross_active_tracking_arrow",
+      "display_name": "교차 사격",
       "ordinal": 9,
       "logic_id": "different_active_same_target_tracking_arrow",
       "icon_asset_id": "procedural.icon.relic.cross_active_tracking_arrow",
@@ -131,10 +137,11 @@
         {"key": "damage_multiplier", "value": 5, "unit": "multiplier"},
         {"key": "per_target_cooldown", "value": 2, "unit": "seconds"}
       ],
-      "rule": "같은 적을 2초 안에 서로 다른 액티브로 맞히면 그 적을 향해 500% 추적 화살을 발사한다. 대상별 쿨타임 2초다."
+      "rule": "같은 적을 2초 안에 서로 다른 액티브 스킬로 맞히면 그 적에게 공격력 500% 추적 화살을 발사한다. 같은 대상에는 2초에 한 번 발동한다."
     },
     {
       "id": "relic.on_damage_push_slow",
+      "display_name": "충격 반격",
       "ordinal": 10,
       "logic_id": "player_damaged_push_and_slow",
       "icon_asset_id": "procedural.icon.relic.on_damage_push_slow",
@@ -143,34 +150,36 @@
         {"key": "push_distance", "value": 3, "unit": "meters"},
         {"key": "slow_fraction", "value": 0.5, "unit": "fraction"},
         {"key": "slow_duration", "value": 2, "unit": "seconds"},
-        {"key": "cooldown", "value": 8, "unit": "seconds"}
+        {"key": "cooldown", "value": 0.1, "unit": "seconds"}
       ],
-      "rule": "피해를 받으면 4m 안의 일반 적을 3m 밀치고 50% 둔화를 2초 부여한다. 쿨타임 8초다."
+      "rule": "피해를 받으면 4m 안의 일반 적을 3m 밀치고 50% 둔화를 2초 부여한다. 0.1초에 한 번 발동한다."
     },
     {
-      "id": "relic.low_hp_once_heal",
+      "id": "relic.once_revive",
+      "display_name": "재기의 심장",
       "ordinal": 11,
-      "logic_id": "first_low_hp_heal",
-      "icon_asset_id": "procedural.icon.relic.low_hp_once_heal",
+      "logic_id": "fatal_damage_once_revive",
+      "icon_asset_id": "procedural.icon.relic.once_revive",
       "parameters": [
-        {"key": "maximum_hp_threshold_fraction", "value": 0.25, "unit": "fraction"},
-        {"key": "maximum_hp_heal_fraction", "value": 0.25, "unit": "fraction"},
+        {"key": "revive_hp_fraction", "value": 0.5, "unit": "fraction"},
+        {"key": "invulnerability_duration", "value": 1, "unit": "seconds"},
         {"key": "maximum_triggers_per_session", "value": 1, "unit": "count"}
       ],
-      "rule": "세션 최초로 현재 HP가 0보다 크고 최대 HP의 25% 이하가 되면 최대 체력의 25%를 즉시 회복한다."
+      "rule": "치명적인 피해를 받으면 한 번만 최대 체력의 50%로 부활하고 1초 동안 피해를 받지 않는다."
     },
     {
-      "id": "relic.cumulative_xp_pulse",
+      "id": "relic.combat_hit_chain",
+      "display_name": "전투의 연쇄",
       "ordinal": 12,
-      "logic_id": "cumulative_xp_pull_and_damage",
-      "icon_asset_id": "procedural.icon.relic.cumulative_xp_pulse",
+      "logic_id": "every_twelfth_direct_hit_chain",
+      "icon_asset_id": "procedural.icon.relic.combat_hit_chain",
       "parameters": [
-        {"key": "xp_interval", "value": 50, "unit": "xp"},
-        {"key": "pickup_pull_radius", "value": 15, "unit": "meters"},
-        {"key": "damage_radius", "value": 5, "unit": "meters"},
-        {"key": "damage_multiplier", "value": 1, "unit": "multiplier"}
+        {"key": "direct_hits_per_trigger", "value": 12, "unit": "count"},
+        {"key": "search_radius", "value": 30, "unit": "meters"},
+        {"key": "maximum_targets", "value": 4, "unit": "count"},
+        {"key": "damage_multiplier", "value": 2.5, "unit": "multiplier"}
       ],
-      "rule": "누적 50 XP를 획득할 때마다 15m 안의 획득물을 끌어당기고 플레이어 중심 반경 5m에 100% 피해를 준다."
+      "rule": "직접 공격이 12회 적중할 때마다 30m 안의 가까운 적 최대 4명에게 각각 공격력 250% 피해를 준다."
     }
   ]
 }

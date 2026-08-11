@@ -32,6 +32,9 @@ struct ApplicationConfig
     bool resize_test{};
     bool borderless{};
     bool character_preview{};
+    bool vfx_showcase{};
+    std::uint32_t skill_vfx_capture{0xFFFFFFFFu};
+    std::uint32_t skill_vfx_upgrade_mask{0xFFu};
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};

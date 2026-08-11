@@ -5,6 +5,7 @@ cbuffer FrameConstants : register(b0)
     float4 LightDirectionIntensity;
     float4 LightColor;
     float4 ScreenSize;
+    float4 CameraForwardSoftness;
     float4x4 ShadowViewProjection[3];
     row_major float4x4 ArcherBones[128];
     float4 RenderOptions;
@@ -31,18 +32,23 @@ struct ParticleData
     float4 PositionLife;
     float4 InitialPositionSpawnTime;
     float4 InitialVelocityMaxLife;
-    float4 StartColorSize;
-    float4 EndColorSize;
-    float4 PhysicsSprite;
+    float4 StartColor;
+    float4 EndColor;
+    float4 SizeRotation;
+    float4 PhysicsMetadata;
 };
 
 struct ParticleSpawnCommandGpu
 {
-    float4 PositionLifetime;
-    float4 VelocitySpread;
-    float4 StartColorSize;
-    float4 EndColorSize;
-    float4 Physics;
+    float4 PositionLifetimeMin;
+    float4 DirectionLifetimeMax;
+    float4 ShapeExtentSpeedMin;
+    float4 SpeedConeGravityStretch;
+    float4 StartColor;
+    float4 EndColor;
+    float4 SizeRange;
+    float4 RotationRange;
+    uint4 Modes;
     uint4 Metadata;
 };
 
@@ -50,6 +56,7 @@ StructuredBuffer<InstanceData> Instances : register(t0);
 StructuredBuffer<ParticleData> Particles : register(t1);
 StructuredBuffer<ParticleSpawnCommandGpu> ParticleSpawnCommands : register(t12);
 StructuredBuffer<uint> DrawAliveIndices : register(t13);
+StructuredBuffer<uint> ParticleSpawnOwners : register(t17);
 RWStructuredBuffer<ParticleData> WritableParticles : register(u0);
 RWByteAddressBuffer IndirectArguments : register(u1);
 RWStructuredBuffer<uint> AliveInput : register(u2);
@@ -68,6 +75,7 @@ Texture2D<float4> PostB : register(t10);
 Texture2D<float4> UiTexture : register(t11);
 Texture2DArray<float4> ArcherDiffuse : register(t14);
 Texture2DArray<float4> ArcherNormal : register(t15);
+Texture2DArray<float> VfxMasks : register(t16);
 SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
 SamplerState MaterialSampler : register(s2);
@@ -346,7 +354,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
             ParticleCounters.Store(0, 0);
             ParticleCounters.Store(4, 0);
             ParticleCounters.Store(8, capacity);
-            IndirectArguments.Store4(0, uint4(6, 0, 0, 0));
+            IndirectArguments.Store4(0, uint4(24, 0, 0, 0));
         }
         return;
     }
@@ -356,7 +364,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         if (index == 0)
         {
             ParticleCounters.Store(4, 0);
-            IndirectArguments.Store4(0, uint4(6, 0, 0, 0));
+            IndirectArguments.Store4(0, uint4(24, 0, 0, 0));
         }
         return;
     }
@@ -374,7 +382,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         float age = max(CameraTime.w - particle.InitialPositionSpawnTime.w, 0.0);
         particle.PositionLife.xyz =
             particle.InitialPositionSpawnTime.xyz + particle.InitialVelocityMaxLife.xyz * age;
-        particle.PositionLife.y += 0.5 * particle.PhysicsSprite.x * age * age;
+        particle.PositionLife.y += 0.5 * particle.PhysicsMetadata.x * age * age;
         particle.PositionLife.w = particle.InitialVelocityMaxLife.w - age;
         if (particle.PositionLife.w > 0.0)
         {
@@ -399,25 +407,20 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
             return;
         }
 
-        uint command_index = 0;
-        uint command_particle = index;
-        for (; command_index < ParticleOptions.y; ++command_index)
-        {
-            uint command_count = ParticleSpawnCommands[command_index].Metadata.z;
-            if (command_particle < command_count)
-            {
-                break;
-            }
-            command_particle -= command_count;
-        }
+        uint command_index = ParticleSpawnOwners[index];
         if (command_index >= ParticleOptions.y)
         {
             return;
         }
 
         ParticleSpawnCommandGpu command = ParticleSpawnCommands[command_index];
-        float age = command.Physics.w;
-        if (age >= command.PositionLifetime.w)
+        uint command_particle = index - command.Metadata.z;
+        uint seed = command.Metadata.y ^ command_particle;
+        float age = asfloat(command.Metadata.w);
+        float lifetime = lerp(command.PositionLifetimeMin.w,
+                              command.DirectionLifetimeMax.w,
+                              ParticleRandom(seed));
+        if (age >= lifetime)
         {
             return;
         }
@@ -440,28 +443,72 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         }
 
         uint particle_index = DeadIndices[old_dead_count - 1];
-        uint seed = command.Metadata.w ^ command_particle;
-        float angle = ParticleRandom(seed) * 6.2831853;
-        float vertical = lerp(-0.15, 1.0, ParticleRandom(seed + 1));
-        float radial = sqrt(ParticleRandom(seed + 2));
-        float3 velocity = command.VelocitySpread.xyz +
-                          float3(cos(angle) * radial, vertical, sin(angle) * radial) *
-                              command.VelocitySpread.w;
+        float u = ParticleRandom(seed + 1);
+        float v = ParticleRandom(seed + 2);
+        float angle = v * 6.2831853;
+        float sphere_y = 2.0 * u - 1.0;
+        float sphere_r = sqrt(max(0.0, 1.0 - sphere_y * sphere_y));
+        float3 sphere_direction = float3(cos(angle) * sphere_r, sphere_y,
+                                         sin(angle) * sphere_r);
+        float3 forward = normalize(command.DirectionLifetimeMax.xyz);
+        float3 right = normalize(abs(forward.y) < 0.99
+            ? cross(float3(0, 1, 0), forward)
+            : cross(float3(1, 0, 0), forward));
+        float3 up = cross(forward, right);
+        float3 local = 0;
+        if (command.Modes.x == 1)
+            local = sphere_direction * command.ShapeExtentSpeedMin.x *
+                    pow(ParticleRandom(seed + 3), 1.0 / 3.0);
+        else if (command.Modes.x == 2)
+            local = float3(cos(angle), 0.0, sin(angle)) *
+                    command.ShapeExtentSpeedMin.x * sqrt(u);
+        else if (command.Modes.x == 3)
+            local = float3(cos(angle), 0.0, sin(angle)) *
+                    command.ShapeExtentSpeedMin.x;
+        else if (command.Modes.x == 4)
+            local = right * lerp(-command.ShapeExtentSpeedMin.x,
+                                  command.ShapeExtentSpeedMin.x, u);
+        float3 initial_position = command.PositionLifetimeMin.xyz + local;
+        float3 velocity_direction = forward;
+        if (command.Modes.y == 1)
+        {
+            float cosine = lerp(1.0, cos(command.SpeedConeGravityStretch.y), u);
+            float sine = sqrt(max(0.0, 1.0 - cosine * cosine));
+            velocity_direction = normalize(forward * cosine +
+                (right * cos(angle) + up * sin(angle)) * sine);
+        }
+        else if (command.Modes.y == 2)
+            velocity_direction = length(local) > 0.0001 ? normalize(local) : sphere_direction;
+        else if (command.Modes.y == 3)
+            velocity_direction = length(local) > 0.0001 ? -normalize(local) : -forward;
+        else if (command.Modes.y == 4)
+        {
+            float cosine = u;
+            float sine = sqrt(max(0.0, 1.0 - cosine * cosine));
+            velocity_direction = float3(cos(angle) * sine, cosine, sin(angle) * sine);
+        }
+        float speed = lerp(command.ShapeExtentSpeedMin.w,
+                           command.SpeedConeGravityStretch.x,
+                           ParticleRandom(seed + 4));
+        float3 velocity = velocity_direction * speed;
 
         ParticleData particle;
         particle.InitialPositionSpawnTime =
-            float4(command.PositionLifetime.xyz, CameraTime.w - age);
-        particle.InitialVelocityMaxLife = float4(velocity, command.PositionLifetime.w);
-        particle.PositionLife.xyz = command.PositionLifetime.xyz + velocity * age;
-        particle.PositionLife.y += 0.5 * command.Physics.x * age * age;
-        particle.PositionLife.w = command.PositionLifetime.w - age;
-        particle.StartColorSize = command.StartColorSize;
-        particle.EndColorSize = command.EndColorSize;
-        uint sprite_metadata =
-            min(command.Metadata.x, 0xffff) | (min(command.Metadata.y, 0xffff) << 16);
-        particle.PhysicsSprite =
-            float4(command.Physics.x, command.Physics.y, command.Physics.z,
-                   asfloat(sprite_metadata));
+            float4(initial_position, CameraTime.w - age);
+        particle.InitialVelocityMaxLife = float4(velocity, lifetime);
+        particle.PositionLife.xyz = initial_position + velocity * age;
+        particle.PositionLife.y += 0.5 * command.SpeedConeGravityStretch.z * age * age;
+        particle.PositionLife.w = lifetime - age;
+        particle.StartColor = command.StartColor;
+        particle.EndColor = command.EndColor;
+        particle.SizeRotation = float4(
+            lerp(command.SizeRange.x, command.SizeRange.y, ParticleRandom(seed + 5)),
+            lerp(command.SizeRange.z, command.SizeRange.w, ParticleRandom(seed + 6)),
+            lerp(command.RotationRange.x, command.RotationRange.y, ParticleRandom(seed + 7)),
+            lerp(command.RotationRange.z, command.RotationRange.w, ParticleRandom(seed + 8)));
+        particle.PhysicsMetadata = float4(command.SpeedConeGravityStretch.z,
+            command.SpeedConeGravityStretch.w, asfloat(command.Modes.z),
+            asfloat(command.Modes.w));
         WritableParticles[particle_index] = particle;
 
         uint output_index;
@@ -474,7 +521,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
     {
         uint alive_count = ParticleCounters.Load(4);
         ParticleCounters.Store(0, alive_count);
-        IndirectArguments.Store4(0, uint4(6, alive_count, 0, 0));
+        IndirectArguments.Store4(0, uint4(24, alive_count, 0, 0));
     }
 }
 
@@ -484,6 +531,24 @@ struct ParticleOutput
     float2 Uv : TEXCOORD0;
     float2 LocalUv : TEXCOORD1;
     float4 Color : COLOR0;
+    float3 WorldPosition : TEXCOORD2;
+    nointerpolation uint Facing : TEXCOORD3;
+    nointerpolation uint Sprite : TEXCOORD4;
+    float Progress : TEXCOORD5;
+    nointerpolation uint2 FrameGrid : TEXCOORD6;
+    float3 Normal : TEXCOORD7;
+    nointerpolation uint Renderer : TEXCOORD8;
+    nointerpolation uint Primitive : TEXCOORD9;
+};
+
+static const float3 OctahedronVertices[6] = {
+    float3(0, 1, 0), float3(0, -1, 0), float3(-1, 0, 0),
+    float3(1, 0, 0), float3(0, 0, -1), float3(0, 0, 1)
+};
+
+static const uint3 OctahedronFaces[8] = {
+    uint3(0, 5, 3), uint3(0, 3, 4), uint3(0, 4, 2), uint3(0, 2, 5),
+    uint3(1, 3, 5), uint3(1, 4, 3), uint3(1, 2, 4), uint3(1, 5, 2)
 };
 
 ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
@@ -493,32 +558,82 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
         float2(-1, -1), float2(1, 1), float2(1, -1)
     };
     ParticleData particle = Particles[DrawAliveIndices[instance_id]];
-    float2 corner = corners[vertex_id];
+    uint visual_metadata = asuint(particle.PhysicsMetadata.z);
+    uint facing = visual_metadata & 0xffu;
+    uint renderer = (visual_metadata >> 8u) & 0xffu;
+    uint primitive = (visual_metadata >> 16u) & 0xffu;
+    float2 corner = vertex_id < 6 ? corners[vertex_id] : 0;
     float progress =
         saturate(1.0 - particle.PositionLife.w / max(particle.InitialVelocityMaxLife.w, 0.0001));
-    float size = lerp(particle.StartColorSize.w, particle.EndColorSize.w, progress);
+    float size = lerp(particle.SizeRotation.x, particle.SizeRotation.y, progress);
     float elapsed = particle.InitialVelocityMaxLife.w - particle.PositionLife.w;
-    float rotation = particle.PhysicsSprite.y + particle.PhysicsSprite.z * elapsed;
+    float rotation = particle.SizeRotation.z + particle.SizeRotation.w * elapsed;
     float sine;
     float cosine;
     sincos(rotation, sine, cosine);
     float2 rotated = float2(
         corner.x * cosine - corner.y * sine, corner.x * sine + corner.y * cosine);
-    float3 world =
-        particle.PositionLife.xyz + float3(rotated.x * size, rotated.y * size, 0.0);
+    float3 camera_forward = normalize(CameraForwardSoftness.xyz);
+    float3 axis_x = normalize(cross(float3(0, 1, 0), camera_forward));
+    float3 axis_y = normalize(cross(camera_forward, axis_x));
+    if (renderer == 1 || (renderer == 2 && facing == 2))
+    {
+        axis_x = float3(1, 0, 0);
+        axis_y = float3(0, 0, 1);
+    }
+    else if (facing == 1)
+    {
+        float3 current_velocity = particle.InitialVelocityMaxLife.xyz +
+            float3(0, particle.PhysicsMetadata.x * elapsed, 0);
+        float3 projected = current_velocity - camera_forward * dot(current_velocity, camera_forward);
+        if (length(projected) > 0.0001) axis_y = normalize(projected);
+        axis_x = normalize(cross(axis_y, camera_forward));
+    }
+    float stretch = facing == 1 || renderer == 2 ? particle.PhysicsMetadata.y : 1.0;
+    float3 world = particle.PositionLife.xyz + axis_x * rotated.x * size +
+                   axis_y * rotated.y * size * stretch;
+    float3 normal = -camera_forward;
+    if (renderer == 1 || renderer == 2) normal = float3(0, 1, 0);
 
-    uint sprite_metadata = asuint(particle.PhysicsSprite.w);
-    uint sprite_index = sprite_metadata & 0xffff;
-    uint sprite_count = max(sprite_metadata >> 16, 1);
-    uint frame = (sprite_index + (uint)(progress * sprite_count)) % sprite_count;
-    uint grid = (uint)ceil(sqrt((float)sprite_count));
-    float2 cell = float2(frame % grid, frame / grid);
+    if (renderer == 3)
+    {
+        uint3 face = OctahedronFaces[min(vertex_id / 3, 7u)];
+        uint vertex = vertex_id % 3;
+        uint source_index = vertex == 0 ? face.x : vertex == 1 ? face.y : face.z;
+        float3 local = OctahedronVertices[source_index];
+        float3 scale = float3(0.45, 0.45, 1.25);
+        if (primitive == 8) scale = float3(0.38, 0.32, 0.9);
+        else if (primitive == 9) scale = float3(0.42, 0.55, 0.42);
+        else if (primitive == 10) scale = float3(0.32, 0.8, 0.32);
+        else if (primitive == 11) scale = 1.0;
+        float3 velocity = particle.InitialVelocityMaxLife.xyz +
+                          float3(0, particle.PhysicsMetadata.x * elapsed, 0);
+        float3 forward = length(velocity) > 0.0001 ? normalize(velocity) : float3(0, 1, 0);
+        float3 reference = abs(forward.y) < 0.95 ? float3(0, 1, 0) : float3(1, 0, 0);
+        float3 mesh_x = normalize(cross(reference, forward));
+        float3 mesh_y = normalize(cross(forward, mesh_x));
+        float3 scaled_local = local * scale * size;
+        world = particle.PositionLife.xyz + mesh_x * scaled_local.x +
+                mesh_y * scaled_local.y + forward * scaled_local.z;
+        normal = normalize(mesh_x * local.x + mesh_y * local.y + forward * local.z);
+        corner = local.xy;
+    }
 
     ParticleOutput output;
     output.Position = mul(float4(world, 1.0), ViewProjection);
-    output.Uv = (cell + corner * 0.5 + 0.5) / grid;
+    output.Uv = corner * 0.5 + 0.5;
     output.LocalUv = corner;
-    output.Color = lerp(particle.StartColorSize, particle.EndColorSize, progress);
+    output.Color = lerp(particle.StartColor, particle.EndColor, progress);
+    output.WorldPosition = world;
+    output.Facing = facing;
+    uint sprite_metadata = asuint(particle.PhysicsMetadata.w);
+    output.Sprite = sprite_metadata & 0xffffu;
+    output.FrameGrid = max(uint2((sprite_metadata >> 16u) & 0xffu,
+                                 (sprite_metadata >> 24u) & 0xffu), 1u);
+    output.Progress = progress;
+    output.Normal = normal;
+    output.Renderer = renderer;
+    output.Primitive = primitive;
     return output;
 }
 
@@ -530,10 +645,102 @@ struct OitOutput
 
 OitOutput ParticlePS(ParticleOutput input)
 {
-    float falloff = saturate(1.0 - dot(input.LocalUv, input.LocalUv));
-    float alpha = input.Color.a * falloff;
+    float mask = 1.0;
+    if (input.Renderer == 0)
+    {
+        float2 mask_uv = input.Uv;
+        uint frame_count = input.FrameGrid.x * input.FrameGrid.y;
+        if (frame_count > 1)
+        {
+            uint frame = min((uint)(input.Progress * frame_count), frame_count - 1u);
+            mask_uv = (mask_uv + float2(frame % input.FrameGrid.x,
+                                        frame / input.FrameGrid.x)) /
+                      float2(input.FrameGrid);
+        }
+        mask = VfxMasks.Sample(MaterialSampler, float3(mask_uv, input.Sprite));
+    }
+    else if (input.Renderer == 1)
+    {
+        float2 p = input.LocalUv;
+        float radius = length(p);
+        if (input.Primitive == 1)
+            mask = 1.0 - smoothstep(0.82, 1.0, radius);
+        else if (input.Primitive == 2)
+            mask = 1.0 - smoothstep(0.055, 0.13, abs(radius - 0.82));
+        else if (input.Primitive == 3)
+        {
+            float angle = abs(atan2(p.x, max(p.y, 0.0001)));
+            mask = (1.0 - smoothstep(0.52, 0.64, angle)) *
+                   (1.0 - smoothstep(0.82, 1.0, radius)) * step(0.0, p.y);
+        }
+        else if (input.Primitive == 4)
+        {
+            float arm = abs(abs(p.x) - (0.25 + 0.45 * (p.y * 0.5 + 0.5)));
+            mask = (1.0 - smoothstep(0.06, 0.14, arm)) *
+                   (1.0 - smoothstep(0.82, 1.0, radius));
+        }
+        else if (input.Primitive == 5)
+        {
+            float ring = 1.0 - smoothstep(0.045, 0.11, abs(radius - 0.74));
+            float spokes = 1.0 - smoothstep(0.035, 0.09,
+                abs(sin(atan2(p.y, p.x) * 4.0)) * radius);
+            mask = max(ring, spokes * smoothstep(0.2, 0.3, radius) *
+                             (1.0 - smoothstep(0.65, 0.8, radius)));
+        }
+        else
+        {
+            float angle = atan2(p.y, p.x);
+            float crack = abs(sin(angle * 7.0 + radius * 11.0 +
+                                  sin(angle * 3.0) * 1.8));
+            mask = (1.0 - smoothstep(0.1, 0.3, crack)) *
+                   smoothstep(0.12, 0.25, radius) *
+                   (1.0 - smoothstep(0.82, 1.0, radius));
+        }
+    }
+    else if (input.Renderer == 2)
+    {
+        float across = 1.0 - smoothstep(0.68, 1.0, abs(input.LocalUv.x));
+        float ends = 1.0 - smoothstep(0.82, 1.0, abs(input.LocalUv.y));
+        mask = across * ends;
+        if (input.Primitive == 13)
+            mask *= step(0.42, frac((input.LocalUv.y * 0.5 + 0.5) * 7.0 + CameraTime.w * 5.0));
+        else if (input.Primitive == 14)
+            mask *= 0.55 + 0.45 * sin((input.LocalUv.y + CameraTime.w * 3.0) * 9.0);
+        else if (input.Primitive == 15)
+            mask *= 0.6 + 0.4 * step(0.5, frac((input.LocalUv.y * 0.5 + 0.5) * 5.0));
+        else if (input.Primitive == 16)
+            mask *= 1.0 - input.Progress;
+    }
+    float alpha = input.Color.a * mask;
+    if (input.Renderer == 3)
+    {
+        float3 view_direction = normalize(CameraTime.xyz - input.WorldPosition);
+        float facing_light = saturate(dot(normalize(input.Normal),
+                                          normalize(-LightDirectionIntensity.xyz)));
+        float lighting = 0.35 + 0.65 * facing_light;
+        if (input.Primitive == 11)
+        {
+            float fresnel = pow(1.0 - saturate(abs(dot(input.Normal, view_direction))), 1.5);
+            alpha *= 0.25 + 0.75 * fresnel;
+        }
+        input.Color.rgb *= lighting;
+    }
+    clip(alpha - 0.001);
+    if (input.Renderer == 0 || input.Renderer == 3)
+    {
+        float2 screen_uv = input.Position.xy / ScreenSize.xy;
+        float valid = GBufferNormal.SampleLevel(LinearClamp, screen_uv, 0).a;
+        float3 scene_world = GBufferPosition.SampleLevel(LinearClamp, screen_uv, 0).xyz;
+        float scene_depth = dot(scene_world - CameraTime.xyz, CameraForwardSoftness.xyz);
+        float particle_depth = dot(input.WorldPosition - CameraTime.xyz, CameraForwardSoftness.xyz);
+        alpha *= valid > 0.0 ? saturate((scene_depth - particle_depth) / CameraForwardSoftness.w) : 1.0;
+    }
+    float linear_depth = length(input.WorldPosition - CameraTime.xyz);
+    float z = saturate(linear_depth / 180.0);
+    float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
+                         1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
     OitOutput output;
-    output.Accumulation = float4(input.Color.rgb * alpha, alpha);
+    output.Accumulation = float4(input.Color.rgb * alpha * weight, alpha * weight);
     output.Revealage = alpha.xxxx;
     return output;
 }

@@ -12,6 +12,7 @@ RenderSnapshotStorage::RenderSnapshotStorage(std::size_t instance_capacity,
     poses_.reserve(pose_capacity);
     lights_.reserve(light_capacity);
     ui_.reserve(ui_capacity);
+    persistent_vfx_.reserve(instance_capacity);
 }
 
 void RenderSnapshotStorage::Clear() noexcept
@@ -20,6 +21,7 @@ void RenderSnapshotStorage::Clear() noexcept
     poses_.clear();
     lights_.clear();
     ui_.clear();
+    persistent_vfx_.clear();
 }
 
 bool RenderSnapshotStorage::AddInstance(const RenderInstance &instance)
@@ -46,9 +48,16 @@ bool RenderSnapshotStorage::AddUi(const UiModel &ui)
     return true;
 }
 
+bool RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
+{
+    if (persistent_vfx_.size() == persistent_vfx_.capacity()) return false;
+    persistent_vfx_.push_back(visual);
+    return true;
+}
+
 RenderSnapshot RenderSnapshotStorage::View() const noexcept
 {
-    return {header, instances_, poses_, lights_, ui_, camera};
+    return {header, instances_, poses_, lights_, ui_, persistent_vfx_, camera};
 }
 
 } // namespace hs

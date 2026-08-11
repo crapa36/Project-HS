@@ -1,6 +1,7 @@
 #include <hs/runtime/application.hpp>
 
 #include "runtime_channels.hpp"
+#include "vfx_catalog.hpp"
 #include "window.hpp"
 
 #include <hs/core/fixed_step_clock.hpp>
@@ -77,12 +78,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::uint64_t content_hash{};
     const auto cooked_game_data_path =
         executable_directory / "Cooked" / "game_data.hsbin";
+    const auto cooked_particle_effects_path =
+        executable_directory / "Cooked" / "particle_effects.hsbin";
     if (auto loaded = LoadCookedGameData(
             cooked_game_data_path, game_data, &content_hash);
         !loaded)
     {
         return {loaded};
     }
+    VfxCatalog vfx_catalog;
+    if (auto loaded = VfxCatalog::Load(
+            cooked_particle_effects_path, vfx_catalog);
+        !loaded)
+        return {loaded};
     PlaytestReplay replay;
     const auto replaying = !config.replay_directory.empty();
     if (replaying)
@@ -165,9 +173,26 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.outline = config.outline;
         renderer_config.interpolate = !config.smoke;
         renderer_config.character_preview = config.character_preview;
+        renderer_config.devtools_visible = config.skill_vfx_capture >= kCombatSkillCount;
         renderer_config.render_scale_percent = config.render_scale_percent;
         renderer_config.shadow_resolution = config.shadow_resolution;
         renderer_config.particle_percentage = config.particle_percentage;
+        const auto sprite_binding = [&](std::string_view id) {
+            ParticleSpriteBinding binding;
+            if (const auto *sprite = vfx_catalog.FindSprite(MakeAssetId(id)))
+            {
+                binding.sprite = sprite->index;
+                binding.frame_columns = sprite->frame_columns;
+                binding.frame_rows = sprite->frame_rows;
+            }
+            return binding;
+        };
+        renderer_config.bleed_status_sprite = sprite_binding("particle_sprite.blood");
+        renderer_config.burn_status_sprite = sprite_binding("particle_sprite.fire");
+        renderer_config.slow_status_sprite = sprite_binding("particle_sprite.slow_rune");
+        renderer_config.mark_status_sprite = sprite_binding("particle_sprite.mark_target");
+        renderer_config.trap_sprite = sprite_binding("particle_sprite.trap_rune");
+        renderer_config.fire_area_sprite = sprite_binding("particle_sprite.fire_ground");
         renderer_config.barrier_mode = config.barrier_mode;
         renderer_config.artifact_directory = config.artifact_directory;
 
@@ -184,23 +209,52 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
         auto active_vsync = config.vsync;
         auto active_frame_cap = config.frame_cap;
+        auto active_particle_percentage = config.particle_percentage;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        std::error_code vfx_watch_error;
+        auto vfx_catalog_write = std::filesystem::last_write_time(
+            cooked_particle_effects_path, vfx_watch_error);
+        auto next_vfx_catalog_check = std::chrono::steady_clock::now();
+#endif
 
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         std::array<PresentationEvent, 256> event_storage{};
         std::vector<ParticleSpawnCommand> pending_particle_spawns;
+        std::vector<EffectLineSpawnCommand> pending_effect_lines;
         std::vector<std::string> event_lines;
         std::vector<std::string> timeline_lines;
         std::vector<std::string> gpu_lines;
         event_lines.reserve(32);
         pending_particle_spawns.reserve(256);
+        pending_effect_lines.reserve(64);
         timeline_lines.reserve(static_cast<std::size_t>(config.maximum_ticks) + 16);
 
         Tick last_tick{};
         bool captured{};
         bool resized{};
+        bool vfx_showcase_injected{};
         auto next_frame = std::chrono::steady_clock::now();
         for (;;)
         {
+#if defined(HS_DEVELOPMENT_TOOLS)
+            if (std::chrono::steady_clock::now() >= next_vfx_catalog_check)
+            {
+                next_vfx_catalog_check = std::chrono::steady_clock::now() +
+                                         std::chrono::milliseconds(250);
+                const auto write = std::filesystem::last_write_time(
+                    cooked_particle_effects_path, vfx_watch_error);
+                if (!vfx_watch_error && write != vfx_catalog_write)
+                {
+                    VfxCatalog replacement;
+                    if (auto loaded = VfxCatalog::Load(cooked_particle_effects_path,
+                                                       replacement); loaded)
+                    {
+                        vfx_catalog = std::move(replacement);
+                        vfx_catalog_write = write;
+                    }
+                }
+            }
+#endif
             SettingsData renderer_settings;
             bool apply_renderer_settings{};
             while (channels.renderer_settings.TryPop(renderer_settings))
@@ -219,6 +273,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 active_vsync = renderer_settings.vsync;
                 active_frame_cap = renderer_settings.frame_cap;
+                active_particle_percentage = renderer_settings.particle_percentage;
             }
             NativeWindowMessage window_message;
             while (channels.window_messages.TryPop(window_message))
@@ -252,6 +307,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                    channels.presentation_events.TryPop(event))
             {
                 event_storage[event_count++] = event;
+                if (event.kind == PresentationKind::Vfx)
+                {
+                    if (auto expanded = vfx_catalog.Expand(
+                            event, active_particle_percentage,
+                            pending_particle_spawns, pending_effect_lines); !expanded)
+                    {
+#if defined(HS_DEVELOPMENT_TOOLS)
+                        set_failure(expanded);
+                        break;
+#endif
+                    }
+                }
                 if (event.kind == PresentationKind::Audio &&
                     !channels.audio_events.TryPush(event))
                 {
@@ -259,16 +326,72 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                                    std::memory_order_relaxed);
                 }
                 event_lines.push_back(
-                    std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{}}}\n",
-                                event.sequence, event.tick, static_cast<unsigned>(event.kind)));
+                    std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{},"
+                                "\"asset\":{},\"position\":[{},{},{}]}}\n",
+                                event.sequence, event.tick, static_cast<unsigned>(event.kind),
+                                event.asset.value, event.position.x, event.position.y,
+                                event.position.z));
             }
             const auto snapshots = snapshot_consumer.AcquireLatest();
             if (snapshots.has_current)
             {
-                ParticleSpawnCommand particle_spawn;
-                while (channels.particle_spawns.TryPop(particle_spawn))
+                if (config.vfx_showcase && !vfx_showcase_injected)
                 {
-                    pending_particle_spawns.push_back(particle_spawn);
+                    constexpr std::array colors{
+                        Float4{0.35f, 0.75f, 2.5f, 0.9f},
+                        Float4{1.8f, 0.25f, 2.2f, 0.9f},
+                        Float4{3.0f, 2.4f, 0.5f, 1.0f},
+                        Float4{0.4f, 2.2f, 3.0f, 0.9f},
+                        Float4{0.65f, 0.72f, 0.8f, 0.8f},
+                        Float4{3.2f, 0.55f, 0.08f, 0.95f},
+                        Float4{1.8f, 0.02f, 0.03f, 0.95f},
+                        Float4{0.4f, 1.6f, 2.8f, 0.95f},
+                        Float4{2.8f, 2.8f, 3.0f, 1.0f},
+                        Float4{0.3f, 1.2f, 3.0f, 0.9f},
+                        Float4{0.7f, 1.8f, 3.0f, 0.9f}};
+                    constexpr std::array primitives{
+                        VfxPrimitive::Disc, VfxPrimitive::Ring, VfxPrimitive::Sector,
+                        VfxPrimitive::Chevron, VfxPrimitive::Rune, VfxPrimitive::Cracks,
+                        VfxPrimitive::Arrow, VfxPrimitive::Shard, VfxPrimitive::Ember,
+                        VfxPrimitive::Spike, VfxPrimitive::ShockShell,
+                        VfxPrimitive::SolidTrail, VfxPrimitive::DashedRicochet,
+                        VfxPrimitive::FireTransfer, VfxPrimitive::RelicChain,
+                        VfxPrimitive::DashWake};
+                    for (std::size_t index = 0; index < primitives.size(); ++index)
+                    {
+                        ParticleSpawnCommand command;
+                        command.sequence = 0xF000u + index;
+                        command.tick = 0;
+                        command.position = {
+                            (static_cast<float>(index % 6) - 2.5f) * 3.2f,
+                            index < 6 || index >= 11 ? 0.04f : 1.0f,
+                            (static_cast<float>(index / 6) - 1.0f) * 4.0f};
+                        command.direction = index >= 6 && index < 11
+                                                ? Float3{0.5f, 0.35f, 1.0f}
+                                                : Float3{0.0f, 1.0f, 0.0f};
+                        command.shape = ParticleShape::Point;
+                        command.velocity_mode = ParticleVelocity::Direction;
+                        command.speed_min = command.speed_max =
+                            index >= 6 && index < 11 ? 0.001f : 0.0f;
+                        command.facing = index < 6 || index >= 11
+                                             ? ParticleFacing::Ground
+                                             : ParticleFacing::Velocity;
+                        command.renderer = index < 6 ? VfxRenderer::Ground
+                                           : index < 11 ? VfxRenderer::Mesh
+                                                        : VfxRenderer::Segment;
+                        command.primitive = primitives[index];
+                        command.count = 1;
+                        command.lifetime_min = command.lifetime_max = 10.0f;
+                        command.start_color = command.end_color = colors[index % colors.size()];
+                        command.start_size_min = command.start_size_max =
+                            command.renderer == VfxRenderer::Segment ? 0.18f : 1.15f;
+                        command.end_size_min = command.end_size_max =
+                            command.start_size_min;
+                        command.stretch = command.renderer == VfxRenderer::Segment ? 7.0f : 1.0f;
+                        command.seed = static_cast<std::uint32_t>(index + 1);
+                        pending_particle_spawns.push_back(command);
+                    }
+                    vfx_showcase_injected = true;
                 }
                 std::size_t particle_spawn_count{};
                 while (particle_spawn_count < pending_particle_spawns.size() &&
@@ -277,6 +400,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 {
                     ++particle_spawn_count;
                 }
+                std::size_t effect_line_count{};
+                while (effect_line_count < pending_effect_lines.size() &&
+                       pending_effect_lines[effect_line_count].tick <=
+                           snapshots.current.header.tick)
+                    ++effect_line_count;
                 if (config.resize_test && !resized &&
                     snapshots.current.header.tick >= config.maximum_ticks / 2)
                 {
@@ -294,17 +422,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     static_cast<std::uint32_t>(workers.WorkerCount()),
                     static_cast<std::uint32_t>(channels.action_edges.Size()),
                     static_cast<std::uint32_t>(channels.presentation_events.Size()),
-                    static_cast<std::uint32_t>(channels.particle_spawns.Size()),
+                    0,
                     static_cast<std::uint32_t>(channels.graphics_commands.Size()),
                     static_cast<std::uint32_t>(channels.debug_commands.Size()),
                     channels.dropped_input_edges.load(std::memory_order_relaxed),
                     channels.dropped_presentation_events.load(std::memory_order_relaxed),
-                    channels.dropped_particle_spawns.load(std::memory_order_relaxed)};
+                    0};
                 const auto frame_start = std::chrono::steady_clock::now();
                 if (auto rendered =
                         renderer.Render(
                             snapshots, std::span(event_storage.data(), event_count),
                             std::span(pending_particle_spawns.data(), particle_spawn_count),
+                            std::span(pending_effect_lines.data(), effect_line_count),
                             devtools, frame);
                     !rendered)
                 {
@@ -314,6 +443,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 pending_particle_spawns.erase(
                     pending_particle_spawns.begin(),
                     pending_particle_spawns.begin() + particle_spawn_count);
+                pending_effect_lines.erase(pending_effect_lines.begin(),
+                                           pending_effect_lines.begin() + effect_line_count);
                 const auto frame_microseconds =
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - frame_start)
@@ -457,6 +588,55 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             return;
         }
 
+        const auto captured_skill =
+            config.skill_vfx_capture < kCombatSkillCount
+                ? static_cast<SkillKind>(config.skill_vfx_capture)
+                : SkillKind::Count;
+        if (captured_skill != SkillKind::Count)
+        {
+            if (captured_skill != SkillKind::BasicAttack)
+            {
+                if (auto granted = simulation.ApplyDebugCommand(
+                        {DebugCommandKind::GrantSkill,
+                         static_cast<std::uint64_t>(captured_skill)});
+                    !granted)
+                {
+                    set_failure(granted);
+                    channels.simulation_done.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+            for (std::uint32_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
+            {
+                if ((config.skill_vfx_upgrade_mask & (1u << upgrade)) == 0) continue;
+                if (auto granted = simulation.ApplyDebugCommand(
+                        {DebugCommandKind::GrantUpgrade,
+                         static_cast<std::uint64_t>(captured_skill), upgrade});
+                    !granted)
+                {
+                    set_failure(granted);
+                    channels.simulation_done.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+            constexpr std::array enemy_positions{
+                Float2{-2.0f, 5.0f}, Float2{0.0f, 5.0f}, Float2{2.0f, 5.0f},
+                Float2{-3.0f, 7.0f}, Float2{-1.0f, 7.0f}, Float2{1.0f, 7.0f},
+                Float2{3.0f, 7.0f},  Float2{-2.0f, 9.0f}, Float2{0.0f, 9.0f},
+                Float2{2.0f, 9.0f},  Float2{-1.0f, 11.0f}, Float2{1.0f, 11.0f}};
+            for (const auto position : enemy_positions)
+            {
+                if (auto spawned = simulation.ApplyDebugCommand(
+                        {DebugCommandKind::SpawnEnemy, 0, 0, position});
+                    !spawned)
+                {
+                    set_failure(spawned);
+                    channels.simulation_done.store(true, std::memory_order_release);
+                    return;
+                }
+            }
+        }
+
         FixedStepClock clock;
         auto now = FixedStepClock::Clock::now();
         (void)clock.Advance(now);
@@ -530,6 +710,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         channels.completed_tick.load(std::memory_order_relaxed) + 1;
                     input.held = channels.held_input.load(std::memory_order_acquire);
                     input.ordered_edges = std::span(action_storage.data(), action_count);
+                }
+                if (captured_skill != SkillKind::Count && !replaying)
+                {
+                    input.held.aim_world = {0.0f, 0.0f, 9.0f};
+                    input.held.basic_attack_held =
+                        captured_skill == SkillKind::BasicAttack && input.target_tick >= 5;
+                    const auto add_edge = [&](GameAction action, EdgeKind kind) {
+                        action_storage[action_count++] =
+                            {static_cast<Sequence>(0xF000u + input.target_tick), action, kind};
+                        input.ordered_edges =
+                            std::span(action_storage.data(), action_count);
+                    };
+                    if (captured_skill != SkillKind::BasicAttack && input.target_tick == 5)
+                        add_edge(GameAction::SkillQ, EdgeKind::Pressed);
+                    if (captured_skill == SkillKind::ChargedShot && input.target_tick == 65)
+                        add_edge(GameAction::SkillQ, EdgeKind::Released);
                 }
                 if (next_timeline_action < config.timeline_actions.size() &&
                     config.timeline_actions[next_timeline_action].target_tick < input.target_tick)
@@ -630,15 +826,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
                 simulation.ClearUiCommands();
-                for (const auto &particle_spawn : simulation.PendingParticleSpawns())
-                {
-                    if (!channels.particle_spawns.TryPush(particle_spawn))
-                    {
-                        channels.dropped_particle_spawns.fetch_add(1,
-                                                                   std::memory_order_relaxed);
-                    }
-                }
-                simulation.ClearParticleSpawns();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
                     slot->storage->camera.distance = 28.0f *
@@ -883,14 +1070,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     const auto rendered_frames = channels.rendered_frames.load(std::memory_order_acquire);
     const auto rendered_particles =
         channels.rendered_particles.load(std::memory_order_acquire);
-    const auto expected_particles =
-        10'000u * std::clamp(config.particle_percentage, 50u, 100u) / 100u;
     const auto valid =
         result && final_tick >= (config.smoke ? config.maximum_ticks : 0) && rendered_frames > 0 &&
-        (!config.smoke || rendered_particles == expected_particles) &&
+        rendered_particles <= 10'000u &&
         channels.dropped_input_edges.load() == 0 &&
-        channels.dropped_presentation_events.load() == 0 &&
-        channels.dropped_particle_spawns.load() == 0;
+        channels.dropped_presentation_events.load() == 0;
     if (playtest.Active())
     {
         if (auto finished = playtest.Finish(valid); !finished)
@@ -912,14 +1096,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                           "\"content_hash\":{},"
                           "\"worker_count\":{},"
                           "\"dropped_input_edges\":{},\"dropped_presentation_events\":{},"
-                          "\"dropped_particle_spawns\":{},"
+                          "\"particle_effects_hash\":{},"
                           "\"user_review\":\"awaiting\"}}\n",
                           valid ? "true" : "false", valid ? "true" : "false", final_tick,
                           checksum, rendered_frames, rendered_particles, content_hash,
                           workers.WorkerCount(),
                           channels.dropped_input_edges.load(),
                           channels.dropped_presentation_events.load(),
-                          channels.dropped_particle_spawns.load()));
+                          vfx_catalog.PayloadHash()));
 
     if (!valid && result)
     {

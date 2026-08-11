@@ -251,7 +251,7 @@
     "relic": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "ordinal", "logic_id", "icon_asset_id", "parameters", "rule"],
+      "required": ["id", "display_name", "ordinal", "logic_id", "icon_asset_id", "parameters", "rule"],
       "properties": {
         "id": {"$ref": "#/$defs/stable_id"},
         "ordinal": {"type": "integer", "minimum": 1, "maximum": 12},
@@ -746,24 +746,67 @@
     "particles_document": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["$schema", "schema_version", "category", "gpu_capacity", "entries", "rules"],
+      "required": ["$schema", "schema_version", "category", "gpu_capacity", "sprites", "effects", "rules"],
       "properties": {
         "$schema": {"const": "../../Schemas/game.schema.json"},
-        "schema_version": {"const": 1},
+        "schema_version": {"const": 3},
         "category": {"const": "particles"},
         "gpu_capacity": {"type": "integer", "minimum": 1},
-        "entries": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/particle"}},
+        "sprites": {"type":"array","minItems":1,"maxItems":65535,"items":{"$ref":"#/$defs/particle_sprite"}},
+        "effects": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/particle_effect"}},
         "rules": {"$ref": "#/$defs/string_array"}
       }
     },
-    "particle": {
+    "particle_sprite": {
+      "type":"object","additionalProperties":false,"required":["id","file","frames"],
+      "properties":{
+        "id":{"$ref":"#/$defs/stable_id"},
+        "file":{"type":"string","pattern":"^vfx_[a-z0-9_]+\\.png$"},
+        "frames":{"type":"array","prefixItems":[{"type":"integer","minimum":1,"maximum":16},{"type":"integer","minimum":1,"maximum":16}],"items":false}
+      }
+    },
+    "particle_effect": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "asset_id", "purpose"],
+      "required": ["id", "kind"],
       "properties": {
         "id": {"$ref": "#/$defs/stable_id"},
-        "asset_id": {"$ref": "#/$defs/asset_id"},
-        "purpose": {"type": "string", "minLength": 1}
+        "display_name": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["particles", "line"]},
+        "emitters": {"type":"array","minItems":1,"items":{"$ref":"#/$defs/particle_emitter"}},
+        "color": {"$ref":"#/$defs/float4"},
+        "width": {"type":"number","exclusiveMinimum":0},
+        "lifetime": {"type":"number","exclusiveMinimum":0},
+        "sprite": {"$ref":"#/$defs/stable_id"},
+        "uv_repeat": {"type":"number","minimum":0.01},
+        "scroll_speed": {"type":"number"},
+        "primitive": {"enum":["solid_trail","dashed_ricochet","fire_transfer","relic_chain","dash_wake"]}
+      },
+      "oneOf": [
+        {"properties":{"kind":{"const":"particles"}},"required":["emitters"]},
+        {"properties":{"kind":{"const":"line"}},"required":["color","width","lifetime","sprite","uv_repeat","scroll_speed","primitive"]}
+      ]
+    },
+    "float3": {"type":"array","prefixItems":[{"type":"number"},{"type":"number"},{"type":"number"}],"items":false},
+    "float4": {"type":"array","prefixItems":[{"type":"number"},{"type":"number"},{"type":"number"},{"type":"number"}],"items":false},
+    "range2": {"type":"array","prefixItems":[{"type":"number","minimum":0},{"type":"number","minimum":0}],"items":false},
+    "particle_emitter": {
+      "type":"object","additionalProperties":false,
+      "required":["sprite","renderer","primitive","shape","velocity","facing","local_offset","shape_extent","local_direction","start_color","end_color","lifetime","speed","cone_degrees","start_size","end_size","gravity","rotation","angular_velocity","stretch","count"],
+      "properties":{
+        "sprite":{"$ref":"#/$defs/stable_id"},
+        "renderer":{"enum":["sprite","ground","segment","mesh"]},
+        "primitive":{"enum":["soft","disc","ring","sector","chevron","rune","cracks","arrow","shard","ember","spike","shock_shell","solid_trail","dashed_ricochet","fire_transfer","relic_chain","dash_wake"]},
+        "shape":{"enum":["point","sphere","disc","ring","line"]},
+        "velocity":{"enum":["direction","cone","radial","inward","upward"]},
+        "facing":{"enum":["camera","velocity","ground"]},
+        "local_offset":{"$ref":"#/$defs/float3"},"shape_extent":{"$ref":"#/$defs/float3"},"local_direction":{"$ref":"#/$defs/float3"},
+        "start_color":{"$ref":"#/$defs/float4"},"end_color":{"$ref":"#/$defs/float4"},
+        "lifetime":{"$ref":"#/$defs/range2"},"speed":{"$ref":"#/$defs/range2"},"start_size":{"$ref":"#/$defs/range2"},"end_size":{"$ref":"#/$defs/range2"},
+        "cone_degrees":{"type":"number","minimum":0,"maximum":180},"gravity":{"type":"number"},
+        "rotation":{"type":"array","prefixItems":[{"type":"number"},{"type":"number"}],"items":false},
+        "angular_velocity":{"type":"array","prefixItems":[{"type":"number"},{"type":"number"}],"items":false},
+        "stretch":{"type":"number","minimum":1},"count":{"type":"integer","minimum":1}
       }
     },
     "audio_cues_document": {

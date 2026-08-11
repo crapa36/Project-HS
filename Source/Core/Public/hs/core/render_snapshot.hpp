@@ -13,6 +13,30 @@
 namespace hs
 {
 
+enum class StatusVisual : std::uint32_t
+{
+    Bleed = 1u << 0,
+    Burn = 1u << 1,
+    Slow = 1u << 2,
+    Mark = 1u << 3,
+};
+
+enum class PersistentVfxKind : std::uint8_t
+{
+    TrapPending,
+    TrapArmed,
+    FireArea,
+};
+
+struct PersistentVfxVisual
+{
+    Float3 position{};
+    float yaw{};
+    float radius{};
+    PersistentVfxKind kind{};
+    std::uint64_t stable_id{};
+};
+
 enum class RenderMesh : std::uint8_t
 {
     Archer,
@@ -35,6 +59,7 @@ struct RenderInstance
     std::uint32_t color_rgba{0xFFFFFFFFu};
     RenderMesh mesh{};
     std::uint64_t stable_id{};
+    std::uint32_t status_visual_mask{};
 };
 
 struct AnimationPoseRef
@@ -102,6 +127,7 @@ struct RenderSnapshot
     std::span<const AnimationPoseRef> poses;
     std::span<const LightView> lights;
     std::span<const UiModel> ui;
+    std::span<const PersistentVfxVisual> persistent_vfx;
     CameraView camera{};
 };
 
@@ -116,6 +142,7 @@ class RenderSnapshotStorage
     [[nodiscard]] bool AddPose(const AnimationPoseRef &pose);
     [[nodiscard]] bool AddLight(const LightView &light);
     [[nodiscard]] bool AddUi(const UiModel &ui);
+    [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
     [[nodiscard]] RenderSnapshot View() const noexcept;
 
     RenderSnapshotHeader header{};
@@ -126,6 +153,7 @@ class RenderSnapshotStorage
     std::vector<AnimationPoseRef> poses_;
     std::vector<LightView> lights_;
     std::vector<UiModel> ui_;
+    std::vector<PersistentVfxVisual> persistent_vfx_;
 };
 
 } // namespace hs

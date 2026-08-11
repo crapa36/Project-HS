@@ -26,10 +26,10 @@ constexpr std::array<std::string_view, kCombatSkillCount> kSkillIds{
     "basic_attack", "piercing_shot", "multi_shot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
 constexpr std::array<std::string_view, kRelicCount> kRelicIds{
-    "bleed_kill_heal", "burn_propagation", "slow_burst", "bleed_burn_explosion",
+    "bleed_kill_heal", "burn_propagation", "kill_cooldown_surge", "bleed_burn_explosion",
     "radial_basic_attack", "basic_kill_tracker", "movement_echo",
     "alternating_skills", "different_skill_tracker", "damage_knockback",
-    "low_health_recovery", "experience_pulse"};
+    "once_revive", "combat_hit_chain"};
 constexpr std::array<std::string_view, kStatCount> kStatIds{
     "max_health", "move_speed", "attack_power", "attack_speed",
     "cooldown_reduction", "magnet_radius"};

@@ -10,7 +10,7 @@
         "maximum_hp": 100,
         "current_hp": 100,
         "attack_power": 10,
-        "basic_attack_rate_per_second": 1.2765957447,
+        "basic_attack_rate_per_second": 0.8,
         "movement_speed_mps": 5,
         "magnet_radius_m": 3,
         "global_cooldown_reduction": 0
@@ -29,8 +29,8 @@
           "id": "stat.movement_speed",
           "display_name": "이동속도",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.03,
-          "formula": "5 * (1 + 0.03 * points)",
+          "amount_per_point": 0.3,
+          "formula": "5 * (1 + 0.3 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "movement_speed"
         },
@@ -38,8 +38,8 @@
           "id": "stat.attack_power",
           "display_name": "공격력",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.06,
-          "formula": "10 * (1 + 0.06 * points)",
+          "amount_per_point": 0.1,
+          "formula": "10 * (1 + 0.1 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "attack_power"
         },
@@ -47,8 +47,8 @@
           "id": "stat.basic_attack_speed",
           "display_name": "공격속도",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.07625,
-          "formula": "1.2765957447 * (1 + 0.07625 * points)",
+          "amount_per_point": 0.2,
+          "formula": "1.2 * (1 + 0.2 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "basic_attack_only"
         },
@@ -56,8 +56,8 @@
           "id": "stat.cooldown_reduction",
           "display_name": "쿨타임 감소",
           "operation": "percentage_points_per_point",
-          "amount_per_point": 0.03,
-          "formula": "0.03 * points",
+          "amount_per_point": 0.05,
+          "formula": "0.05 * points",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "global_cooldown_reduction"
         },
@@ -65,8 +65,8 @@
           "id": "stat.magnet_radius",
           "display_name": "자석 반경",
           "operation": "absolute_per_point",
-          "amount_per_point": 0.4,
-          "formula": "3 + 0.4 * points",
+          "amount_per_point": 1,
+          "formula": "3 + 1 * points",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "magnet_radius"
         }

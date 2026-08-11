@@ -14,7 +14,7 @@
             {"key": "delay", "value": 0.08, "unit": "seconds"},
             {"key": "damage_multiplier", "value": 0.7, "unit": "multiplier"}
           ],
-          "rule": "매 3번째 기본 공격 뒤 0.08초에 70% 위력의 기본 공격을 한 번 더 발사한다. 추가 공격은 공격 횟수를 올리고 다른 기본 공격 강화를 적용하지만 이 강화 자신을 다시 발동시키지는 않는다."
+          "rule": "매 3번째 기본 공격 뒤 70% 위력의 기본 공격을 한 번 더 발사한다."
         },
         {
           "ordinal": 2,
@@ -30,7 +30,7 @@
             {"key": "projectile_count", "value": 2, "unit": "count"},
             {"key": "damage_multiplier", "value": 0.5, "unit": "multiplier"}
           ],
-          "rule": "첫 적중 지점에서 원래 진행 방향 기준 ±30°로 각각 50% 화살 1발을 분기한다."
+          "rule": "기본 화살이 적중 후 절반의 데미지를 주는 공격 두개로 분열된다."
         },
         {
           "ordinal": 4,
@@ -39,13 +39,13 @@
             {"key": "direct_arrow_interval", "value": 3, "unit": "count"},
             {"key": "bleed_stacks", "value": 1, "unit": "count"}
           ],
-          "rule": "매 3번째 기본 화살이 출혈 1중첩을 부여한다."
+          "rule": "매 3번째 기본 화살이 출혈을 부여한다."
         },
         {
           "ordinal": 5,
           "logic_id": "fourth_direct_arrow_burn",
           "parameters": [{"key": "direct_arrow_interval", "value": 4, "unit": "count"}],
-          "rule": "매 4번째 기본 화살이 화상을 부여한다. 출혈 강화와 함께 선택하면 같은 화살에 두 상태가 적용된다."
+          "rule": "매 4번째 기본 화살이 화상을 부여한다."
         },
         {
           "ordinal": 6,
@@ -55,16 +55,16 @@
             {"key": "slow_duration", "value": 1, "unit": "seconds"},
             {"key": "cooldown_reduction", "value": 0.2, "unit": "seconds"}
           ],
-          "rule": "첫 적중 대상에게 20% 둔화를 1초 부여하고 남은 쿨타임이 가장 긴 액티브 스킬 하나를 0.2초 단축한다."
+          "rule": "기본 공격이 첫 적중 대상에게 20% 둔화를 1초 부여하고 남은 쿨타임이 가장 긴 액티브 스킬 하나를 0.2초 단축한다."
         },
         {
           "ordinal": 7,
           "logic_id": "missed_arrow_reacquire",
           "parameters": [
-            {"key": "damage_multiplier", "value": 1.75, "unit": "multiplier"},
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
             {"key": "maximum_retargets", "value": 1, "unit": "count"}
           ],
-          "rule": "적에게 적중하지 않은 화살이 최대 사거리 지점에서 가까운 적을 다시 찾아 더 넓은 판정과 175% 위력으로 1회 추적한다."
+          "rule": "적에게 적중하지 않은 화살이 최대 사거리 지점에서 가까운 적을 찾아 추적한다."
         },
         {
           "ordinal": 8,
@@ -75,7 +75,7 @@
             {"key": "projectile_count", "value": 3, "unit": "count"},
             {"key": "damage_multiplier_per_arrow", "value": 0.7, "unit": "multiplier"}
           ],
-          "rule": "액티브 스킬 사용 후 3초 안에 발사하는 다음 기본 공격을 조준 방향 기준 -15°/0°/+15°의 70% 화살 3발로 변경한다."
+          "rule": "액티브 스킬 사용 후 3초 안에 발사하는 다음 기본 공격이 70% 데미지의 화살 3발로 변경된다."
         }
       ]
     },
@@ -89,7 +89,7 @@
             {"key": "delay", "value": 0.08, "unit": "seconds"},
             {"key": "damage_multiplier", "value": 5, "unit": "multiplier"}
           ],
-          "rule": "발사 직후 새 대상을 추적하는 매우 강한 후속 화살을 추가 발사한다."
+          "rule": "발사 직후 적을 추적하는 매우 강한 후속 화살을 추가 발사한다."
         },
         {
           "ordinal": 2,
@@ -129,13 +129,13 @@
             {"key": "angle_from_direction", "value": 90, "unit": "degrees"},
             {"key": "damage_multiplier", "value": 2, "unit": "multiplier"}
           ],
-          "rule": "일반 적 3명을 관통할 때마다 현재 위치에서 좌우 직각 방향으로 기본 위력 화살을 발사한다."
+          "rule": "일반 적 3명을 관통할 때마다 좌우 방향으로 추가로 적을 공격하는 화살이 생성된다."
         },
         {
           "ordinal": 6,
           "logic_id": "align_hit_normal_enemy",
-          "parameters": [{"key": "move_distance", "value": 1.5, "unit": "meters"}],
-          "rule": "적중한 일반 적을 진행 방향으로 1.5m 이동시킨다."
+          "parameters": [{"key": "move_distance", "value": 3.0, "unit": "meters"}],
+          "rule": "적중한 일반 적을 공격 방향으로 밀어낸다."
         },
         {
           "ordinal": 7,
@@ -254,7 +254,7 @@
           "ordinal": 4,
           "logic_id": "additional_pierce",
           "parameters": [{"key": "additional_pierce", "value": 4, "unit": "count"}],
-          "rule": "추가 관통 수가 4 늘어나 최대 7명의 적을 추가 관통한다."
+          "rule": "추가 관통 수가 4 늘어나 최대 14명의 적을 추가 관통한다."
         },
         {
           "ordinal": 5,
@@ -423,7 +423,7 @@
             {"key": "arrows_per_kill", "value": 3, "unit": "count"},
             {"key": "maximum_arrows_per_cast", "value": 9, "unit": "count"}
           ],
-          "rule": "원본 도탄으로 적을 처치하면 주변의 서로 다른 적을 향해 기본 위력 추적 화살을 최대 3발 발사한다. 한 시전에서 최대 9발이며 이 화살은 다른 강화를 발동하지 않는다."
+          "rule": "원본 도탄으로 적을 처치하면 주변의 서로 다른 적을 향해 기본 위력 추적 화살을 최대 3발 발사한다."
         },
         {
           "ordinal": 6,
@@ -438,7 +438,7 @@
             {"key": "cooldown_reduction_per_ricochet", "value": 0.2, "unit": "seconds"},
             {"key": "maximum_reduction", "value": 1, "unit": "seconds"}
           ],
-          "rule": "원본 화살이 도탄할 때마다 다른 액티브 중 남은 쿨타임이 가장 긴 스킬을 0.2초 단축한다. 기본 도탄 5회에서 최대 1초 단축한다."
+          "rule": "원본 화살이 도탄할 때마다 다른 액티브 중 남은 쿨타임이 가장 긴 스킬을 0.2초 단축한다. (최대 1초)"
         },
         {
           "ordinal": 8,

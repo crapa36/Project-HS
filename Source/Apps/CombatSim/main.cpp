@@ -36,11 +36,11 @@ constexpr std::array<std::string_view, hs::kCombatSkillCount> kSkillIds{
     "basic_attack", "piercing_shot", "multishot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
 constexpr std::array<std::string_view, hs::kRelicCount> kRelicIds{
-    "bleed_kill_heal", "burn_spread_on_kill", "triple_slow_burst",
+    "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge",
     "bleed_burn_explosion", "sixth_basic_radial", "basic_kill_tracking_arrow",
     "movement_afterimage_arrow", "alternating_active_refund",
-    "cross_active_tracking_arrow", "on_damage_push_slow", "low_hp_once_heal",
-    "cumulative_xp_pulse"};
+    "cross_active_tracking_arrow", "on_damage_push_slow", "once_revive",
+    "combat_hit_chain"};
 constexpr std::array<std::string_view, hs::kStatCount> kStatIds{
     "maximum_hp", "movement_speed", "attack_power", "basic_attack_speed",
     "cooldown_reduction", "magnet_radius"};
@@ -372,7 +372,6 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count()));
         simulation.ClearPresentationEvents();
-        simulation.ClearParticleSpawns();
         const auto probe = simulation.Probe();
         maximum_enemies = std::max(maximum_enemies,
                                    probe.normal_enemy_count + probe.boss_count);
@@ -430,9 +429,16 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
             }
     Json relics = Json::array();
     for (const auto relic : build.relics)
+    {
+        Json effects = Json::object();
+        for (std::size_t metric = 0; metric < kEffectIds.size(); ++metric)
+            effects[std::string(kEffectIds[metric])] =
+                probe.balance.relic_effects[relic][metric];
         relics.push_back({{"id", kRelicIds[relic]},
                           {"damage", probe.balance.relic_damage[relic]},
-                          {"triggers", probe.balance.relic_triggers[relic]}});
+                          {"triggers", probe.balance.relic_triggers[relic]},
+                          {"effects", std::move(effects)}});
+    }
 
     Json result{{"build_id", build.id},
                 {"seed", seed},
@@ -686,7 +692,6 @@ Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
         const auto input = MakeCombatInput(before, snapshot.View(), target_tick, control);
         (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
         simulation.ClearPresentationEvents();
-        simulation.ClearParticleSpawns();
         const auto after = simulation.Probe();
         constexpr std::array phase_boundaries{hs::Tick{300 * 60},
                                                hs::Tick{600 * 60},

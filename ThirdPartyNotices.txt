@@ -3,6 +3,7 @@ Project HS third-party notices
 Taskflow 4.1.0 - MIT
 Flecs 4.1.6 - MIT
 D3D12 Memory Allocator 3.2.0 - MIT
+DirectXTex 2026-05-07 - MIT; Cook-only
 DirectX 12 Agility SDK 1.619.4 - Microsoft license
 WinPixEventRuntime 1.0.240308001 - Microsoft license
 Autodesk FBX SDK 2020.3.7 VS2022 - Autodesk SDK license; Cook-only, not redistributed

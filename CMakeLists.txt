@@ -50,6 +50,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+set(BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    directxtex
+    GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
+    GIT_TAG 4feb3e1
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(directxtex)
+
 FetchContent_Declare(
     imgui
     GIT_REPOSITORY https://github.com/ocornut/imgui.git
@@ -194,6 +204,7 @@ add_library(
     Source/Runtime/Private/experiment_spec.cpp
     Source/Runtime/Private/playtest_recording.cpp
     Source/Runtime/Private/save_store.cpp
+    Source/Runtime/Private/vfx_catalog.cpp
     Source/Runtime/Private/window.cpp
 )
 target_sources(
@@ -342,7 +353,7 @@ add_executable(hs_content Source/Apps/Content/main.cpp)
 target_link_libraries(
     hs_content
     PRIVATE hs_core hs_gameplay nlohmann_json::nlohmann_json
-            fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
+            DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
 )
 add_dependencies(hs_content hs_shaders)
 target_compile_definitions(
@@ -351,6 +362,7 @@ target_compile_definitions(
         HS_COOKED_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/Cooked"
         HS_SHADER_DIRECTORY="${HS_SHADER_DIRECTORY}"
         HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
+        HS_VFX_TEXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX"
         HS_SCHEMA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
         HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
@@ -370,6 +382,9 @@ set(
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/AimRecoil.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DeathBackward.fbx"
 )
+file(GLOB HS_VFX_TEXTURE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX/*.png"
+)
 file(GLOB HS_ARCHER_TEXTURE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbm/*"
 )
@@ -377,7 +392,7 @@ list(APPEND HS_ARCHER_ASSET_SOURCES ${HS_ARCHER_TEXTURE_SOURCES})
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     COMMAND "$<TARGET_FILE:hs_content>" --cook
-    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
+    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
@@ -393,6 +408,8 @@ add_custom_command(
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
     VERBATIM
 )
 add_custom_target(
@@ -439,6 +456,13 @@ if(HS_BUILD_TESTS)
     )
     set_tests_properties(smoke.stage1 PROPERTIES TIMEOUT 120)
     add_test(
+        NAME vfx.showcase
+        COMMAND
+            ProjectHS --smoke --vfx-showcase --ticks=60 --barriers=legacy
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/vfx-showcase
+    )
+    set_tests_properties(vfx.showcase PROPERTIES TIMEOUT 120)
+    add_test(
         NAME barriers.stage1
         COMMAND
             powershell -NoProfile -ExecutionPolicy Bypass
@@ -458,6 +482,7 @@ if(HS_BUILD_TESTS)
     add_executable(hs_stage2_tests Tests/stage2_gameplay_tests.cpp)
     target_link_libraries(hs_stage2_tests PRIVATE hs_core hs_gameplay)
     hs_configure_target(hs_stage2_tests)
+    add_dependencies(hs_stage2_tests hs_cooked_content)
     add_test(NAME gameplay.stage2 COMMAND hs_stage2_tests)
     set_tests_properties(gameplay.stage2 PROPERTIES TIMEOUT 120)
     add_test(
@@ -470,6 +495,10 @@ if(HS_BUILD_TESTS)
 
     add_executable(hs_stage2_runtime_tests Tests/stage2_runtime_tests.cpp)
     target_link_libraries(hs_stage2_runtime_tests PRIVATE hs_runtime)
+    target_include_directories(hs_stage2_runtime_tests PRIVATE
+        Source/Runtime/Private
+        Source/RendererD3D12/Public
+    )
     hs_configure_target(hs_stage2_runtime_tests)
     add_test(NAME runtime.stage2 COMMAND hs_stage2_runtime_tests)
     set_tests_properties(runtime.stage2 PROPERTIES TIMEOUT 30)
@@ -536,6 +565,8 @@ install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     DESTINATION Cooked
     COMPONENT Runtime

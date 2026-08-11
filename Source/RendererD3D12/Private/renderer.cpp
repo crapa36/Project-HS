@@ -60,7 +60,7 @@ constexpr std::uint32_t kParticleCount = 10'000;
 constexpr std::uint32_t kUiWidth = 1'920;
 constexpr std::uint32_t kUiHeight = 1'080;
 constexpr std::uint32_t kPostTextureDescriptorCount = 10;
-constexpr std::uint32_t kCharacterDescriptorCount = 2;
+constexpr std::uint32_t kCharacterDescriptorCount = 3;
 constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kTextureDescriptorCount =
     kPostTextureDescriptorCount + kCharacterDescriptorCount;
@@ -121,6 +121,7 @@ struct FrameConstants
     DirectX::XMFLOAT4 light_direction_intensity;
     DirectX::XMFLOAT4 light_color;
     DirectX::XMFLOAT4 screen_size;
+    DirectX::XMFLOAT4 camera_forward_softness;
     DirectX::XMFLOAT4X4 shadow_view_projection[3];
     DirectX::XMFLOAT4X4 archer_bones[kMaxCharacterBones];
     DirectX::XMFLOAT4 render_options;
@@ -134,20 +135,27 @@ struct GpuParticle
     DirectX::XMFLOAT4 position_life;
     DirectX::XMFLOAT4 initial_position_spawn_time;
     DirectX::XMFLOAT4 initial_velocity_max_life;
-    DirectX::XMFLOAT4 start_color_size;
-    DirectX::XMFLOAT4 end_color_size;
-    DirectX::XMFLOAT4 physics_sprite;
+    DirectX::XMFLOAT4 start_color;
+    DirectX::XMFLOAT4 end_color;
+    DirectX::XMFLOAT4 size_rotation;
+    DirectX::XMFLOAT4 physics_metadata;
 };
+static_assert(sizeof(GpuParticle) == 112);
 
 struct GpuParticleSpawnCommand
 {
-    DirectX::XMFLOAT4 position_lifetime;
-    DirectX::XMFLOAT4 velocity_spread;
-    DirectX::XMFLOAT4 start_color_size;
-    DirectX::XMFLOAT4 end_color_size;
-    DirectX::XMFLOAT4 physics;
+    DirectX::XMFLOAT4 position_lifetime_min;
+    DirectX::XMFLOAT4 direction_lifetime_max;
+    DirectX::XMFLOAT4 shape_extent_speed_min;
+    DirectX::XMFLOAT4 speed_cone_gravity_stretch;
+    DirectX::XMFLOAT4 start_color;
+    DirectX::XMFLOAT4 end_color;
+    DirectX::XMFLOAT4 size_range;
+    DirectX::XMFLOAT4 rotation_range;
+    DirectX::XMUINT4 modes;
     DirectX::XMUINT4 metadata;
 };
+static_assert(sizeof(GpuParticleSpawnCommand) == 160);
 
 
 struct AllocationResource
@@ -307,6 +315,60 @@ struct DdsHeader
     std::uint32_t caps;
     std::array<std::uint32_t, 4> remaining_caps;
 };
+
+struct DdsHeaderDx10
+{
+    DXGI_FORMAT format;
+    D3D12_RESOURCE_DIMENSION dimension;
+    std::uint32_t misc_flag;
+    std::uint32_t array_size;
+    std::uint32_t misc_flags2;
+};
+
+[[nodiscard]] Result LoadVfxMaskDds(const std::filesystem::path &path,
+                                    DdsHeader &header,
+                                    std::uint32_t &sprite_count,
+                                    std::span<const std::byte> &pixels,
+                                    std::vector<std::byte> &storage)
+{
+    if (auto loaded = ReadBinary(path, storage); !loaded) return loaded;
+    constexpr std::uint32_t dds_magic = 0x20534444;
+    constexpr std::uint32_t dx10 = 0x30315844;
+    if (storage.size() < sizeof(dds_magic) + sizeof(header) + sizeof(DdsHeaderDx10))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "VFX mask DDS header is truncated.");
+    std::uint32_t magic{};
+    DdsHeaderDx10 extension{};
+    std::memcpy(&magic, storage.data(), sizeof(magic));
+    std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
+    std::memcpy(&extension, storage.data() + sizeof(magic) + sizeof(header),
+                sizeof(extension));
+    if (magic != dds_magic || header.size != 124 || header.pixel_format.size != 32 ||
+        header.pixel_format.four_cc != dx10 || header.width != 512 ||
+        header.height != 512 || header.mip_count != 10 ||
+        extension.format != DXGI_FORMAT_BC4_UNORM ||
+        extension.dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        extension.array_size == 0 ||
+        extension.array_size > std::numeric_limits<std::uint16_t>::max())
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "VFX mask DDS layout is invalid.");
+    pixels = std::span(storage).subspan(sizeof(magic) + sizeof(header) +
+                                        sizeof(extension));
+    std::size_t expected{};
+    sprite_count = extension.array_size;
+    for (std::uint32_t slice = 0; slice < sprite_count; ++slice)
+        for (std::uint32_t mip = 0; mip < header.mip_count; ++mip)
+        {
+            const auto width = std::max(1u, header.width >> mip);
+            const auto height = std::max(1u, header.height >> mip);
+            expected += static_cast<std::size_t>((width + 3) / 4) *
+                        ((height + 3) / 4) * 8;
+        }
+    if (pixels.size() != expected)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "VFX mask DDS payload is invalid.");
+    return Result::Success();
+}
 
 [[nodiscard]] Result LoadRgbaDds(const std::filesystem::path &path,
                                  std::uint32_t &width, std::uint32_t &height,
@@ -583,6 +645,9 @@ struct D3D12Renderer::Impl
     AllocationResource archer_vertices;
     AllocationResource archer_diffuse;
     AllocationResource archer_normal;
+    AllocationResource vfx_masks;
+    std::uint32_t vfx_sprite_count{};
+    Tick last_status_visual_tick{std::numeric_limits<Tick>::max()};
     AllocationResource particles;
     std::array<AllocationResource, 2> particle_alive;
     AllocationResource particle_dead;
@@ -1180,7 +1245,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
     character_range.RegisterSpace = 0;
     character_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
 
-    std::array<D3D12_ROOT_PARAMETER1, 14> parameters{};
+    std::array<D3D12_ROOT_PARAMETER1, 15> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     parameters[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -1220,6 +1285,10 @@ Result D3D12Renderer::Impl::CreatePipeline()
     parameters[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[13].DescriptorTable = {1, &character_range};
     parameters[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameters[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[14].Descriptor = {17, 0,
+                                 D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
+    parameters[14].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -1375,7 +1444,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
     particle.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     particle.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
     particle.BlendState.RenderTarget[0].BlendEnable = TRUE;
-    particle.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+    particle.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
     particle.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
     particle.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
     particle.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
@@ -1384,10 +1453,10 @@ Result D3D12Renderer::Impl::CreatePipeline()
     particle.BlendState.IndependentBlendEnable = TRUE;
     particle.BlendState.RenderTarget[1].BlendEnable = TRUE;
     particle.BlendState.RenderTarget[1].SrcBlend = D3D12_BLEND_ZERO;
-    particle.BlendState.RenderTarget[1].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+    particle.BlendState.RenderTarget[1].DestBlend = D3D12_BLEND_INV_SRC_COLOR;
     particle.BlendState.RenderTarget[1].BlendOp = D3D12_BLEND_OP_ADD;
     particle.BlendState.RenderTarget[1].SrcBlendAlpha = D3D12_BLEND_ZERO;
-    particle.BlendState.RenderTarget[1].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+    particle.BlendState.RenderTarget[1].DestBlendAlpha = D3D12_BLEND_ONE;
     particle.BlendState.RenderTarget[1].BlendOpAlpha = D3D12_BLEND_OP_ADD;
     particle.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     particle.NumRenderTargets = 2;
@@ -1752,6 +1821,85 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
     {
         return uploaded;
     }
+    {
+        DdsHeader header{};
+        std::vector<std::byte> storage;
+        std::span<const std::byte> pixels;
+        if (auto loaded = LoadVfxMaskDds(cooked / "vfx_masks.dds", header,
+                                         vfx_sprite_count,
+                                         pixels, storage);
+            !loaded)
+            return loaded;
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width = header.width;
+        description.Height = header.height;
+        description.DepthOrArraySize = static_cast<UINT16>(vfx_sprite_count);
+        description.MipLevels = static_cast<std::uint16_t>(header.mip_count);
+        description.Format = DXGI_FORMAT_BC4_UNORM;
+        description.SampleDesc = {1, 0};
+        D3D12MA::ALLOCATION_DESC default_allocation{};
+        default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (auto created = CreateAllocation(vfx_masks, default_allocation,
+                                            description,
+                                            D3D12_RESOURCE_STATE_COPY_DEST);
+            !created)
+            return created;
+
+        const auto subresource_count = vfx_sprite_count * header.mip_count;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(subresource_count);
+        std::vector<UINT> rows(subresource_count);
+        std::vector<UINT64> row_sizes(subresource_count);
+        UINT64 upload_size{};
+        device->GetCopyableFootprints(&description, 0, subresource_count, 0,
+                                      footprints.data(), rows.data(),
+                                      row_sizes.data(), &upload_size);
+        uploads.emplace_back();
+        D3D12MA::ALLOCATION_DESC upload_allocation{};
+        upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto created = CreateAllocation(uploads.back(), upload_allocation,
+                                            BufferDescription(upload_size),
+                                            D3D12_RESOURCE_STATE_GENERIC_READ);
+            !created)
+            return created;
+        std::byte *mapped{};
+        D3D12_RANGE no_read{};
+        result = uploads.back().resource->Map(
+            0, &no_read, reinterpret_cast<void **>(&mapped));
+        if (FAILED(result)) return HResultFailure("Map VFX mask upload", result);
+        std::size_t source_offset{};
+        for (std::uint32_t subresource = 0; subresource < subresource_count;
+             ++subresource)
+        {
+            for (std::uint32_t row = 0; row < rows[subresource]; ++row)
+            {
+                std::memcpy(mapped + footprints[subresource].Offset +
+                                static_cast<std::size_t>(row) *
+                                    footprints[subresource].Footprint.RowPitch,
+                            pixels.data() + source_offset,
+                            static_cast<std::size_t>(row_sizes[subresource]));
+                source_offset += static_cast<std::size_t>(row_sizes[subresource]);
+            }
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = vfx_masks.resource.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            destination.SubresourceIndex = subresource;
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = uploads.back().resource.Get();
+            source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            source.PlacedFootprint = footprints[subresource];
+            command_list->CopyTextureRegion(&destination, 0, 0, 0, &source,
+                                            nullptr);
+        }
+        uploads.back().resource->Unmap(0, nullptr);
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = vfx_masks.resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        command_list->ResourceBarrier(1, &barrier);
+    }
     result = command_list->Close();
     if (FAILED(result))
     {
@@ -1782,6 +1930,13 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         create_view(archer_diffuse.resource.Get(),
                     DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         create_view(archer_normal.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        D3D12_SHADER_RESOURCE_VIEW_DESC vfx_view{};
+        vfx_view.Format = DXGI_FORMAT_BC4_UNORM;
+        vfx_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        vfx_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        vfx_view.Texture2DArray.MipLevels = 10;
+        vfx_view.Texture2DArray.ArraySize = vfx_sprite_count;
+        device->CreateShaderResourceView(vfx_masks.resource.Get(), &vfx_view, handle);
     }
     return Result::Success();
 }
@@ -2389,9 +2544,11 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
 Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                              std::span<const PresentationEvent> events,
                              std::span<const ParticleSpawnCommand> particle_spawns,
+                             std::span<const EffectLineSpawnCommand> effect_lines,
                              const DevToolsFrameData &devtools,
                              RendererFrameResult &frame_result)
 {
+    static_cast<void>(effect_lines);
     if (!impl_->initialized)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -2425,11 +2582,135 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
 
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
+    std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
+                                                 snapshot.instances.end());
+    std::vector<ParticleSpawnCommand> frame_particle_spawns(particle_spawns.begin(),
+                                                             particle_spawns.end());
+    if (snapshot.header.tick != impl_->last_status_visual_tick)
+    {
+        impl_->last_status_visual_tick = snapshot.header.tick;
+        for (const auto &source : snapshot.instances)
+        {
+            const auto add_status = [&](StatusVisual status,
+                                        const ParticleSpriteBinding &binding,
+                                        ParticleFacing facing, VfxRenderer renderer,
+                                        VfxPrimitive primitive, float height,
+                                        float size, Float4 color, std::uint32_t count) {
+                if ((source.status_visual_mask & static_cast<std::uint32_t>(status)) == 0)
+                    return;
+                ParticleSpawnCommand command;
+                command.sequence = source.stable_id ^ snapshot.header.tick ^
+                                   static_cast<std::uint32_t>(status);
+                command.tick = snapshot.header.tick;
+                command.position = {source.position.x, source.position.y + height,
+                                    source.position.z};
+                command.shape = ParticleShape::Point;
+                command.velocity_mode = ParticleVelocity::Direction;
+                command.facing = facing;
+                command.renderer = renderer;
+                command.primitive = primitive;
+                command.sprite = binding.sprite;
+                command.frame_columns = binding.frame_columns;
+                command.frame_rows = binding.frame_rows;
+                command.direction = {0.0f, 1.0f, 0.0f};
+                command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
+                command.start_color = command.end_color = color;
+                command.start_size_min = command.start_size_max = size;
+                command.end_size_min = command.end_size_max = size;
+                command.count = count;
+                command.seed = static_cast<std::uint32_t>(command.sequence);
+                frame_particle_spawns.push_back(command);
+            };
+            add_status(StatusVisual::Bleed, impl_->config.bleed_status_sprite,
+                       ParticleFacing::Velocity, VfxRenderer::Mesh,
+                       VfxPrimitive::Shard, source.scale.y * 0.55f,
+                       source.scale.y * 0.22f, {2.2f, 0.03f, 0.04f, 0.72f}, 2);
+            add_status(StatusVisual::Burn, impl_->config.burn_status_sprite,
+                       ParticleFacing::Camera, VfxRenderer::Sprite,
+                       VfxPrimitive::Soft, source.scale.y * 0.5f,
+                       source.scale.y * 0.3f, {5.0f, 1.3f, 0.1f, 0.68f}, 2);
+            add_status(StatusVisual::Slow, impl_->config.slow_status_sprite,
+                       ParticleFacing::Ground, VfxRenderer::Ground,
+                       VfxPrimitive::Rune, 0.025f, source.scale.x * 0.72f,
+                       {0.3f, 1.2f, 3.0f, 0.55f}, 1);
+            add_status(StatusVisual::Mark, impl_->config.mark_status_sprite,
+                       ParticleFacing::Velocity, VfxRenderer::Mesh,
+                       VfxPrimitive::Spike, source.scale.y * 1.1f,
+                       source.scale.y * 0.28f, {3.0f, 1.8f, 0.2f, 0.78f}, 1);
+        }
+        for (const auto &visual : snapshot.persistent_vfx)
+        {
+            const auto trap = visual.kind != PersistentVfxKind::FireArea;
+            const auto &binding = trap ? impl_->config.trap_sprite
+                                       : impl_->config.fire_area_sprite;
+            ParticleSpawnCommand command;
+            command.sequence = visual.stable_id ^ snapshot.header.tick;
+            command.tick = snapshot.header.tick;
+            command.position = visual.position;
+            command.shape = ParticleShape::Point;
+            command.velocity_mode = ParticleVelocity::Direction;
+            command.facing = ParticleFacing::Ground;
+            command.renderer = VfxRenderer::Ground;
+            command.primitive = trap ? VfxPrimitive::Rune : VfxPrimitive::Cracks;
+            command.sprite = binding.sprite;
+            command.frame_columns = binding.frame_columns;
+            command.frame_rows = binding.frame_rows;
+            command.direction = {0.0f, 1.0f, 0.0f};
+            command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
+            command.start_size_min = command.start_size_max = visual.radius;
+            command.end_size_min = command.end_size_max = visual.radius;
+            command.rotation_min = command.rotation_max = visual.yaw;
+            command.start_color = command.end_color =
+                visual.kind == PersistentVfxKind::TrapPending
+                    ? Float4{1.1f, 0.75f, 0.2f, 0.18f}
+                    : visual.kind == PersistentVfxKind::TrapArmed
+                          ? Float4{1.7f, 1.05f, 0.25f, 0.34f}
+                          : Float4{2.8f, 0.45f, 0.04f, 0.28f};
+            command.count = 1;
+            command.seed = static_cast<std::uint32_t>(command.sequence);
+            frame_particle_spawns.push_back(command);
+        }
+    }
+    for (const auto &line : effect_lines)
+    {
+        const auto dx = line.end.x - line.start.x;
+        const auto dz = line.end.z - line.start.z;
+        const auto length = std::hypot(dx, dz);
+        if (length <= 0.0001f) continue;
+        ParticleSpawnCommand command;
+        command.sequence = line.sequence;
+        command.tick = line.tick;
+        command.position = {(line.start.x + line.end.x) * 0.5f, 0.035f,
+                            (line.start.z + line.end.z) * 0.5f};
+        command.shape = ParticleShape::Line;
+        command.velocity_mode = ParticleVelocity::Direction;
+        command.facing = ParticleFacing::Ground;
+        command.renderer = VfxRenderer::Segment;
+        command.primitive = line.primitive;
+        command.sprite = line.sprite;
+        command.frame_columns = line.frame_columns;
+        command.frame_rows = line.frame_rows;
+        command.shape_extent = {length * 0.5f, 0.0f, 0.0f};
+        command.direction = {dz / length, 0.0f, -dx / length};
+        command.lifetime_min = command.lifetime_max = line.lifetime;
+        command.start_color = command.end_color = line.color;
+        command.start_size_min = command.start_size_max = line.width * 2.5f;
+        command.end_size_min = command.end_size_max = line.width * 2.5f;
+        command.stretch = length / std::max(line.width * 5.0f, 0.001f);
+        command.rotation_min = command.rotation_max = std::atan2(dx, dz);
+        command.count = 1;
+        command.seed = static_cast<std::uint32_t>(line.sequence);
+        frame_particle_spawns.push_back(command);
+    }
+    const auto original_instance_count = snapshot.instances.size();
     const auto particle_spawn_data_offset =
-        (kInstanceDataOffset + sizeof(GpuInstance) * snapshot.instances.size() + 255u) &
+        (kInstanceDataOffset + sizeof(GpuInstance) * render_instances.size() + 255u) &
         ~std::size_t{255u};
-    const auto required_upload_size = particle_spawn_data_offset +
-        sizeof(GpuParticleSpawnCommand) * std::max<std::size_t>(particle_spawns.size(), 1);
+    const auto particle_owner_data_offset =
+        (particle_spawn_data_offset + sizeof(GpuParticleSpawnCommand) *
+             std::max<std::size_t>(frame_particle_spawns.size(), 1) + 255u) & ~std::size_t{255u};
+    const auto required_upload_size = particle_owner_data_offset +
+        sizeof(std::uint32_t) * kParticleCount;
     if (required_upload_size > frame.upload_size)
     {
         std::size_t new_size = frame.upload_size;
@@ -2456,6 +2737,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::uint64_t debug_value{};
     std::uint32_t debug_secondary{};
 #if defined(HS_DEVELOPMENT_TOOLS)
+    if (impl_->config.devtools_visible)
+    {
     ImGui_ImplDX12_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -2562,22 +2845,24 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         ImGui::BulletText("%.*s", static_cast<int>(pass.size()), pass.data());
     ImGui::End();
     ImGui::Render();
+    }
 #endif
     if (auto result = impl_->RasterizeUi(back_buffer_index, snapshot.ui); !result)
     {
         return result;
     }
-    const auto instance_count = snapshot.instances.size();
+    const auto instance_count = render_instances.size();
 
     auto *constants = reinterpret_cast<FrameConstants *>(frame.mapped);
     auto *instances = reinterpret_cast<GpuInstance *>(frame.mapped + kInstanceDataOffset);
     auto *gpu_particle_spawns =
         reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + particle_spawn_data_offset);
-    const auto particle_capacity =
-        kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) / 100u;
+    auto *gpu_particle_owners =
+        reinterpret_cast<std::uint32_t *>(frame.mapped + particle_owner_data_offset);
+    constexpr auto particle_capacity = kParticleCount;
     std::uint32_t gpu_particle_spawn_count{};
     std::uint32_t total_particles_to_spawn{};
-    for (const auto &source : particle_spawns)
+    for (const auto &source : frame_particle_spawns)
     {
         if (total_particles_to_spawn == particle_capacity)
         {
@@ -2586,24 +2871,43 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto age_ticks =
             snapshot.header.tick > source.tick ? snapshot.header.tick - source.tick : 0;
         const auto age = static_cast<float>(age_ticks) / 60.0f;
-        if (age >= source.lifetime || source.count == 0)
+        if (age >= source.lifetime_max || source.count == 0)
         {
             continue;
         }
         const auto count = std::min(source.count, particle_capacity - total_particles_to_spawn);
         auto &target_spawn = gpu_particle_spawns[gpu_particle_spawn_count++];
-        target_spawn.position_lifetime = {source.position.x, source.position.y,
-                                          source.position.z, source.lifetime};
-        target_spawn.velocity_spread = {source.velocity.x, source.velocity.y,
-                                        source.velocity.z, source.velocity_spread};
-        target_spawn.start_color_size = {source.start_color.x, source.start_color.y,
-                                         source.start_color.z, source.start_size};
-        target_spawn.end_color_size = {source.end_color.x, source.end_color.y,
-                                       source.end_color.z, source.end_size};
-        target_spawn.physics = {source.gravity, source.rotation, source.angular_velocity, age};
-        target_spawn.metadata = {
-            source.sprite_index, std::max(source.sprite_count, 1u), count,
-            static_cast<std::uint32_t>(source.sequence ^ (source.sequence >> 32))};
+        target_spawn.position_lifetime_min = {source.position.x, source.position.y,
+                                              source.position.z, source.lifetime_min};
+        target_spawn.direction_lifetime_max = {source.direction.x, source.direction.y,
+                                               source.direction.z, source.lifetime_max};
+        target_spawn.shape_extent_speed_min = {source.shape_extent.x, source.shape_extent.y,
+                                               source.shape_extent.z, source.speed_min};
+        target_spawn.speed_cone_gravity_stretch = {source.speed_max, source.cone_radians,
+                                                   source.gravity, source.stretch};
+        target_spawn.start_color = {source.start_color.x, source.start_color.y,
+                                    source.start_color.z, source.start_color.w};
+        target_spawn.end_color = {source.end_color.x, source.end_color.y,
+                                  source.end_color.z, source.end_color.w};
+        target_spawn.size_range = {source.start_size_min, source.start_size_max,
+                                   source.end_size_min, source.end_size_max};
+        target_spawn.rotation_range = {source.rotation_min, source.rotation_max,
+                                       source.angular_velocity_min,
+                                       source.angular_velocity_max};
+        const auto sprite_metadata = static_cast<std::uint32_t>(source.sprite) |
+                                     (static_cast<std::uint32_t>(source.frame_columns) << 16u) |
+                                     (static_cast<std::uint32_t>(source.frame_rows) << 24u);
+        const auto visual_metadata = static_cast<std::uint32_t>(source.facing) |
+                                     (static_cast<std::uint32_t>(source.renderer) << 8u) |
+                                     (static_cast<std::uint32_t>(source.primitive) << 16u);
+        target_spawn.modes = {static_cast<std::uint32_t>(source.shape),
+                              static_cast<std::uint32_t>(source.velocity_mode),
+                              visual_metadata,
+                              sprite_metadata};
+        target_spawn.metadata = {count, source.seed, total_particles_to_spawn,
+                                 std::bit_cast<std::uint32_t>(age)};
+        std::fill_n(gpu_particle_owners + total_particles_to_spawn, count,
+                    gpu_particle_spawn_count - 1);
         total_particles_to_spawn += count;
     }
     const auto particle_delta_ticks =
@@ -2684,6 +2988,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         static_cast<float>(impl_->render_width), static_cast<float>(impl_->render_height),
         1.0f / static_cast<float>(impl_->render_width),
         1.0f / static_cast<float>(impl_->render_height)};
+    DirectX::XMFLOAT3 camera_forward;
+    DirectX::XMStoreFloat3(&camera_forward, direction);
+    constants->camera_forward_softness = {camera_forward.x, camera_forward.y,
+                                          camera_forward.z, 0.35f};
     constexpr float cascade_extent[] = {18.0f, 36.0f, 72.0f};
     const auto light_direction = DirectX::XMVector3Normalize(
         DirectX::XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f));
@@ -2835,11 +3143,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                    impl_->archer_material_count};
     for (std::size_t index = 0; index < instance_count; ++index)
     {
-        const auto &source = snapshot.instances[index];
+        const auto &source = render_instances[index];
         auto position = source.position;
         auto yaw_value = source.yaw;
         if (snapshots.has_previous &&
-            snapshots.previous.instances.size() == instance_count &&
+            index < original_instance_count &&
+            snapshots.previous.instances.size() == original_instance_count &&
             source.stable_id != 0 &&
             snapshots.previous.instances[index].stable_id == source.stable_id)
         {
@@ -3017,6 +3326,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             10, impl_->particle_counters.resource->GetGPUVirtualAddress());
         impl_->command_list->SetComputeRootShaderResourceView(
             11, frame.upload.resource->GetGPUVirtualAddress() + particle_spawn_data_offset);
+        impl_->command_list->SetComputeRootShaderResourceView(
+            14, frame.upload.resource->GetGPUVirtualAddress() + particle_owner_data_offset);
 
         const auto dispatch_phase = [&](std::uint32_t phase, std::uint32_t item_count) {
             impl_->command_list->SetComputeRoot32BitConstant(6, phase, 0);
@@ -3156,6 +3467,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     transparent_pass.Read(particles, Access::ShaderRead);
     transparent_pass.Read(particle_alive_output, Access::ShaderRead);
     transparent_pass.Read(indirect_arguments, Access::IndirectArgs);
+    transparent_pass.Read(gbuffer_position, Access::ShaderRead);
+    transparent_pass.Read(gbuffer_normal, Access::ShaderRead);
     transparent_pass.Write(oit_accumulation, Access::RenderTarget);
     transparent_pass.Write(oit_revealage, Access::RenderTarget);
     transparent_pass.SetExecute([&](RenderPassContext &) {
@@ -3265,12 +3578,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return graph_result;
     }
 #if defined(HS_DEVELOPMENT_TOOLS)
-    impl_->command_list->RSSetViewports(1, &output_viewport);
-    impl_->command_list->RSSetScissorRects(1, &output_scissor);
-    impl_->command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-    ID3D12DescriptorHeap *imgui_heaps[] = {impl_->imgui_heap.Get()};
-    impl_->command_list->SetDescriptorHeaps(1, imgui_heaps);
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), impl_->command_list.Get());
+    if (impl_->config.devtools_visible)
+    {
+        impl_->command_list->RSSetViewports(1, &output_viewport);
+        impl_->command_list->RSSetScissorRects(1, &output_scissor);
+        impl_->command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        ID3D12DescriptorHeap *imgui_heaps[] = {impl_->imgui_heap.Get()};
+        impl_->command_list->SetDescriptorHeaps(1, imgui_heaps);
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), impl_->command_list.Get());
+    }
     impl_->TransitionTexture(impl_->back_buffers[back_buffer_index].Get(),
                              D3D12_RESOURCE_STATE_RENDER_TARGET,
                              D3D12_RESOURCE_STATE_PRESENT,
@@ -3307,8 +3623,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     ++impl_->frame_number;
     frame_result = {impl_->frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)
-                    ImGui::GetIO().WantCaptureMouse,
-                    ImGui::GetIO().WantCaptureKeyboard,
+                    impl_->config.devtools_visible && ImGui::GetIO().WantCaptureMouse,
+                    impl_->config.devtools_visible && ImGui::GetIO().WantCaptureKeyboard,
 #else
                     false, false,
 #endif
@@ -3521,6 +3837,7 @@ Result D3D12Renderer::Shutdown()
     impl_->archer_vertices.Reset();
     impl_->archer_diffuse.Reset();
     impl_->archer_normal.Reset();
+    impl_->vfx_masks.Reset();
     impl_->particles.Reset();
     for (auto &alive : impl_->particle_alive)
     {

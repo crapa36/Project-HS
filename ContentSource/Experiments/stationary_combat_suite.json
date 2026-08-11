@@ -29,7 +29,7 @@
       "relics": [
         "bleed_kill_heal",
         "burn_spread_on_kill",
-        "triple_slow_burst",
+        "kill_cooldown_surge",
         "bleed_burn_explosion",
         "alternating_active_refund",
         "cross_active_tracking_arrow"

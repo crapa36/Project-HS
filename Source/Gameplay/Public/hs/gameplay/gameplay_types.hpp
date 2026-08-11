@@ -99,7 +99,7 @@ enum class RelicKind : std::uint8_t
 {
     BleedKillHeal,
     BurnPropagation,
-    SlowBurst,
+    KillCooldownSurge,
     BleedBurnExplosion,
     RadialBasicAttack,
     BasicKillTracker,
@@ -107,8 +107,8 @@ enum class RelicKind : std::uint8_t
     AlternatingSkills,
     DifferentSkillTracker,
     DamageKnockback,
-    LowHealthRecovery,
-    ExperiencePulse,
+    OnceRevive,
+    CombatHitChain,
     Count,
 };
 

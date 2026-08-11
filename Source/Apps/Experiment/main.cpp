@@ -625,7 +625,6 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                    << '\n';
         }
         simulation.ClearPresentationEvents();
-        simulation.ClearParticleSpawns();
         if (tick.tick % 60 == 0)
             (void)WriteHeartbeat(heartbeat_path, tick.tick, "running");
         if ((spec.termination.on_victory && tick.phase == hs::SessionPhase::Victory) ||

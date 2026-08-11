@@ -1,4 +1,5 @@
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/cooked_particle_effects.hpp>
 #include <hs/gameplay/game_data.hpp>
 
 #ifndef NOMINMAX
@@ -7,6 +8,7 @@
 
 #include <fbxsdk.h>
 #include <nlohmann/json.hpp>
+#include <DirectXTex.h>
 
 #include <Windows.h>
 #include <wincodec.h>
@@ -41,6 +43,10 @@
 
 #ifndef HS_SCHEMA_FILE
 #define HS_SCHEMA_FILE "Schemas/game.schema.json"
+#endif
+
+#ifndef HS_VFX_TEXTURE_DIRECTORY
+#define HS_VFX_TEXTURE_DIRECTORY "ContentSource/Textures/VFX"
 #endif
 
 #ifndef HS_CHARACTER_MODEL
@@ -78,6 +84,7 @@ struct ContentSources
 {
     std::unordered_map<std::string, Json> documents;
     std::string source_bytes;
+    std::string all_source_bytes;
 };
 
 struct CharacterCookResult
@@ -364,9 +371,10 @@ void ValidateRoot(const Json &document, std::string_view name)
     {
         Fail(name, "$/\u0024schema", "unexpected schema reference");
     }
-    if (RequireInteger(document, name, "$", "schema_version") != 1)
+    const auto expected_version = name == "particles" ? 3 : 1;
+    if (RequireInteger(document, name, "$", "schema_version") != expected_version)
     {
-        Fail(name, "$/schema_version", "only schema version 1 is supported");
+        Fail(name, "$/schema_version", "unsupported schema version");
     }
     if (RequireString(document, name, "$", "category") != name)
     {
@@ -407,7 +415,7 @@ void ValidateDocuments(const ContentSources &sources)
                      {"$schema", "schema_version", "category", "entries",
                       "rendering_rules"});
     RequireExactKeys(particles, "particles",
-                     {"$schema", "schema_version", "category", "gpu_capacity", "entries",
+                     {"$schema", "schema_version", "category", "gpu_capacity", "sprites", "effects",
                       "rules"});
     RequireExactKeys(relics, "relics",
                      {"$schema", "schema_version", "category",
@@ -438,7 +446,7 @@ void ValidateDocuments(const ContentSources &sources)
     const auto &level_entries = RequireArray(level, "level", "$", "entries");
     const auto &stat_entries = RequireArray(stats, "stats", "$", "entries");
     const auto &material_entries = RequireArray(materials, "materials", "$", "entries");
-    const auto &particle_entries = RequireArray(particles, "particles", "$", "entries");
+    const auto &particle_entries = RequireArray(particles, "particles", "$", "effects");
     const auto &relic_entries = RequireArray(relics, "relics", "$", "entries");
     const auto &audio_entries = RequireArray(audio, "audio_cues", "$", "entries");
     const auto &ui_entries = RequireArray(ui, "ui_strings", "$", "entries");
@@ -453,7 +461,6 @@ void ValidateDocuments(const ContentSources &sources)
     RequireCount(relic_entries, "relics", "$/entries", 12);
     RequireCount(upgrade_groups, "upgrades", "$/groups", 9);
     RequireCount(material_entries, "materials", "$/entries", 11);
-    RequireCount(particle_entries, "particles", "$/entries", 13);
     RequireCount(audio_entries, "audio_cues", "$/entries", 8);
     RequireCount(ui_entries, "ui_strings", "$/entries", 28);
 
@@ -464,6 +471,36 @@ void ValidateDocuments(const ContentSources &sources)
     const auto stat_ids = CollectIds(stat_entries, "stats");
     const auto material_ids = CollectIds(material_entries, "materials");
     const auto particle_ids = CollectIds(particle_entries, "particles");
+    constexpr std::array required_particle_ids{
+        "particle.basic_attack", "particle.boss.area.activate", "particle.boss.dash.impact",
+        "particle.boss.dash.start", "particle.boss.phase_change", "particle.boss.shockwave.release",
+        "particle.boss.spawn", "particle.boss.volley.release",
+        "particle.common.enemy_death", "particle.common.explosion_large", "particle.common.explosion_small",
+        "particle.common.heal", "particle.common.heavy_hit", "particle.common.hit", "particle.common.mark_apply",
+        "particle.common.mark_trigger", "particle.common.player_death", "particle.common.player_hit",
+        "particle.common.pull", "particle.common.push", "particle.enemy.melee.hit",
+        "particle.enemy.melee.windup", "particle.enemy.ranged.release",
+        "particle.enemy.suicide.charge", "particle.enemy.suicide.explosion",
+        "particle.line.burn_transfer", "particle.line.relic_chain", "particle.line.ricochet",
+        "particle.pickup.heal_collect", "particle.pickup.magnet_collect", "particle.pickup.relic_collect",
+        "particle.pickup.xp_spawn", "particle.relic.bleed_burn_explosion",
+        "particle.relic.combat_chain", "particle.relic.damage_push",
+        "particle.relic.radial_arrows", "particle.skill.arrow_rain", "particle.skill.arrow_rain.area_pulse",
+        "particle.skill.arrow_rain.impact", "particle.skill.charged_shot", "particle.skill.charged_shot.pulse",
+        "particle.skill.charged_shot.ready", "particle.skill.explosive_arrow",
+        "particle.skill.explosive_arrow.main", "particle.skill.explosive_arrow.secondary",
+        "particle.skill.damage_area.pulse", "particle.skill.fire_area.pulse",
+        "particle.skill.multishot", "particle.skill.piercing_shot", "particle.skill.piercing_shot.trail_pulse",
+        "particle.skill.retreat_shot", "particle.skill.retreat_shot.land",
+        "particle.skill.retreat_shot.move", "particle.skill.ricochet_arrow",
+        "particle.skill.trap.idle",
+        "particle.skill.ricochet_arrow.hit", "particle.skill.trap", "particle.skill.trap.arm",
+        "particle.skill.trap.trigger", "particle.status.bleed_apply", "particle.status.bleed_tick",
+        "particle.status.burn_apply", "particle.status.burn_tick", "particle.status.slow_apply",
+        "particle.status.slow_area"};
+    for (const auto id : required_particle_ids)
+        if (!particle_ids.contains(id))
+            Fail("particles", "$/effects", std::string("required particle effect is missing: ") + id);
     const auto relic_ids = CollectIds(relic_entries, "relics");
     const auto audio_ids = CollectIds(audio_entries, "audio_cues");
     const auto ui_ids = CollectIds(ui_entries, "ui_strings");
@@ -814,10 +851,17 @@ ContentSources LoadAndValidateSources()
             throw std::runtime_error(path.string() + ": " + exception.what());
         }
         ValidateRoot(document, name);
-        sources.source_bytes.append(name);
-        sources.source_bytes.push_back('\0');
-        sources.source_bytes.append(text);
-        sources.source_bytes.push_back('\0');
+        sources.all_source_bytes.append(name);
+        sources.all_source_bytes.push_back('\0');
+        sources.all_source_bytes.append(text);
+        sources.all_source_bytes.push_back('\0');
+        if (name != "particles")
+        {
+            sources.source_bytes.append(name);
+            sources.source_bytes.push_back('\0');
+            sources.source_bytes.append(text);
+            sources.source_bytes.push_back('\0');
+        }
         sources.documents.emplace(name, std::move(document));
     }
     const auto append_asset = [&](std::string_view name,
@@ -826,6 +870,10 @@ ContentSources LoadAndValidateSources()
         sources.source_bytes.push_back('\0');
         sources.source_bytes.append(ReadText(path));
         sources.source_bytes.push_back('\0');
+        sources.all_source_bytes.append(name);
+        sources.all_source_bytes.push_back('\0');
+        sources.all_source_bytes.append(ReadText(path));
+        sources.all_source_bytes.push_back('\0');
     };
     const auto animation_root =
         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY);
@@ -896,6 +944,76 @@ hs::GameData BuildGameData(const ContentSources &sources)
     data.relic_chest_miss_increment = static_cast<float>(RequireNumber(
         relic_boxes, "relics", "$/box_rules",
         "normal_enemy_probability_increment_per_kill_percent") / 100.0);
+
+    const auto &relics = sources.documents.at("relics")["entries"];
+    const auto relic_number = [&](std::size_t index, std::string_view key) {
+        const auto path = "$/entries/" + std::to_string(index);
+        const auto value = static_cast<float>(
+            ParameterNumber(relics[index], "relics", path, key));
+        RequirePositive(value, "relics", path + "/parameters/" + std::string(key));
+        return value;
+    };
+    const auto relic_count = [&](std::size_t index, std::string_view key) {
+        return CheckedInteger<std::uint32_t>(
+            relic_number(index, key), "relics",
+            "$/entries/" + std::to_string(index) + "/parameters/" +
+                std::string(key));
+    };
+    const auto copy_text = [&](auto &destination, const std::string &source,
+                               std::string_view path) {
+        if (source.size() >= destination.size())
+            Fail("relics", path, "UTF-8 text exceeds cooked capacity");
+        std::ranges::copy(source, destination.begin());
+    };
+    for (std::size_t index = 0; index < relics.size(); ++index)
+    {
+        const auto path = "$/entries/" + std::to_string(index);
+        copy_text(data.relic_names[index],
+                  RequireString(relics[index], "relics", path, "display_name"),
+                  path + "/display_name");
+        copy_text(data.relic_rules[index],
+                  RequireString(relics[index], "relics", path, "rule"),
+                  path + "/rule");
+    }
+    data.relics.bleed_kill_heal = {
+        relic_number(0, "maximum_hp_heal_fraction"),
+        relic_number(0, "internal_cooldown")};
+    data.relics.burn_propagation = {
+        relic_number(1, "search_radius"), relic_number(1, "copied_burn_strength"),
+        relic_count(1, "maximum_targets")};
+    data.relics.kill_cooldown_surge = {
+        relic_count(2, "kills_per_trigger"),
+        relic_number(2, "all_active_cooldown_reduction")};
+    data.relics.bleed_burn_explosion = {
+        relic_number(3, "radius"), relic_number(3, "damage_multiplier"),
+        relic_number(3, "per_target_cooldown")};
+    data.relics.radial_basic_attack = {
+        relic_count(4, "cadence_interval"), relic_count(4, "direction_count"),
+        relic_number(4, "damage_multiplier")};
+    data.relics.basic_kill_tracker = {
+        relic_number(5, "search_radius"), relic_number(5, "damage_multiplier"),
+        relic_count(5, "maximum_triggers_per_original_attack")};
+    data.relics.movement_echo = {
+        relic_number(6, "required_cumulative_distance"),
+        relic_number(6, "position_history_age"),
+        relic_number(6, "damage_multiplier")};
+    data.relics.alternating_skills = {
+        relic_number(7, "window"), relic_number(7, "cooldown_refund_fraction")};
+    data.relics.different_skill_tracker = {
+        relic_number(8, "window"), relic_number(8, "damage_multiplier"),
+        relic_number(8, "per_target_cooldown")};
+    data.relics.damage_knockback = {
+        relic_number(9, "radius"), relic_number(9, "push_distance"),
+        relic_number(9, "slow_fraction"), relic_number(9, "slow_duration"),
+        relic_number(9, "cooldown")};
+    data.relics.once_revive = {
+        relic_number(10, "revive_hp_fraction"),
+        relic_number(10, "invulnerability_duration"),
+        relic_count(10, "maximum_triggers_per_session")};
+    data.relics.combat_hit_chain = {
+        relic_count(11, "direct_hits_per_trigger"),
+        relic_number(11, "search_radius"), relic_count(11, "maximum_targets"),
+        relic_number(11, "damage_multiplier")};
 
     const auto &arena = sources.documents.at("level")["entries"][0]["arena"];
     const auto width = RequireNumber(arena, "level", "$/entries/0/arena", "width_m");
@@ -1137,6 +1255,198 @@ bool WriteCookedGameData(const std::filesystem::path &path, const hs::GameData &
     std::memcpy(file.data(), &header, sizeof(header));
     std::memcpy(file.data() + sizeof(header), payload.data(), payload.size());
     return AtomicWrite(path, file, error_message);
+}
+
+template <typename T, std::size_t N>
+T ParseEnum(std::string_view value, const std::array<std::pair<std::string_view, T>, N> &values,
+            std::string_view path)
+{
+    const auto found = std::ranges::find(values, value, &std::pair<std::string_view, T>::first);
+    if (found == values.end()) Fail("particles", path, "unknown enum value");
+    return found->second;
+}
+
+struct ParticleSpriteSource
+{
+    std::string id;
+    std::filesystem::path file;
+    std::uint8_t frame_columns{1};
+    std::uint8_t frame_rows{1};
+};
+
+bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &document,
+                                std::vector<ParticleSpriteSource> &sprite_sources,
+                                std::string &error_message)
+{
+    constexpr std::array<std::pair<std::string_view, hs::ParticleShape>, 5> shapes{{
+        std::pair{std::string_view{"point"}, hs::ParticleShape::Point}, {std::string_view{"sphere"}, hs::ParticleShape::Sphere},
+        {std::string_view{"disc"}, hs::ParticleShape::Disc}, {std::string_view{"ring"}, hs::ParticleShape::Ring},
+        {std::string_view{"line"}, hs::ParticleShape::Line}}};
+    constexpr std::array<std::pair<std::string_view, hs::ParticleVelocity>, 5> velocities{{
+        std::pair{std::string_view{"direction"}, hs::ParticleVelocity::Direction}, {std::string_view{"cone"}, hs::ParticleVelocity::Cone},
+        {std::string_view{"radial"}, hs::ParticleVelocity::Radial}, {std::string_view{"inward"}, hs::ParticleVelocity::Inward},
+        {std::string_view{"upward"}, hs::ParticleVelocity::Upward}}};
+    constexpr std::array<std::pair<std::string_view, hs::ParticleFacing>, 3> facings{{
+        std::pair{std::string_view{"camera"}, hs::ParticleFacing::Camera}, {std::string_view{"velocity"}, hs::ParticleFacing::Velocity},
+        {std::string_view{"ground"}, hs::ParticleFacing::Ground}}};
+    constexpr std::array<std::pair<std::string_view, hs::VfxRenderer>, 4> renderers{{
+        std::pair{std::string_view{"sprite"}, hs::VfxRenderer::Sprite},
+        {std::string_view{"ground"}, hs::VfxRenderer::Ground},
+        {std::string_view{"segment"}, hs::VfxRenderer::Segment},
+        {std::string_view{"mesh"}, hs::VfxRenderer::Mesh}}};
+    constexpr std::array<std::pair<std::string_view, hs::VfxPrimitive>, 17> primitives{{
+        std::pair{std::string_view{"soft"}, hs::VfxPrimitive::Soft},
+        {std::string_view{"disc"}, hs::VfxPrimitive::Disc},
+        {std::string_view{"ring"}, hs::VfxPrimitive::Ring},
+        {std::string_view{"sector"}, hs::VfxPrimitive::Sector},
+        {std::string_view{"chevron"}, hs::VfxPrimitive::Chevron},
+        {std::string_view{"rune"}, hs::VfxPrimitive::Rune},
+        {std::string_view{"cracks"}, hs::VfxPrimitive::Cracks},
+        {std::string_view{"arrow"}, hs::VfxPrimitive::Arrow},
+        {std::string_view{"shard"}, hs::VfxPrimitive::Shard},
+        {std::string_view{"ember"}, hs::VfxPrimitive::Ember},
+        {std::string_view{"spike"}, hs::VfxPrimitive::Spike},
+        {std::string_view{"shock_shell"}, hs::VfxPrimitive::ShockShell},
+        {std::string_view{"solid_trail"}, hs::VfxPrimitive::SolidTrail},
+        {std::string_view{"dashed_ricochet"}, hs::VfxPrimitive::DashedRicochet},
+        {std::string_view{"fire_transfer"}, hs::VfxPrimitive::FireTransfer},
+        {std::string_view{"relic_chain"}, hs::VfxPrimitive::RelicChain},
+        {std::string_view{"dash_wake"}, hs::VfxPrimitive::DashWake}}};
+    const auto read_values = [](const Json &object, std::string_view key, std::size_t count,
+                                std::string_view path) {
+        const auto &array = RequireArray(object, "particles", path, key);
+        if (array.size() != count) Fail("particles", std::string(path) + "/" + std::string(key), "wrong vector size");
+        std::array<float, 4> values{};
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            if (!array[i].is_number()) Fail("particles", path, "expected number");
+            values[i] = array[i].get<float>();
+            if (!std::isfinite(values[i])) Fail("particles", path, "non-finite number");
+        }
+        return values;
+    };
+    std::vector<hs::CookedVfxDefinition> definitions;
+    std::vector<hs::CookedParticleEmitter> emitters;
+    std::vector<hs::CookedParticleSprite> cooked_sprites;
+    std::unordered_map<std::string, hs::ParticleSprite> sprite_indices;
+    std::unordered_map<std::uint64_t, std::string> sprite_hashes;
+    sprite_sources.clear();
+    const auto &sprites = RequireArray(document, "particles", "$", "sprites");
+    if (sprites.size() > std::numeric_limits<hs::ParticleSprite>::max())
+        Fail("particles", "$/sprites", "too many sprites");
+    for (std::size_t index = 0; index < sprites.size(); ++index)
+    {
+        const auto sprite_path = "$/sprites/" + std::to_string(index);
+        RequireExactKeys(sprites[index], "particles", {"id", "file", "frames"});
+        ParticleSpriteSource sprite;
+        sprite.id = RequireString(sprites[index], "particles", sprite_path, "id");
+        sprite.file = RequireString(sprites[index], "particles", sprite_path, "file");
+        const auto frames = read_values(sprites[index], "frames", 2, sprite_path);
+        sprite.frame_columns = static_cast<std::uint8_t>(frames[0]);
+        sprite.frame_rows = static_cast<std::uint8_t>(frames[1]);
+        if (frames[0] != sprite.frame_columns || frames[1] != sprite.frame_rows ||
+            !sprite_indices.emplace(sprite.id, static_cast<hs::ParticleSprite>(index)).second)
+            Fail("particles", sprite_path, "invalid or duplicate sprite");
+        const auto sprite_hash = hs::MakeAssetId("particle_sprite." + sprite.id).value;
+        if (!sprite_hashes.emplace(sprite_hash, sprite.id).second)
+            Fail("particles", sprite_path, "sprite hash collision");
+        cooked_sprites.push_back({sprite_hash, static_cast<hs::ParticleSprite>(index),
+                                  sprite.frame_columns, sprite.frame_rows});
+        sprite_sources.push_back(std::move(sprite));
+    }
+    std::unordered_map<std::uint64_t, std::string> hashes;
+    const auto &effects = RequireArray(document, "particles", "$", "effects");
+    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    {
+        const auto base = "$/effects/" + std::to_string(effect_index);
+        const auto id = RequireString(effects[effect_index], "particles", base, "id");
+        if (!id.starts_with("particle.")) Fail("particles", base + "/id", "effect ID must start with particle.");
+        const auto hash = hs::MakeAssetId(id).value;
+        if (!hashes.emplace(hash, id).second) Fail("particles", base + "/id", "duplicate ID or hash collision");
+        hs::CookedVfxDefinition definition;
+        definition.effect_id = hash;
+        const auto kind = RequireString(effects[effect_index], "particles", base, "kind");
+        if (kind == "line")
+        {
+            RequireExactKeys(effects[effect_index], "particles", {"id", "kind", "color", "width", "lifetime", "sprite", "uv_repeat", "scroll_speed", "primitive"});
+            definition.kind = hs::VfxDefinitionKind::Line;
+            const auto color = read_values(effects[effect_index], "color", 4, base);
+            definition.line_color = {color[0], color[1], color[2], color[3]};
+            definition.line_width = static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "width"));
+            definition.line_lifetime = static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "lifetime"));
+            const auto sprite_name = RequireString(effects[effect_index], "particles", base, "sprite");
+            const auto sprite = sprite_indices.find(sprite_name);
+            if (sprite == sprite_indices.end()) Fail("particles", base + "/sprite", "unknown sprite");
+            definition.line_sprite = sprite->second;
+            definition.line_frame_columns = sprite_sources[sprite->second].frame_columns;
+            definition.line_frame_rows = sprite_sources[sprite->second].frame_rows;
+            definition.line_uv_repeat = static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "uv_repeat"));
+            definition.line_scroll_speed = static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "scroll_speed"));
+            definition.line_primitive = ParseEnum(
+                RequireString(effects[effect_index], "particles", base, "primitive"),
+                primitives, base + "/primitive");
+            if (definition.line_primitive < hs::VfxPrimitive::SolidTrail)
+                Fail("particles", base + "/primitive", "line requires a segment primitive");
+            if (definition.line_width <= 0 || definition.line_lifetime <= 0 || definition.line_uv_repeat <= 0) Fail("particles", base, "line range invalid");
+        }
+        else if (kind == "particles")
+        {
+            RequireExactKeys(effects[effect_index], "particles", {"id", "kind", "emitters"});
+            definition.kind = hs::VfxDefinitionKind::Particles;
+            definition.first_emitter = static_cast<std::uint32_t>(emitters.size());
+            const auto &source_emitters = RequireArray(effects[effect_index], "particles", base, "emitters");
+            if (source_emitters.empty() || source_emitters.size() > std::numeric_limits<std::uint16_t>::max())
+                Fail("particles", base + "/emitters", "invalid emitter count");
+            definition.emitter_count = static_cast<std::uint16_t>(source_emitters.size());
+            for (std::size_t emitter_index = 0; emitter_index < source_emitters.size(); ++emitter_index)
+            {
+                const auto emitter_path = base + "/emitters/" + std::to_string(emitter_index);
+                const auto &source = source_emitters[emitter_index];
+                RequireExactKeys(source, "particles", {"sprite","renderer","primitive","shape","velocity","facing","local_offset","shape_extent","local_direction","start_color","end_color","lifetime","speed","cone_degrees","start_size","end_size","gravity","rotation","angular_velocity","stretch","count"});
+                hs::CookedParticleEmitter emitter;
+                const auto sprite_name = RequireString(source,"particles",emitter_path,"sprite");
+                const auto sprite = sprite_indices.find(sprite_name);
+                if (sprite == sprite_indices.end()) Fail("particles", emitter_path + "/sprite", "unknown sprite");
+                emitter.sprite = sprite->second;
+                emitter.frame_columns = sprite_sources[sprite->second].frame_columns;
+                emitter.frame_rows = sprite_sources[sprite->second].frame_rows;
+                emitter.shape = ParseEnum(RequireString(source,"particles",emitter_path,"shape"), shapes, emitter_path);
+                emitter.velocity = ParseEnum(RequireString(source,"particles",emitter_path,"velocity"), velocities, emitter_path);
+                emitter.facing = ParseEnum(RequireString(source,"particles",emitter_path,"facing"), facings, emitter_path);
+                emitter.renderer = ParseEnum(RequireString(source,"particles",emitter_path,"renderer"), renderers, emitter_path + "/renderer");
+                emitter.primitive = ParseEnum(RequireString(source,"particles",emitter_path,"primitive"), primitives, emitter_path + "/primitive");
+                const auto offset=read_values(source,"local_offset",3,emitter_path), extent=read_values(source,"shape_extent",3,emitter_path), direction=read_values(source,"local_direction",3,emitter_path);
+                const auto start_color=read_values(source,"start_color",4,emitter_path), end_color=read_values(source,"end_color",4,emitter_path);
+                const auto lifetime=read_values(source,"lifetime",2,emitter_path), speed=read_values(source,"speed",2,emitter_path), start_size=read_values(source,"start_size",2,emitter_path), end_size=read_values(source,"end_size",2,emitter_path), rotation=read_values(source,"rotation",2,emitter_path), angular=read_values(source,"angular_velocity",2,emitter_path);
+                emitter.local_offset={offset[0],offset[1],offset[2]}; emitter.shape_extent={extent[0],extent[1],extent[2]}; emitter.local_direction={direction[0],direction[1],direction[2]};
+                emitter.start_color={start_color[0],start_color[1],start_color[2],start_color[3]}; emitter.end_color={end_color[0],end_color[1],end_color[2],end_color[3]};
+                emitter.lifetime_min=lifetime[0]; emitter.lifetime_max=lifetime[1]; emitter.speed_min=speed[0]; emitter.speed_max=speed[1];
+                emitter.start_size_min=start_size[0]; emitter.start_size_max=start_size[1]; emitter.end_size_min=end_size[0]; emitter.end_size_max=end_size[1];
+                emitter.rotation_min=rotation[0]; emitter.rotation_max=rotation[1]; emitter.angular_velocity_min=angular[0]; emitter.angular_velocity_max=angular[1];
+                emitter.cone_degrees=static_cast<float>(RequireNumber(source,"particles",emitter_path,"cone_degrees")); emitter.gravity=static_cast<float>(RequireNumber(source,"particles",emitter_path,"gravity")); emitter.stretch=static_cast<float>(RequireNumber(source,"particles",emitter_path,"stretch")); emitter.count=static_cast<std::uint32_t>(RequireInteger(source,"particles",emitter_path,"count"));
+                const auto direction_length = std::sqrt(direction[0]*direction[0]+direction[1]*direction[1]+direction[2]*direction[2]);
+                if (lifetime[0] <= 0 || lifetime[0] > lifetime[1] || speed[0] < 0 || speed[0] > speed[1] || start_size[0] < 0 || start_size[0] > start_size[1] || end_size[0] < 0 || end_size[0] > end_size[1] || rotation[0] > rotation[1] || angular[0] > angular[1] || emitter.count == 0 || emitter.cone_degrees < 0 || emitter.cone_degrees > 180 || emitter.stretch < 1 || ((emitter.velocity == hs::ParticleVelocity::Direction || emitter.velocity == hs::ParticleVelocity::Cone) && direction_length <= 0.0001f) || (emitter.velocity == hs::ParticleVelocity::Inward && emitter.shape == hs::ParticleShape::Point) || (emitter.renderer == hs::VfxRenderer::Sprite && emitter.primitive != hs::VfxPrimitive::Soft) || (emitter.renderer == hs::VfxRenderer::Ground && (emitter.primitive < hs::VfxPrimitive::Disc || emitter.primitive > hs::VfxPrimitive::Cracks)) || (emitter.renderer == hs::VfxRenderer::Segment && emitter.primitive < hs::VfxPrimitive::SolidTrail) || (emitter.renderer == hs::VfxRenderer::Mesh && (emitter.primitive < hs::VfxPrimitive::Arrow || emitter.primitive > hs::VfxPrimitive::ShockShell)))
+                    Fail("particles", emitter_path, "emitter contract violation");
+                emitters.push_back(emitter);
+            }
+        }
+        else Fail("particles", base + "/kind", "unknown effect kind");
+        definitions.push_back(definition);
+    }
+    std::ranges::sort(definitions, {}, &hs::CookedVfxDefinition::effect_id);
+    std::ranges::sort(cooked_sprites, {}, &hs::CookedParticleSprite::sprite_id);
+    std::vector<std::byte> payload(definitions.size()*sizeof(definitions.front()) +
+                                   emitters.size()*sizeof(emitters.front()) +
+                                   cooked_sprites.size()*sizeof(cooked_sprites.front()));
+    std::memcpy(payload.data(), definitions.data(), definitions.size()*sizeof(definitions.front()));
+    std::memcpy(payload.data()+definitions.size()*sizeof(definitions.front()), emitters.data(), emitters.size()*sizeof(emitters.front()));
+    std::memcpy(payload.data()+definitions.size()*sizeof(definitions.front())+
+                    emitters.size()*sizeof(emitters.front()),
+                cooked_sprites.data(), cooked_sprites.size()*sizeof(cooked_sprites.front()));
+    hs::CookedParticleEffectsHeader header;
+    header.effect_count=static_cast<std::uint32_t>(definitions.size()); header.emitter_count=static_cast<std::uint32_t>(emitters.size()); header.sprite_count=static_cast<std::uint32_t>(sprite_sources.size()); header.schema_hash=hs::kParticleEffectsSchemaHash; header.payload_hash=hs::Fnv1a64(payload);
+    std::vector<std::byte> file(sizeof(header)+payload.size()); std::memcpy(file.data(),&header,sizeof(header)); std::memcpy(file.data()+sizeof(header),payload.data(),payload.size());
+    return AtomicWrite(path,file,error_message);
 }
 
 FbxScene *LoadFbx(FbxManager &manager, const std::filesystem::path &path,
@@ -1832,6 +2142,68 @@ bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
     return AtomicWrite(path, file, error_message);
 }
 
+bool WriteVfxMaskArray(const std::filesystem::path &path,
+                       std::span<const ParticleSpriteSource> sprites,
+                       std::string &error_message)
+{
+    DirectX::ScratchImage masks;
+    auto result = masks.Initialize2D(DXGI_FORMAT_R8_UNORM, 512, 512,
+                                     sprites.size(), 1);
+    if (FAILED(result))
+    {
+        error_message = "cannot allocate VFX mask array";
+        return false;
+    }
+    for (std::size_t slice = 0; slice < sprites.size(); ++slice)
+    {
+        DirectX::TexMetadata metadata;
+        DirectX::ScratchImage source;
+        const auto source_path = std::filesystem::path(HS_VFX_TEXTURE_DIRECTORY) /
+                                 sprites[slice].file;
+        result = DirectX::LoadFromWICFile(source_path.c_str(),
+                                         DirectX::WIC_FLAGS_NONE,
+                                         &metadata, source);
+        DirectX::ScratchImage rgba;
+        if (SUCCEEDED(result))
+            result = DirectX::Convert(
+                source.GetImages(), source.GetImageCount(), source.GetMetadata(),
+                DXGI_FORMAT_R8G8B8A8_UNORM, DirectX::TEX_FILTER_DEFAULT, 0.0f,
+                rgba);
+        const auto *input = rgba.GetImage(0, 0, 0);
+        auto *output = masks.GetImage(0, slice, 0);
+        if (FAILED(result) || !input || !output || metadata.width != 512 ||
+            metadata.height != 512)
+        {
+            error_message = "invalid VFX mask: " + source_path.string();
+            return false;
+        }
+        for (std::size_t row = 0; row < 512; ++row)
+            for (std::size_t column = 0; column < 512; ++column)
+                output->pixels[row * output->rowPitch + column] =
+                    input->pixels[row * input->rowPitch + column * 4 + 3];
+    }
+    DirectX::ScratchImage mipmaps;
+    result = DirectX::GenerateMipMaps(
+        masks.GetImages(), masks.GetImageCount(), masks.GetMetadata(),
+        DirectX::TEX_FILTER_DEFAULT, 0, mipmaps);
+    DirectX::ScratchImage compressed;
+    if (SUCCEEDED(result))
+        result = DirectX::Compress(
+            mipmaps.GetImages(), mipmaps.GetImageCount(), mipmaps.GetMetadata(),
+            DXGI_FORMAT_BC4_UNORM, DirectX::TEX_COMPRESS_DEFAULT, 0.5f,
+            compressed);
+    if (SUCCEEDED(result))
+        result = DirectX::SaveToDDSFile(
+            compressed.GetImages(), compressed.GetImageCount(),
+            compressed.GetMetadata(), DirectX::DDS_FLAGS_NONE, path.c_str());
+    if (FAILED(result))
+    {
+        error_message = "cannot cook BC4 VFX mask array";
+        return false;
+    }
+    return true;
+}
+
 bool CookCharacterAsset(const std::filesystem::path &output,
                         CharacterCookResult &character,
                         std::string &error_message)
@@ -1949,7 +2321,8 @@ int main(int argc, char **argv)
     {
         const auto sources = LoadAndValidateSources();
         const auto data = BuildGameData(sources);
-        const auto source_hash = hs::Fnv1a64(sources.source_bytes);
+        const auto gameplay_hash = hs::Fnv1a64(sources.source_bytes);
+        const auto source_hash = hs::Fnv1a64(sources.all_source_bytes);
         if (mode == "--validate-only")
         {
             std::cout << "content.validated documents=" << kDocumentNames.size()
@@ -1966,11 +2339,21 @@ int main(int argc, char **argv)
         }
 
         std::string error_message;
-        if (!WriteCookedGameData(output / "game_data.hsbin", data, source_hash,
+        if (!WriteCookedGameData(output / "game_data.hsbin", data, gameplay_hash,
                                  error_message))
         {
             throw std::runtime_error("game_data.hsbin: " + error_message);
         }
+        std::vector<ParticleSpriteSource> particle_sprites;
+        if (!WriteCookedParticleEffects(output / "particle_effects.hsbin",
+                                        sources.documents.at("particles"),
+                                        particle_sprites, error_message))
+        {
+            throw std::runtime_error("particle_effects.hsbin: " + error_message);
+        }
+        if (!WriteVfxMaskArray(output / "vfx_masks.dds", particle_sprites,
+                               error_message))
+            throw std::runtime_error("vfx_masks.dds: " + error_message);
         hs::GameData loaded{};
         std::uint64_t loaded_hash{};
         if (const auto result =
@@ -1980,8 +2363,13 @@ int main(int argc, char **argv)
             throw std::runtime_error("game_data.hsbin self-check failed: " +
                                      std::string(result.Message()));
         }
-        if (loaded_hash != source_hash || loaded.player_health != data.player_health ||
-            loaded.skills[1].damage_coefficient != data.skills[1].damage_coefficient)
+        if (loaded_hash != gameplay_hash || loaded.player_health != data.player_health ||
+            loaded.skills[1].damage_coefficient != data.skills[1].damage_coefficient ||
+            loaded.relics.bleed_burn_explosion.radius !=
+                data.relics.bleed_burn_explosion.radius ||
+            loaded.relics.damage_knockback.cooldown_seconds !=
+                data.relics.damage_knockback.cooldown_seconds ||
+            loaded.relic_rules[3] != data.relic_rules[3])
         {
             throw std::runtime_error("game_data.hsbin self-check mismatch");
         }
@@ -2016,6 +2404,8 @@ int main(int argc, char **argv)
         std::ofstream manifest(output / "manifest.txt", std::ios::trunc);
         manifest << "fbx_sdk=2020.3.7-vs2022\n"
                  << "game_data=game_data.hsbin\n"
+                 << "particle_effects=particle_effects.hsbin\n"
+                 << "vfx_masks=vfx_masks.dds\n"
                  << "source_hash=" << source_hash << '\n'
                  << "mesh=stage1_archer.meshbin\n";
         for (std::size_t index = 0; index < character.materials.size(); ++index)

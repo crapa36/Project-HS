@@ -1,10 +1,10 @@
 #pragma once
 
-#include <hs/core/particle_spawn_command.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/types.hpp>
+#include <hs/renderer/particle_spawn_command.hpp>
 
 #include <cstdint>
 #include <array>
@@ -16,6 +16,13 @@ namespace hs
 {
 
 inline constexpr std::size_t kStage1RenderPassCount = 11;
+
+struct ParticleSpriteBinding
+{
+    ParticleSprite sprite{};
+    std::uint8_t frame_columns{1};
+    std::uint8_t frame_rows{1};
+};
 
 struct RendererConfig
 {
@@ -30,9 +37,16 @@ struct RendererConfig
     bool outline{true};
     bool interpolate{true};
     bool character_preview{};
+    bool devtools_visible{true};
     std::uint32_t render_scale_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
+    ParticleSpriteBinding bleed_status_sprite{};
+    ParticleSpriteBinding burn_status_sprite{};
+    ParticleSpriteBinding slow_status_sprite{};
+    ParticleSpriteBinding mark_status_sprite{};
+    ParticleSpriteBinding trap_sprite{};
+    ParticleSpriteBinding fire_area_sprite{};
     BarrierMode barrier_mode{BarrierMode::Automatic};
     std::filesystem::path artifact_directory;
 };
@@ -100,6 +114,7 @@ class D3D12Renderer
     [[nodiscard]] Result Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                 std::span<const PresentationEvent> events,
                                 std::span<const ParticleSpawnCommand> particle_spawns,
+                                std::span<const EffectLineSpawnCommand> effect_lines,
                                 const DevToolsFrameData &devtools,
                                 RendererFrameResult &frame_result);
     [[nodiscard]] Result CapturePng(const std::filesystem::path &path);

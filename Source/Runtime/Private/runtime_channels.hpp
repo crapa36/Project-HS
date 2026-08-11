@@ -2,7 +2,6 @@
 
 #include <hs/core/bounded_spsc_queue.hpp>
 #include <hs/core/input.hpp>
-#include <hs/core/particle_spawn_command.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/settings.hpp>
@@ -46,7 +45,6 @@ struct RuntimeChannels
     RenderSnapshotExchange snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
     BoundedSpscQueue<PresentationEvent, 1024> audio_events;
-    BoundedSpscQueue<ParticleSpawnCommand, 256> particle_spawns;
     BoundedSpscQueue<GraphicsCommand, 64> graphics_commands;
     BoundedSpscQueue<SettingsData, 8> renderer_settings;
     BoundedSpscQueue<SettingsData, 8> simulation_settings;
@@ -64,7 +62,6 @@ struct RuntimeChannels
     std::atomic<std::uint32_t> rendered_particles{};
     std::atomic<std::uint64_t> dropped_input_edges{};
     std::atomic<std::uint64_t> dropped_presentation_events{};
-    std::atomic<std::uint64_t> dropped_particle_spawns{};
     std::atomic<bool> devtools_capture_mouse{};
     std::atomic<bool> devtools_capture_keyboard{};
 };

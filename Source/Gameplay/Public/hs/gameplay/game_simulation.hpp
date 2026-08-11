@@ -1,7 +1,6 @@
 #pragma once
 
 #include <hs/core/input.hpp>
-#include <hs/core/particle_spawn_command.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/render_snapshot.hpp>
 #include <hs/core/result.hpp>
@@ -57,8 +56,6 @@ class GameSimulation
     void ClearPresentationEvents() noexcept;
     [[nodiscard]] std::span<const UiCommand> PendingUiCommands() const noexcept;
     void ClearUiCommands() noexcept;
-    [[nodiscard]] std::span<const ParticleSpawnCommand> PendingParticleSpawns() const noexcept;
-    void ClearParticleSpawns() noexcept;
     [[nodiscard]] Result Shutdown();
 
   private:
