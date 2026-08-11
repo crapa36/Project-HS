@@ -301,6 +301,13 @@ struct Arguments
     }
     DWORD exit_code{};
     GetExitCodeProcess(process.hProcess, &exit_code);
+    if (exit_code != 0)
+    {
+        const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
+                                          artifact_directory / "child_failure.dmp");
+        std::cerr << "Experiment child exited with code 0x" << std::hex << exit_code
+                  << std::dec << "; dump_written=" << std::boolalpha << dumped << ".\n";
+    }
     close_process();
     return static_cast<int>(exit_code);
 #else

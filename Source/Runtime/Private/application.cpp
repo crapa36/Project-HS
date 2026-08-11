@@ -8,6 +8,7 @@
 #include <hs/jobs/task_system.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/runtime/audio_engine.hpp>
+#include <hs/runtime/playtest_recording.hpp>
 #include <hs/runtime/save_store.hpp>
 
 #include <Windows.h>
@@ -82,6 +83,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     {
         return {loaded};
     }
+    PlaytestReplay replay;
+    const auto replaying = !config.replay_directory.empty();
+    if (replaying)
+    {
+        if (auto loaded = LoadPlaytestReplay(config.replay_directory, replay); !loaded)
+            return {loaded};
+        if (!config.replay_compare && replay.content_hash != content_hash)
+            return {Result::Failure(ErrorCode::InvalidState, "hs_playtest",
+                                    "Replay content hash differs from the current content.")};
+    }
+    const auto effective_seed = replaying ? replay.seed : config.seed;
+    PlaytestRecorder playtest;
+    if (config.record_playtest)
+    {
+        if (auto started = playtest.Start(
+                {config.playtest_output_directory, effective_seed, content_hash}); !started)
+            return {started};
+    }
     SaveStore save_store(config.smoke
                              ? std::optional<std::filesystem::path>(
                                    config.artifact_directory / "Profile")
@@ -145,6 +164,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.bloom = config.bloom;
         renderer_config.outline = config.outline;
         renderer_config.interpolate = !config.smoke;
+        renderer_config.character_preview = config.character_preview;
         renderer_config.render_scale_percent = config.render_scale_percent;
         renderer_config.shadow_resolution = config.shadow_resolution;
         renderer_config.particle_percentage = config.particle_percentage;
@@ -429,7 +449,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
         if (auto initialized = simulation.Initialize(
-                {config.seed, config.smoke, !config.smoke, settings}, game_data);
+                {effective_seed, config.smoke, !config.smoke, settings}, game_data);
             !initialized)
         {
             set_failure(initialized);
@@ -445,6 +465,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::array<ActionEdge, 256> action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
         std::size_t next_timeline_action{};
+        std::size_t replay_frame_index{};
         if (!config.heartbeat_path.empty())
         {
             WriteText(config.heartbeat_path, "{\"tick\":0,\"state\":\"running\"}\n");
@@ -494,9 +515,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
 
                 InputFrame input;
-                input.target_tick = channels.completed_tick.load(std::memory_order_relaxed) + 1;
-                input.held = channels.held_input.load(std::memory_order_acquire);
-                input.ordered_edges = std::span(action_storage.data(), action_count);
+                if (replaying)
+                {
+                    if (replay_frame_index >= replay.frames.size())
+                    {
+                        channels.stop_requested.store(true, std::memory_order_release);
+                        break;
+                    }
+                    input = replay.frames[replay_frame_index].View();
+                }
+                else
+                {
+                    input.target_tick =
+                        channels.completed_tick.load(std::memory_order_relaxed) + 1;
+                    input.held = channels.held_input.load(std::memory_order_acquire);
+                    input.ordered_edges = std::span(action_storage.data(), action_count);
+                }
                 if (next_timeline_action < config.timeline_actions.size() &&
                     config.timeline_actions[next_timeline_action].target_tick < input.target_tick)
                 {
@@ -531,6 +565,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
                 const auto probe = simulation.Probe();
+                if (replaying && !config.replay_compare && tick.checksum !=
+                                     replay.frames[replay_frame_index].expected_checksum)
+                {
+                    set_failure(Result::Failure(
+                        ErrorCode::InvalidState, "hs_playtest",
+                        std::format("Replay checksum mismatch at tick {}.", tick.tick)));
+                    break;
+                }
+                if (playtest.Active())
+                {
+                    if (auto recorded = playtest.Record(
+                            input, tick.checksum, probe,
+                            simulation.PendingPresentationEvents()); !recorded)
+                    {
+                        set_failure(recorded);
+                        break;
+                    }
+                }
+                if (replaying) ++replay_frame_index;
                 channels.camera_target_x.store(probe.player_position.x,
                                                std::memory_order_release);
                 channels.camera_target_z.store(probe.player_position.y,
@@ -838,6 +891,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         channels.dropped_input_edges.load() == 0 &&
         channels.dropped_presentation_events.load() == 0 &&
         channels.dropped_particle_spawns.load() == 0;
+    if (playtest.Active())
+    {
+        if (auto finished = playtest.Finish(valid); !finished)
+        {
+            result = finished;
+        }
+    }
 
     WriteText(config.artifact_directory / "spec.json",
               std::format("{{\"scenario_id\":\"runtime-smoke\",\"seed\":{},\"maximum_ticks\":{},"
@@ -866,7 +926,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                  "Runtime execution assertions failed.");
     }
-    return {result, final_tick, checksum, rendered_frames};
+    return {result, final_tick, checksum, rendered_frames, playtest.Directory()};
 }
 
 } // namespace hs

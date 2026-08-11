@@ -31,6 +31,9 @@ struct ApplicationConfig
     bool outline{true};
     bool resize_test{};
     bool borderless{};
+    bool character_preview{};
+    bool record_playtest{};
+    bool replay_compare{};
     std::uint32_t width{1280};
     std::uint32_t height{720};
     std::uint32_t frame_cap{60};
@@ -42,6 +45,8 @@ struct ApplicationConfig
     BarrierMode barrier_mode{BarrierMode::Automatic};
     std::filesystem::path artifact_directory{"Artifacts/runtime"};
     std::filesystem::path heartbeat_path;
+    std::filesystem::path playtest_output_directory;
+    std::filesystem::path replay_directory;
     std::vector<ApplicationTimelineAction> timeline_actions;
 };
 
@@ -51,6 +56,7 @@ struct ApplicationResult
     Tick final_tick{};
     GameplayChecksum checksum{};
     std::uint64_t rendered_frames{};
+    std::filesystem::path playtest_directory;
 };
 
 [[nodiscard]] ApplicationResult RunApplication(const ApplicationConfig &config);

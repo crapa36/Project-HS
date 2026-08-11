@@ -21,6 +21,9 @@ namespace
 hs::ApplicationConfig ParseArguments(int argc, char **argv)
 {
     hs::ApplicationConfig config;
+#if defined(_DEBUG)
+    config.record_playtest = true;
+#endif
     hs::SettingsData settings;
     if (hs::SaveStore store; store.LoadSettings(settings))
     {
@@ -66,6 +69,34 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         else if (argument == "--borderless")
         {
             config.borderless = true;
+        }
+        else if (argument == "--character-preview")
+        {
+            config.character_preview = true;
+        }
+        else if (argument == "--record-playtest")
+        {
+            config.record_playtest = true;
+        }
+        else if (argument == "--no-playtest-recording")
+        {
+            config.record_playtest = false;
+        }
+        else if (argument.starts_with("--playtest-output="))
+        {
+            config.playtest_output_directory = argument.substr(18);
+            config.record_playtest = true;
+        }
+        else if (argument.starts_with("--replay="))
+        {
+            config.replay_directory = argument.substr(9);
+            config.record_playtest = true;
+        }
+        else if (argument.starts_with("--replay-compare="))
+        {
+            config.replay_directory = argument.substr(17);
+            config.replay_compare = true;
+            config.record_playtest = true;
         }
         else if (argument == "--no-bloom")
         {
@@ -156,5 +187,7 @@ int main(int argc, char **argv)
     }
     std::cout << "runtime tick=" << run.final_tick << " checksum=" << run.checksum
               << " frames=" << run.rendered_frames << '\n';
+    if (!run.playtest_directory.empty())
+        std::cout << "playtest=" << run.playtest_directory.string() << '\n';
     return 0;
 }

@@ -192,6 +192,7 @@ add_library(
     Source/Runtime/Private/application.cpp
     Source/Runtime/Private/audio_engine.cpp
     Source/Runtime/Private/experiment_spec.cpp
+    Source/Runtime/Private/playtest_recording.cpp
     Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/window.cpp
 )
@@ -202,8 +203,8 @@ target_sources(
 target_include_directories(hs_runtime PUBLIC Source/Runtime/Public)
 target_link_libraries(
     hs_runtime
-    PUBLIC hs_core
-    PRIVATE hs_gameplay hs_jobs hs_renderer_d3d12 nlohmann_json::nlohmann_json
+    PUBLIC hs_core hs_gameplay
+    PRIVATE hs_jobs hs_renderer_d3d12 nlohmann_json::nlohmann_json
             user32 shell32 xaudio2 ole32 psapi
 )
 target_compile_definitions(hs_runtime PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
@@ -300,6 +301,13 @@ target_compile_definitions(
 hs_configure_target(hs_experiment)
 add_dependencies(hs_experiment hs_runtime_assets)
 
+add_executable(hs_combat_sim Source/Apps/CombatSim/main.cpp)
+target_link_libraries(
+    hs_combat_sim PRIVATE hs_gameplay nlohmann_json::nlohmann_json psapi
+)
+target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+hs_configure_target(hs_combat_sim)
+
 set(
     HS_FBX_SDK_ROOT
     "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.7"
@@ -393,6 +401,7 @@ add_custom_target(
 )
 add_dependencies(ProjectHS hs_cooked_content)
 add_dependencies(hs_experiment hs_cooked_content)
+add_dependencies(hs_combat_sim hs_cooked_content)
 
 add_executable(hs_tools Source/Apps/Tools/main.cpp)
 target_link_libraries(hs_tools PRIVATE nlohmann_json::nlohmann_json)
@@ -451,6 +460,13 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_stage2_tests)
     add_test(NAME gameplay.stage2 COMMAND hs_stage2_tests)
     set_tests_properties(gameplay.stage2 PROPERTIES TIMEOUT 120)
+    add_test(
+        NAME combat-simulator.stage2
+        COMMAND hs_combat_sim
+            --suite=${CMAKE_CURRENT_SOURCE_DIR}/Tests/Data/combat_suite_smoke.json
+            --output=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/combat-simulator
+    )
+    set_tests_properties(combat-simulator.stage2 PROPERTIES TIMEOUT 30)
 
     add_executable(hs_stage2_runtime_tests Tests/stage2_runtime_tests.cpp)
     target_link_libraries(hs_stage2_runtime_tests PRIVATE hs_runtime)
