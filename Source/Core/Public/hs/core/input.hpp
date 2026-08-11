@@ -16,6 +16,7 @@ enum class GameAction : std::uint8_t
     SkillE,
     SkillR,
     Pause,
+    CharacterPage,
 };
 
 enum class EdgeKind : std::uint8_t

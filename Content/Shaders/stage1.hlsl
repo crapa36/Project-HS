@@ -261,7 +261,7 @@ GBufferOutput ScenePS(SceneOutput input)
         output.BaseColor.rgb = lerp(input.Color.rgb, 1.0, grid);
     }
     output.Normal = float4(world_normal * 0.5 + 0.5, 1.0);
-    output.Position = float4(input.WorldPosition, 1.0);
+    output.Position = float4(input.WorldPosition, input.Mesh == 0 ? 1.0 : 0.0);
     return output;
 }
 
@@ -578,22 +578,21 @@ float4 ToneMapPS(FullScreenOutput input) : SV_Target0
 
 float4 OutlinePS(FullScreenOutput input) : SV_Target0
 {
-    float2 texel = ScreenSize.zw * 1.35;
-    float3 center_normal =
-        normalize(GBufferNormal.SampleLevel(LinearClamp, input.Uv, 0).xyz * 2.0 - 1.0);
+    float2 texel = ScreenSize.zw * 0.675;
+    float center_mask = GBufferPosition.SampleLevel(LinearClamp, input.Uv, 0).a;
     float edge = 0.0;
-    edge = max(edge, length(center_normal -
-                            normalize(GBufferNormal.SampleLevel(
-                                          LinearClamp, input.Uv + float2(texel.x, 0), 0).xyz *
-                                          2.0 -
-                                      1.0)));
-    edge = max(edge, length(center_normal -
-                            normalize(GBufferNormal.SampleLevel(
-                                          LinearClamp, input.Uv + float2(0, texel.y), 0).xyz *
-                                          2.0 -
-                                      1.0)));
+    static const float2 offsets[8] = {
+        float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
+        float2(1, 0), float2(-1, 1), float2(0, 1), float2(1, 1)
+    };
+    for (uint index = 0; index < 8; ++index)
+    {
+        float neighbor_mask = GBufferPosition.SampleLevel(
+            LinearClamp, input.Uv + offsets[index] * texel, 0).a;
+        edge = max(edge, abs(center_mask - neighbor_mask));
+    }
     float3 color = PostA.SampleLevel(LinearClamp, input.Uv, 0).rgb;
-    float outline = RenderOptions.z > 0.5 ? smoothstep(0.18, 0.38, edge) : 0.0;
+    float outline = RenderOptions.z > 0.5 ? smoothstep(0.1, 0.9, edge) : 0.0;
     return float4(lerp(color, color * 0.08, outline), 1.0);
 }
 

@@ -42,11 +42,14 @@ struct AnimationPoseRef
     std::uint32_t instance_index{};
     CharacterAnimationClip clip{CharacterAnimationClip::Idle};
     float normalized_time{};
+    float playback_rate{1.0f};
     CharacterAnimationClip secondary_clip{CharacterAnimationClip::Run};
     float secondary_normalized_time{};
+    float secondary_playback_rate{1.0f};
     float secondary_weight{};
     CharacterAnimationClip upper_body_clip{CharacterAnimationClip::Idle};
     float upper_body_normalized_time{};
+    float upper_body_playback_rate{1.0f};
     float upper_body_weight{};
 };
 

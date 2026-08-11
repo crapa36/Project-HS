@@ -4,28 +4,28 @@
   "category": "spawn_schedule",
   "tick_rate_hz": 60,
   "continuous_intervals": [
-    {"start_seconds": 0, "end_seconds": 120, "rate_per_second": 0.5},
-    {"start_seconds": 120, "end_seconds": 240, "rate_per_second": 1},
-    {"start_seconds": 240, "end_seconds": 360, "rate_per_second": 1.75},
-    {"start_seconds": 360, "end_seconds": 540, "rate_per_second": 2.75},
-    {"start_seconds": 540, "end_seconds": 720, "rate_per_second": 4},
-    {"start_seconds": 720, "end_seconds": 900, "rate_per_second": 5}
+    {"start_seconds": 0, "end_seconds": 120, "rate_per_second": 0.9},
+    {"start_seconds": 120, "end_seconds": 240, "rate_per_second": 1.2},
+    {"start_seconds": 240, "end_seconds": 360, "rate_per_second": 2.1},
+    {"start_seconds": 360, "end_seconds": 540, "rate_per_second": 3.3},
+    {"start_seconds": 540, "end_seconds": 720, "rate_per_second": 4.8},
+    {"start_seconds": 720, "end_seconds": 900, "rate_per_second": 4.8}
   ],
   "compositions": [
     {"start_seconds": 0, "melee_weight": 100, "ranged_weight": 0, "suicide_weight": 0},
     {"start_seconds": 120, "melee_weight": 80, "ranged_weight": 20, "suicide_weight": 0},
-    {"start_seconds": 240, "melee_weight": 70, "ranged_weight": 20, "suicide_weight": 10},
-    {"start_seconds": 360, "melee_weight": 60, "ranged_weight": 25, "suicide_weight": 15},
-    {"start_seconds": 540, "melee_weight": 50, "ranged_weight": 30, "suicide_weight": 20},
-    {"start_seconds": 720, "melee_weight": 45, "ranged_weight": 30, "suicide_weight": 25},
-    {"start_seconds": 840, "melee_weight": 40, "ranged_weight": 30, "suicide_weight": 30}
+    {"start_seconds": 240, "melee_weight": 74, "ranged_weight": 21, "suicide_weight": 5},
+    {"start_seconds": 360, "melee_weight": 65, "ranged_weight": 27, "suicide_weight": 8},
+    {"start_seconds": 540, "melee_weight": 56, "ranged_weight": 34, "suicide_weight": 10},
+    {"start_seconds": 720, "melee_weight": 52, "ranged_weight": 35, "suicide_weight": 13},
+    {"start_seconds": 840, "melee_weight": 49, "ranged_weight": 36, "suicide_weight": 15}
   ],
   "waves": [
-    {"start_seconds": 180, "total_count": 30, "duration_seconds": 2, "duration_ticks": 120},
-    {"start_seconds": 360, "total_count": 45, "duration_seconds": 2, "duration_ticks": 120},
-    {"start_seconds": 540, "total_count": 65, "duration_seconds": 2, "duration_ticks": 120},
-    {"start_seconds": 720, "total_count": 85, "duration_seconds": 2, "duration_ticks": 120},
-    {"start_seconds": 840, "total_count": 100, "duration_seconds": 2, "duration_ticks": 120}
+    {"start_seconds": 180, "total_count": 30, "duration_seconds": 20, "duration_ticks": 1200},
+    {"start_seconds": 360, "total_count": 45, "duration_seconds": 20, "duration_ticks": 1200},
+    {"start_seconds": 540, "total_count": 65, "duration_seconds": 20, "duration_ticks": 1200},
+    {"start_seconds": 720, "total_count": 85, "duration_seconds": 20, "duration_ticks": 1200},
+    {"start_seconds": 840, "total_count": 100, "duration_seconds": 20, "duration_ticks": 1200}
   ],
   "placement": {
     "minimum_player_distance_m": 20,
@@ -39,7 +39,7 @@
     "구간 경계 시각부터 새 구간의 생성률과 조합을 사용한다.",
     "연속 생성률을 60으로 나눈 값을 tick마다 고정소수점 누적하고 정수 부분만큼 생성하며 소수는 보존한다.",
     "생성마다 세션 고정 시드 난수로 현재 조합을 선택한다.",
-    "웨이브 총 수를 120 tick에 정수 분배하고 앞 tick부터 한 마리씩 나머지를 배분한다.",
+    "웨이브 5초 전 경고하고 시작 시 알린 뒤 총 수를 1200 tick에 균등 분배한다.",
     "15분 최종 보스 등장 tick에 연속 생성 누적값과 대기 중인 일반 적 생성 예약을 폐기한다."
   ]
 }

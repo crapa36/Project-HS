@@ -75,7 +75,7 @@
       "single_pattern_recovery_seconds": 1.5,
       "phase2_pattern_interval_seconds": null,
       "phase2_cycle_recovery_seconds": null,
-      "preference_rule": "distance <= 7m: ground_areas; distance > 7m: fan_projectiles",
+      "preference_rule": "distance <= 12m: ground_areas; 12m < distance <= 18m: fan_projectiles; distance > 18m: approach at 4.8m/s",
       "patterns": [
         {
           "id": "pattern.mid_10m.fan_projectiles",

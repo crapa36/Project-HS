@@ -10,7 +10,7 @@
         "maximum_hp": 100,
         "current_hp": 100,
         "attack_power": 10,
-        "basic_attack_rate_per_second": 1.5,
+        "basic_attack_rate_per_second": 1.2765957447,
         "movement_speed_mps": 5,
         "magnet_radius_m": 3,
         "global_cooldown_reduction": 0
@@ -47,8 +47,8 @@
           "id": "stat.basic_attack_speed",
           "display_name": "공격속도",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.05,
-          "formula": "1.5 * (1 + 0.05 * points)",
+          "amount_per_point": 0.07625,
+          "formula": "1.2765957447 * (1 + 0.07625 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "basic_attack_only"
         },
@@ -102,7 +102,7 @@
             {"key": "maximum_stacks", "value": 5, "unit": "count"},
             {"key": "duration", "value": 4, "unit": "seconds"},
             {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
-            {"key": "attack_power_multiplier_per_tick", "value": 0.1, "unit": "multiplier"}
+            {"key": "attack_power_multiplier_per_tick", "value": 0.25, "unit": "multiplier"}
           ],
           "rules": [
             "각 중첩은 적용 당시 공격자의 공격력을 저장한다.",
@@ -116,7 +116,7 @@
             {"key": "maximum_instances", "value": 1, "unit": "count"},
             {"key": "duration", "value": 4, "unit": "seconds"},
             {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
-            {"key": "attack_power_multiplier_per_tick", "value": 0.2, "unit": "multiplier"}
+            {"key": "attack_power_multiplier_per_tick", "value": 0.45, "unit": "multiplier"}
           ],
           "rules": [
             "새 화상의 tick 피해가 기존보다 강하면 새 화상으로 교체한다.",

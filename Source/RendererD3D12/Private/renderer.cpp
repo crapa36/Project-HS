@@ -38,6 +38,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #include <format>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <span>
 #include <string>
 #include <tuple>
@@ -69,6 +70,35 @@ constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kStage1RenderPassCount * 2);
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+constexpr std::array<const char *, 8> kDebugSkillNames{
+    "관통 사격", "다중 사격", "충전 사격", "폭발 화살",
+    "도탄 화살", "화살비", "덫", "후퇴 사격"};
+constexpr std::array<std::array<const char *, 8>, 8> kDebugUpgradeNames{{
+    {{"후속 화살", "사거리 끝 분열", "관통 출혈", "피해 궤적",
+      "관통 연쇄 사격", "적 밀어 정렬", "화상 전달", "빠른 재사용"}},
+    {{"2차 부채", "적중 분열", "추가 관통", "후방 사격",
+      "출혈 부채", "화상 전달", "근거리 집중 사격", "빗나감 재추적"}},
+    {{"과충전 폭발", "빠른 충전", "이동 충전", "관통 감쇠 제거",
+      "완전 충전 출혈", "관통 분열", "화상 폭발", "다중 처치 쿨타임 회수"}},
+    {{"재폭발", "소형 폭탄", "파편 폭발", "화상 지대",
+      "출혈 연쇄 폭발", "폭발 흡인", "액티브 연계 표식", "빠른 재사용"}},
+    {{"귀환 도탄", "분기 도탄", "출혈 도탄 연장", "화상 전달",
+      "처치 소형 화살", "처치 연쇄 갱신", "귀환 쿨타임 회수", "빠른 재사용"}},
+    {{"2차 화살비", "첫 타격 흡인", "반복 적중 출혈", "화상 지대",
+      "추적 화살", "둔화 지대", "처치 추적 화살", "추가 타격과 둔화"}},
+    {{"연속 덫", "착지 둔화", "덫 재활성", "출혈 덫",
+      "화상 덫", "흡인 덫", "액티브 연계 표식", "처치 덫"}},
+    {{"세 갈래 사격", "출발점 덫", "둔화 궤적", "출혈 추적 화살",
+      "착지 충격", "다음 스킬 쿨타임 회수", "다중 적중 회복", "추가 후퇴"}}
+}};
+constexpr std::array<const char *, 12> kDebugRelicNames{
+    "피의 회복", "번지는 불꽃", "한기 폭발", "피와 불", "팔방 사격", "추격 본능",
+    "잔상 사격", "연계 숙련", "교차 사격", "충격 반격", "위기 회복", "경험의 파동"};
+constexpr std::array<const char *, 6> kDebugStatNames{
+    "최대 체력", "이동속도", "공격력", "공격속도", "쿨타임 감소", "자석 반경"};
+#endif
 
 using Vertex = SkinnedVertex;
 
@@ -315,8 +345,10 @@ struct DdsHeader
 [[nodiscard]] Result LoadCharacterAsset(
     const std::filesystem::path &path, std::vector<SkinnedVertex> &vertices,
     std::vector<CharacterClipHeader> &clips,
+    std::vector<std::uint16_t> &parents,
+    std::vector<std::array<float, 16>> &inverse_bind_matrices,
     std::vector<float> &upper_body_weights,
-    std::vector<std::array<float, 16>> &matrices, std::uint32_t &bone_count,
+    std::vector<CharacterLocalTransform> &transforms, std::uint32_t &bone_count,
     float &ground_offset, std::uint32_t &material_count)
 {
     std::vector<std::byte> bytes;
@@ -334,9 +366,15 @@ struct DdsHeader
     std::memcpy(&header, bytes.data(), sizeof(header));
     const auto expected_clips_offset =
         sizeof(header) + header.vertex_count * sizeof(SkinnedVertex);
-    const auto expected_matrices_offset =
-        expected_clips_offset + header.clip_count * sizeof(CharacterClipHeader) +
-        header.bone_count * sizeof(float);
+    const auto expected_parents_offset =
+        expected_clips_offset + header.clip_count * sizeof(CharacterClipHeader);
+    const auto expected_inverse_bind_matrices_offset =
+        expected_parents_offset + header.bone_count * sizeof(std::uint16_t);
+    const auto expected_upper_body_weights_offset =
+        expected_inverse_bind_matrices_offset +
+        header.bone_count * sizeof(inverse_bind_matrices.front());
+    const auto expected_transforms_offset =
+        expected_upper_body_weights_offset + header.bone_count * sizeof(float);
     if (header.magic !=
             std::array<char, 8>{'H', 'S', 'C', 'H', 'A', 'R', '1', '\0'} ||
         header.version != kCharacterAssetVersion || header.vertex_count == 0 ||
@@ -346,9 +384,10 @@ struct DdsHeader
         header.clip_count != static_cast<std::uint32_t>(CharacterAnimationClip::Count) ||
         header.vertices_offset != sizeof(header) ||
         header.clips_offset != expected_clips_offset ||
-        header.upper_body_weights_offset !=
-            expected_clips_offset + header.clip_count * sizeof(CharacterClipHeader) ||
-        header.matrices_offset != expected_matrices_offset ||
+        header.parents_offset != expected_parents_offset ||
+        header.inverse_bind_matrices_offset != expected_inverse_bind_matrices_offset ||
+        header.upper_body_weights_offset != expected_upper_body_weights_offset ||
+        header.transforms_offset != expected_transforms_offset ||
         !std::isfinite(header.bounds_min[1]) ||
         !std::isfinite(header.bounds_max[1]) ||
         header.bounds_min[1] >= header.bounds_max[1] ||
@@ -366,6 +405,26 @@ struct DdsHeader
     clips.resize(header.clip_count);
     std::memcpy(clips.data(), bytes.data() + header.clips_offset,
                 clips.size() * sizeof(clips.front()));
+    parents.resize(header.bone_count);
+    std::memcpy(parents.data(), bytes.data() + header.parents_offset,
+                parents.size() * sizeof(parents.front()));
+    inverse_bind_matrices.resize(header.bone_count);
+    std::memcpy(inverse_bind_matrices.data(),
+                bytes.data() + header.inverse_bind_matrices_offset,
+                inverse_bind_matrices.size() * sizeof(inverse_bind_matrices.front()));
+    for (std::size_t bone_index = 0; bone_index < parents.size(); ++bone_index)
+    {
+        const auto parent = parents[bone_index];
+        if ((parent != std::numeric_limits<std::uint16_t>::max() &&
+             parent >= bone_index) ||
+            !std::ranges::all_of(inverse_bind_matrices[bone_index], [](float value) {
+                return std::isfinite(value);
+            }))
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Character skeleton hierarchy is invalid.");
+        }
+    }
     upper_body_weights.resize(header.bone_count);
     std::memcpy(upper_body_weights.data(), bytes.data() + header.upper_body_weights_offset,
                 upper_body_weights.size() * sizeof(float));
@@ -378,24 +437,43 @@ struct DdsHeader
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Character upper-body mask is invalid.");
     }
-    const auto matrix_bytes = bytes.size() - header.matrices_offset;
-    if (matrix_bytes % sizeof(matrices.front()) != 0)
+    const auto transform_bytes = bytes.size() - header.transforms_offset;
+    if (transform_bytes % sizeof(transforms.front()) != 0)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Character animation matrices are misaligned.");
+                               "Character animation transforms are misaligned.");
     }
-    matrices.resize(matrix_bytes / sizeof(matrices.front()));
-    std::memcpy(matrices.data(), bytes.data() + header.matrices_offset, matrix_bytes);
+    transforms.resize(transform_bytes / sizeof(transforms.front()));
+    std::memcpy(transforms.data(), bytes.data() + header.transforms_offset,
+                transform_bytes);
+    for (const auto &transform : transforms)
+    {
+        const auto rotation_length = std::sqrt(std::inner_product(
+            transform.rotation.begin(), transform.rotation.end(),
+            transform.rotation.begin(), 0.0f));
+        if (!std::ranges::all_of(transform.translation, [](float value) {
+                return std::isfinite(value);
+            }) ||
+            !std::ranges::all_of(transform.scale, [](float value) {
+                return std::isfinite(value) && std::abs(value) > 0.0001f;
+            }) ||
+            !std::isfinite(rotation_length) || rotation_length < 0.999f ||
+            rotation_length > 1.001f)
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Character animation contains an invalid local pose.");
+        }
+    }
     std::array<bool, static_cast<std::size_t>(CharacterAnimationClip::Count)> found{};
     for (const auto &clip : clips)
     {
         const auto clip_index = static_cast<std::size_t>(clip.clip);
-        const auto matrix_count =
+        const auto transform_count =
             static_cast<std::uint64_t>(clip.frame_count) * header.bone_count;
         if (clip_index >= found.size() || std::exchange(found[clip_index], true) ||
             clip.frame_count < 2 || !(clip.duration_seconds > 0.0f) ||
-            static_cast<std::uint64_t>(clip.first_matrix) + matrix_count >
-                matrices.size())
+            static_cast<std::uint64_t>(clip.first_transform) + transform_count >
+                transforms.size())
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Character animation clip table is invalid.");
@@ -547,7 +625,9 @@ struct D3D12Renderer::Impl
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_VERTEX_BUFFER_VIEW archer_vertex_view{};
     std::vector<CharacterClipHeader> archer_clips;
-    std::vector<std::array<float, 16>> archer_matrices;
+    std::vector<std::uint16_t> archer_parents;
+    std::vector<std::array<float, 16>> archer_inverse_bind_matrices;
+    std::vector<CharacterLocalTransform> archer_transforms;
     std::vector<float> archer_upper_body_weights;
     std::uint32_t archer_vertex_count{};
     std::uint32_t archer_bone_count{};
@@ -576,6 +656,18 @@ struct D3D12Renderer::Impl
     bool com_initialized{};
 #if defined(HS_DEVELOPMENT_TOOLS)
     bool imgui_initialized{};
+    bool preview_pose_override{true};
+    int preview_base_clip{};
+    int preview_secondary_clip{1};
+    int preview_upper_clip{3};
+    float preview_base_time{0.37f};
+    float preview_secondary_time{0.61f};
+    float preview_upper_time{0.5f};
+    float preview_secondary_weight{0.5f};
+    float preview_upper_weight{0.5f};
+    float preview_distance{4.0f};
+    float preview_yaw{180.0f};
+    float preview_pitch{10.0f};
     std::filesystem::file_time_type shader_write{};
     std::chrono::steady_clock::time_point next_shader_check{};
 #endif
@@ -1455,8 +1547,9 @@ Result D3D12Renderer::Impl::CreateGpuData()
     std::vector<SkinnedVertex> cooked_vertices;
     if (auto loaded = LoadCharacterAsset(
             ExecutableDirectory() / "Cooked" / "stage1_archer.meshbin",
-            cooked_vertices, archer_clips, archer_upper_body_weights,
-            archer_matrices, archer_bone_count,
+            cooked_vertices, archer_clips, archer_parents,
+            archer_inverse_bind_matrices, archer_upper_body_weights,
+            archer_transforms, archer_bone_count,
             archer_ground_offset, archer_material_count);
         !loaded)
     {
@@ -2160,6 +2253,11 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
+    const auto imgui_font_path =
+        (ExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf").string();
+    ImGui::GetIO().Fonts->AddFontFromFileTTF(
+        imgui_font_path.c_str(), 16.0f, nullptr,
+        ImGui::GetIO().Fonts->GetGlyphRangesKorean());
     ImGui::StyleColorsDark();
     if (!ImGui_ImplWin32_Init(static_cast<HWND>(config.window)))
     {
@@ -2387,6 +2485,27 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 static_cast<unsigned long long>(devtools.dropped_input),
                 static_cast<unsigned long long>(devtools.dropped_presentation),
                 static_cast<unsigned long long>(devtools.dropped_particles));
+    ImGui::SeparatorText("Character animation inspection");
+    ImGui::Checkbox("Close-up preview", &impl_->config.character_preview);
+    if (impl_->config.character_preview)
+    {
+        ImGui::SliderFloat("Camera distance", &impl_->preview_distance, 2.5f, 8.0f);
+        ImGui::SliderFloat("Camera yaw", &impl_->preview_yaw, 0.0f, 360.0f);
+        ImGui::SliderFloat("Camera pitch", &impl_->preview_pitch, -20.0f, 60.0f);
+        ImGui::Checkbox("Override pose", &impl_->preview_pose_override);
+        if (impl_->preview_pose_override)
+        {
+            constexpr const char *clips = "Idle\0Run\0Draw\0Recoil\0Death\0";
+            ImGui::Combo("Base clip", &impl_->preview_base_clip, clips);
+            ImGui::SliderFloat("Base time", &impl_->preview_base_time, 0.0f, 1.0f);
+            ImGui::Combo("Blend clip", &impl_->preview_secondary_clip, clips);
+            ImGui::SliderFloat("Blend time", &impl_->preview_secondary_time, 0.0f, 1.0f);
+            ImGui::SliderFloat("Blend weight", &impl_->preview_secondary_weight, 0.0f, 1.0f);
+            ImGui::Combo("Upper clip", &impl_->preview_upper_clip, clips);
+            ImGui::SliderFloat("Upper time", &impl_->preview_upper_time, 0.0f, 1.0f);
+            ImGui::SliderFloat("Upper weight", &impl_->preview_upper_weight, 0.0f, 1.0f);
+        }
+    }
     ImGui::SeparatorText("Simulation");
     if (ImGui::Button("Start Session")) debug_command = 1;
     if (ImGui::Button("Pause / Resume")) debug_command = 15;
@@ -2411,22 +2530,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     ImGui::SameLine();
     if (ImGui::Button("Spawn Final Boss")) { debug_command = 11; debug_value = 2; }
 
-    static int skill = 1;
+    static int skill{};
     static int upgrade{};
     static int relic{};
     static int stat{};
     ImGui::SeparatorText("Build controls");
-    ImGui::SliderInt("Skill", &skill, 1, 8);
-    if (ImGui::Button("Grant Skill")) { debug_command = 7; debug_value = skill; }
-    ImGui::SliderInt("Upgrade", &upgrade, 0, 7);
+    ImGui::Combo("Skill", &skill, kDebugSkillNames.data(),
+                 static_cast<int>(kDebugSkillNames.size()));
+    if (ImGui::Button("Grant Skill")) { debug_command = 7; debug_value = skill + 1; }
+    ImGui::Combo("Upgrade", &upgrade, kDebugUpgradeNames[skill].data(),
+                 static_cast<int>(kDebugUpgradeNames[skill].size()));
     if (ImGui::Button("Grant Upgrade")) {
         debug_command = 8;
-        debug_value = skill;
+        debug_value = skill + 1;
         debug_secondary = static_cast<std::uint32_t>(upgrade);
     }
-    ImGui::SliderInt("Relic", &relic, 0, 11);
+    ImGui::Combo("Relic", &relic, kDebugRelicNames.data(),
+                 static_cast<int>(kDebugRelicNames.size()));
     if (ImGui::Button("Grant Relic")) { debug_command = 9; debug_value = relic; }
-    ImGui::SliderInt("Stat", &stat, 0, 5);
+    ImGui::Combo("Stat", &stat, kDebugStatNames.data(),
+                 static_cast<int>(kDebugStatNames.size()));
     if (ImGui::Button("Assign Stat")) { debug_command = 13; debug_value = stat; }
     ImGui::SameLine();
     if (ImGui::Button("Reroll")) debug_command = 14;
@@ -2499,15 +2622,30 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                   std::chrono::duration<float>(now - impl_->snapshot_arrival).count() * 60.0f,
                   0.0f, 1.0f)
             : 1.0f;
-    const auto target = DirectX::XMVectorSet(snapshot.camera.target.x, snapshot.camera.target.y,
+    const auto target_height = impl_->config.character_preview ? 1.0f
+                                                                : snapshot.camera.target.y;
+    const auto target = DirectX::XMVectorSet(snapshot.camera.target.x, target_height,
                                              snapshot.camera.target.z, 1.0f);
-    const auto yaw = DirectX::XMConvertToRadians(snapshot.camera.yaw_degrees);
-    const auto pitch = DirectX::XMConvertToRadians(snapshot.camera.pitch_degrees);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto camera_yaw = impl_->config.character_preview ? impl_->preview_yaw
+                                                             : snapshot.camera.yaw_degrees;
+    const auto camera_pitch = impl_->config.character_preview ? impl_->preview_pitch
+                                                               : snapshot.camera.pitch_degrees;
+    const auto camera_distance = impl_->config.character_preview
+                                     ? impl_->preview_distance
+                                     : snapshot.camera.distance;
+#else
+    const auto camera_yaw = snapshot.camera.yaw_degrees;
+    const auto camera_pitch = snapshot.camera.pitch_degrees;
+    const auto camera_distance = snapshot.camera.distance;
+#endif
+    const auto yaw = DirectX::XMConvertToRadians(camera_yaw);
+    const auto pitch = DirectX::XMConvertToRadians(camera_pitch);
     const auto direction = DirectX::XMVector3Normalize(
         DirectX::XMVectorSet(std::cos(pitch) * std::sin(yaw), -std::sin(pitch),
                              std::cos(pitch) * std::cos(yaw), 0.0f));
-    const auto eye =
-        DirectX::XMVectorSubtract(target, DirectX::XMVectorScale(direction, snapshot.camera.distance));
+    const auto eye = DirectX::XMVectorSubtract(
+        target, DirectX::XMVectorScale(direction, camera_distance));
     const auto view =
         DirectX::XMMatrixLookAtLH(eye, target, DirectX::XMVectorSet(0, 1, 0, 0));
     const auto projection = DirectX::XMMatrixPerspectiveFovLH(
@@ -2532,8 +2670,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         camera_log << std::format(
             "{{\"origin\":[{},{},{}],\"forward\":[{},{},{}],\"yaw\":{},\"pitch\":{}}}\n",
             projected_origin.x, projected_origin.y, projected_origin.z, projected_forward.x,
-            projected_forward.y, projected_forward.z, snapshot.camera.yaw_degrees,
-            snapshot.camera.pitch_degrees);
+            projected_forward.y, projected_forward.z, camera_yaw, camera_pitch);
     }
     DirectX::XMStoreFloat4(&constants->camera_time, eye);
     constants->camera_time.w =
@@ -2567,26 +2704,55 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         DirectX::XMStoreFloat4x4(
             &bone, DirectX::XMMatrixTranspose(DirectX::XMMatrixIdentity()));
     }
-    const auto pose = snapshot.poses.empty() ? AnimationPoseRef{} : snapshot.poses.front();
-    const auto blend_transform = [](DirectX::XMMATRIX first, DirectX::XMMATRIX second,
-                                    float weight, DirectX::XMMATRIX &output) {
-        DirectX::XMVECTOR first_scale, first_rotation, first_translation;
-        DirectX::XMVECTOR second_scale, second_rotation, second_translation;
-        if (!DirectX::XMMatrixDecompose(&first_scale, &first_rotation,
-                                        &first_translation, first) ||
-            !DirectX::XMMatrixDecompose(&second_scale, &second_rotation,
-                                        &second_translation, second))
-            return false;
-        output = DirectX::XMMatrixScalingFromVector(
-                     DirectX::XMVectorLerp(first_scale, second_scale, weight)) *
-                 DirectX::XMMatrixRotationQuaternion(
-                     DirectX::XMQuaternionSlerp(first_rotation, second_rotation, weight)) *
-                 DirectX::XMMatrixTranslationFromVector(
-                     DirectX::XMVectorLerp(first_translation, second_translation, weight));
-        return true;
+    auto pose = snapshot.poses.empty() ? AnimationPoseRef{} : snapshot.poses.front();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (impl_->config.character_preview && impl_->preview_pose_override)
+    {
+        pose.clip = static_cast<CharacterAnimationClip>(impl_->preview_base_clip);
+        pose.normalized_time = impl_->preview_base_time;
+        pose.secondary_clip =
+            static_cast<CharacterAnimationClip>(impl_->preview_secondary_clip);
+        pose.secondary_normalized_time = impl_->preview_secondary_time;
+        pose.secondary_weight = impl_->preview_secondary_weight;
+        pose.upper_body_clip =
+            static_cast<CharacterAnimationClip>(impl_->preview_upper_clip);
+        pose.upper_body_normalized_time = impl_->preview_upper_time;
+        pose.upper_body_weight = impl_->preview_upper_weight;
+    }
+#endif
+    const auto eased_weight = [](float weight) {
+        const auto clamped = std::clamp(weight, 0.0f, 1.0f);
+        return clamped * clamped * (3.0f - 2.0f * clamped);
+    };
+    const auto blend_transform = [](const CharacterLocalTransform &first,
+                                    const CharacterLocalTransform &second,
+                                    float weight) {
+        CharacterLocalTransform output;
+        for (std::size_t axis = 0; axis < 3; ++axis)
+        {
+            output.translation[axis] = std::lerp(first.translation[axis],
+                                                 second.translation[axis], weight);
+            output.scale[axis] = std::lerp(first.scale[axis], second.scale[axis], weight);
+        }
+        auto first_rotation = DirectX::XMQuaternionNormalize(DirectX::XMVectorSet(
+            first.rotation[0], first.rotation[1], first.rotation[2], first.rotation[3]));
+        auto second_rotation = DirectX::XMQuaternionNormalize(DirectX::XMVectorSet(
+            second.rotation[0], second.rotation[1], second.rotation[2], second.rotation[3]));
+        if (DirectX::XMVectorGetX(
+                DirectX::XMQuaternionDot(first_rotation, second_rotation)) < 0.0f)
+        {
+            second_rotation = DirectX::XMVectorNegate(second_rotation);
+        }
+        DirectX::XMFLOAT4 rotation;
+        DirectX::XMStoreFloat4(
+            &rotation, DirectX::XMQuaternionNormalize(DirectX::XMQuaternionSlerp(
+                           first_rotation, second_rotation, weight)));
+        output.rotation = {rotation.x, rotation.y, rotation.z, rotation.w};
+        return output;
     };
     const auto sample = [&](CharacterAnimationClip clip, float time,
-                            std::uint32_t bone_index, DirectX::XMMATRIX &output) {
+                            std::uint32_t bone_index,
+                            CharacterLocalTransform &output) {
         const auto found = std::ranges::find(impl_->archer_clips, clip,
                                               &CharacterClipHeader::clip);
         if (found == impl_->archer_clips.end()) return false;
@@ -2595,40 +2761,70 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto frame_position = normalized * static_cast<float>(found->frame_count - 1);
         const auto first_frame = static_cast<std::uint32_t>(frame_position);
         const auto second_frame = std::min(first_frame + 1, found->frame_count - 1);
-        DirectX::XMFLOAT4X4 first{}, second{};
-        std::memcpy(&first, impl_->archer_matrices[
-            found->first_matrix + first_frame * impl_->archer_bone_count + bone_index].data(),
-            sizeof(first));
-        std::memcpy(&second, impl_->archer_matrices[
-            found->first_matrix + second_frame * impl_->archer_bone_count + bone_index].data(),
-            sizeof(second));
-        return blend_transform(
-            DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&first)),
-            DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&second)),
-            frame_position - static_cast<float>(first_frame), output);
+        const auto &first = impl_->archer_transforms[
+            found->first_transform + first_frame * impl_->archer_bone_count + bone_index];
+        const auto &second = impl_->archer_transforms[
+            found->first_transform + second_frame * impl_->archer_bone_count + bone_index];
+        output = blend_transform(first, second,
+                                 frame_position - static_cast<float>(first_frame));
+        return true;
     };
+    std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> global_transforms{};
     for (std::uint32_t bone_index = 0; bone_index < impl_->archer_bone_count; ++bone_index)
     {
-        DirectX::XMMATRIX base, secondary, upper;
-        if (!sample(pose.clip, pose.normalized_time, bone_index, base) ||
-            !sample(pose.secondary_clip, pose.secondary_normalized_time,
-                    bone_index, secondary) ||
-            !blend_transform(base, secondary,
-                             std::clamp(pose.secondary_weight, 0.0f, 1.0f), base))
+        CharacterLocalTransform base, secondary, upper;
+        if (!sample(pose.clip, pose.normalized_time * std::max(0.0f, pose.playback_rate),
+                    bone_index, base) ||
+            !sample(pose.secondary_clip,
+                    pose.secondary_normalized_time *
+                        std::max(0.0f, pose.secondary_playback_rate),
+                    bone_index, secondary))
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Cooked animation transform cannot be blended.");
         }
-        const auto upper_weight = std::clamp(pose.upper_body_weight, 0.0f, 1.0f) *
+        base = blend_transform(base, secondary, eased_weight(pose.secondary_weight));
+        const auto upper_weight = eased_weight(pose.upper_body_weight) *
                                   impl_->archer_upper_body_weights[bone_index];
         if (upper_weight > 0.0f &&
-            (!sample(pose.upper_body_clip, pose.upper_body_normalized_time,
-                     bone_index, upper) ||
-             !blend_transform(base, upper, upper_weight, base)))
+            (!sample(pose.upper_body_clip,
+                     pose.upper_body_normalized_time *
+                         std::max(0.0f, pose.upper_body_playback_rate),
+                     bone_index, upper)))
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Cooked upper-body animation cannot be blended.");
+        if (upper_weight > 0.0f)
+        {
+            base = blend_transform(base, upper, upper_weight);
+        }
+        const auto local =
+            DirectX::XMMatrixScaling(base.scale[0], base.scale[1], base.scale[2]) *
+            DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(
+                base.rotation[0], base.rotation[1], base.rotation[2], base.rotation[3])) *
+            DirectX::XMMatrixTranslation(base.translation[0], base.translation[1],
+                                         base.translation[2]);
+        const auto parent = impl_->archer_parents[bone_index];
+        const auto global = parent == std::numeric_limits<std::uint16_t>::max()
+                                ? local
+                                : local * DirectX::XMLoadFloat4x4(
+                                              &global_transforms[parent]);
+        DirectX::XMStoreFloat4x4(&global_transforms[bone_index], global);
+        DirectX::XMFLOAT4X4 inverse_bind;
+        std::memcpy(&inverse_bind,
+                    impl_->archer_inverse_bind_matrices[bone_index].data(),
+                    sizeof(inverse_bind));
+        const auto skin = DirectX::XMMatrixTranspose(
+                              DirectX::XMLoadFloat4x4(&inverse_bind)) *
+                          global;
+        const auto determinant = DirectX::XMVectorGetX(DirectX::XMMatrixDeterminant(skin));
+        if (!std::isfinite(determinant) || std::abs(determinant) <= 0.0001f ||
+            DirectX::XMMatrixIsNaN(skin) || DirectX::XMMatrixIsInfinite(skin))
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Blended animation produced an invalid skin pose.");
+        }
         DirectX::XMStoreFloat4x4(&constants->archer_bones[bone_index],
-                                 DirectX::XMMatrixTranspose(base));
+                                 DirectX::XMMatrixTranspose(skin));
     }
     constants->render_options = {
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
@@ -3014,7 +3210,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     auto outline_pass =
         impl_->graph.AddPass("Screen-space Outline", QueueHint::Direct);
     outline_pass.Read(post_a, Access::ShaderRead);
-    outline_pass.Read(gbuffer_normal, Access::ShaderRead);
+    outline_pass.Read(gbuffer_position, Access::ShaderRead);
     outline_pass.Write(post_b, Access::RenderTarget);
     outline_pass.SetExecute([&](RenderPassContext &) {
         draw_fullscreen(impl_->outline_pipeline.Get(), post_b_rtv);

@@ -51,9 +51,9 @@
         {"key": "maximum_hold_distance", "value": 12, "unit": "meters"},
         {"key": "telegraph_duration", "value": 0.5, "unit": "seconds"},
         {"key": "base_damage", "value": 8, "unit": "damage"},
-        {"key": "projectile_speed", "value": 5.5, "unit": "meters_per_second"},
+        {"key": "projectile_speed", "value": 6.875, "unit": "meters_per_second"},
         {"key": "projectile_range", "value": 18, "unit": "meters"},
-        {"key": "reattack_interval", "value": 2.2, "unit": "seconds"}
+        {"key": "reattack_interval", "value": 2.444444, "unit": "seconds"}
       ],
       "rules": [
         "12m 밖이면 접근하고 12m 이내에서는 정지하며 플레이어에게서 멀어지는 이동은 하지 않는다.",
@@ -64,7 +64,7 @@
       "id": "enemy.suicide",
       "display_name": "자폭",
       "base_hp": 13,
-      "movement_speed_mps": 1.9125,
+      "movement_speed_mps": 3.825,
       "xp_reward": 2,
       "mesh_asset_id": "procedural.mesh.enemy.suicide",
       "material_id": "material.enemy.suicide",

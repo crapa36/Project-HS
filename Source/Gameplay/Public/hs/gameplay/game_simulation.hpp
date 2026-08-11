@@ -23,6 +23,8 @@ struct SimulationConfig
     bool automatic_choices{};
     bool start_in_main_menu{};
     SettingsData settings{};
+    bool stationary_combat_simulation{};
+    bool stationary_progression_simulation{};
 };
 
 struct TickResult

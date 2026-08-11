@@ -15,7 +15,8 @@
       "starting_active_skill_ids": [],
       "starting_relic_ids": [],
       "starting_unspent_stat_points": 0,
-      "starting_shared_rerolls": 3,
+      "starting_level_rerolls": 3,
+      "starting_relic_rerolls": 3,
       "movement": {
         "input": "RMB",
         "stop_distance_m": 0.15,

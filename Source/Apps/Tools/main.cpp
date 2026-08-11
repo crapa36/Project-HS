@@ -249,8 +249,6 @@ std::uint64_t SourceHash()
     append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
     append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
     append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
-    append_asset("character/archer/turn_left", animation_root / "TurnLeft90.fbx");
-    append_asset("character/archer/turn_right", animation_root / "TurnRight90.fbx");
     return hash;
 }
 

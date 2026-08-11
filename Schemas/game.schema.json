@@ -76,7 +76,7 @@
         "id", "display_name", "playable", "stat_profile_id", "mesh_asset_id",
         "material_id", "starting_level", "starting_basic_attack_level",
         "starting_active_skill_ids", "starting_relic_ids",
-        "starting_unspent_stat_points", "starting_shared_rerolls", "movement",
+        "starting_unspent_stat_points", "starting_level_rerolls", "starting_relic_rerolls", "movement",
         "aiming", "camera", "rules"
       ],
       "properties": {
@@ -91,7 +91,8 @@
         "starting_active_skill_ids": {"type": "array", "items": {"$ref": "#/$defs/stable_id"}},
         "starting_relic_ids": {"type": "array", "items": {"$ref": "#/$defs/stable_id"}},
         "starting_unspent_stat_points": {"type": "integer", "minimum": 0},
-        "starting_shared_rerolls": {"type": "integer", "minimum": 0},
+        "starting_level_rerolls": {"type": "integer", "minimum": 0},
+        "starting_relic_rerolls": {"type": "integer", "minimum": 0},
         "movement": {"$ref": "#/$defs/character_movement"},
         "aiming": {"$ref": "#/$defs/character_aiming"},
         "camera": {"$ref": "#/$defs/camera"},
@@ -634,7 +635,7 @@
     "experience": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rewards", "next_level_formula", "level_cap", "pickup_magnet_tracking", "utility_pickup_base_chance", "utility_pickup_miss_increment", "target_level_at_15_minutes", "target_level_choices_at_15_minutes", "forced_level_correction"],
+      "required": ["rewards", "next_level_formula", "level_cap", "pickup_magnet_tracking", "utility_pickup_base_chance", "utility_pickup_miss_increment", "heal_pickup_chance_multiplier", "magnet_pickup_chance_multiplier", "target_level_at_15_minutes", "target_level_choices_at_15_minutes", "forced_level_correction"],
       "properties": {
         "rewards": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/xp_reward"}},
         "next_level_formula": {"type": "string", "minLength": 1},
@@ -642,6 +643,8 @@
         "pickup_magnet_tracking": {"type": "boolean"},
         "utility_pickup_base_chance": {"type": "number", "minimum": 0, "maximum": 1},
         "utility_pickup_miss_increment": {"type": "number", "minimum": 0, "maximum": 1},
+        "heal_pickup_chance_multiplier": {"type": "number", "minimum": 0, "maximum": 1},
+        "magnet_pickup_chance_multiplier": {"type": "number", "minimum": 0, "maximum": 1},
         "target_level_at_15_minutes": {"type": "integer", "minimum": 1},
         "target_level_choices_at_15_minutes": {"type": "integer", "minimum": 0},
         "forced_level_correction": {"type": "boolean"}
@@ -679,9 +682,10 @@
     "rerolls": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["shared_initial_count", "shared_between_level_and_relic_choices", "replace_all_candidate_cards", "candidate_count", "exclude_current_cards_when_enough_candidates", "can_skip_acquisition_or_stat_allocation"],
+      "required": ["level_initial_count", "relic_initial_count", "shared_between_level_and_relic_choices", "replace_all_candidate_cards", "candidate_count", "exclude_current_cards_when_enough_candidates", "can_skip_acquisition_or_stat_allocation"],
       "properties": {
-        "shared_initial_count": {"type": "integer", "minimum": 0},
+        "level_initial_count": {"type": "integer", "minimum": 0},
+        "relic_initial_count": {"type": "integer", "minimum": 0},
         "shared_between_level_and_relic_choices": {"type": "boolean"},
         "replace_all_candidate_cards": {"type": "boolean"},
         "candidate_count": {"type": "integer", "minimum": 1},

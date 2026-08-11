@@ -361,8 +361,6 @@ set(
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DrawArrow.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/AimRecoil.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DeathBackward.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/TurnLeft90.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/TurnRight90.fbx"
 )
 file(GLOB HS_ARCHER_TEXTURE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbm/*"

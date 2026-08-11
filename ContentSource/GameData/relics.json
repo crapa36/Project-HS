@@ -10,7 +10,7 @@
     "guaranteed_boxes_per_mid_boss": 1,
     "mid_boss_maximum_hp_heal_fraction": 0.25,
     "normal_enemy_base_probability_percent": 0.001,
-    "normal_enemy_probability_increment_per_kill_percent": 0.00003,
+    "normal_enemy_probability_increment_per_kill_percent": 0.0004,
     "normal_enemy_probability_cap_percent": 100,
     "hard_pity": false,
     "reset_kill_counter_on_box_spawn": true,
@@ -43,9 +43,10 @@
       "icon_asset_id": "procedural.icon.relic.burn_spread_on_kill",
       "parameters": [
         {"key": "search_radius", "value": 5, "unit": "meters"},
-        {"key": "maximum_targets", "value": 3, "unit": "count"}
+        {"key": "maximum_targets", "value": 2, "unit": "count"},
+        {"key": "copied_burn_strength", "value": 0.4, "unit": "multiplier"}
       ],
-      "rule": "화상 중인 적 처치 시 남은 화상을 5m 안의 최대 3명에게 복제한다. 복제된 화상은 다시 전파되지 않는다."
+      "rule": "화상 중인 적 처치 시 남은 화상의 40% 세기를 5m 안의 최대 2명에게 복제한다. 복제된 화상은 다시 전파되지 않는다."
     },
     {
       "id": "relic.triple_slow_burst",
@@ -67,11 +68,11 @@
       "logic_id": "burn_applied_to_bleeding_explosion",
       "icon_asset_id": "procedural.icon.relic.bleed_burn_explosion",
       "parameters": [
-        {"key": "radius", "value": 2, "unit": "meters"},
-        {"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"},
+        {"key": "radius", "value": 2.5, "unit": "meters"},
+        {"key": "damage_multiplier", "value": 12, "unit": "multiplier"},
         {"key": "per_target_cooldown", "value": 2, "unit": "seconds"}
       ],
-      "rule": "출혈 중인 적에게 화상을 적용하면 대상 중심 반경 2m에 120% 폭발을 일으킨다. 대상별 쿨타임 2초다."
+      "rule": "출혈 중인 적에게 화상을 적용하면 대상 중심 반경 2.5m에 1200% 폭발을 일으킨다. 대상별 쿨타임 2초다."
     },
     {
       "id": "relic.sixth_basic_radial",
@@ -81,9 +82,9 @@
       "parameters": [
         {"key": "cadence_interval", "value": 6, "unit": "count"},
         {"key": "direction_count", "value": 8, "unit": "count"},
-        {"key": "damage_multiplier", "value": 0.6, "unit": "multiplier"}
+        {"key": "damage_multiplier", "value": 0.45, "unit": "multiplier"}
       ],
-      "rule": "매 6번째 기본 공격이 발사 시점에 8방향으로 각각 60% 화살을 발사한다."
+      "rule": "매 6번째 기본 공격이 발사 시점에 8방향으로 각각 45% 화살을 발사한다."
     },
     {
       "id": "relic.basic_kill_tracking_arrow",
@@ -116,9 +117,9 @@
       "icon_asset_id": "procedural.icon.relic.alternating_active_refund",
       "parameters": [
         {"key": "window", "value": 4, "unit": "seconds"},
-        {"key": "cooldown_refund_fraction", "value": 0.25, "unit": "fraction"}
+        {"key": "cooldown_refund_fraction", "value": 0.15, "unit": "fraction"}
       ],
-      "rule": "직전에 사용한 액티브와 다른 액티브를 4초 안에 사용하면 새로 사용한 스킬의 쿨타임을 25% 반환한다."
+      "rule": "직전에 사용한 액티브와 다른 액티브를 4초 안에 사용하면 새로 사용한 스킬의 쿨타임을 15% 반환한다."
     },
     {
       "id": "relic.cross_active_tracking_arrow",
@@ -127,10 +128,10 @@
       "icon_asset_id": "procedural.icon.relic.cross_active_tracking_arrow",
       "parameters": [
         {"key": "window", "value": 2, "unit": "seconds"},
-        {"key": "damage_multiplier", "value": 1.5, "unit": "multiplier"},
+        {"key": "damage_multiplier", "value": 5, "unit": "multiplier"},
         {"key": "per_target_cooldown", "value": 2, "unit": "seconds"}
       ],
-      "rule": "같은 적을 2초 안에 서로 다른 액티브로 맞히면 그 적을 향해 150% 추적 화살을 발사한다. 대상별 쿨타임 2초다."
+      "rule": "같은 적을 2초 안에 서로 다른 액티브로 맞히면 그 적을 향해 500% 추적 화살을 발사한다. 대상별 쿨타임 2초다."
     },
     {
       "id": "relic.on_damage_push_slow",

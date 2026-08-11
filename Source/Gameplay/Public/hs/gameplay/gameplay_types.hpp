@@ -14,6 +14,49 @@ inline constexpr std::size_t kCombatSkillCount = 9;
 inline constexpr std::size_t kUpgradeCount = 8;
 inline constexpr std::size_t kRelicCount = 12;
 inline constexpr std::size_t kStatCount = 6;
+inline constexpr std::size_t kEnemyArchetypeCount = 6;
+inline constexpr std::size_t kPickupKindCount = 4;
+enum class UpgradeEffectMetric : std::uint8_t
+{
+    ProjectilesCreated,
+    AreasCreated,
+    ExplosionsCreated,
+    BleedStacksApplied,
+    BurnApplications,
+    SlowApplications,
+    SlowTargetTicks,
+    BleedActiveTicks,
+    BurnActiveTicks,
+    SlowActiveTicks,
+    CooldownTicksSaved,
+    Healing,
+    DisplacementMillimetres,
+    ExtraTargetsHit,
+    ExtraBounces,
+    ChargeTicksSaved,
+    DurationTicksAdded,
+    MarksApplied,
+    Kills,
+    DamageAmplified,
+    Activations,
+    Count,
+};
+inline constexpr std::size_t kUpgradeEffectMetricCount =
+    static_cast<std::size_t>(UpgradeEffectMetric::Count);
+enum class UpgradeRelicSynergyMetric : std::uint8_t
+{
+    Damage,
+    DamageEvents,
+    Activations,
+    Healing,
+    BurnApplications,
+    SlowApplications,
+    SlowTargetTicks,
+    Count,
+};
+inline constexpr std::size_t kUpgradeRelicSynergyMetricCount =
+    static_cast<std::size_t>(UpgradeRelicSynergyMetric::Count);
+inline constexpr std::size_t kMaxUpgradeRelicSynergies = 256;
 enum class SessionPhase : std::uint8_t
 {
     MainMenu,
@@ -114,6 +157,53 @@ struct CardView
     std::uint8_t upgrade{};
 };
 
+struct UpgradeRelicSynergyTelemetry
+{
+    SkillKind skill{SkillKind::Count};
+    std::uint8_t upgrade{};
+    RelicKind relic{RelicKind::Count};
+    std::array<std::uint64_t, kUpgradeRelicSynergyMetricCount> metrics{};
+};
+
+struct BalanceTelemetry
+{
+    std::array<std::uint64_t, kCombatSkillCount> skill_uses{};
+    std::array<std::uint64_t, kCombatSkillCount> skill_casts_with_hit{};
+    std::array<std::uint64_t, kCombatSkillCount> skill_hit_events{};
+    std::array<std::uint64_t, kCombatSkillCount> skill_kills{};
+    std::array<std::uint64_t, kCombatSkillCount> skill_boss_damage{};
+    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
+        upgrade_damage{};
+    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
+        upgrade_triggers{};
+    std::array<std::array<std::array<std::uint64_t, kUpgradeEffectMetricCount>,
+                          kUpgradeCount>,
+               kCombatSkillCount>
+        upgrade_effects{};
+    std::array<UpgradeRelicSynergyTelemetry, kMaxUpgradeRelicSynergies>
+        upgrade_relic_synergies{};
+    std::uint16_t upgrade_relic_synergy_count{};
+    std::array<std::uint64_t, kRelicCount> relic_damage{};
+    std::array<std::uint64_t, kRelicCount> relic_triggers{};
+    std::array<std::array<std::uint64_t, kUpgradeEffectMetricCount>, kRelicCount>
+        relic_effects{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_spawned{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_killed{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_attack_attempts{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_hits{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_damage{};
+    std::array<std::uint64_t, kEnemyArchetypeCount> enemy_lifetime_ticks{};
+    std::array<std::uint64_t, kPickupKindCount> pickup_drop_attempts{};
+    std::array<std::uint64_t, kPickupKindCount> pickup_drops{};
+    std::array<std::uint64_t, kPickupKindCount> pickup_collected{};
+    // max-health HP, movement millimetres, attack damage, attack/cooldown ticks saved,
+    // and extra magnet pickups respectively.
+    std::array<std::uint64_t, kStatCount> stat_utility{};
+    std::uint64_t direct_damage{};
+    std::uint64_t derived_damage{};
+    std::uint64_t damage_over_time{};
+};
+
 struct SessionProbe
 {
     Tick tick{};
@@ -139,11 +229,15 @@ struct SessionProbe
     std::uint32_t kills{};
     std::uint64_t damage_dealt{};
     std::array<std::uint64_t, kCombatSkillCount> damage_by_skill{};
+    BalanceTelemetry balance{};
     std::uint64_t damage_taken{};
     std::uint64_t healing{};
-    std::uint8_t rerolls_remaining{3};
+    std::uint8_t level_rerolls_remaining{3};
+    std::uint8_t relic_rerolls_remaining{3};
     std::uint8_t pending_stat_points{};
     std::uint8_t active_skill_count{};
+    std::array<SkillKind, 4> skill_loadout{SkillKind::Count, SkillKind::Count,
+                                           SkillKind::Count, SkillKind::Count};
     std::array<std::uint8_t, kCombatSkillCount> skill_levels{};
     std::array<std::uint8_t, kCombatSkillCount> upgrade_masks{};
     std::array<std::uint32_t, kActiveSkillCount> cooldown_ticks{};
@@ -171,6 +265,7 @@ enum class DebugCommandKind : std::uint8_t
     SpawnBoss,
     SelectCard,
     AssignStat,
+    SetStat,
     Reroll,
     TogglePause,
 };

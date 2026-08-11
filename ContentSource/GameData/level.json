@@ -55,11 +55,13 @@
           {"source_id": "boss.mid_10m", "xp": 200},
           {"source_id": "boss.final_15m", "xp": 0}
         ],
-        "next_level_formula": "20 + 7 * (L - 1) + floor(1.5 * (L - 1)^2)",
+        "next_level_formula": "20 + floor(3.5 * (L - 1) + 0.75 * (L - 1)^2)",
         "level_cap": null,
         "pickup_magnet_tracking": true,
         "utility_pickup_base_chance": 0.01,
         "utility_pickup_miss_increment": 0.001,
+        "heal_pickup_chance_multiplier": 0.5,
+        "magnet_pickup_chance_multiplier": 0.25,
         "target_level_at_15_minutes": 25,
         "target_level_choices_at_15_minutes": 24,
         "forced_level_correction": false
@@ -80,8 +82,9 @@
         "banish": false
       },
       "rerolls": {
-        "shared_initial_count": 3,
-        "shared_between_level_and_relic_choices": true,
+        "level_initial_count": 3,
+        "relic_initial_count": 3,
+        "shared_between_level_and_relic_choices": false,
         "replace_all_candidate_cards": true,
         "candidate_count": 3,
         "exclude_current_cards_when_enough_candidates": true,

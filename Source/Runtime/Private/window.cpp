@@ -376,6 +376,11 @@ void Window::HandleRawInput(HRAWINPUT input)
             PushAction(GameAction::Pause,
                        pressed ? EdgeKind::Pressed : EdgeKind::Released);
         }
+        else if (key == VK_TAB)
+        {
+            PushAction(GameAction::CharacterPage,
+                       pressed ? EdgeKind::Pressed : EdgeKind::Released);
+        }
         else if (const auto iterator = std::ranges::find(skill_virtual_keys_, key);
                  iterator != skill_virtual_keys_.end())
         {

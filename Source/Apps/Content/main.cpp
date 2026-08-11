@@ -23,6 +23,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -90,7 +91,9 @@ struct CharacterCookResult
 
     std::vector<hs::SkinnedVertex> vertices;
     std::vector<hs::CharacterClipHeader> clips;
-    std::vector<std::array<float, 16>> matrices;
+    std::vector<std::uint16_t> parents;
+    std::vector<std::array<float, 16>> inverse_bind_matrices;
+    std::vector<hs::CharacterLocalTransform> transforms;
     std::vector<float> upper_body_weights;
     std::uint32_t mesh_count{};
     std::uint32_t bone_count{};
@@ -832,8 +835,6 @@ ContentSources LoadAndValidateSources()
     append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
     append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
     append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
-    append_asset("character/archer/turn_left", animation_root / "TurnLeft90.fbx");
-    append_asset("character/archer/turn_right", animation_root / "TurnRight90.fbx");
     ValidateDocuments(sources);
     return sources;
 }
@@ -881,6 +882,20 @@ hs::GameData BuildGameData(const ContentSources &sources)
         experience, "level", "$/entries/0/experience", "utility_pickup_base_chance"));
     data.utility_pickup_miss_increment = static_cast<float>(RequireNumber(
         experience, "level", "$/entries/0/experience", "utility_pickup_miss_increment"));
+    data.heal_pickup_chance_multiplier = static_cast<float>(RequireNumber(
+        experience, "level", "$/entries/0/experience",
+        "heal_pickup_chance_multiplier"));
+    data.magnet_pickup_chance_multiplier = static_cast<float>(RequireNumber(
+        experience, "level", "$/entries/0/experience",
+        "magnet_pickup_chance_multiplier"));
+
+    const auto &relic_boxes = sources.documents.at("relics")["box_rules"];
+    data.relic_chest_base_chance = static_cast<float>(RequireNumber(
+        relic_boxes, "relics", "$/box_rules",
+        "normal_enemy_base_probability_percent") / 100.0);
+    data.relic_chest_miss_increment = static_cast<float>(RequireNumber(
+        relic_boxes, "relics", "$/box_rules",
+        "normal_enemy_probability_increment_per_kill_percent") / 100.0);
 
     const auto &arena = sources.documents.at("level")["entries"][0]["arena"];
     const auto width = RequireNumber(arena, "level", "$/entries/0/arena", "width_m");
@@ -924,6 +939,8 @@ hs::GameData BuildGameData(const ContentSources &sources)
     data.skills[3].range = number(3, "maximum_range");
     data.skills[3].collision_radius = number(3, "maximum_collision_radius");
     data.skills[3].duration_seconds = number(3, "maximum_charge_time");
+    data.skills[3].pierce_count = CheckedInteger<std::uint8_t>(
+        number(3, "pierce"), "skills", "$/entries/3/pierce");
 
     data.skills[4].cooldown_seconds = number(4, "cooldown");
     data.skills[4].damage_coefficient = number(4, "explosion_damage_multiplier");
@@ -1062,6 +1079,9 @@ hs::GameData BuildGameData(const ContentSources &sources)
         data.waves[index].count = CheckedInteger<std::uint16_t>(
             waves[index]["total_count"].get<double>(), "spawn_schedule",
             "$/waves/total_count");
+        data.waves[index].duration_ticks = CheckedInteger<hs::Tick>(
+            waves[index]["duration_ticks"].get<double>(), "spawn_schedule",
+            "$/waves/duration_ticks");
     }
     return data;
 }
@@ -1332,6 +1352,22 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
             }
         }
     }
+    output.parents.reserve(bones.size());
+    output.inverse_bind_matrices.reserve(bones.size());
+    for (const auto &bone : bones)
+    {
+        if (bone.parent != std::numeric_limits<std::size_t>::max() &&
+            bone.parent >= output.parents.size())
+        {
+            throw std::runtime_error("Archer skeleton parent order is invalid");
+        }
+        output.parents.push_back(
+            bone.parent == std::numeric_limits<std::size_t>::max()
+                ? std::numeric_limits<std::uint16_t>::max()
+                : static_cast<std::uint16_t>(bone.parent));
+        output.inverse_bind_matrices.push_back(
+            RuntimeMatrix(bone.global_bind.Inverse()));
+    }
     for (auto *node : mesh_nodes)
     {
         auto *mesh = node->GetMesh();
@@ -1572,7 +1608,7 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
     hs::CharacterClipHeader header;
     header.clip = clip;
     header.looping = looping;
-    header.first_matrix = static_cast<std::uint32_t>(output.matrices.size());
+    header.first_transform = static_cast<std::uint32_t>(output.transforms.size());
     header.frame_count = frame_count;
     header.duration_seconds = static_cast<float>(duration);
     output.clips.push_back(header);
@@ -1601,6 +1637,7 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
 
     std::vector<FbxAMatrix> current_globals(model_bones.size());
     std::vector<FbxAMatrix> target_globals(model_bones.size());
+    std::vector<FbxAMatrix> corrected_globals(model_bones.size());
     for (std::uint32_t frame = 0; frame < frame_count; ++frame)
     {
         FbxTime sample_time;
@@ -1629,18 +1666,46 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
             corrected_root.GetT() - model_bones.front().global_bind.GetT();
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
         {
-            auto corrected = target_globals[bone_index];
-            auto translation = corrected.GetT();
+            corrected_globals[bone_index] = target_globals[bone_index];
+            auto translation = corrected_globals[bone_index].GetT();
             translation[0] -= root_delta[0];
             translation[2] -= root_delta[2];
-            corrected.SetT(translation);
-            const auto skin = corrected * model_bones[bone_index].global_bind.Inverse();
-            if (!std::isfinite(skin.Determinant()) || skin.Determinant() <= 0.0001)
+            corrected_globals[bone_index].SetT(translation);
+        }
+        for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
+        {
+            const auto parent = model_bones[bone_index].parent;
+            const auto local = parent == std::numeric_limits<std::size_t>::max()
+                                   ? corrected_globals[bone_index]
+                                   : corrected_globals[parent].Inverse() *
+                                         corrected_globals[bone_index];
+            const auto translation = local.GetT();
+            const auto rotation = local.GetQ();
+            const auto scale = local.GetS();
+            hs::CharacterLocalTransform transform;
+            for (std::size_t axis = 0; axis < 3; ++axis)
+            {
+                transform.translation[axis] = static_cast<float>(translation[axis]);
+                transform.rotation[axis] = static_cast<float>(rotation[axis]);
+                transform.scale[axis] = static_cast<float>(scale[axis]);
+            }
+            transform.rotation[3] = static_cast<float>(rotation[3]);
+            const auto rotation_length = std::sqrt(
+                std::inner_product(transform.rotation.begin(), transform.rotation.end(),
+                                   transform.rotation.begin(), 0.0f));
+            if (!std::isfinite(rotation_length) || rotation_length < 0.999f ||
+                rotation_length > 1.001f ||
+                !std::ranges::all_of(transform.translation, [](float value) {
+                    return std::isfinite(value);
+                }) ||
+                !std::ranges::all_of(transform.scale, [](float value) {
+                    return std::isfinite(value) && std::abs(value) > 0.0001f;
+                }))
             {
                 throw std::runtime_error(
-                    "Animation skin transform contains a reflection or singularity");
+                    "Animation local transform is invalid");
             }
-            output.matrices.push_back(RuntimeMatrix(skin));
+            output.transforms.push_back(transform);
         }
     }
 }
@@ -1656,14 +1721,18 @@ bool WriteCharacterAsset(const std::filesystem::path &path,
     header.material_count = static_cast<std::uint32_t>(asset.materials.size());
     header.clips_offset = header.vertices_offset +
                           header.vertex_count * sizeof(hs::SkinnedVertex);
-    header.matrices_offset = header.clips_offset +
-                             header.clip_count * sizeof(hs::CharacterClipHeader) +
-                             header.bone_count * sizeof(float);
-    header.upper_body_weights_offset = header.clips_offset +
-                                       header.clip_count * sizeof(hs::CharacterClipHeader);
-    header.payload_size = header.matrices_offset - sizeof(header) +
+    header.parents_offset = header.clips_offset +
+                            header.clip_count * sizeof(hs::CharacterClipHeader);
+    header.inverse_bind_matrices_offset =
+        header.parents_offset + header.bone_count * sizeof(std::uint16_t);
+    header.upper_body_weights_offset =
+        header.inverse_bind_matrices_offset +
+        header.bone_count * sizeof(asset.inverse_bind_matrices.front());
+    header.transforms_offset =
+        header.upper_body_weights_offset + header.bone_count * sizeof(float);
+    header.payload_size = header.transforms_offset - sizeof(header) +
                           static_cast<std::uint32_t>(
-                              asset.matrices.size() * sizeof(asset.matrices.front()));
+                              asset.transforms.size() * sizeof(asset.transforms.front()));
     header.bounds_min = asset.bounds_min;
     header.bounds_max = asset.bounds_max;
 
@@ -1675,11 +1744,18 @@ bool WriteCharacterAsset(const std::filesystem::path &path,
     const auto clips_size = asset.clips.size() * sizeof(asset.clips.front());
     std::memcpy(cursor, asset.clips.data(), clips_size);
     cursor += clips_size;
+    const auto parents_size = asset.parents.size() * sizeof(asset.parents.front());
+    std::memcpy(cursor, asset.parents.data(), parents_size);
+    cursor += parents_size;
+    const auto inverse_bind_size =
+        asset.inverse_bind_matrices.size() * sizeof(asset.inverse_bind_matrices.front());
+    std::memcpy(cursor, asset.inverse_bind_matrices.data(), inverse_bind_size);
+    cursor += inverse_bind_size;
     const auto weights_size = asset.upper_body_weights.size() * sizeof(float);
     std::memcpy(cursor, asset.upper_body_weights.data(), weights_size);
     cursor += weights_size;
-    const auto matrices_size = asset.matrices.size() * sizeof(asset.matrices.front());
-    std::memcpy(cursor, asset.matrices.data(), matrices_size);
+    const auto transforms_size = asset.transforms.size() * sizeof(asset.transforms.front());
+    std::memcpy(cursor, asset.transforms.data(), transforms_size);
     header.payload_crc32 = hs::Crc32(
         std::span(file.data() + sizeof(header), header.payload_size));
     std::memcpy(file.data(), &header, sizeof(header));
@@ -1803,8 +1879,6 @@ bool CookCharacterAsset(const std::filesystem::path &output,
                  std::tuple{"DrawArrow.fbx", hs::CharacterAnimationClip::Draw, false},
                  std::tuple{"AimRecoil.fbx", hs::CharacterAnimationClip::Recoil, false},
                  std::tuple{"DeathBackward.fbx", hs::CharacterAnimationClip::Death, false},
-                 std::tuple{"TurnLeft90.fbx", hs::CharacterAnimationClip::TurnLeft, false},
-                 std::tuple{"TurnRight90.fbx", hs::CharacterAnimationClip::TurnRight, false},
              })
         {
             auto *animation = LoadFbx(*manager, animation_root / filename, filename);

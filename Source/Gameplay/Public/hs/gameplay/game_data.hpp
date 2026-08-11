@@ -10,6 +10,20 @@
 namespace hs
 {
 
+enum class SkillTag : std::uint16_t
+{
+    Bleed = 1u << 0,
+    Burn = 1u << 1,
+    Slow = 1u << 2,
+};
+
+using SkillTagMask = std::uint16_t;
+
+[[nodiscard]] SkillTagMask SkillTags(SkillKind skill) noexcept;
+[[nodiscard]] SkillTagMask UpgradeTags(SkillKind skill,
+                                       std::uint8_t zero_based_upgrade) noexcept;
+[[nodiscard]] SkillTagMask RelicPrerequisiteTags(RelicKind relic) noexcept;
+
 struct SkillDefinition
 {
     float cooldown_seconds{};
@@ -52,6 +66,7 @@ struct WaveDefinition
 {
     std::uint16_t minute{};
     std::uint16_t count{};
+    Tick duration_ticks{};
 };
 
 struct GameData
@@ -60,11 +75,15 @@ struct GameData
     float arena_half_extent{60.0f};
     std::int32_t player_health{100};
     float player_attack{10.0f};
-    float player_attack_speed{1.5f};
+    float player_attack_speed{60.0f / 47.0f};
     float player_move_speed{5.0f};
     float player_magnet_radius{3.0f};
     float utility_pickup_base_chance{0.01f};
     float utility_pickup_miss_increment{0.001f};
+    float heal_pickup_chance_multiplier{0.5f};
+    float magnet_pickup_chance_multiplier{0.25f};
+    float relic_chest_base_chance{0.00001f};
+    float relic_chest_miss_increment{0.000004f};
     std::array<SkillDefinition, kCombatSkillCount> skills{};
     std::array<EnemyDefinition, 3> enemies{};
     std::array<BossDefinition, 3> bosses{};

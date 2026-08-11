@@ -62,14 +62,17 @@
       "material_id": "material.projectile.arrow",
       "particle_id": "particle.skill.piercing_shot",
       "parameters": [
-        {"key": "cooldown", "value": 4.5, "unit": "seconds"},
-        {"key": "damage_multiplier", "value": 3, "unit": "multiplier"},
+        {"key": "cooldown", "value": 4, "unit": "seconds"},
+        {"key": "damage_multiplier", "value": 1.8, "unit": "multiplier"},
         {"key": "projectile_speed", "value": 30, "unit": "meters_per_second"},
         {"key": "range", "value": 24, "unit": "meters"},
         {"key": "collision_radius", "value": 0.3, "unit": "meters"},
         {"key": "maximum_hits_per_target", "value": 1, "unit": "count"}
       ],
-      "rules": ["모든 일반 적을 관통한다."]
+      "rules": [
+        "모든 일반 적을 관통한다.",
+        "관통할 때마다 피해가 15%씩 감소하며 최초 피해의 55% 아래로 내려가지 않는다."
+      ]
     },
     {
       "id": "skill.multishot",
@@ -83,14 +86,14 @@
       "parameters": [
         {"key": "cooldown", "value": 5.5, "unit": "seconds"},
         {"key": "fan_angle", "value": 50, "unit": "degrees"},
-        {"key": "projectile_count", "value": 5, "unit": "count"},
-        {"key": "damage_multiplier_per_arrow", "value": 1.2, "unit": "multiplier"},
+        {"key": "projectile_count", "value": 9, "unit": "count"},
+        {"key": "damage_multiplier_per_arrow", "value": 1.7, "unit": "multiplier"},
         {"key": "projectile_speed", "value": 25, "unit": "meters_per_second"},
         {"key": "range", "value": 16, "unit": "meters"},
         {"key": "pierce_per_arrow", "value": 1, "unit": "count"},
         {"key": "maximum_hits_per_target", "value": 2, "unit": "count"}
       ],
-      "rules": ["50도 부채꼴에 5발을 균등하게 배치한다."]
+      "rules": ["50도 부채꼴에 9발을 균등하게 배치한다."]
     },
     {
       "id": "skill.charged_shot",
@@ -102,23 +105,23 @@
       "material_id": "material.projectile.arrow",
       "particle_id": "particle.skill.charged_shot",
       "parameters": [
-        {"key": "maximum_charge_time", "value": 1.5, "unit": "seconds"},
-        {"key": "minimum_damage_multiplier", "value": 1.2, "unit": "multiplier"},
-        {"key": "maximum_damage_multiplier", "value": 4.5, "unit": "multiplier"},
-        {"key": "minimum_range", "value": 12, "unit": "meters"},
+        {"key": "maximum_charge_time", "value": 1, "unit": "seconds"},
+        {"key": "minimum_damage_multiplier", "value": 5, "unit": "multiplier"},
+        {"key": "maximum_damage_multiplier", "value": 11.5, "unit": "multiplier"},
+        {"key": "minimum_range", "value": 14, "unit": "meters"},
         {"key": "maximum_range", "value": 28, "unit": "meters"},
         {"key": "minimum_collision_radius", "value": 0.25, "unit": "meters"},
         {"key": "maximum_collision_radius", "value": 0.55, "unit": "meters"},
         {"key": "projectile_speed", "value": 35, "unit": "meters_per_second"},
-        {"key": "damage_loss_per_pierce", "value": 0.1, "unit": "fraction"},
-        {"key": "minimum_pierce_damage_multiplier", "value": 0.6, "unit": "multiplier"},
+        {"key": "pierce", "value": 5, "unit": "count"},
         {"key": "movement_speed_multiplier_while_charging", "value": 0.7, "unit": "multiplier"},
-        {"key": "cooldown", "value": 7, "unit": "seconds"}
+        {"key": "cooldown", "value": 4, "unit": "seconds"}
       ],
       "rules": [
         "키를 누르는 동안 충전하고 키를 떼면 발사한다.",
         "피해, 사거리, 충돌 반경은 충전율에 따라 선형 증가한다.",
-        "모든 일반 적을 관통한다.",
+        "최대 3명의 적을 추가 관통하며 관통 피해는 감소하지 않는다.",
+        "충전 중 이동속도는 70%가 된다.",
         "충전 중 기본 공격과 다른 스킬을 사용할 수 없다.",
         "쿨타임은 발사 시점부터 시작한다."
       ]
@@ -152,7 +155,7 @@
       "particle_id": "particle.skill.ricochet_arrow",
       "parameters": [
         {"key": "cooldown", "value": 6, "unit": "seconds"},
-        {"key": "damage_multiplier", "value": 1.8, "unit": "multiplier"},
+        {"key": "damage_multiplier", "value": 0.8, "unit": "multiplier"},
         {"key": "initial_range", "value": 18, "unit": "meters"},
         {"key": "ricochet_search_radius", "value": 6, "unit": "meters"},
         {"key": "maximum_ricochets", "value": 5, "unit": "count"}
@@ -197,7 +200,7 @@
         {"key": "active_duration", "value": 12, "unit": "seconds"},
         {"key": "detection_radius", "value": 2, "unit": "meters"},
         {"key": "explosion_radius", "value": 3, "unit": "meters"},
-        {"key": "damage_multiplier", "value": 2.2, "unit": "multiplier"},
+        {"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"},
         {"key": "slow_fraction", "value": 0.3, "unit": "fraction"},
         {"key": "slow_duration", "value": 3, "unit": "seconds"}
       ],
@@ -219,10 +222,10 @@
       "parameters": [
         {"key": "forced_move_duration", "value": 0.2, "unit": "seconds"},
         {"key": "forced_move_distance", "value": 5, "unit": "meters"},
-        {"key": "damage_multiplier", "value": 2.2, "unit": "multiplier"},
+        {"key": "damage_multiplier", "value": 3.5, "unit": "multiplier"},
         {"key": "cooldown", "value": 7, "unit": "seconds"},
         {"key": "projectile_range", "value": 16, "unit": "meters"},
-        {"key": "pierce", "value": 1, "unit": "count"}
+        {"key": "pierce", "value": 3, "unit": "count"}
       ],
       "rules": [
         "조준 반대 방향으로 강제 이동하며 동시에 조준 방향으로 화살을 발사한다.",

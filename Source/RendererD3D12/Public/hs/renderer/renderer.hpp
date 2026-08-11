@@ -29,6 +29,7 @@ struct RendererConfig
     bool bloom{true};
     bool outline{true};
     bool interpolate{true};
+    bool character_preview{};
     std::uint32_t render_scale_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};

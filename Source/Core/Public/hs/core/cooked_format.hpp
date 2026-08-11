@@ -17,7 +17,7 @@ namespace hs
 
 inline constexpr std::uint16_t kCookedFormatVersion = 1;
 inline constexpr std::uint16_t kLittleEndianMarker = 0x4C45;
-inline constexpr std::uint32_t kCharacterAssetVersion = 4;
+inline constexpr std::uint32_t kCharacterAssetVersion = 6;
 inline constexpr std::uint32_t kMaxCharacterBones = 128;
 inline constexpr std::uint32_t kMaxCharacterMaterials = 8;
 
@@ -28,8 +28,6 @@ enum class CharacterAnimationClip : std::uint8_t
     Draw,
     Recoil,
     Death,
-    TurnLeft,
-    TurnRight,
     Count,
 };
 
@@ -52,12 +50,23 @@ struct CharacterClipHeader
     CharacterAnimationClip clip{};
     std::uint8_t looping{};
     std::uint16_t reserved{};
-    std::uint32_t first_matrix{};
+    std::uint32_t first_transform{};
     std::uint32_t frame_count{};
     float duration_seconds{};
 };
 
 static_assert(sizeof(CharacterClipHeader) == 16);
+
+struct CharacterLocalTransform
+{
+    std::array<float, 3> translation{};
+    float translation_padding{};
+    std::array<float, 4> rotation{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    float scale_padding{};
+};
+
+static_assert(sizeof(CharacterLocalTransform) == 48);
 
 struct CharacterAssetHeader
 {
@@ -69,15 +78,17 @@ struct CharacterAssetHeader
     std::uint32_t material_count{};
     std::uint32_t vertices_offset{sizeof(CharacterAssetHeader)};
     std::uint32_t clips_offset{};
+    std::uint32_t parents_offset{};
+    std::uint32_t inverse_bind_matrices_offset{};
     std::uint32_t upper_body_weights_offset{};
-    std::uint32_t matrices_offset{};
+    std::uint32_t transforms_offset{};
     std::uint32_t payload_size{};
     std::uint32_t payload_crc32{};
     std::array<float, 3> bounds_min{};
     std::array<float, 3> bounds_max{};
 };
 
-static_assert(sizeof(CharacterAssetHeader) == 76);
+static_assert(sizeof(CharacterAssetHeader) == 84);
 
 struct CookedHeader
 {
