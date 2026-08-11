@@ -72,15 +72,34 @@ void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,
 void TestStartingEnemyBalanceAndBoundary()
 {
     const auto data = hs::GameData::Defaults();
-    Check(data.spawn_stages[0].per_second == 0.5f,
-          "starting enemy spawn rate is one every two seconds");
+    constexpr std::array<float, 7> expected_spawn_rates{
+        0.9f, 1.2f, 2.1f, 3.3f, 4.8f, 4.8f, 4.8f};
+    for (std::size_t index = 0; index < expected_spawn_rates.size(); ++index)
+        Check(std::abs(data.spawn_stages[index].per_second -
+                       expected_spawn_rates[index]) < 0.0001f,
+              "continuous spawn rates are increased by twenty percent");
     Check(data.enemies[0].health == 15 && data.enemies[1].health == 12 &&
               data.enemies[2].health == 13,
           "starting enemy health is halved and rounded");
     Check(std::abs(data.enemies[0].move_speed - 1.445f) < 0.0001f &&
               std::abs(data.enemies[1].move_speed - 1.19f) < 0.0001f &&
-              std::abs(data.enemies[2].move_speed - 1.9125f) < 0.0001f,
-          "normal enemy movement speed is 85 percent of the prior balance");
+              std::abs(data.enemies[2].move_speed - 3.825f) < 0.0001f,
+          "suicide enemy movement speed is doubled");
+    Check(data.spawn_stages[2].weights == std::array<std::uint8_t, 3>{74, 21, 5} &&
+              data.spawn_stages[6].weights == std::array<std::uint8_t, 3>{49, 36, 15},
+          "suicide spawn share is approximately halved while total spawn rate stays fixed");
+    Check(data.heal_pickup_chance_multiplier == 0.5f &&
+              data.magnet_pickup_chance_multiplier == 0.25f,
+          "utility pickup chances use separate heal and magnet multipliers");
+    Check(std::abs(data.relic_chest_base_chance - 0.00001f) < 0.0000001f &&
+              std::abs(data.relic_chest_miss_increment - 0.000004f) < 0.0000001f,
+          "relic chest miss growth targets roughly four normal chests per run");
+    Check(data.spawn_stages[5].per_second == 4.8f &&
+              data.spawn_stages[6].per_second == 4.8f,
+          "late continuous spawning keeps the twenty percent increase");
+    Check(std::abs(data.enemies[1].projectile_speed - 6.875f) < 0.0001f &&
+              std::abs(data.enemies[1].attack_cooldown_seconds - 2.444444f) < 0.0001f,
+          "ranged projectiles are faster while attack frequency is ten percent lower");
 
     hs::GameSimulation simulation;
     Check(simulation.Initialize({10}, data).Succeeded(), "starting balance initialize");
@@ -103,16 +122,101 @@ void TestStartingEnemyBalanceAndBoundary()
     Check(boundary_count == 4, "four visible arena boundaries");
     Check(ground_count == 1, "one test grid ground");
 
-    for (std::uint32_t tick = 0; tick < 119; ++tick)
+    for (std::uint32_t tick = 0; tick < 66; ++tick)
     {
         (void)Tick(simulation);
     }
     Check(simulation.Probe().normal_enemy_count == 0,
-          "halved spawn rate does not spawn before two seconds");
+          "opening spawn does not occur before its accumulated interval");
     (void)Tick(simulation);
     Check(simulation.Probe().normal_enemy_count == 1,
-          "halved spawn rate spawns one normal enemy every two seconds");
+          "opening spawn emits the first enemy after sixty-seven ticks");
     Check(simulation.Shutdown().Succeeded(), "starting balance shutdown");
+}
+
+void TestExperienceBalance()
+{
+    hs::GameSimulation progression;
+    Check(progression.Initialize({11}, QuietGameData()).Succeeded(),
+          "experience progression initialize");
+    Check(progression.Probe().experience_to_next == 20,
+          "level one requirement keeps its base value");
+    Debug(progression, hs::DebugCommandKind::GrantExperience, 20);
+    (void)Tick(progression);
+    Debug(progression, hs::DebugCommandKind::SelectCard, 0);
+    Debug(progression, hs::DebugCommandKind::AssignStat,
+          static_cast<std::uint64_t>(hs::StatKind::MaxHealth));
+    Check(progression.Probe().level == 2 &&
+              progression.Probe().experience_to_next == 24,
+          "per-level experience requirement growth is halved");
+    Check(progression.Shutdown().Succeeded(), "experience progression shutdown");
+
+    const auto collected_xp = [](hs::EnemyKind kind) {
+        auto data = QuietGameData();
+        data.enemies[static_cast<std::size_t>(kind)].health = 1;
+        data.player_magnet_radius = 100.0f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({12}, data).Succeeded(), "enemy XP initialize");
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(kind), 0, {5.0f, 0.0f});
+        hs::HeldInputState held;
+        held.basic_attack_held = true;
+        held.aim_world = {20.0f, 0.0f, 0.0f};
+        for (std::uint32_t tick = 0; tick < 180 && simulation.Probe().kills == 0; ++tick)
+            (void)Tick(simulation, held);
+        held.basic_attack_held = false;
+        for (std::uint32_t tick = 0; tick < 180 && simulation.Probe().experience == 0; ++tick)
+            (void)Tick(simulation, held);
+        const auto experience = simulation.Probe().experience;
+        Check(simulation.Shutdown().Succeeded(), "enemy XP shutdown");
+        return experience;
+    };
+    Check(collected_xp(hs::EnemyKind::Melee) == 1 &&
+              collected_xp(hs::EnemyKind::Suicide) == 2,
+          "suicide enemies grant exactly twice the melee enemy experience");
+}
+
+void TestLevelUpSelectionInputGuard()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({84}, QuietGameData()).Succeeded(),
+          "selection input guard initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantExperience, 20);
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.ui_cursor_pixels = {500.0f, 400.0f};
+    (void)Tick(simulation, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::CardSelection,
+          "level up opens card selection");
+
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::CardSelection,
+          "held combat click cannot select a level card");
+
+    held.basic_attack_held = false;
+    for (std::uint32_t frame = 0; frame < 12; ++frame) (void)Tick(simulation, held);
+    held.basic_attack_held = true;
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::StatAllocation,
+          "released deliberate click selects a level card");
+
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::StatAllocation &&
+              simulation.Probe().pending_stat_points == 1,
+          "card click cannot spill into stat allocation");
+    held.basic_attack_held = false;
+    for (std::uint32_t frame = 0; frame < 12; ++frame) (void)Tick(simulation, held);
+    held.basic_attack_held = true;
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::Playing &&
+              simulation.Probe().pending_stat_points == 0,
+          "released deliberate click assigns a stat");
+    Check(simulation.Shutdown().Succeeded(), "selection input guard shutdown");
 }
 
 void TestCursorMovement()
@@ -253,7 +357,33 @@ void TestUiHitRegionsMatchAnchors()
               simulation.Probe().menu_page == 1,
           "collection anchor opens collection instead of starting");
 
-    SetCursor(held, 960.0f, 792.0f);
+    const auto contains_text = [](const hs::RenderSnapshot &snapshot,
+                                  std::string_view expected) {
+        return std::ranges::any_of(snapshot.ui, [&](const hs::UiModel &model) {
+            const auto end = std::ranges::find(model.utf8_text, '\0');
+            return std::string_view(model.utf8_text.data(),
+                                    end - model.utf8_text.begin()).contains(expected);
+        });
+    };
+    hs::RenderSnapshotStorage snapshot(4, 2, 2, 64);
+    Check(simulation.WriteRenderSnapshot(snapshot), "collection snapshot");
+    Check(contains_text(snapshot.View(), "스킬 도감") &&
+              contains_text(snapshot.View(), "연속 추가 화살") &&
+              contains_text(snapshot.View(), "액티브 연계 사격"),
+          "collection shows all eight basic attack upgrades");
+
+    SetCursor(held, 390.0f, 248.0f);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "selected collection snapshot");
+    Check(contains_text(snapshot.View(), "관통 사격") &&
+              contains_text(snapshot.View(), "후속 화살") &&
+              contains_text(snapshot.View(), "빠른 재사용") &&
+              contains_text(snapshot.View(), "관통 사격을 발사한 직후"),
+          "collection selection shows the skill description and all upgrades");
+
+    SetCursor(held, 390.0f, 928.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(simulation.Probe().menu_page == 0, "page back anchor returns to main menu");
@@ -357,14 +487,16 @@ void TestAttackStopsMovementAndFacesAim()
           "LMB attack stops movement, faces cursor, and waits for release marker");
 
     hs::RenderSnapshotStorage turn_snapshot(32, 2, 2, 8);
-    Check(simulation.WriteRenderSnapshot(turn_snapshot), "turn animation snapshot");
+    Check(simulation.WriteRenderSnapshot(turn_snapshot), "facing snapshot");
     Check(!turn_snapshot.View().poses.empty() &&
               turn_snapshot.View().poses.front().clip ==
-                  hs::CharacterAnimationClip::TurnLeft &&
-              !turn_snapshot.View().instances.empty() &&
-              turn_snapshot.View().instances.front().yaw > 0.0f &&
-              turn_snapshot.View().instances.front().yaw < 1.5708f,
-          "attack direction change uses left-turn animation and smooth visual yaw");
+                  hs::CharacterAnimationClip::Idle,
+          "attack direction change does not select a turn animation");
+    Check(!turn_snapshot.View().instances.empty() &&
+              std::abs(turn_snapshot.View().instances.front().yaw -
+                       std::atan2(attacking.facing_direction.x,
+                                  attacking.facing_direction.y)) < 0.0001f,
+          "render facing follows gameplay facing without turn lag");
 
     for (std::uint32_t tick = 0; tick < 6; ++tick) (void)Tick(simulation, held);
     Check(simulation.Probe().player_projectile_count == 1,
@@ -439,8 +571,10 @@ void TestBasicAttackStopsAtFirstEnemy()
 
 void TestTenMinuteBossApproachesAttackRange()
 {
+    auto data = QuietGameData();
+    data.player_health = 10'000;
     hs::GameSimulation simulation;
-    Check(simulation.Initialize({143}, QuietGameData()).Succeeded(),
+    Check(simulation.Initialize({143}, data).Succeeded(),
           "ten minute boss approach initialize");
     Debug(simulation, hs::DebugCommandKind::SpawnBoss,
           static_cast<std::uint64_t>(hs::BossKind::TenMinute));
@@ -452,7 +586,7 @@ void TestTenMinuteBossApproachesAttackRange()
         });
     Check(before != before_snapshot.View().instances.end(), "ten minute boss visible");
     const auto before_distance = std::hypot(before->position.x, before->position.z);
-    for (std::uint32_t tick = 0; tick < 60; ++tick) (void)Tick(simulation);
+    for (std::uint32_t tick = 0; tick < 151; ++tick) (void)Tick(simulation);
     hs::RenderSnapshotStorage after_snapshot(32, 2, 2, 8);
     Check(simulation.WriteRenderSnapshot(after_snapshot), "boss after snapshot");
     const auto after = std::ranges::find_if(
@@ -460,8 +594,38 @@ void TestTenMinuteBossApproachesAttackRange()
             return instance.mesh == hs::RenderMesh::Boss;
         });
     Check(after != after_snapshot.View().instances.end() &&
-              std::hypot(after->position.x, after->position.z) < before_distance - 2.0f,
-          "ten minute boss approaches until its 12 meter attack range");
+              std::hypot(after->position.x, after->position.z) < before_distance - 4.0f,
+          "ten minute boss uses doubled movement speed toward its 18 meter attack range");
+    for (std::uint32_t tick = 151;
+         tick < 1200 && simulation.Probe().boss_warning_count == 0; ++tick)
+        (void)Tick(simulation);
+    Check(simulation.Probe().boss_warning_count > 0,
+          "ten minute boss starts a skill warning");
+    hs::RenderSnapshotStorage warning_snapshot(32, 2, 2, 8);
+    Check(simulation.WriteRenderSnapshot(warning_snapshot), "boss warning snapshot");
+    const auto warning = std::ranges::find_if(
+        warning_snapshot.View().instances, [](const hs::RenderInstance &instance) {
+            return instance.mesh == hs::RenderMesh::Boss;
+        });
+    Check(warning != warning_snapshot.View().instances.end(),
+          "ten minute boss visible during warning");
+    const auto warning_position = warning->position;
+    for (std::uint32_t tick = 0; tick < 20; ++tick) (void)Tick(simulation);
+    hs::RenderSnapshotStorage casting_snapshot(32, 2, 2, 8);
+    Check(simulation.WriteRenderSnapshot(casting_snapshot), "boss casting snapshot");
+    const auto casting = std::ranges::find_if(
+        casting_snapshot.View().instances, [](const hs::RenderInstance &instance) {
+            return instance.mesh == hs::RenderMesh::Boss;
+        });
+    Check(casting != casting_snapshot.View().instances.end() &&
+              std::hypot(casting->position.x - warning_position.x,
+                         casting->position.z - warning_position.z) < 0.001f,
+          "ten minute boss remains stationary while warning and casting");
+    for (std::uint32_t tick = 0;
+         tick < 1200 && simulation.Probe().balance.enemy_attack_attempts[4] == 0; ++tick)
+        (void)Tick(simulation);
+    Check(simulation.Probe().balance.enemy_attack_attempts[4] > 0,
+          "ten minute boss begins ranged attacks from the expanded 18 meter range");
     Check(simulation.Shutdown().Succeeded(), "ten minute boss approach shutdown");
 }
 
@@ -572,10 +736,12 @@ void TestQwerSkills()
         (void)Tick(simulation, held);
     }
     const auto charging = simulation.Probe();
-    Check(std::abs(charging.player_position.x - before_charge.x) < 0.0001f &&
-              std::abs(charging.player_position.y - before_charge.y) < 0.0001f &&
+    const auto charge_move = std::hypot(
+        charging.player_position.x - before_charge.x,
+        charging.player_position.y - before_charge.y);
+    Check(charge_move > 0.1f && charge_move < 0.5f &&
               charging.facing_direction.x > 0.99f,
-          "charged skill stays stationary and faces cursor aim");
+          "charged skill moves slowly and faces cursor aim");
     (void)TickEdge(simulation, hs::GameAction::SkillE, hs::EdgeKind::Released,
                    sequence, held);
     Check(simulation.Probe().cooldown_ticks[2] > 0, "E releases charged skill");
@@ -600,11 +766,14 @@ void TestCombatPresentationContracts()
     (void)Tick(simulation, held);
     hs::RenderSnapshotStorage snapshot(128, 4, 2, 64);
     Check(simulation.WriteRenderSnapshot(snapshot), "attack snapshot");
-    Check(!snapshot.View().poses.empty() &&
-              snapshot.View().poses.front().upper_body_clip ==
-                  hs::CharacterAnimationClip::Recoil &&
-              snapshot.View().poses.front().upper_body_weight == 1.0f,
-          "basic attack layers recoil over locomotion until the release marker");
+    Check(!snapshot.View().poses.empty(), "basic attack writes an animation pose");
+    Check(snapshot.View().poses.front().upper_body_clip ==
+              hs::CharacterAnimationClip::Recoil,
+          "basic attack selects the recoil clip");
+    Check(snapshot.View().poses.front().upper_body_weight > 0.0f &&
+              snapshot.View().poses.front().upper_body_weight < 1.0f,
+          std::format("basic attack blend weight is {} before the release marker",
+                      snapshot.View().poses.front().upper_body_weight));
 
     for (std::uint32_t tick = 0; tick < 5; ++tick) (void)Tick(simulation, held);
     snapshot.Clear();
@@ -621,10 +790,35 @@ void TestCombatPresentationContracts()
               return instance.mesh == hs::RenderMesh::PlayerProjectile;
           }), "first basic arrow is visible on its release snapshot");
 
-    for (std::uint32_t tick = 0; tick < 24; ++tick)
+    held.basic_attack_held = false;
+    for (std::uint32_t tick = 0; tick < 34; ++tick)
     {
         (void)Tick(simulation, held);
     }
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "late attack clip snapshot");
+    Check(snapshot.View().poses.front().upper_body_normalized_time *
+                  snapshot.View().poses.front().upper_body_playback_rate < 1.0f &&
+              snapshot.View().poses.front().upper_body_weight == 1.0f,
+          "attack remains fully weighted until the recoil clip completes");
+
+    (void)Tick(simulation, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "completed attack clip snapshot");
+    Check(snapshot.View().poses.front().upper_body_normalized_time *
+                  snapshot.View().poses.front().upper_body_playback_rate == 1.0f &&
+              snapshot.View().poses.front().upper_body_weight == 1.0f,
+          "attack reaches its final pose before blending out");
+
+    (void)Tick(simulation, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "attack blend-out snapshot");
+    Check(snapshot.View().poses.front().upper_body_normalized_time *
+                  snapshot.View().poses.front().upper_body_playback_rate >= 1.0f &&
+              snapshot.View().poses.front().upper_body_weight < 1.0f,
+          "attack blend-out starts from the completed pose");
+
+    for (std::uint32_t tick = 0; tick < 5; ++tick) (void)Tick(simulation, held);
     snapshot.Clear();
     Check(simulation.WriteRenderSnapshot(snapshot), "between attacks snapshot");
     Check(snapshot.View().poses.front().upper_body_weight == 0.0f,
@@ -642,7 +836,196 @@ void TestCombatPresentationContracts()
               return instance.mesh == hs::RenderMesh::Area &&
                      instance.color_rgba == 0xFFFFFFFFu && instance.scale.z >= 12.0f;
           }), "charged shot renders a white range line");
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released,
+                   sequence, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "charged release snapshot");
+    Check(std::abs(snapshot.View().poses.front().upper_body_playback_rate -
+                   41.0f / 9.0f) < 0.0001f,
+          "skill recoil playback fits the charged-shot recovery delay");
     Check(simulation.Shutdown().Succeeded(), "presentation shutdown");
+}
+
+void TestCharacterInformationPage()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({18}, QuietGameData()).Succeeded(),
+          "character page initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::BleedKillHeal));
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
+
+    hs::HeldInputState held;
+    hs::Sequence sequence{};
+    const auto before = simulation.Probe().tick;
+    const auto opened = TickEdge(simulation, hs::GameAction::CharacterPage,
+                                 hs::EdgeKind::Pressed, sequence, held);
+    Check(opened.phase == hs::SessionPhase::Paused && opened.tick == before &&
+              simulation.Probe().menu_page == 3,
+          "Tab opens the character page and pauses simulation");
+
+    const auto contains_text = [](const hs::RenderSnapshot &snapshot,
+                                  std::string_view expected) {
+        return std::ranges::any_of(snapshot.ui, [&](const hs::UiModel &model) {
+            const auto end = std::ranges::find(model.utf8_text, '\0');
+            return std::string_view(model.utf8_text.data(),
+                                    end - model.utf8_text.begin()).contains(expected);
+        });
+    };
+    hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
+    Check(simulation.WriteRenderSnapshot(snapshot), "character stats snapshot");
+    Check(contains_text(snapshot.View(), "상세 능력치") &&
+              contains_text(snapshot.View(), "기본 공격 피해") &&
+              contains_text(snapshot.View(), "투자 포인트") &&
+              contains_text(snapshot.View(), "현재 전투 기록"),
+          "character overview shows effective stats and damage totals");
+
+    SetCursor(held, 700, 165);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "character skills snapshot");
+    Check(simulation.Probe().menu_page == 4 &&
+              contains_text(snapshot.View(), "연속 추가 화살") &&
+              contains_text(snapshot.View(), "기본 공격을 유지하면"),
+          "skill page shows current upgrades and detailed skill explanation");
+
+    SetCursor(held, 850, 240);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    SetCursor(held, 1'250, 240);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    auto reordered = simulation.Probe();
+    Check(reordered.skill_loadout[0] == hs::SkillKind::Count &&
+              reordered.skill_loadout[2] == hs::SkillKind::PiercingShot,
+          "clicking an occupied then empty slot moves the skill");
+
+    SetCursor(held, 1'050, 240);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    SetCursor(held, 1'250, 240);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    reordered = simulation.Probe();
+    Check(reordered.skill_loadout[1] == hs::SkillKind::PiercingShot &&
+              reordered.skill_loadout[2] == hs::SkillKind::MultiShot,
+          "clicking two occupied slots swaps their QWER bindings");
+
+    SetCursor(held, 1'000, 165);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "character relic snapshot");
+    Check(simulation.Probe().menu_page == 5 &&
+              contains_text(snapshot.View(), "피의 회복") &&
+              contains_text(snapshot.View(), "출혈 중인 적을 처치하면"),
+          "relic page shows acquired relic effects");
+
+    const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
+                                 hs::EdgeKind::Pressed, sequence, held);
+    Check(closed.phase == hs::SessionPhase::Playing &&
+              simulation.Probe().menu_page == 0,
+          "Tab closes the character page");
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().cooldown_ticks[0] > 0,
+          "the swapped W binding immediately casts piercing shot");
+    Check(simulation.Shutdown().Succeeded(), "character page shutdown");
+}
+
+void TestPauseMenuActions()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({19}, QuietGameData()).Succeeded(),
+          "pause menu initialize");
+    hs::HeldInputState held;
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
+                   sequence, held);
+
+    hs::RenderSnapshotStorage snapshot(16, 2, 2, 32);
+    Check(simulation.WriteRenderSnapshot(snapshot), "pause menu snapshot");
+    const auto contains_text = [&](std::string_view expected) {
+        return std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &model) {
+            const auto end = std::ranges::find(model.utf8_text, '\0');
+            return std::string_view(model.utf8_text.data(),
+                                    end - model.utf8_text.begin()).contains(expected);
+        });
+    };
+    Check(contains_text("계속") && contains_text("설정") &&
+              contains_text("게임 종료"),
+          "Esc menu shows continue, settings, and quit actions");
+
+    SetCursor(held, 960, 556);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::Paused &&
+              simulation.Probe().menu_page == 6,
+          "pause settings keeps the game paused");
+    snapshot.Clear();
+    Check(simulation.WriteRenderSnapshot(snapshot), "in-game settings snapshot");
+    Check(contains_text("화면:") && !contains_text("상세 능력치") &&
+              !contains_text("캐릭터 정보") && !contains_text("스킬·강화"),
+          "in-game settings does not render the character information page");
+
+    (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::Paused &&
+              simulation.Probe().menu_page == 0,
+          "Esc returns from settings to the pause menu");
+
+    SetCursor(held, 960, 456);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::Playing,
+          "continue resumes gameplay");
+
+    (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
+                   sequence, held);
+    SetCursor(held, 960, 656);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().phase == hs::SessionPhase::QuitRequested,
+          "pause menu quit requests application exit");
+    Check(simulation.Shutdown().Succeeded(), "pause menu shutdown");
+}
+
+void TestAttackSpeedAnimationRate()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({83}, QuietGameData()).Succeeded(),
+          "attack-speed animation initialize");
+    for (std::uint32_t level = 0; level < 10; ++level)
+    {
+        const auto before = simulation.Probe();
+        Debug(simulation, hs::DebugCommandKind::GrantExperience,
+              before.experience_to_next - before.experience);
+        (void)Tick(simulation);
+        Debug(simulation, hs::DebugCommandKind::SelectCard, 0);
+        Debug(simulation, hs::DebugCommandKind::AssignStat,
+              static_cast<std::uint64_t>(hs::StatKind::AttackSpeed));
+    }
+    Check(simulation.Probe().stat_points[
+              static_cast<std::size_t>(hs::StatKind::AttackSpeed)] == 10,
+          "attack speed reaches level ten");
+
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    held.basic_attack_held = true;
+    (void)Tick(simulation, held);
+    hs::RenderSnapshotStorage snapshot(128, 4, 2, 64);
+    Check(simulation.WriteRenderSnapshot(snapshot), "level-ten attack snapshot");
+    Check(std::abs(snapshot.View().poses.front().upper_body_playback_rate -
+                   41.0f / 21.0f) < 0.0001f,
+          "level-ten attack keeps the prior 2.25 attacks per second and speeds animation");
+    Check(simulation.Shutdown().Succeeded(), "attack-speed animation shutdown");
 }
 
 void TestArrowRainTrackingProjectileMoves()
@@ -688,6 +1071,128 @@ void TestArrowRainTrackingProjectileMoves()
     Check(simulation.Shutdown().Succeeded(), "arrow rain tracking shutdown");
 }
 
+void TestPiercingDamageTrailMatchesArrowPath()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 100;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({122}, data).Succeeded(),
+          "piercing trail initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot), 3);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {10.0f, 0.0f});
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {10.0f, 2.0f});
+
+    hs::HeldInputState held;
+    held.aim_world = {24.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(simulation.Probe().damage_by_skill[
+              static_cast<std::size_t>(hs::SkillKind::PiercingShot)] == 4,
+          "one-meter trail damages only enemies on the arrow path");
+
+    hs::RenderSnapshotStorage snapshot(64, 2, 2, 8);
+    Check(simulation.WriteRenderSnapshot(snapshot), "piercing trail snapshot");
+    Check(std::ranges::any_of(snapshot.View().instances,
+                              [](const hs::RenderInstance &instance) {
+              return instance.mesh == hs::RenderMesh::Area &&
+                     instance.color_rgba == 0x6080D040u &&
+                     std::abs(instance.position.x - 12.0f) < 0.0001f &&
+                     std::abs(instance.scale.x - 1.0f) < 0.0001f &&
+                     std::abs(instance.scale.z - 24.0f) < 0.0001f;
+          }), "piercing trail visual matches its 24 by 1 meter damage path");
+    Check(simulation.Shutdown().Succeeded(), "piercing trail shutdown");
+}
+
+void TestStationaryCombatSimulationContract()
+{
+    auto data = QuietGameData();
+    data.spawn_stages.front().per_second = 10.0f;
+    data.spawn_stages.front().weights = {50, 50, 0};
+    hs::SimulationConfig config{123};
+    config.stationary_combat_simulation = true;
+    hs::GameSimulation attacking;
+    hs::GameSimulation idle;
+    Check(attacking.Initialize(config, data).Succeeded() &&
+              idle.Initialize(config, data).Succeeded(),
+          "stationary combat initialize");
+    Debug(attacking, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::Trap));
+    Debug(attacking, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot));
+    Debug(attacking, hs::DebugCommandKind::SetStat,
+          static_cast<std::uint64_t>(hs::StatKind::AttackPower), 10);
+    Debug(attacking, hs::DebugCommandKind::GrantExperience, 1'000);
+    Debug(attacking, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {10.0f, 0.0f});
+    Debug(idle, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {10.0f, 0.0f});
+
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(attacking, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    (void)Tick(idle);
+    for (std::uint32_t tick = 1; tick < 600; ++tick)
+    {
+        if (tick == 30)
+            (void)TickEdge(attacking, hs::GameAction::SkillW,
+                           hs::EdgeKind::Pressed, sequence, held);
+        else
+            (void)Tick(attacking, held);
+        (void)Tick(idle);
+    }
+    const auto active = attacking.Probe();
+    const auto passive = idle.Probe();
+    Check(active.player_position.x == 0.0f && active.player_position.y == 0.0f &&
+              active.health == active.max_health && active.damage_taken > 0,
+          "combat simulation keeps the player stationary and invulnerable while recording threat");
+    Check(active.level == 1 && active.stat_points[
+              static_cast<std::size_t>(hs::StatKind::AttackPower)] == 10,
+          "combat simulation freezes progression and applies the requested build stats");
+    Check(active.balance.enemy_spawned == passive.balance.enemy_spawned,
+          "build-created entities do not change the paired enemy spawn stream");
+    Check(attacking.Shutdown().Succeeded() && idle.Shutdown().Succeeded(),
+          "stationary combat shutdown");
+}
+
+void TestStationaryProgressionSimulationContract()
+{
+    auto data = QuietGameData();
+    data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].health = 1;
+    hs::SimulationConfig config{124};
+    config.automatic_choices = true;
+    config.stationary_combat_simulation = true;
+    config.stationary_progression_simulation = true;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize(config, data).Succeeded(),
+          "stationary progression initialize");
+    for (std::uint32_t index = 0; index < 20; ++index)
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0,
+              {2.0f, static_cast<float>(index) * 0.01f});
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    for (std::uint32_t tick = 0; tick < 1'200 && simulation.Probe().level == 1;
+         ++tick)
+        (void)Tick(simulation, held);
+    const auto probe = simulation.Probe();
+    Check(probe.level >= 2 &&
+              probe.balance.pickup_collected[
+                  static_cast<std::size_t>(hs::PickupKind::Experience)] >= 20,
+          "stationary progression instantly collects experience and levels normally");
+    Check(probe.player_position.x == 0.0f && probe.player_position.y == 0.0f &&
+              probe.health == probe.max_health,
+          "stationary progression remains fixed and invulnerable");
+    Check(simulation.Shutdown().Succeeded(), "stationary progression shutdown");
+}
+
 void TestRangedWarningAndExplosiveArea()
 {
     hs::GameSimulation warning_simulation;
@@ -718,6 +1223,24 @@ void TestRangedWarningAndExplosiveArea()
               std::abs(ranged->position.z) < 0.0001f,
           "ranged enemy holds position inside attack range instead of retreating");
     Check(warning_simulation.Shutdown().Succeeded(), "ranged warning shutdown");
+
+    hs::GameSimulation suicide_warning;
+    Check(suicide_warning.Initialize({201}, QuietGameData()).Succeeded(),
+          "suicide warning initialize");
+    Debug(suicide_warning, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Suicide), 0, {2.0f, 0.0f});
+    (void)Tick(suicide_warning);
+    hs::RenderSnapshotStorage suicide_snapshot(128, 4, 2, 64);
+    Check(suicide_warning.WriteRenderSnapshot(suicide_snapshot),
+          "suicide warning snapshot");
+    Check(std::ranges::any_of(
+              suicide_snapshot.View().instances, [](const hs::RenderInstance &instance) {
+                  return instance.mesh == hs::RenderMesh::Area &&
+                         instance.color_rgba == 0x803030FFu &&
+                         std::abs(instance.scale.x - 3.0f) < 0.0001f &&
+                         std::abs(instance.scale.z - 3.0f) < 0.0001f;
+              }), "suicide enemy renders its red explosion radius while arming");
+    Check(suicide_warning.Shutdown().Succeeded(), "suicide warning shutdown");
 
     hs::GameSimulation explosion_simulation;
     Check(explosion_simulation.Initialize({21}, QuietGameData()).Succeeded(),
@@ -755,6 +1278,8 @@ void TestMagnetPickupCollectsAllExperience()
     data.enemies[0].health = 1;
     data.utility_pickup_base_chance = 1.0f;
     data.utility_pickup_miss_increment = 0.0f;
+    data.heal_pickup_chance_multiplier = 1.0f;
+    data.magnet_pickup_chance_multiplier = 1.0f;
 
     hs::GameSimulation simulation;
     Check(simulation.Initialize({22}, data).Succeeded(), "magnet pickup initialize");
@@ -762,12 +1287,21 @@ void TestMagnetPickupCollectsAllExperience()
     hs::HeldInputState held;
     held.basic_attack_held = true;
     held.aim_world = {-20.0f, 0.0f, 0.0f};
-    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {-10.0f, 0.0f});
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {-17.0f, 0.0f});
     for (std::uint32_t tick = 0; tick < 180 && simulation.Probe().kills < 1; ++tick)
         (void)Tick(simulation, held);
 
-    held.aim_world = {20.0f, 0.0f, 0.0f};
-    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {10.0f, 0.0f});
+    held.basic_attack_held = false;
+    held.move_held = true;
+    held.move_target_world = {40.0f, 0.0f, 0.0f};
+    for (std::uint32_t tick = 0;
+         tick < 600 && simulation.Probe().player_position.x < 39.0f; ++tick)
+        (void)Tick(simulation, held);
+
+    held.move_held = false;
+    held.basic_attack_held = true;
+    held.aim_world = {60.0f, 0.0f, 0.0f};
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {50.0f, 0.0f});
     for (std::uint32_t tick = 0; tick < 180 && simulation.Probe().kills < 2; ++tick)
         (void)Tick(simulation, held);
     Check(simulation.Probe().pickup_count == 6,
@@ -782,20 +1316,22 @@ void TestMagnetPickupCollectsAllExperience()
     const auto magnet = std::ranges::find_if(
         pickup_snapshot.View().instances, [](const hs::RenderInstance &instance) {
             return instance.mesh == hs::RenderMesh::Pickup &&
-                   instance.color_rgba == 0xFFFFB020u;
+                    instance.color_rgba == 0xFFFF3030u;
         });
     Check(heal != pickup_snapshot.View().instances.end() &&
               magnet != pickup_snapshot.View().instances.end() &&
-              heal->scale.y > heal->scale.x && magnet->scale.x > magnet->scale.y,
-          "heal and magnet pickups use distinct colors and silhouettes");
+              heal->scale.y > heal->scale.x &&
+              std::abs(magnet->scale.x - magnet->scale.y) < 0.0001f &&
+              std::abs(magnet->scale.y - magnet->scale.z) < 0.0001f,
+          "heal is green and tall while magnet is a red square");
 
     held.basic_attack_held = false;
     held.move_held = true;
-    held.move_target_world = {10.0f, 0.0f, 0.0f};
-    for (std::uint32_t tick = 0; tick < 240 && simulation.Probe().experience < 2; ++tick)
+    held.move_target_world = {50.0f, 0.0f, 0.0f};
+    for (std::uint32_t tick = 0; tick < 600 && simulation.Probe().experience < 2; ++tick)
         (void)Tick(simulation, held);
     Check(simulation.Probe().experience == 2,
-          "collecting a magnet pulls every individual experience pickup to the player");
+          "magnet-attracted experience keeps tracking beyond the old three-second window");
     Check(simulation.Probe().pickup_count == 2,
           "magnet pull leaves unrelated distant utility pickups on the field");
     Check(simulation.Shutdown().Succeeded(), "magnet pickup shutdown");
@@ -806,20 +1342,20 @@ void TestUtilityPickupMissChanceGrowth()
     auto data = QuietGameData();
     data.enemies[0].health = 1;
     data.utility_pickup_base_chance = 0.0f;
-    data.utility_pickup_miss_increment = 1.0f;
+    data.utility_pickup_miss_increment = 4.0f;
     hs::GameSimulation simulation;
     Check(simulation.Initialize({23}, data).Succeeded(), "utility pity initialize");
     hs::HeldInputState held;
     held.basic_attack_held = true;
     held.aim_world = {20.0f, 0.0f, 0.0f};
-    for (std::uint32_t kill = 0; kill < 2; ++kill)
+    for (std::uint32_t kill = 0; kill < 3; ++kill)
     {
         Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
         for (std::uint32_t tick = 0; tick < 180 && simulation.Probe().kills <= kill; ++tick)
             (void)Tick(simulation, held);
     }
-    Check(simulation.Probe().pickup_count == 4,
-          "each utility drop is guaranteed after one miss when increment is 100 percent");
+    Check(simulation.Probe().pickup_count == 5,
+          "successful utility drops reset misses immediately before the next kill");
     Check(simulation.Shutdown().Succeeded(), "utility pity shutdown");
 }
 
@@ -1051,7 +1587,8 @@ void TestTimedBossEventsAndSpawnStop()
     }
     const auto after_final = simulation.Probe();
     Check(after_final.phase == hs::SessionPhase::Playing &&
-              after_final.normal_enemy_count == normal_count,
+              after_final.normal_enemy_count == normal_count &&
+              after_final.boss_count == 3,
           "final boss stops new normal enemy spawns");
     Check(after_final.growth_ticks == 15 * kTicksPerMinute &&
               after_final.boss_fight_ticks == 10,
@@ -1063,18 +1600,50 @@ void TestLargeWaveSchedule()
 {
     auto data = QuietGameData();
     data.waves = hs::GameData::Defaults().waves;
+    for (auto &enemy : data.enemies) enemy.damage = 0;
     constexpr std::array<std::uint32_t, 5> minutes{3, 6, 9, 12, 14};
     constexpr std::array<std::uint32_t, 5> counts{30, 45, 65, 85, 100};
     for (std::size_t event = 0; event < minutes.size(); ++event)
     {
         hs::GameSimulation simulation;
         Check(simulation.Initialize({55}, data).Succeeded(), "wave schedule initialize");
+        const auto start = minutes[event] * kTicksPerMinute;
+        Debug(simulation, hs::DebugCommandKind::SetGrowthTick, start - 5 * 60 - 1);
+        (void)Tick(simulation);
+        hs::RenderSnapshotStorage snapshot(256, 4, 2, 128);
+        Check(simulation.WriteRenderSnapshot(snapshot), "wave warning snapshot");
+        const auto contains_text = [&](std::string_view expected) {
+            return std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &model) {
+                const auto end = std::ranges::find(model.utf8_text, '\0');
+                return std::string_view(model.utf8_text.data(),
+                                        end - model.utf8_text.begin()).contains(expected);
+            });
+        };
+        Check(contains_text("대규모 웨이브까지 5초"),
+              "large wave displays a five-second warning");
+
         Debug(simulation, hs::DebugCommandKind::SetGrowthTick,
-              minutes[event] * kTicksPerMinute - 1);
-        for (std::uint32_t tick = 0; tick < 120; ++tick)
+              start - 1);
+        (void)Tick(simulation);
+        snapshot.Clear();
+        Check(simulation.WriteRenderSnapshot(snapshot), "wave start snapshot");
+        Check(contains_text("대규모 웨이브 발생"),
+              "large wave displays a spawn notification");
+        const auto spawned = [&] {
+            const auto &values = simulation.Probe().balance.enemy_spawned;
+            return values[0] + values[1] + values[2];
+        };
+        Check(spawned() == 1,
+              "large wave starts with one distributed spawn");
+
+        for (std::uint32_t tick = 1; tick < 120; ++tick)
             (void)Tick(simulation);
-        Check(simulation.Probe().normal_enemy_count == counts[event],
-              std::format("{}m wave emits {} enemies over two seconds",
+        Check(spawned() == (counts[event] + 9) / 10,
+              "large wave emits only one tenth of its enemies in two seconds");
+        for (std::uint32_t tick = 120; tick < 1200; ++tick)
+            (void)Tick(simulation);
+        Check(spawned() == counts[event],
+              std::format("{}m wave emits {} enemies over twenty seconds",
                           minutes[event], counts[event]));
         Check(simulation.Shutdown().Succeeded(), "wave schedule shutdown");
     }
@@ -1197,8 +1766,14 @@ void TestRerollExcludesDisplayedCards()
     const auto before = simulation.Probe();
     Check(before.phase == hs::SessionPhase::CardSelection && before.card_count == 3,
           "level cards displayed");
+    Check(std::ranges::none_of(before.cards, [](const hs::CardView &card) {
+              return card.kind == hs::CardKind::BonusStatPoint;
+          }), "stat point fallback is absent while upgrades are available");
     Debug(simulation, hs::DebugCommandKind::Reroll);
     const auto after = simulation.Probe();
+    Check(std::ranges::none_of(after.cards, [](const hs::CardView &card) {
+              return card.kind == hs::CardKind::BonusStatPoint;
+          }), "reroll does not mix stat point fallback into upgrade candidates");
     for (std::size_t left = 0; left < before.card_count; ++left)
     {
         for (std::size_t right = 0; right < after.card_count; ++right)
@@ -1209,8 +1784,419 @@ void TestRerollExcludesDisplayedCards()
                   "reroll excludes displayed candidates when pool is sufficient");
         }
     }
-    Check(after.rerolls_remaining == 2, "reroll consumes shared count");
+    Check(after.level_rerolls_remaining == 2, "level reroll consumes level count");
+    Check(after.relic_rerolls_remaining == 3, "level reroll preserves relic count");
     Check(simulation.Shutdown().Succeeded(), "reroll shutdown");
+}
+
+void TestAlternatingSkillRelicTelemetry()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({211}, QuietGameData()).Succeeded(),
+          "alternating relic telemetry initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::AlternatingSkills));
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    for (std::uint32_t tick = 0; tick < 60; ++tick) (void)Tick(simulation, held);
+    (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
+                   sequence, held);
+    const auto relic = static_cast<std::size_t>(hs::RelicKind::AlternatingSkills);
+    const auto &effects = simulation.Probe().balance.relic_effects[relic];
+    Check(effects[static_cast<std::size_t>(hs::UpgradeEffectMetric::Activations)] == 1 &&
+              effects[static_cast<std::size_t>(
+                  hs::UpgradeEffectMetric::CooldownTicksSaved)] > 0,
+          "alternating relic records activation and actual cooldown refund");
+    Check(simulation.Shutdown().Succeeded(),
+          "alternating relic telemetry shutdown");
+}
+
+void TestTagWeightedCardSelection()
+{
+    const auto bleed = static_cast<hs::SkillTagMask>(hs::SkillTag::Bleed);
+    const auto burn = static_cast<hs::SkillTagMask>(hs::SkillTag::Burn);
+    const auto slow = static_cast<hs::SkillTagMask>(hs::SkillTag::Slow);
+    Check(hs::RelicPrerequisiteTags(hs::RelicKind::BleedKillHeal) ==
+              bleed &&
+              hs::RelicPrerequisiteTags(hs::RelicKind::BurnPropagation) ==
+                  burn &&
+              hs::RelicPrerequisiteTags(hs::RelicKind::RadialBasicAttack) == 0,
+          "conditional relics require a working build tag while standalone relics remain universal");
+    Check(hs::SkillTags(hs::SkillKind::MultiShot) == 0 &&
+              hs::SkillTags(hs::SkillKind::Trap) == slow &&
+              hs::UpgradeTags(hs::SkillKind::BasicAttack, 0) == 0 &&
+              hs::UpgradeTags(hs::SkillKind::BasicAttack, 3) == bleed &&
+              hs::UpgradeTags(hs::SkillKind::BasicAttack, 4) == burn,
+          "only real status application and dependency tags participate in synergy weighting");
+}
+
+void TestUpgradeDamageAttribution()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1'000;
+    data.enemies[0].move_speed = 0.0f;
+    data.enemies[0].damage = 0;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({193}, data).Succeeded(),
+          "upgrade damage attribution initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    for (std::uint32_t tick = 0; tick < 240; ++tick) (void)Tick(simulation, held);
+    const auto probe = simulation.Probe();
+    Check(probe.balance.upgrade_damage[0][0] > 0 &&
+              probe.balance.upgrade_damage[0][0] < probe.damage_by_skill[0],
+          "extra-arrow damage is separated from the basic attack's base damage");
+    Check(probe.balance.upgrade_effects[0][0][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ProjectilesCreated)] > 0,
+          "upgrade telemetry records the extra projectiles that actually spawned");
+    const auto extra_attacks = probe.balance.upgrade_effects[0][0][
+        static_cast<std::size_t>(hs::UpgradeEffectMetric::ProjectilesCreated)];
+    Check(probe.balance.skill_uses[0] >= extra_attacks + 4,
+          "extra basic arrows count as basic attacks without recursively spawning themselves");
+    Check(probe.balance.skill_casts_with_hit[0] > 0 &&
+              probe.balance.skill_casts_with_hit[0] <= probe.balance.skill_uses[0],
+          "one cast contributes at most one cast-hit regardless of derived projectiles");
+    Check(simulation.Shutdown().Succeeded(), "upgrade damage attribution shutdown");
+
+    hs::GameSimulation interaction;
+    Check(interaction.Initialize({194}, data).Succeeded(),
+          "conditional upgrade attribution initialize");
+    Debug(interaction, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(interaction, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 5);
+    Debug(interaction, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 7);
+    Debug(interaction, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    Debug(interaction, hs::DebugCommandKind::SpawnEnemy, 0, 0, {4.83f, 1.29f});
+    Debug(interaction, hs::DebugCommandKind::SpawnEnemy, 0, 0, {4.83f, -1.29f});
+    hs::Sequence sequence{};
+    hs::HeldInputState interaction_held;
+    interaction_held.aim_world = {20.0f, 0.0f, 0.0f};
+    (void)TickEdge(interaction, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, interaction_held);
+    for (std::uint32_t tick = 0; tick < 20; ++tick)
+        (void)Tick(interaction, interaction_held);
+    interaction_held.basic_attack_held = true;
+    for (std::uint32_t tick = 0; tick < 100; ++tick)
+        (void)Tick(interaction, interaction_held);
+    const auto interaction_probe = interaction.Probe();
+    Check(interaction_probe.balance.upgrade_damage[0][7] > 0 &&
+              interaction_probe.balance.upgrade_damage[0][7] <
+                  interaction_probe.damage_by_skill[0],
+          "empowered basic attack attributes only the two additional arrows");
+    Check(interaction_probe.balance.upgrade_effects[0][5][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::CooldownTicksSaved)] > 0,
+          "slow-hit upgrade records the cooldown ticks actually removed");
+    Check(interaction.Shutdown().Succeeded(),
+          "conditional upgrade attribution shutdown");
+
+    hs::GameSimulation independent;
+    Check(independent.Initialize({195}, data).Succeeded(),
+          "independent upgrade behavior initialize");
+    Debug(independent, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(independent, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
+    Debug(independent, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+    Debug(independent, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 6);
+    Debug(independent, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow), 6);
+    for (const auto position : {hs::Float2{4.0f, 0.0f}, hs::Float2{6.0f, 0.5f},
+                                hs::Float2{8.0f, -0.5f}, hs::Float2{10.0f, 0.0f}})
+        Debug(independent, hs::DebugCommandKind::SpawnEnemy, 0, 0, position);
+    hs::HeldInputState independent_held;
+    independent_held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence independent_sequence{};
+    (void)TickEdge(independent, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   independent_sequence, independent_held);
+    for (std::uint32_t tick = 0; tick < 20; ++tick)
+        (void)Tick(independent, independent_held);
+    (void)TickEdge(independent, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
+                   independent_sequence, independent_held);
+    for (std::uint32_t tick = 0; tick < 20; ++tick)
+        (void)Tick(independent, independent_held);
+    Check(independent.Probe().balance.upgrade_effects[2][6][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ProjectilesCreated)] == 2,
+          "multishot seventh upgrade creates exactly two independent arrows");
+    (void)TickEdge(independent, hs::GameAction::SkillE, hs::EdgeKind::Pressed,
+                   independent_sequence, independent_held);
+    for (std::uint32_t tick = 0; tick < 120; ++tick)
+        (void)Tick(independent, independent_held);
+    Check(independent.Probe().balance.upgrade_effects[5][6][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::CooldownTicksSaved)] > 0,
+          "ricochet cooldown recovery works without the return-arrow upgrade");
+    Check(independent.Shutdown().Succeeded(),
+          "independent upgrade behavior shutdown");
+}
+
+void TestSelectiveUpgradeInheritance()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1'000;
+    data.enemies[0].move_speed = 0.0f;
+    data.enemies[0].damage = 0;
+
+    hs::GameSimulation split;
+    Check(split.Initialize({196}, data).Succeeded(), "isolated split initialize");
+    Debug(split, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(split, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 2);
+    Debug(split, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 5);
+    for (const auto position : {hs::Float2{5.0f, 0.0f}, hs::Float2{6.8f, 1.5f},
+                                hs::Float2{6.8f, -1.5f}})
+        Debug(split, hs::DebugCommandKind::SpawnEnemy, 0, 0, position);
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    held.basic_attack_held = true;
+    (void)Tick(split, held);
+    held.basic_attack_held = false;
+    for (std::uint32_t tick = 0; tick < 90; ++tick) (void)Tick(split, held);
+    const auto split_probe = split.Probe();
+    Check(split_probe.balance.upgrade_effects[0][2][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ProjectilesCreated)] == 2,
+          "basic split creates two arrows");
+    Check(split_probe.balance.upgrade_effects[0][5][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::SlowApplications)] == 1,
+          "basic split arrows do not inherit slow and cooldown effects");
+    Check(split.Shutdown().Succeeded(), "isolated split shutdown");
+
+    hs::GameSimulation snapshot_mask;
+    Check(snapshot_mask.Initialize({200}, data).Succeeded(),
+          "cast upgrade snapshot initialize");
+    Debug(snapshot_mask, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(snapshot_mask, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    hs::Sequence snapshot_sequence{};
+    (void)TickEdge(snapshot_mask, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   snapshot_sequence, held);
+    Debug(snapshot_mask, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot), 2);
+    for (std::uint32_t tick = 0; tick < 90; ++tick) (void)Tick(snapshot_mask, held);
+    Check(snapshot_mask.Probe().balance.upgrade_effects[1][2][
+              static_cast<std::size_t>(hs::UpgradeEffectMetric::BleedStacksApplied)] == 0,
+          "scheduled effects keep the upgrade mask captured at cast time");
+    Check(snapshot_mask.Shutdown().Succeeded(), "cast upgrade snapshot shutdown");
+
+    hs::GameSimulation repeat;
+    Check(repeat.Initialize({197}, data).Succeeded(), "full repeat initialize");
+    Debug(repeat, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(repeat, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
+    Debug(repeat, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 5);
+    Debug(repeat, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    hs::Sequence sequence{};
+    (void)TickEdge(repeat, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    for (std::uint32_t tick = 0; tick < 20; ++tick) (void)Tick(repeat, held);
+    held.basic_attack_held = true;
+    for (std::uint32_t tick = 0; tick < 160; ++tick) (void)Tick(repeat, held);
+    const auto repeat_probe = repeat.Probe();
+    const auto repeat_arrows = repeat_probe.balance.upgrade_effects[0][0][
+        static_cast<std::size_t>(hs::UpgradeEffectMetric::ProjectilesCreated)];
+    const auto slow_applications = repeat_probe.balance.upgrade_effects[0][5][
+        static_cast<std::size_t>(hs::UpgradeEffectMetric::SlowApplications)];
+    Check(repeat_arrows > 0 && slow_applications == repeat_probe.balance.skill_uses[0],
+          "full basic repeats inherit other basic attack effects once");
+    Check(repeat_probe.balance.upgrade_effects[0][5][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::CooldownTicksSaved)] > 0,
+          "full basic repeats retain cooldown utility");
+    Check(repeat.Shutdown().Succeeded(), "full repeat shutdown");
+
+    held.basic_attack_held = false;
+    hs::GameSimulation basic_reacquire;
+    Check(basic_reacquire.Initialize({212}, data).Succeeded(),
+          "basic miss reacquire initialize");
+    Debug(basic_reacquire, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 6);
+    Debug(basic_reacquire, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+          {17.0f, 3.0f});
+    hs::HeldInputState basic_held;
+    basic_held.aim_world = {20.0f, 0.0f, 0.0f};
+    basic_held.basic_attack_held = true;
+    (void)Tick(basic_reacquire, basic_held);
+    basic_held.basic_attack_held = false;
+    for (std::uint32_t tick = 0; tick < 120; ++tick)
+        (void)Tick(basic_reacquire, basic_held);
+    Check(basic_reacquire.Probe().balance.upgrade_damage[0][6] > 0,
+          "missed basic arrow reacquires a nearby enemy and deals attributed damage");
+    Check(basic_reacquire.Shutdown().Succeeded(),
+          "basic miss reacquire shutdown");
+
+    hs::GameSimulation miss_recovery;
+    Check(miss_recovery.Initialize({205}, data).Succeeded(),
+          "derived miss recovery initialize");
+    Debug(miss_recovery, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
+    Debug(miss_recovery, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 0);
+    Debug(miss_recovery, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 7);
+    Debug(miss_recovery, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+          {18.0f, 10.0f});
+    hs::Sequence miss_sequence{};
+    (void)TickEdge(miss_recovery, hs::GameAction::SkillQ,
+                   hs::EdgeKind::Pressed, miss_sequence, held);
+    for (std::uint32_t tick = 0; tick < 180; ++tick)
+        (void)Tick(miss_recovery, held);
+    Check(miss_recovery.Probe().balance.upgrade_effects[2][7][
+              static_cast<std::size_t>(
+                  hs::UpgradeEffectMetric::ProjectilesCreated)] > 5,
+          "miss recovery applies to derived upgrade volleys");
+    Check(miss_recovery.Shutdown().Succeeded(),
+          "derived miss recovery shutdown");
+
+    hs::GameSimulation mark;
+    Check(mark.Initialize({206}, data).Succeeded(), "basic mark trigger initialize");
+    Debug(mark, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow));
+    Debug(mark, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow), 6);
+    Debug(mark, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    hs::Sequence mark_sequence{};
+    (void)TickEdge(mark, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   mark_sequence, held);
+    for (std::uint32_t tick = 0; tick < 30; ++tick) (void)Tick(mark, held);
+    const auto mark_explosions_before_basic =
+        mark.Probe().balance.upgrade_effects[4][6][static_cast<std::size_t>(
+            hs::UpgradeEffectMetric::ExplosionsCreated)];
+    held.basic_attack_held = true;
+    for (std::uint32_t tick = 0; tick < 120; ++tick) (void)Tick(mark, held);
+    held.basic_attack_held = false;
+    Check(mark.Probe().balance.upgrade_effects[4][6][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ExplosionsCreated)] >
+              mark_explosions_before_basic,
+          "basic attack triggers a mark from another skill");
+    Check(mark.Shutdown().Succeeded(), "basic mark trigger shutdown");
+
+    data.enemies[0].health = 8;
+    hs::GameSimulation small_trap;
+    Check(small_trap.Initialize({198}, data).Succeeded(), "small trap initialize");
+    Debug(small_trap, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::Trap));
+    for (const auto upgrade : {2u, 3u, 4u, 7u})
+        Debug(small_trap, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::Trap), upgrade);
+    for (const auto x : {0.0f, 8.0f})
+        Debug(small_trap, hs::DebugCommandKind::SpawnEnemy, 0, 0, {x, 0.0f});
+    hs::HeldInputState trap_held;
+    trap_held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence trap_sequence{};
+    (void)TickEdge(small_trap, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   trap_sequence, trap_held);
+    for (std::uint32_t tick = 0; tick < 1'000; ++tick)
+        (void)Tick(small_trap, trap_held);
+    const auto trap_probe = small_trap.Probe();
+    Check(trap_probe.kills == 2,
+          "the first small trap retains its own explosion");
+    Check(trap_probe.balance.upgrade_effects[7][3][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::BleedStacksApplied)] == 3 &&
+              trap_probe.balance.upgrade_effects[7][4][static_cast<std::size_t>(
+                  hs::UpgradeEffectMetric::BurnApplications)] == 1,
+          "small traps do not inherit the full trap's bleed or burn");
+    Check(trap_probe.balance.upgrade_effects[7][7][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::AreasCreated)] == 1,
+          "small trap kills do not trigger the kill-trap upgrade again");
+    Check(small_trap.Shutdown().Succeeded(), "small trap shutdown");
+
+    hs::GameSimulation retreat_trap;
+    Check(retreat_trap.Initialize({199}, data).Succeeded(),
+          "retreat small trap initialize");
+    Debug(retreat_trap, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot));
+    for (const auto upgrade : {1u, 2u, 3u, 4u})
+        Debug(retreat_trap, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::RetreatShot), upgrade);
+    Debug(retreat_trap, hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.0f, 1.2f});
+    hs::Sequence retreat_sequence{};
+    (void)TickEdge(retreat_trap, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   retreat_sequence, trap_held);
+    for (std::uint32_t tick = 0; tick < 180; ++tick)
+        (void)Tick(retreat_trap, trap_held);
+    const auto retreat_probe = retreat_trap.Probe();
+    std::uint64_t retreat_bleed{};
+    std::uint64_t retreat_burn{};
+    for (std::size_t upgrade = 0; upgrade < hs::kUpgradeCount; ++upgrade)
+    {
+        retreat_bleed += retreat_probe.balance.upgrade_effects[8][upgrade]
+            [static_cast<std::size_t>(hs::UpgradeEffectMetric::BleedStacksApplied)];
+        retreat_burn += retreat_probe.balance.upgrade_effects[8][upgrade]
+            [static_cast<std::size_t>(hs::UpgradeEffectMetric::BurnApplications)];
+    }
+    Check(retreat_bleed == 0 && retreat_burn == 0,
+          "retreat small trap does not reinterpret retreat upgrades as trap upgrades");
+    Check(retreat_trap.Shutdown().Succeeded(), "retreat small trap shutdown");
+}
+
+void TestHighFanoutChainsTerminate()
+{
+    const auto run = [](hs::SkillKind skill, std::array<std::uint8_t, 4> upgrades,
+                        std::uint64_t seed) {
+        auto data = QuietGameData();
+        data.enemies[0].health = 1;
+        data.enemies[0].move_speed = 0.0f;
+        data.enemies[0].damage = 0;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({seed}, data).Succeeded(), "chain initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill,
+              static_cast<std::uint64_t>(skill));
+        for (const auto upgrade : upgrades)
+            Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+                  static_cast<std::uint64_t>(skill), upgrade);
+        for (std::uint32_t enemy = 0; enemy < 48; ++enemy)
+        {
+            const auto column = static_cast<float>(enemy % 8);
+            const auto row = static_cast<float>(enemy / 8);
+            Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+                  {3.0f + column * 2.0f, (row - 2.5f) * 2.0f});
+        }
+        hs::HeldInputState held;
+        held.aim_world = {15.0f, 0.0f, 0.0f};
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                       sequence, held);
+        for (std::uint32_t tick = 0; tick < 1'200; ++tick) (void)Tick(simulation, held);
+        const auto settled = simulation.Probe();
+        for (std::uint32_t tick = 0; tick < 180; ++tick) (void)Tick(simulation, held);
+        const auto after = simulation.Probe();
+        Check(settled.player_projectile_count == 0 &&
+                  after.player_projectile_count == 0 &&
+                  settled.damage_dealt == after.damage_dealt,
+              "one cast settles without an infinite damage or projectile chain");
+        Check(simulation.Shutdown().Succeeded(), "chain shutdown");
+        return settled;
+    };
+
+    const auto ricochet = run(hs::SkillKind::RicochetArrow, {0, 1, 2, 4}, 201);
+    Check(ricochet.balance.upgrade_effects[5][4][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ProjectilesCreated)] <= 9,
+          "ricochet kill arrows share the nine-projectile cap");
+    const auto trap = run(hs::SkillKind::Trap, {0, 2, 3, 7}, 202);
+    Check(trap.balance.upgrade_effects[7][7][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::AreasCreated)] <= 3,
+          "kill traps share the three-area cap");
+    const auto rain = run(hs::SkillKind::ArrowRain, {0, 3, 6, 7}, 203);
+    Check(rain.balance.upgrade_effects[6][6][static_cast<std::size_t>(
+              hs::UpgradeEffectMetric::ProjectilesCreated)] <= 6,
+          "arrow rain kill arrows share the six-projectile cap");
+    (void)run(hs::SkillKind::ExplosiveArrow, {0, 1, 2, 4}, 204);
 }
 
 void TestSkillUpgradeCardsHaveDescriptions()
@@ -1242,7 +2228,8 @@ void TestSkillUpgradeCardsHaveDescriptions()
                                             end - model.utf8_text.begin());
                 const auto heading_position = text.find(heading);
                 return heading_position != std::string_view::npos &&
-                       std::ranges::count(text, '\n') >= 2 &&
+                       text.find('#', heading_position) == std::string_view::npos &&
+                       std::ranges::count(text, '\n') >= 1 &&
                        heading_position + heading.size() + 30 < text.size();
             });
         Check(has_description, "skill upgrade card includes readable effect description");
@@ -1291,10 +2278,14 @@ int main()
     try
     {
         TestStartingEnemyBalanceAndBoundary();
+        TestExperienceBalance();
+        TestLevelUpSelectionInputGuard();
         TestCursorMovement();
         TestExperiencePickupDoesNotExpire();
         TestExperienceAttractSpeed();
         TestUiHitRegionsMatchAnchors();
+        TestCharacterInformationPage();
+        TestPauseMenuActions();
         TestGameplayDataHotReloadBoundary();
         TestAttackStopsMovementAndFacesAim();
         TestSkillMovementPauseAndResume();
@@ -1304,7 +2295,11 @@ int main()
         TestPauseStopsTicks();
         TestQwerSkills();
         TestCombatPresentationContracts();
+        TestAttackSpeedAnimationRate();
         TestArrowRainTrackingProjectileMoves();
+        TestPiercingDamageTrailMatchesArrowPath();
+        TestStationaryCombatSimulationContract();
+        TestStationaryProgressionSimulationContract();
         TestRangedWarningAndExplosiveArea();
         TestMagnetPickupCollectsAllExperience();
         TestUtilityPickupMissChanceGrowth();
@@ -1312,6 +2307,7 @@ int main()
         TestSingleWorkerOracleDeterminism();
         TestCombatUpgradeCombinations();
         TestRelicCombinations();
+        TestAlternatingSkillRelicTelemetry();
         TestTimedBossEventsAndSpawnStop();
         TestLargeWaveSchedule();
         TestBossWarningExecutionAndPhaseCancellation();
@@ -1319,6 +2315,10 @@ int main()
         TestNormalEnemyCountIsUnbounded();
         TestExperimentDebugCommands();
         TestRerollExcludesDisplayedCards();
+        TestTagWeightedCardSelection();
+        TestUpgradeDamageAttribution();
+        TestSelectiveUpgradeInheritance();
+        TestHighFanoutChainsTerminate();
         TestSkillUpgradeCardsHaveDescriptions();
         TestTwentyFourLevelChoicesAndStats();
         std::cout << "stage2_gameplay_tests passed\n";

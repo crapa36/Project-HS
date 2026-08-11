@@ -1,9 +1,11 @@
 #include <hs/runtime/experiment_spec.hpp>
 #include <hs/runtime/experiment_pipe.hpp>
 #include <hs/runtime/save_store.hpp>
+#include <hs/runtime/playtest_recording.hpp>
 
 #include <Windows.h>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -166,6 +168,102 @@ void TestNamedPipeIdempotencyAndTargetTick()
           "accepted command executes once");
 }
 
+void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
+{
+    const auto directory = root / "playtest";
+    hs::PlaytestRecorder recorder;
+    Check(recorder.Start({directory, 42, 99}).Succeeded(), "start playtest recorder");
+    const std::array edges{hs::ActionEdge{1, hs::GameAction::SkillQ,
+                                         hs::EdgeKind::Pressed}};
+    hs::InputFrame input{1, {}, edges};
+    hs::SessionProbe probe;
+    probe.tick = 1;
+    probe.phase = hs::SessionPhase::Playing;
+    probe.balance.skill_uses[1] = 1;
+    probe.balance.skill_casts_with_hit[1] = 1;
+    probe.skill_levels[1] = 2;
+    probe.upgrade_masks[1] = 1;
+    probe.balance.upgrade_damage[1][0] = 17;
+    probe.balance.upgrade_triggers[1][0] = 2;
+    probe.balance.upgrade_effects[1][0][static_cast<std::size_t>(
+        hs::UpgradeEffectMetric::ProjectilesCreated)] = 3;
+    probe.balance.upgrade_effects[1][0][static_cast<std::size_t>(
+        hs::UpgradeEffectMetric::CooldownTicksSaved)] = 12;
+    probe.balance.upgrade_relic_synergy_count = 1;
+    auto &synergy = probe.balance.upgrade_relic_synergies[0];
+    synergy.skill = hs::SkillKind::PiercingShot;
+    synergy.upgrade = 0;
+    synergy.relic = hs::RelicKind::BurnPropagation;
+    synergy.metrics[static_cast<std::size_t>(
+        hs::UpgradeRelicSynergyMetric::Damage)] = 23;
+    probe.damage_by_skill[1] = 30;
+    probe.damage_dealt = 30;
+    probe.balance.skill_boss_damage[1] = 17;
+    probe.stat_points[static_cast<std::size_t>(hs::StatKind::AttackPower)] = 2;
+    probe.balance.stat_utility[
+        static_cast<std::size_t>(hs::StatKind::AttackPower)] = 6;
+    Check(recorder.Record(input, 1234, probe, {}).Succeeded(), "record playtest tick");
+
+    probe.tick = 2;
+    probe.phase = hs::SessionPhase::Defeat;
+    probe.health = 0;
+    const hs::InputFrame terminal_input{2, {}, {}};
+    Check(recorder.Record(terminal_input, 2234, probe, {}).Succeeded(),
+          "record terminal playtest tick");
+    probe.tick = 3;
+    probe.phase = hs::SessionPhase::MainMenu;
+    probe.health = 100;
+    const hs::InputFrame menu_input{3, {}, {}};
+    Check(recorder.Record(menu_input, 3234, probe, {}).Succeeded(),
+          "record post-run menu tick");
+    Check(recorder.Finish(true).Succeeded(), "finish playtest recorder");
+    Check(std::filesystem::is_regular_file(directory / "result.json") &&
+              std::filesystem::is_regular_file(directory / "analysis.md"),
+          "playtest reports exist");
+    std::ifstream result_stream(directory / "result.json");
+    const std::string result_json((std::istreambuf_iterator<char>(result_stream)), {});
+    Check(result_json.contains("\"build\"") && result_json.contains("\"skills\"") &&
+              result_json.contains("\"upgrades\"") &&
+              result_json.contains("\"relics\"") &&
+              result_json.contains("\"enemies\"") &&
+              result_json.contains("\"pickups\"") &&
+              result_json.contains("\"stats\"") &&
+              result_json.contains("\"damage\": 17") &&
+              result_json.contains("\"damage_triggers\": 2") &&
+              result_json.contains("\"projectiles_created\"") &&
+               result_json.contains("\"cooldown_ticks_saved\"") &&
+               result_json.contains("\"value\": 12") &&
+               result_json.contains("\"upgrade_relic_synergies\"") &&
+               result_json.contains("\"burn_propagation\"") &&
+               result_json.contains("\"damage\": 23"),
+          "playtest result contains balance metrics");
+    Check(result_json.contains("\"outcome\": \"defeat\"") &&
+              result_json.contains("\"tick\": 2"),
+          "first terminal result survives a later menu transition");
+    Check(result_json.contains("\"damage_to_normal\": 13") &&
+              result_json.contains("\"damage_to_boss\": 17") &&
+              result_json.contains("\"boss\": 17"),
+          "skill damage is split by normal and boss targets");
+    Check(result_json.contains("\"per_point_utility\": 0.1") &&
+              result_json.contains("\"unit\": \"session_contribution_ratio\""),
+          "stat utility uses a comparable per-point session contribution ratio");
+    std::ifstream analysis_stream(directory / "analysis.md");
+    const std::string analysis((std::istreambuf_iterator<char>(analysis_stream)), {});
+    Check(analysis.contains("piercing_shot / 강화 1: 17 피해 (2회)"),
+          "playtest analysis separates damage caused by each selected upgrade");
+    Check(analysis.contains("추가 투사체 3") &&
+              analysis.contains("쿨타임 단축 틱 12"),
+          "playtest analysis explains each realized non-damage upgrade effect");
+    Check(analysis.contains("attack_power: 10.00% / 포인트"),
+          "UTF-8 analysis reports normalized stat utility in Korean");
+    hs::PlaytestReplay replay;
+    Check(hs::LoadPlaytestReplay(directory, replay).Succeeded() &&
+              replay.seed == 42 && replay.content_hash == 99 &&
+              replay.frames.size() == 3 && replay.frames[0].expected_checksum == 1234 &&
+              replay.frames[2].expected_checksum == 3234,
+          "playtest inputs replay exactly");
+}
+
 } // namespace
 
 int main()
@@ -180,6 +278,7 @@ int main()
         TestExperimentSpecRoundTrip(root);
         TestNamedPipeCommandRoundTrip();
         TestNamedPipeIdempotencyAndTargetTick();
+        TestPlaytestRecordAndReplay(root);
         std::filesystem::remove_all(root, error);
         std::cout << "stage2_runtime_tests passed\n";
         return 0;
