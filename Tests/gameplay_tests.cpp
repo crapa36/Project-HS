@@ -30,14 +30,26 @@ void Check(bool condition, std::string_view message)
     }
 }
 
-const hs::CookedContentBundle &DefaultContent()
+struct TestContent
+{
+    hs::SimulationRules simulation_rules;
+    hs::PresentationCatalog presentation;
+};
+
+const TestContent &DefaultContent()
 {
     static const auto data = [] {
-        hs::CookedContentBundle loaded;
-        Check(hs::LoadCookedContent(
-                  std::filesystem::current_path() / "Cooked" / "game_data.hsbin",
-                  loaded).Succeeded(),
-              "load cooked game data");
+        TestContent loaded;
+        Check(hs::LoadSimulationRules(
+                  std::filesystem::current_path() / "Cooked" /
+                      "simulation_rules.hsbin",
+                  loaded.simulation_rules).Succeeded(),
+              "load cooked simulation rules");
+        Check(hs::LoadPresentationCatalog(
+                  std::filesystem::current_path() / "Cooked" /
+                      "presentation_catalog.hsbin",
+                  loaded.presentation).Succeeded(),
+              "load cooked presentation catalog");
         return loaded;
     }();
     return data;
@@ -74,17 +86,34 @@ hs::TickResult Tick(hs::GameSimulation &simulation,
 }
 
 hs::SettingsData test_settings;
+hs::PresentationUiState test_ui;
 std::optional<hs::UiCommand> last_ui_command;
 
 hs::TickResult TickEdge(hs::GameSimulation &simulation, hs::GameAction action,
                         hs::EdgeKind kind, hs::Sequence &sequence,
                         const hs::HeldInputState &held = {})
 {
+    if (kind == hs::EdgeKind::Pressed && action == hs::GameAction::CharacterPage)
+    {
+        test_ui.page = simulation.Probe().phase == hs::SessionPhase::Playing ? 3 : 0;
+        test_ui.loadout_source = 0xFF;
+    }
+    if (kind == hs::EdgeKind::Pressed && action == hs::GameAction::Pause)
+    {
+        const auto phase = simulation.Probe().phase;
+        if ((phase == hs::SessionPhase::Paused && test_ui.page == 6) ||
+            (phase == hs::SessionPhase::MainMenu && test_ui.page != 0))
+        {
+            test_ui.page = 0;
+            return Tick(simulation, held);
+        }
+        test_ui.page = 0;
+    }
     if (action == hs::GameAction::BasicAttack && kind == hs::EdgeKind::Pressed &&
         simulation.Probe().phase != hs::SessionPhase::Playing)
     {
         const auto interaction = hs::ResolveUiInteraction(
-            simulation.Probe(), test_settings, held.cursor_normalized);
+            simulation.Probe(), test_ui, test_settings, held.cursor_normalized);
         if (interaction.gameplay) simulation.ApplyUiAction(*interaction.gameplay);
         last_ui_command = interaction.runtime;
     }
@@ -103,6 +132,26 @@ void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,
 void TestStartingEnemyBalanceAndBoundary()
 {
     const auto data = hs::SimulationRules::Defaults();
+    constexpr std::array expected_handlers{
+        hs::AbilityHandlerId::BasicProjectileCadence,
+        hs::AbilityHandlerId::PiercingProjectile,
+        hs::AbilityHandlerId::UniformFanProjectiles,
+        hs::AbilityHandlerId::HoldReleaseLinearCharge,
+        hs::AbilityHandlerId::ProjectileToAreaExplosion,
+        hs::AbilityHandlerId::NearestUnhitTargetRicochet,
+        hs::AbilityHandlerId::TargetedPeriodicArea,
+        hs::AbilityHandlerId::ForwardRollLeaveTrap,
+        hs::AbilityHandlerId::ForcedRetreatAndProjectile};
+    for (std::size_t index = 0; index < expected_handlers.size(); ++index)
+        Check(data.skills[index].handler == expected_handlers[index],
+              "every default skill has an explicit ability handler");
+    const auto rules_hash = hs::SimulationRulesHash(data);
+    auto changed_rules = data;
+    changed_rules.skills[0].damage_coefficient += 0.25f;
+    Check(hs::SimulationRulesHash(data) == rules_hash,
+          "simulation rules hash is stable for identical values");
+    Check(hs::SimulationRulesHash(changed_rules) != rules_hash,
+          "simulation rules hash changes with gameplay data");
     constexpr std::array<float, 7> expected_spawn_rates{
         0.9f, 1.2f, 2.1f, 3.3f, 4.8f, 4.8f, 4.8f};
     for (std::size_t index = 0; index < expected_spawn_rates.size(); ++index)
@@ -189,8 +238,8 @@ bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &sn
     hs::GameReadModelStorage model;
     simulation.WriteReadModel(model);
     static const hs::SettingsData settings;
-    return hs::ProjectRenderSnapshot(model.View(), simulation.Rules(),
-                                     DefaultContent().presentation, settings, snapshot);
+    return hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
+                                     settings, snapshot);
 }
 
 bool HasVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind kind)
@@ -486,7 +535,7 @@ void TestUiHitRegionsMatchAnchors()
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(simulation.Probe().phase == hs::SessionPhase::MainMenu &&
-              simulation.Probe().menu_page == 1,
+              test_ui.page == 1,
           "collection anchor opens collection instead of starting");
 
     const auto contains_text = [](const hs::RenderSnapshot &snapshot,
@@ -518,12 +567,12 @@ void TestUiHitRegionsMatchAnchors()
     SetCursor(held, 390.0f, 928.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.Probe().menu_page == 0, "page back anchor returns to main menu");
+    Check(test_ui.page == 0, "page back anchor returns to main menu");
 
     SetCursor(held, 960.0f, 616.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.Probe().menu_page == 2, "settings anchor opens settings");
+    Check(test_ui.page == 2, "settings anchor opens settings");
 
     SetCursor(held, 700.0f, 348.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -550,7 +599,7 @@ void TestUiHitRegionsMatchAnchors()
 
     (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.Probe().menu_page == 0, "Esc returns from settings");
+    Check(test_ui.page == 0, "Esc returns from settings");
 
     SetCursor(held, 960.0f, 316.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -1093,7 +1142,7 @@ void TestCharacterInformationPage()
     const auto opened = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
     Check(opened.phase == hs::SessionPhase::Paused && opened.tick == before &&
-              simulation.Probe().menu_page == 3,
+              test_ui.page == 3,
           "Tab opens the character page and pauses simulation");
 
     const auto contains_text = [](const hs::RenderSnapshot &snapshot,
@@ -1117,7 +1166,7 @@ void TestCharacterInformationPage()
                    sequence, held);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "character skills snapshot");
-    Check(simulation.Probe().menu_page == 4 &&
+    Check(test_ui.page == 4 &&
               contains_text(snapshot.View(), "연속 추가 화살") &&
               contains_text(snapshot.View(), "기본 공격을 유지하면"),
           "skill page shows current upgrades and detailed skill explanation");
@@ -1149,15 +1198,14 @@ void TestCharacterInformationPage()
                    sequence, held);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "character relic snapshot");
-    Check(simulation.Probe().menu_page == 5 &&
+    Check(test_ui.page == 5 &&
               contains_text(snapshot.View(), "피의 회복") &&
               contains_text(snapshot.View(), "출혈 중인 적을 처치하면"),
           "relic page shows acquired relic effects");
 
     const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
-    Check(closed.phase == hs::SessionPhase::Playing &&
-              simulation.Probe().menu_page == 0,
+    Check(closed.phase == hs::SessionPhase::Playing && test_ui.page == 0,
           "Tab closes the character page");
     held.aim_world = {20.0f, 0.0f, 0.0f};
     (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
@@ -1194,7 +1242,7 @@ void TestPauseMenuActions()
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(simulation.Probe().phase == hs::SessionPhase::Paused &&
-              simulation.Probe().menu_page == 6,
+              test_ui.page == 6,
           "pause settings keeps the game paused");
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "in-game settings snapshot");
@@ -1205,7 +1253,7 @@ void TestPauseMenuActions()
     (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(simulation.Probe().phase == hs::SessionPhase::Paused &&
-              simulation.Probe().menu_page == 0,
+              test_ui.page == 0,
           "Esc returns from settings to the pause menu");
 
     SetCursor(held, 960, 456);

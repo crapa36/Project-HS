@@ -1,4 +1,5 @@
 #include "active_rules.hpp"
+#include "rule_dispatcher.hpp"
 #include "simulation_pipeline.hpp"
 
 #include <algorithm>
@@ -34,6 +35,19 @@ int main()
                   rules[1].handler == RuleHandlerId::BurnPropagation &&
                   rules[2].handler == RuleHandlerId::KillCooldownSurge,
               "active rules resolve to static handlers");
+        std::vector<RuleHandlerId> executed;
+        DispatchRule<RuleHandlerId::BleedKillHeal>(
+            table, RuleHook::OnEnemyKilled,
+            [&](const ActiveRule &rule) { executed.push_back(rule.handler); });
+        DispatchRule<RuleHandlerId::BurnPropagation>(
+            table, RuleHook::OnEnemyKilled,
+            [&](const ActiveRule &rule) { executed.push_back(rule.handler); });
+        DispatchRule<RuleHandlerId::DamageKnockback>(
+            table, RuleHook::OnPlayerDamaged,
+            [&](const ActiveRule &rule) { executed.push_back(rule.handler); });
+        Check(executed == std::vector{RuleHandlerId::BleedKillHeal,
+                                     RuleHandlerId::BurnPropagation},
+              "dispatcher executes each acquired handler exactly once");
         Check(table.For(RuleHook::OnProjectileHit).empty() &&
                   table.For(RuleHook::BeforeDamage).empty(),
               "unused semantic hooks remain explicit and allocation free");

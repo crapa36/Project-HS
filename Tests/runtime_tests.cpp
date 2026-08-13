@@ -274,11 +274,11 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
 {
     const auto directory = root / "playtest";
     hs::PlaytestRecorder recorder;
-    Check(recorder.Start({directory, 42, 99}).Succeeded(), "start playtest recorder");
+    Check(recorder.Start({directory, 42, 99, 101}).Succeeded(), "start playtest recorder");
     const std::array edges{hs::ActionEdge{1, hs::GameAction::SkillQ,
                                          hs::EdgeKind::Pressed}};
     const std::array ui_actions{
-        hs::UiAction{hs::UiActionKind::OpenCharacterSkills, 0}};
+        hs::UiAction{hs::UiActionKind::SwapLoadoutSlots, 0, 1}};
     hs::InputFrame input{1, {}, edges, ui_actions};
     hs::SimulationObservation probe;
     probe.tick = 1;
@@ -362,7 +362,7 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
           "UTF-8 analysis reports normalized stat utility in Korean");
     hs::PlaytestReplay replay;
     Check(hs::LoadPlaytestReplay(directory, replay).Succeeded() &&
-              replay.header.format_version == 3 &&
+              replay.header.format_version == 4 &&
               replay.header.simulation_version == hs::kSimulationVersion &&
               replay.header.gameplay_hash_version == hs::kGameplayHashVersion &&
               replay.header.determinism_profile == hs::kDeterminismProfile &&

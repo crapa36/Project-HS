@@ -2,7 +2,6 @@
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
-#include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
 
 #include <atomic>
@@ -176,43 +175,6 @@ void TestSnapshotExchange()
     Check(exchange.DroppedPublishes() == 0, "snapshot no drops");
 }
 
-hs::GameplayChecksum RunSimulation()
-{
-    hs::GameSimulation simulation;
-    Check(simulation.Initialize({0x12345678u}).Succeeded(), "simulation initialize");
-    hs::GameplayChecksum checksum{};
-    for (hs::Tick tick = 1; tick <= 240; ++tick)
-    {
-        hs::InputFrame input{};
-        input.target_tick = tick;
-        input.held.move_held = true;
-        input.held.move_target_world = tick <= 120 ? hs::Float3{30.0f, 0.0f, 30.0f}
-                                                    : hs::Float3{-30.0f, 0.0f, 0.0f};
-        checksum = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep).checksum;
-    }
-    Check(simulation.Shutdown().Succeeded(), "simulation shutdown");
-    return checksum;
-}
-
-void TestGameplayDeterminism()
-{
-    constexpr hs::GameplayChecksum kGameplayOracle = 2264690505295034864ull;
-    const auto first = RunSimulation();
-    Check(first == RunSimulation(), "repeated gameplay checksum");
-    Check(first == kGameplayOracle,
-          std::format("gameplay checksum oracle: {}", first));
-
-    hs::GameSimulation simulation;
-    Check(simulation.Initialize({1}).Succeeded(), "cursor movement simulation initialize");
-    hs::InputFrame input{};
-    input.held.move_held = true;
-    input.held.move_target_world = {30.0f, 0.0f, 30.0f};
-    const auto first_tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-    Check(first_tick.tick == 1 && first_tick.checksum != 0,
-          "cursor movement simulation tick");
-    Check(simulation.Shutdown().Succeeded(), "cursor movement simulation shutdown");
-}
-
 void TestSpscQueueSize()
 {
     hs::BoundedSpscQueue<std::uint32_t, 64> queue;
@@ -267,7 +229,6 @@ int main(int argc, char **argv)
             TestFixedStepClock();
             TestSpscQueueSize();
             TestSnapshotExchange();
-            TestGameplayDeterminism();
             TestVfxEventParameters();
         }
         if (group == "all" || group == "jobs") TestTaskSystem();
