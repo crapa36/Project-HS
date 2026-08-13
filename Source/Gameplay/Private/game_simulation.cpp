@@ -949,7 +949,8 @@ struct GameSimulation::SimulationWorld
             projectile.explosion_damage = projectile.damage;
         }
         projectiles.push_back(projectile);
-        if (player_owned && skill < SkillKind::Count)
+        if (player_owned && skill < SkillKind::Count &&
+            skill != SkillKind::BasicAttack)
         {
             constexpr std::array<std::string_view, kCombatSkillCount> effects{
                 "particle.basic_attack", "particle.skill.piercing_shot",
@@ -3176,6 +3177,9 @@ struct GameSimulation::SimulationWorld
                     hit_direction, hit_scale, hit_height);
         else if (projectile.skill == SkillKind::RicochetArrow)
             EmitVfx("particle.skill.ricochet_arrow.hit", enemy.position,
+                    hit_direction, hit_scale, hit_height);
+        else if (projectile.skill == SkillKind::BasicAttack)
+            EmitVfx("particle.basic_attack", enemy.position,
                     hit_direction, hit_scale, hit_height);
         else
             EmitVfx("particle.common.hit", enemy.position,
@@ -5871,10 +5875,9 @@ bool GameSimulation::WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const
         const auto playback_ticks = std::max<Tick>(
             1, clip_until - impl_->player.basic_attack_animation_start);
         pose.upper_body_clip = CharacterAnimationClip::Recoil;
-        pose.upper_body_normalized_time = std::clamp(
+        pose.upper_body_normalized_time =
             static_cast<float>(impl_->tick - impl_->player.basic_attack_animation_start) /
-                static_cast<float>(kRecoilClipTicks),
-            0.0f, 1.0f);
+            static_cast<float>(kRecoilClipTicks);
         pose.upper_body_playback_rate = static_cast<float>(kRecoilClipTicks) /
                                         static_cast<float>(playback_ticks);
         const auto fade_in = static_cast<float>(
@@ -5895,9 +5898,9 @@ bool GameSimulation::WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const
         const auto playback_ticks = std::max<Tick>(
             1, clip_until - impl_->player.active_animation_start);
         pose.upper_body_clip = CharacterAnimationClip::Recoil;
-        pose.upper_body_normalized_time = std::clamp(
+        pose.upper_body_normalized_time =
             static_cast<float>(impl_->tick - impl_->player.active_animation_start) /
-                static_cast<float>(kRecoilClipTicks), 0.0f, 1.0f);
+            static_cast<float>(kRecoilClipTicks);
         pose.upper_body_playback_rate = static_cast<float>(kRecoilClipTicks) /
                                         static_cast<float>(playback_ticks);
         const auto fade_in = static_cast<float>(
@@ -6029,8 +6032,19 @@ bool GameSimulation::WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const
             default: break;
             }
         }
+        auto render_position = projectile.position;
+        if (projectile.player_owned && projectile.skill == SkillKind::BasicAttack &&
+            projectile.spawned_tick == impl_->tick)
+        {
+            render_position = Add(render_position,
+                                  Multiply(Normalize(projectile.velocity), 0.85f));
+        }
         complete &= snapshot.AddInstance(
-            {{projectile.position.x, 0.25f, projectile.position.y},
+            {{render_position.x,
+              projectile.player_owned && projectile.skill == SkillKind::BasicAttack
+                  ? 1.05f
+                  : 0.25f,
+              render_position.y},
              std::atan2(projectile.velocity.x, projectile.velocity.y),
              scale, color,
              projectile.player_owned ? RenderMesh::PlayerProjectile
@@ -6044,6 +6058,7 @@ bool GameSimulation::WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const
         {
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.025f, area.position.y}, 0.0f, area.radius,
+                 0.0f,
                  impl_->tick < area.active_tick ? PersistentVfxKind::TrapPending
                                                 : PersistentVfxKind::TrapArmed,
                  kAreaRenderId | area.id.value});
@@ -6056,11 +6071,36 @@ bool GameSimulation::WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const
         {
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.02f, area.position.y}, 0.0f, area.radius,
-                 PersistentVfxKind::FireArea, kAreaRenderId | area.id.value});
+                 0.0f, PersistentVfxKind::FireArea,
+                 kAreaRenderId | area.id.value});
+        }
+        if (area.kind == AreaKind::Slow && impl_->tick >= area.active_tick)
+        {
+            complete &= snapshot.AddPersistentVfx(
+                {{area.position.x, 0.018f, area.position.y}, 0.0f, area.radius,
+                 0.0f, PersistentVfxKind::SlowArea,
+                 kAreaRenderId | area.id.value});
+        }
+        if (area.skill == SkillKind::ArrowRain &&
+            area.origin == EffectOrigin::Original && impl_->tick >= area.active_tick)
+        {
+            complete &= snapshot.AddPersistentVfx(
+                {{area.position.x, 0.016f, area.position.y}, 0.0f, area.radius,
+                 0.0f, PersistentVfxKind::ArrowRainArea,
+                 kAreaRenderId | area.id.value});
+        }
+        if (area.half_length > 0.0f && area.kind == AreaKind::Damage &&
+            impl_->tick >= area.active_tick)
+        {
+            complete &= snapshot.AddPersistentVfx(
+                {{area.position.x, 0.014f, area.position.y},
+                 std::atan2(area.direction.x, area.direction.y), area.radius,
+                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail,
+                 kAreaRenderId | area.id.value});
         }
         const auto particle_visual = area.kind == AreaKind::Slow ||
             area.kind == AreaKind::Trap ||
-            (area.kind == AreaKind::Damage && area.half_length <= 0.0f);
+            area.kind == AreaKind::Damage;
         if (particle_visual) continue;
         if (area.ring_outer_radius > 0.0f && area.safe_gap_count > 0)
         {

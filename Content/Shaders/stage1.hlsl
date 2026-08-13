@@ -576,10 +576,19 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
     float3 camera_forward = normalize(CameraForwardSoftness.xyz);
     float3 axis_x = normalize(cross(float3(0, 1, 0), camera_forward));
     float3 axis_y = normalize(cross(camera_forward, axis_x));
-    if (renderer == 1 || (renderer == 2 && facing == 2))
+    if (renderer == 1)
     {
         axis_x = float3(1, 0, 0);
         axis_y = float3(0, 0, 1);
+    }
+    else if (renderer == 2)
+    {
+        float3 segment_direction = particle.InitialVelocityMaxLife.xyz;
+        segment_direction.y = 0.0;
+        axis_y = length(segment_direction) > 0.0001
+            ? normalize(segment_direction)
+            : float3(0, 0, 1);
+        axis_x = float3(axis_y.z, 0, -axis_y.x);
     }
     else if (facing == 1)
     {

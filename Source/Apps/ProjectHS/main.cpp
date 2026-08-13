@@ -95,6 +95,17 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
                             config.skill_vfx_upgrade_mask);
             config.skill_vfx_upgrade_mask &= 0xFFu;
         }
+        else if (argument.starts_with("--skill-vfx-aim="))
+        {
+            const auto value = argument.substr(16);
+            if (const auto comma = value.find(','); comma != std::string_view::npos)
+            {
+                std::from_chars(value.data(), value.data() + comma,
+                                config.skill_vfx_aim.x);
+                std::from_chars(value.data() + comma + 1, value.data() + value.size(),
+                                config.skill_vfx_aim.y);
+            }
+        }
         else if (argument == "--record-playtest")
         {
             config.record_playtest = true;

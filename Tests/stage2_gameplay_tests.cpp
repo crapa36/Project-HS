@@ -972,15 +972,20 @@ void TestCombatPresentationContracts()
                              [](const hs::RenderInstance &instance) {
               return instance.mesh == hs::RenderMesh::PlayerProjectile;
           }), "first basic arrow is visible on its release snapshot");
-    Check(std::ranges::any_of(
+    Check(std::ranges::none_of(
               simulation.PendingPresentationEvents(),
               [](const hs::PresentationEvent &event) {
                   return event.kind == hs::PresentationKind::Vfx &&
                          event.asset.value ==
-                             hs::MakeAssetId("particle.basic_attack").value &&
-                         event.position.x > 0.5f && event.position.y > 1.0f;
+                             hs::MakeAssetId("particle.basic_attack").value;
               }),
-          "basic attack VFX originates at the bow side instead of the character origin");
+          "basic attack has no release VFX");
+    const auto arrow = std::ranges::find_if(
+        snapshot.View().instances, [](const hs::RenderInstance &instance) {
+            return instance.mesh == hs::RenderMesh::PlayerProjectile;
+        });
+    Check(arrow != snapshot.View().instances.end() && arrow->position.x > 0.8f,
+          "basic arrow starts at the bow tip instead of the character origin");
 
     held.basic_attack_held = false;
     for (std::uint32_t tick = 0; tick < 34; ++tick)
@@ -1016,6 +1021,23 @@ void TestCombatPresentationContracts()
     Check(snapshot.View().poses.front().upper_body_weight == 0.0f,
           "basic attack upper-body action completes instead of looping while held");
 
+    hs::GameSimulation hit_simulation;
+    Check(hit_simulation.Initialize({20}, QuietGameData()).Succeeded(),
+          "basic hit VFX initialize");
+    Debug(hit_simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {2.0f, 0.0f});
+    held.basic_attack_held = true;
+    for (std::uint32_t tick = 0; tick < 12; ++tick) (void)Tick(hit_simulation, held);
+    Check(std::ranges::any_of(
+              hit_simulation.PendingPresentationEvents(),
+              [](const hs::PresentationEvent &event) {
+                  return event.kind == hs::PresentationKind::Vfx &&
+                         event.asset.value ==
+                             hs::MakeAssetId("particle.basic_attack").value &&
+                         event.position.y > 0.5f;
+              }),
+          "basic attack hit VFX is emitted at the target");
+    Check(hit_simulation.Shutdown().Succeeded(), "basic hit VFX shutdown");
+
     Debug(simulation, hs::DebugCommandKind::GrantSkill,
           static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
     hs::Sequence sequence{};
@@ -1024,7 +1046,7 @@ void TestCombatPresentationContracts()
                    sequence, held);
     snapshot.Clear();
     Check(simulation.WriteRenderSnapshot(snapshot), "charge telegraph snapshot");
-    Check(std::ranges::any_of(snapshot.View().instances, [](const hs::RenderInstance &instance) {
+    Check(std::ranges::any_of(snapshot.View().instances, [](const auto &instance) {
               return instance.mesh == hs::RenderMesh::Area &&
                      instance.color_rgba == 0xFFFFFFFFu &&
                      instance.scale.z >= 4.2f && instance.scale.z < 5.0f;
@@ -1289,13 +1311,12 @@ void TestPiercingDamageTrailMatchesArrowPath()
 
     hs::RenderSnapshotStorage snapshot(64, 2, 2, 8);
     Check(simulation.WriteRenderSnapshot(snapshot), "piercing trail snapshot");
-    Check(std::ranges::any_of(snapshot.View().instances,
-                              [](const hs::RenderInstance &instance) {
-              return instance.mesh == hs::RenderMesh::Area &&
-                     instance.color_rgba == 0x6080D040u &&
-                     std::abs(instance.position.x - 12.0f) < 0.0001f &&
-                     std::abs(instance.scale.x - 1.0f) < 0.0001f &&
-                     std::abs(instance.scale.z - 24.0f) < 0.0001f;
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx,
+                              [](const auto &visual) {
+              return visual.kind == hs::PersistentVfxKind::DamageTrail &&
+                     std::abs(visual.position.x - 12.0f) < 0.0001f &&
+                     std::abs(visual.radius - 0.5f) < 0.0001f &&
+                     std::abs(visual.length - 24.0f) < 0.0001f;
           }), "piercing trail visual matches its 24 by 1 meter damage path");
     Check(simulation.Shutdown().Succeeded(), "piercing trail shutdown");
 }

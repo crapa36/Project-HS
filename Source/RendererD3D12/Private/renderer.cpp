@@ -2624,25 +2624,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             add_status(StatusVisual::Bleed, impl_->config.bleed_status_sprite,
                        ParticleFacing::Velocity, VfxRenderer::Mesh,
                        VfxPrimitive::Shard, source.scale.y * 0.55f,
-                       source.scale.y * 0.22f, {2.2f, 0.03f, 0.04f, 0.72f}, 2);
+                       source.scale.y * 0.16f, {1.8f, 0.04f, 0.05f, 0.42f}, 1);
             add_status(StatusVisual::Burn, impl_->config.burn_status_sprite,
-                       ParticleFacing::Camera, VfxRenderer::Sprite,
-                       VfxPrimitive::Soft, source.scale.y * 0.5f,
-                       source.scale.y * 0.3f, {5.0f, 1.3f, 0.1f, 0.68f}, 2);
+                       ParticleFacing::Velocity, VfxRenderer::Mesh,
+                       VfxPrimitive::Ember, source.scale.y * 0.5f,
+                       source.scale.y * 0.18f, {2.2f, 0.7f, 0.08f, 0.38f}, 1);
             add_status(StatusVisual::Slow, impl_->config.slow_status_sprite,
                        ParticleFacing::Ground, VfxRenderer::Ground,
                        VfxPrimitive::Rune, 0.025f, source.scale.x * 0.72f,
-                       {0.3f, 1.2f, 3.0f, 0.55f}, 1);
+                       {0.25f, 0.85f, 1.8f, 0.28f}, 1);
             add_status(StatusVisual::Mark, impl_->config.mark_status_sprite,
                        ParticleFacing::Velocity, VfxRenderer::Mesh,
                        VfxPrimitive::Spike, source.scale.y * 1.1f,
-                       source.scale.y * 0.28f, {3.0f, 1.8f, 0.2f, 0.78f}, 1);
+                       source.scale.y * 0.22f, {2.1f, 1.0f, 0.15f, 0.5f}, 1);
         }
         for (const auto &visual : snapshot.persistent_vfx)
         {
-            const auto trap = visual.kind != PersistentVfxKind::FireArea;
-            const auto &binding = trap ? impl_->config.trap_sprite
-                                       : impl_->config.fire_area_sprite;
             ParticleSpawnCommand command;
             command.sequence = visual.stable_id ^ snapshot.header.tick;
             command.tick = snapshot.header.tick;
@@ -2651,21 +2648,52 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             command.velocity_mode = ParticleVelocity::Direction;
             command.facing = ParticleFacing::Ground;
             command.renderer = VfxRenderer::Ground;
-            command.primitive = trap ? VfxPrimitive::Rune : VfxPrimitive::Cracks;
-            command.sprite = binding.sprite;
-            command.frame_columns = binding.frame_columns;
-            command.frame_rows = binding.frame_rows;
             command.direction = {0.0f, 1.0f, 0.0f};
             command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
             command.start_size_min = command.start_size_max = visual.radius;
             command.end_size_min = command.end_size_max = visual.radius;
             command.rotation_min = command.rotation_max = visual.yaw;
-            command.start_color = command.end_color =
-                visual.kind == PersistentVfxKind::TrapPending
-                    ? Float4{1.1f, 0.75f, 0.2f, 0.18f}
-                    : visual.kind == PersistentVfxKind::TrapArmed
-                          ? Float4{1.7f, 1.05f, 0.25f, 0.34f}
-                          : Float4{2.8f, 0.45f, 0.04f, 0.28f};
+            switch (visual.kind)
+            {
+            case PersistentVfxKind::TrapPending:
+                command.primitive = VfxPrimitive::Ring;
+                command.start_color = command.end_color = {0.45f, 0.8f, 1.3f, 0.18f};
+                break;
+            case PersistentVfxKind::TrapArmed:
+                command.primitive = VfxPrimitive::Rune;
+                command.start_color = command.end_color = {1.55f, 0.8f, 0.16f, 0.24f};
+                break;
+            case PersistentVfxKind::FireArea:
+                command.primitive = VfxPrimitive::Ring;
+                command.start_color = command.end_color = {3.2f, 0.62f, 0.035f, 0.34f};
+                break;
+            case PersistentVfxKind::SlowArea:
+                command.primitive = VfxPrimitive::Ring;
+                command.start_color = command.end_color = {0.2f, 0.75f, 1.65f, 0.2f};
+                break;
+            case PersistentVfxKind::ArrowRainArea:
+                command.primitive = VfxPrimitive::Ring;
+                command.start_color = command.end_color = {1.55f, 1.05f, 0.28f, 0.18f};
+                break;
+            case PersistentVfxKind::DamageTrail:
+            case PersistentVfxKind::ChargeGuide:
+            {
+                command.renderer = VfxRenderer::Segment;
+                command.primitive = VfxPrimitive::SolidTrail;
+                const auto direction = Float3{std::sin(visual.yaw), 0.0f,
+                                              std::cos(visual.yaw)};
+                command.direction = direction;
+                command.rotation_min = command.rotation_max = 0.0f;
+                command.start_size_min = command.start_size_max = visual.radius;
+                command.end_size_min = command.end_size_max = visual.radius;
+                command.stretch = visual.length / std::max(visual.radius * 2.0f, 0.001f);
+                command.start_color = command.end_color =
+                    visual.kind == PersistentVfxKind::ChargeGuide
+                        ? Float4{1.8f, 1.8f, 1.8f, 0.34f}
+                        : Float4{0.35f, 1.0f, 1.8f, 0.16f};
+                break;
+            }
+            }
             command.count = 1;
             command.seed = static_cast<std::uint32_t>(command.sequence);
             frame_particle_spawns.push_back(command);
@@ -2691,13 +2719,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         command.frame_columns = line.frame_columns;
         command.frame_rows = line.frame_rows;
         command.shape_extent = {length * 0.5f, 0.0f, 0.0f};
-        command.direction = {dz / length, 0.0f, -dx / length};
+        command.direction = {dx / length, 0.0f, dz / length};
         command.lifetime_min = command.lifetime_max = line.lifetime;
         command.start_color = command.end_color = line.color;
         command.start_size_min = command.start_size_max = line.width * 2.5f;
         command.end_size_min = command.end_size_max = line.width * 2.5f;
         command.stretch = length / std::max(line.width * 5.0f, 0.001f);
-        command.rotation_min = command.rotation_max = std::atan2(dx, dz);
+        command.rotation_min = command.rotation_max = 0.0f;
         command.count = 1;
         command.seed = static_cast<std::uint32_t>(line.sequence);
         frame_particle_spawns.push_back(command);

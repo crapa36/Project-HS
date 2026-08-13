@@ -262,12 +262,12 @@ void TestVfxCatalog()
     };
     check_visual("particle.status.slow_area", hs::VfxRenderer::Ground,
                  hs::VfxPrimitive::Rune);
-    check_visual("particle.skill.explosive_arrow.main", hs::VfxRenderer::Mesh,
-                 hs::VfxPrimitive::ShockShell);
+    check_visual("particle.skill.explosive_arrow.main", hs::VfxRenderer::Ground,
+                 hs::VfxPrimitive::Ring);
     check_visual("particle.skill.retreat_shot.move", hs::VfxRenderer::Segment,
                  hs::VfxPrimitive::DashWake);
-    check_visual("particle.status.burn_apply", hs::VfxRenderer::Sprite,
-                 hs::VfxPrimitive::Soft);
+    check_visual("particle.status.burn_apply", hs::VfxRenderer::Mesh,
+                 hs::VfxPrimitive::Ember);
 }
 
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)

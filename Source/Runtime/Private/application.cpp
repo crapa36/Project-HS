@@ -713,7 +713,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 if (captured_skill != SkillKind::Count && !replaying)
                 {
-                    input.held.aim_world = {0.0f, 0.0f, 9.0f};
+                    input.held.aim_world = {config.skill_vfx_aim.x, 0.0f,
+                                            config.skill_vfx_aim.y};
                     input.held.basic_attack_held =
                         captured_skill == SkillKind::BasicAttack && input.target_tick >= 5;
                     const auto add_edge = [&](GameAction action, EdgeKind kind) {

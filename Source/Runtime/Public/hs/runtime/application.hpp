@@ -35,6 +35,7 @@ struct ApplicationConfig
     bool vfx_showcase{};
     std::uint32_t skill_vfx_capture{0xFFFFFFFFu};
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};
+    Float2 skill_vfx_aim{0.0f, 9.0f};
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};

@@ -26,6 +26,10 @@ enum class PersistentVfxKind : std::uint8_t
     TrapPending,
     TrapArmed,
     FireArea,
+    SlowArea,
+    ArrowRainArea,
+    DamageTrail,
+    ChargeGuide,
 };
 
 struct PersistentVfxVisual
@@ -33,6 +37,7 @@ struct PersistentVfxVisual
     Float3 position{};
     float yaw{};
     float radius{};
+    float length{};
     PersistentVfxKind kind{};
     std::uint64_t stable_id{};
 };
