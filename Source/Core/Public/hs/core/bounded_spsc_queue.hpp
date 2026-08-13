@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -48,9 +49,9 @@ template <typename T, std::size_t Capacity> class BoundedSpscQueue
 
     [[nodiscard]] std::size_t Size() const noexcept
     {
-        const auto write = write_.load(std::memory_order_acquire);
         const auto read = read_.load(std::memory_order_acquire);
-        return static_cast<std::size_t>(write - read);
+        const auto write = write_.load(std::memory_order_acquire);
+        return static_cast<std::size_t>(std::min<std::uint64_t>(write - read, Capacity));
     }
 
   private:

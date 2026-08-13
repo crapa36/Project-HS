@@ -1,3 +1,4 @@
+#include <hs/core/bounded_spsc_queue.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
@@ -10,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace
@@ -194,16 +196,49 @@ hs::GameplayChecksum RunSimulation()
 
 void TestGameplayDeterminism()
 {
-    Check(RunSimulation() == RunSimulation(), "repeated gameplay checksum");
+    constexpr hs::GameplayChecksum kGameplayOracle = 17771490641751846880ull;
+    const auto first = RunSimulation();
+    Check(first == RunSimulation(), "repeated gameplay checksum");
+    Check(first == kGameplayOracle,
+          std::format("gameplay checksum oracle: {}", first));
 
     hs::GameSimulation simulation;
     Check(simulation.Initialize({1}).Succeeded(), "cursor movement simulation initialize");
     hs::InputFrame input{};
     input.held.move_held = true;
     input.held.move_target_world = {30.0f, 0.0f, 30.0f};
-    const auto first = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-    Check(first.tick == 1 && first.checksum != 0, "cursor movement simulation tick");
+    const auto first_tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    Check(first_tick.tick == 1 && first_tick.checksum != 0,
+          "cursor movement simulation tick");
     Check(simulation.Shutdown().Succeeded(), "cursor movement simulation shutdown");
+}
+
+void TestSpscQueueSize()
+{
+    hs::BoundedSpscQueue<std::uint32_t, 64> queue;
+    std::atomic<bool> producer_done{};
+    std::atomic<bool> failed{};
+    std::jthread producer([&] {
+        for (std::uint32_t value = 0; value < 100'000;)
+        {
+            if (queue.TryPush(value)) ++value;
+        }
+        producer_done.store(true, std::memory_order_release);
+    });
+    std::jthread consumer([&] {
+        std::uint32_t value{};
+        while (!producer_done.load(std::memory_order_acquire) || queue.Size() != 0)
+        {
+            (void)queue.TryPop(value);
+        }
+    });
+    while (!producer_done.load(std::memory_order_acquire))
+    {
+        if (queue.Size() > 64) failed.store(true, std::memory_order_relaxed);
+    }
+    producer.join();
+    consumer.join();
+    Check(!failed.load(std::memory_order_relaxed), "SPSC observed size stays bounded");
 }
 
 void TestVfxEventParameters()
@@ -222,15 +257,22 @@ void TestVfxEventParameters()
 
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
     try
     {
-        TestFixedStepClock();
-        TestTaskSystem();
-        TestSnapshotExchange();
-        TestGameplayDeterminism();
-        TestVfxEventParameters();
+        const std::string_view group = argc > 1 ? argv[1] : "all";
+        if (group == "all" || group == "foundation")
+        {
+            TestFixedStepClock();
+            TestSpscQueueSize();
+            TestSnapshotExchange();
+            TestGameplayDeterminism();
+            TestVfxEventParameters();
+        }
+        if (group == "all" || group == "jobs") TestTaskSystem();
+        Check(group == "all" || group == "foundation" || group == "jobs",
+              "unknown test group");
         std::cout << "foundation_tests passed\n";
         return 0;
     }
