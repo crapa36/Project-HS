@@ -13,6 +13,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(HS_BUILD_TESTS "Build Project HS tests" ON)
+option(HS_BUILD_CONTENT_TOOLS "Build FBX content cooker and content-dependent tests" ON)
 option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
 option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
 
@@ -230,7 +231,6 @@ find_program(
     REQUIRED
     HINTS
         "$ENV{WindowsSdkBinPath}/x64"
-        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
 )
 set(HS_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/stage1.hlsl")
 set(HS_SHADER_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Generated/Shaders")
@@ -319,6 +319,7 @@ target_link_libraries(
 target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_combat_sim)
 
+if(HS_BUILD_CONTENT_TOOLS)
 set(
     HS_FBX_SDK_ROOT
     "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.7"
@@ -436,6 +437,7 @@ target_compile_definitions(
 )
 add_dependencies(hs_tools hs_content ProjectHS)
 hs_configure_target(hs_tools)
+endif()
 
 if(HS_BUILD_TESTS)
     enable_testing()
@@ -443,10 +445,12 @@ if(HS_BUILD_TESTS)
     target_link_libraries(hs_tests PRIVATE hs_core hs_jobs hs_gameplay)
     hs_configure_target(hs_tests)
 
-    add_test(NAME foundation.stage1 COMMAND hs_tests)
-    add_test(NAME adr.task_system COMMAND hs_tests)
+    add_test(NAME foundation.stage1 COMMAND hs_tests foundation)
+    add_test(NAME adr.task_system COMMAND hs_tests jobs)
+    if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
     add_test(NAME tools.content-status COMMAND hs_tools status)
+    endif()
     add_test(
         NAME smoke.stage1
         COMMAND
@@ -479,12 +483,14 @@ if(HS_BUILD_TESTS)
     )
     set_tests_properties(experiment.stage1 PROPERTIES TIMEOUT 120)
 
+    if(HS_BUILD_CONTENT_TOOLS)
     add_executable(hs_stage2_tests Tests/stage2_gameplay_tests.cpp)
     target_link_libraries(hs_stage2_tests PRIVATE hs_core hs_gameplay)
     hs_configure_target(hs_stage2_tests)
     add_dependencies(hs_stage2_tests hs_cooked_content)
     add_test(NAME gameplay.stage2 COMMAND hs_stage2_tests)
     set_tests_properties(gameplay.stage2 PROPERTIES TIMEOUT 120)
+    endif()
     add_test(
         NAME combat-simulator.stage2
         COMMAND hs_combat_sim
@@ -561,6 +567,7 @@ install(
     DESTINATION Licenses
     COMPONENT Runtime
 )
+if(HS_BUILD_CONTENT_TOOLS)
 install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
@@ -577,6 +584,7 @@ install(
     COMPONENT Runtime
     FILES_MATCHING PATTERN "archer_*.dds"
 )
+endif()
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)
 
 set(CPACK_GENERATOR ZIP)
