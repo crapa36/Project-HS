@@ -55,8 +55,7 @@ GameReadModel GameReadModelStorage::View() const noexcept
             effective_magnet_radius,
             collection_skill_index,
             character_skill_index,
-            character_slot_source,
-            pending_rebind_slot};
+            character_slot_source};
 }
 
 } // namespace hs

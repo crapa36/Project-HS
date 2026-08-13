@@ -15,7 +15,7 @@ namespace hs
 
 struct ReplayHeader
 {
-    std::uint32_t format_version{2};
+    std::uint32_t format_version{3};
     std::uint32_t simulation_version{kSimulationVersion};
     std::uint32_t gameplay_hash_version{kGameplayHashVersion};
     std::uint64_t simulation_rules_hash{};
@@ -36,11 +36,12 @@ struct PlaytestReplayFrame
     Tick target_tick{};
     HeldInputState held{};
     std::vector<ActionEdge> ordered_edges;
+    std::vector<UiAction> ui_actions;
     GameplayChecksum expected_checksum{};
 
     [[nodiscard]] InputFrame View() const noexcept
     {
-        return {target_tick, held, ordered_edges};
+        return {target_tick, held, ordered_edges, ui_actions};
     }
 };
 

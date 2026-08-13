@@ -44,6 +44,7 @@ enum class UiCommandKind : std::uint8_t
     SetSfxVolumePercent,
     SetUiVolumePercent,
     BeginSkillRebind,
+    CancelSkillRebind,
 };
 
 struct UiCommand

@@ -132,9 +132,7 @@ bool Window::PumpMessages()
             const auto normalized_y =
                 1.0f - static_cast<float>(cursor.y) / static_cast<float>(client_height_) * 2.0f;
             held_.cursor_normalized = {normalized_x, normalized_y};
-            constexpr float reference_width = 1'920.0f;
-            constexpr float reference_height = 1'080.0f;
-            constexpr float reference_aspect = reference_width / reference_height;
+            constexpr float reference_aspect = 1920.0f / 1080.0f;
             const auto output_aspect = static_cast<float>(client_width_) /
                                        static_cast<float>(client_height_);
             auto reference_u = (normalized_x + 1.0f) * 0.5f;
@@ -145,9 +143,8 @@ bool Window::PumpMessages()
             else
                 reference_v = (reference_v - 0.5f) * reference_aspect /
                               output_aspect + 0.5f;
-            held_.ui_cursor_pixels = {reference_u * reference_width,
-                                      reference_v * reference_height};
-
+            ui_cursor_normalized_ = {reference_u * 2.0f - 1.0f,
+                                     1.0f - reference_v * 2.0f};
             constexpr float yaw = 45.0f * 3.14159265358979323846f / 180.0f;
             constexpr float pitch = 55.0f * 3.14159265358979323846f / 180.0f;
             constexpr float vertical_fov = 45.0f * 3.14159265358979323846f / 180.0f;
@@ -209,6 +206,16 @@ void Window::BeginSkillRebind(std::uint32_t slot) noexcept
     {
         pending_rebind_slot_ = static_cast<std::uint8_t>(slot);
     }
+}
+
+void Window::CancelSkillRebind() noexcept
+{
+    pending_rebind_slot_.reset();
+}
+
+void Window::SetUiClickHandler(std::function<void(Float2)> handler)
+{
+    ui_click_handler_ = std::move(handler);
 }
 
 bool Window::ConsumeReboundSkillKeys(std::array<std::uint16_t, 4> &keys) noexcept
@@ -396,6 +403,7 @@ void Window::HandleRawInput(HRAWINPUT input)
         if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
         {
             held_.basic_attack_held = true;
+            if (ui_click_handler_) ui_click_handler_(ui_cursor_normalized_);
             PushAction(GameAction::BasicAttack, EdgeKind::Pressed);
         }
         if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)

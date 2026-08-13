@@ -143,7 +143,6 @@ struct GameReadModel
     std::uint8_t collection_skill_index{};
     std::uint8_t character_skill_index{};
     std::uint8_t character_slot_source{0xFF};
-    std::uint8_t pending_rebind_slot{0xFF};
 };
 
 class GameReadModelStorage
@@ -175,7 +174,6 @@ class GameReadModelStorage
     std::uint8_t collection_skill_index{};
     std::uint8_t character_skill_index{};
     std::uint8_t character_slot_source{0xFF};
-    std::uint8_t pending_rebind_slot{0xFF};
 
   private:
     std::vector<EnemyView> enemies_;

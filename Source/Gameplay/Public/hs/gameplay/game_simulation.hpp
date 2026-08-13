@@ -2,7 +2,6 @@
 
 #include <hs/core/input.hpp>
 #include <hs/core/result.hpp>
-#include <hs/core/settings.hpp>
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/game_domain/domain_signal.hpp>
@@ -29,7 +28,6 @@ struct SimulationConfig
     std::uint64_t seed{1};
     bool automatic_choices{};
     bool start_in_main_menu{};
-    SettingsData settings{};
     SimulationScenarioPolicy scenario{};
 };
 
@@ -59,12 +57,10 @@ class GameSimulation
     [[nodiscard]] SimulationObservation Probe() const noexcept;
     void WriteReadModel(GameReadModelStorage &model) const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);
-    void ApplySettings(const SettingsData &settings) noexcept;
+    void ApplyUiAction(const UiAction &action);
     [[nodiscard]] Result ApplySimulationRules(const SimulationRules &rules);
     [[nodiscard]] std::span<const DomainSignal> PendingDomainSignals() const noexcept;
     void ClearDomainSignals() noexcept;
-    [[nodiscard]] std::span<const UiCommand> PendingUiCommands() const noexcept;
-    void ClearUiCommands() noexcept;
     [[nodiscard]] Result Shutdown();
 
   private:

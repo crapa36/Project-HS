@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <functional>
 
 namespace hs
 {
@@ -29,9 +30,11 @@ class Window
     [[nodiscard]] HWND Handle() const noexcept;
     void StopInput() noexcept;
     void BeginSkillRebind(std::uint32_t slot) noexcept;
+    void CancelSkillRebind() noexcept;
     [[nodiscard]] bool ConsumeReboundSkillKeys(
         std::array<std::uint16_t, 4> &keys) noexcept;
     [[nodiscard]] Result SetBorderless(bool borderless);
+    void SetUiClickHandler(std::function<void(Float2)> handler);
 
   private:
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam,
@@ -45,9 +48,11 @@ class Window
     HWND window_{};
     HINSTANCE instance_{};
     HeldInputState held_{};
+    Float2 ui_cursor_normalized_{};
     std::array<std::uint16_t, 4> skill_virtual_keys_{};
     std::optional<std::uint8_t> pending_rebind_slot_;
     std::optional<std::array<std::uint16_t, 4>> rebound_skill_keys_;
+    std::function<void(Float2)> ui_click_handler_;
     Sequence input_sequence_{};
     bool accepting_input_{true};
     bool borderless_{};

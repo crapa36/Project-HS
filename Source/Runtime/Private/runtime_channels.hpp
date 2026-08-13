@@ -60,13 +60,15 @@ struct SimulationPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
-    BoundedSpscQueue<SettingsData, 8> &simulation_settings;
     BoundedSpscQueue<SimulationRules, 2> &gameplay_data_updates;
-    BoundedSpscQueue<UiCommand, 64> &ui_commands;
+    BoundedSpscQueue<SettingsData, 8> &presentation_settings;
+    BoundedSpscQueue<UiAction, 64> &ui_actions;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
     std::atomic<Tick> &completed_tick;
     std::atomic<GameplayChecksum> &checksum;
     std::atomic<std::uint8_t> &session_phase;
+    std::atomic<std::uint8_t> &menu_page;
+    std::atomic<std::uint8_t> &pending_rebind_slot;
     std::atomic<std::uint32_t> &best_level;
     std::atomic<std::uint64_t> &completed_run_kills;
     std::atomic<std::uint64_t> &completed_run_wins;
@@ -93,14 +95,17 @@ struct RuntimeChannels
     BoundedSpscQueue<PresentationEvent, 1024> audio_events;
     BoundedSpscQueue<GraphicsCommand, 64> graphics_commands;
     BoundedSpscQueue<SettingsData, 8> renderer_settings;
-    BoundedSpscQueue<SettingsData, 8> simulation_settings;
     BoundedSpscQueue<SimulationRules, 2> gameplay_data_updates;
+    BoundedSpscQueue<SettingsData, 8> presentation_settings;
+    BoundedSpscQueue<UiAction, 64> ui_actions;
     BoundedSpscQueue<UiCommand, 64> ui_commands;
     BoundedSpscQueue<NativeWindowMessage, 256> window_messages;
     BoundedSpscQueue<DebugCommand, 64> debug_commands;
     std::atomic<Tick> completed_tick{};
     std::atomic<GameplayChecksum> checksum{};
     std::atomic<std::uint8_t> session_phase{};
+    std::atomic<std::uint8_t> menu_page{};
+    std::atomic<std::uint8_t> pending_rebind_slot{0xFF};
     std::atomic<std::uint32_t> best_level{1};
     std::atomic<std::uint64_t> completed_run_kills{};
     std::atomic<std::uint64_t> completed_run_wins{};
@@ -124,9 +129,10 @@ struct RuntimeChannels
     {
         return {stop_requested, simulation_done, held_input, focus_epoch,
                 camera_target_x, camera_target_z, camera_zoom_percent, action_edges,
-                snapshots, presentation_events, simulation_settings,
-                gameplay_data_updates, ui_commands, debug_commands, completed_tick,
-                checksum, session_phase, best_level, completed_run_kills,
+                snapshots, presentation_events, gameplay_data_updates,
+                presentation_settings, ui_actions,
+                debug_commands, completed_tick, checksum, session_phase, menu_page,
+                pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events};
     }
 };

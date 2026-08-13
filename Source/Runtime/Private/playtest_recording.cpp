@@ -101,6 +101,10 @@ Json InputJson(const InputFrame &input, GameplayChecksum checksum)
                          {"action", static_cast<std::uint8_t>(edge.action)},
                          {"kind", static_cast<std::uint8_t>(edge.kind)}});
     }
+    Json ui_actions = Json::array();
+    for (const auto &action : input.ui_actions)
+        ui_actions.push_back({{"kind", static_cast<std::uint8_t>(action.kind)},
+                              {"value", action.value}});
     return {{"target_tick", input.target_tick},
             {"move_target", {input.held.move_target_world.x,
                               input.held.move_target_world.y,
@@ -109,11 +113,10 @@ Json InputJson(const InputFrame &input, GameplayChecksum checksum)
                             input.held.aim_world.z}},
             {"cursor_normalized", {input.held.cursor_normalized.x,
                                     input.held.cursor_normalized.y}},
-            {"ui_cursor_pixels", {input.held.ui_cursor_pixels.x,
-                                   input.held.ui_cursor_pixels.y}},
             {"move_held", input.held.move_held},
             {"basic_attack_held", input.held.basic_attack_held},
             {"edges", std::move(edges)},
+            {"ui_actions", std::move(ui_actions)},
             {"checksum", checksum}};
 }
 
@@ -194,7 +197,7 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
                                "Cannot create playtest trace files.");
 
     std::ofstream(impl_->directory / "metadata.json", std::ios::trunc)
-        << Json{{"format_version", 2},
+        << Json{{"format_version", 3},
                 {"simulation_version", kSimulationVersion},
                 {"gameplay_hash_version", kGameplayHashVersion},
                 {"simulation_rules_hash", config.content_hash},
@@ -626,7 +629,7 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
         std::ifstream metadata_stream(directory / "metadata.json");
         Json metadata;
         metadata_stream >> metadata;
-        if (!metadata_stream || metadata.value("format_version", 0) != 2)
+        if (!metadata_stream || metadata.value("format_version", 0) != 3)
             return Invalid("Playtest metadata is missing or unsupported.");
         PlaytestReplay parsed;
         parsed.header.format_version = metadata.at("format_version").get<std::uint32_t>();
@@ -658,14 +661,12 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             const auto &move = json.at("move_target");
             const auto &aim = json.at("aim_world");
             const auto &cursor = json.at("cursor_normalized");
-            const auto &ui = json.at("ui_cursor_pixels");
             frame.held.move_target_world = {move.at(0).get<float>(), move.at(1).get<float>(),
                                             move.at(2).get<float>()};
             frame.held.aim_world = {aim.at(0).get<float>(), aim.at(1).get<float>(),
                                     aim.at(2).get<float>()};
             frame.held.cursor_normalized = {cursor.at(0).get<float>(),
                                             cursor.at(1).get<float>()};
-            frame.held.ui_cursor_pixels = {ui.at(0).get<float>(), ui.at(1).get<float>()};
             frame.held.move_held = json.at("move_held").get<bool>();
             frame.held.basic_attack_held = json.at("basic_attack_held").get<bool>();
             for (const auto &edge : json.at("edges"))
@@ -678,6 +679,15 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
                 frame.ordered_edges.push_back(
                     {edge.at("sequence").get<Sequence>(),
                      static_cast<GameAction>(action), static_cast<EdgeKind>(kind)});
+            }
+            for (const auto &action_json : json.at("ui_actions"))
+            {
+                const auto kind = action_json.at("kind").get<std::uint8_t>();
+                if (kind > static_cast<std::uint8_t>(UiActionKind::ReturnToMainMenu))
+                    return Invalid("Playtest input contains an invalid UI action.");
+                frame.ui_actions.push_back(
+                    {static_cast<UiActionKind>(kind),
+                     action_json.at("value").get<std::uint8_t>()});
             }
             parsed.frames.push_back(std::move(frame));
         }

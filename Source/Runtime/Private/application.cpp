@@ -135,6 +135,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem workers;
     Window window(channels, settings.skill_virtual_keys);
+    window.SetUiClickHandler([&](Float2 cursor) {
+        SessionProbe session;
+        session.phase = static_cast<SessionPhase>(
+            channels.session_phase.load(std::memory_order_acquire));
+        session.menu_page = channels.menu_page.load(std::memory_order_acquire);
+        const auto interaction = ResolveUiInteraction(session, settings, cursor);
+        if (interaction.gameplay) (void)channels.ui_actions.TryPush(*interaction.gameplay);
+        if (interaction.runtime) (void)channels.ui_commands.TryPush(*interaction.runtime);
+    });
     auto result =
         window.Create(config.width, config.height, config.visible, config.borderless);
     if (!result)
@@ -585,8 +594,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto &channels = simulation_ports;
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
+        SettingsData projection_settings = settings;
         if (auto initialized = simulation.Initialize(
-                {effective_seed, config.smoke, !config.smoke, settings},
+                {effective_seed, config.smoke, !config.smoke},
                 content.simulation_rules);
             !initialized)
         {
@@ -650,6 +660,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint64_t observed_focus_epoch{};
         Sequence publish_sequence{};
         std::array<ActionEdge, 256> action_storage{};
+        std::array<UiAction, 64> ui_action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
         GameReadModelStorage read_model;
         std::size_t next_timeline_action{};
@@ -684,9 +695,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         break;
                     }
                 }
-                SettingsData updated_settings;
-                while (channels.simulation_settings.TryPop(updated_settings))
-                    simulation.ApplySettings(updated_settings);
+                SettingsData updated_presentation_settings;
+                while (channels.presentation_settings.TryPop(
+                    updated_presentation_settings))
+                    projection_settings = updated_presentation_settings;
+                std::size_t ui_action_count{};
+                UiAction ui_action;
+                while (ui_action_count < ui_action_storage.size() &&
+                       channels.ui_actions.TryPop(ui_action))
+                    ui_action_storage[ui_action_count++] = ui_action;
                 const auto focus_epoch = channels.focus_epoch.load(std::memory_order_acquire);
                 if (focus_epoch != observed_focus_epoch)
                 {
@@ -718,6 +735,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         channels.completed_tick.load(std::memory_order_relaxed) + 1;
                     input.held = channels.held_input.load(std::memory_order_acquire);
                     input.ordered_edges = std::span(action_storage.data(), action_count);
+                    input.ui_actions =
+                        std::span(ui_action_storage.data(), ui_action_count);
                 }
                 if (captured_skill != SkillKind::Count && !replaying)
                 {
@@ -803,6 +822,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                std::memory_order_release);
                 channels.session_phase.store(static_cast<std::uint8_t>(tick.phase),
                                              std::memory_order_release);
+                channels.menu_page.store(probe.menu_page, std::memory_order_release);
                 if ((tick.phase == SessionPhase::Victory ||
                      tick.phase == SessionPhase::Defeat) &&
                     tick.phase != previous_phase)
@@ -833,17 +853,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
                 simulation.ClearDomainSignals();
-                for (const auto &ui_command : simulation.PendingUiCommands())
-                {
-                    if (!channels.ui_commands.TryPush(ui_command))
-                    {
-                        set_failure(Result::Failure(ErrorCode::InvalidState,
-                                                    "hs_runtime",
-                                                    "UI command queue capacity exceeded."));
-                        break;
-                    }
-                }
-                simulation.ClearUiCommands();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
                     simulation.WriteReadModel(read_model);
@@ -853,8 +862,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (ProjectRenderSnapshot(read_model.View(),
                                               content.simulation_rules,
                                               content.presentation,
-                                              settings,
-                                              *slot->storage))
+                                              projection_settings,
+                                              *slot->storage,
+                                              channels.pending_rebind_slot.load(
+                                                  std::memory_order_acquire)))
                     {
                         channels.snapshots.Publish(*slot, ++publish_sequence);
                     }
@@ -1021,26 +1032,35 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 break;
             case UiCommandKind::BeginSkillRebind:
                 window.BeginSkillRebind(ui_command.value);
+                channels.pending_rebind_slot.store(
+                    static_cast<std::uint8_t>(ui_command.value),
+                    std::memory_order_release);
+                break;
+            case UiCommandKind::CancelSkillRebind:
+                window.CancelSkillRebind();
+                channels.pending_rebind_slot.store(0xFF, std::memory_order_release);
                 break;
             }
         }
         if (settings_changed)
         {
             audio.ApplySettings(settings);
-            if (!channels.renderer_settings.TryPush(settings))
+            if (!channels.renderer_settings.TryPush(settings) ||
+                !channels.presentation_settings.TryPush(settings))
                 set_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                            "Renderer settings queue capacity exceeded."));
+                                            "Settings queue capacity exceeded."));
             else if (auto saved = save_store.SaveSettings(settings); !saved)
                 set_failure(saved);
         }
         std::array<std::uint16_t, 4> rebound_keys;
         if (window.ConsumeReboundSkillKeys(rebound_keys))
         {
+            channels.pending_rebind_slot.store(0xFF, std::memory_order_release);
             settings.skill_virtual_keys = rebound_keys;
-            if (!channels.simulation_settings.TryPush(settings))
+            if (!channels.presentation_settings.TryPush(settings))
                 set_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                            "Simulation settings queue capacity exceeded."));
-            else if (auto saved = save_store.SaveSettings(settings); !saved)
+                                            "Presentation settings queue capacity exceeded."));
+            if (auto saved = save_store.SaveSettings(settings); !saved)
                 set_failure(saved);
         }
         PresentationEvent audio_event;

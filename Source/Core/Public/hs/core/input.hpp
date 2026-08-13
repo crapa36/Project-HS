@@ -37,9 +37,25 @@ struct HeldInputState
     Float3 move_target_world{};
     Float3 aim_world{};
     Float2 cursor_normalized{};
-    Float2 ui_cursor_pixels{};
     bool move_held{};
     bool basic_attack_held{};
+};
+
+enum class UiActionKind : std::uint8_t
+{
+    StartSession, OpenCollection, OpenSettings, Quit, Back,
+    SelectCollectionSkill, Reroll, SelectCard, AssignStat,
+    OpenCharacterStats, OpenCharacterSkills, OpenCharacterRelics,
+    CloseCharacter, SelectLoadoutSlot, SelectCharacterSkill,
+    Resume, OpenPauseSettings, ReturnToMainMenu,
+};
+
+struct UiAction
+{
+    UiActionKind kind{};
+    std::uint8_t value{};
+
+    bool operator==(const UiAction &) const = default;
 };
 
 struct InputFrame
@@ -47,6 +63,7 @@ struct InputFrame
     Tick target_tick{};
     HeldInputState held{};
     std::span<const ActionEdge> ordered_edges{};
+    std::span<const UiAction> ui_actions{};
 };
 
 } // namespace hs

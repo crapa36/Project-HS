@@ -24,7 +24,8 @@ Tick PresentationCooldownTicks(const GameReadModel&m,const SimulationRules&r,Ski
 bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &rules,
                            const PresentationCatalog &presentation,
                            const SettingsData &settings,
-                           RenderSnapshotStorage &snapshot)
+                           RenderSnapshotStorage &snapshot,
+                           std::uint8_t pending_rebind_slot)
 {
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
@@ -661,7 +662,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             constexpr std::array<std::string_view, 4> slots{"Q", "W", "E", "R"};
             for (std::size_t slot = 0; slot < slots.size(); ++slot)
             {
-                const auto waiting = model.pending_rebind_slot == slot;
+                const auto waiting = pending_rebind_slot == slot;
                 add_ui(UiModel::Kind::Button,
                        {1'000, 550.0f + static_cast<float>(slot) * 70.0f}, {420, 56},
                        waiting ? 0xFF8A5A30u : 0xFF34495Eu,
