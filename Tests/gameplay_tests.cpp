@@ -20,6 +20,8 @@ namespace
 constexpr auto kFixedStep = std::chrono::nanoseconds{16'666'667};
 constexpr hs::Tick kTicksPerMinute = 60 * 60;
 
+hs::Float2 NormalizedCursor(float x, float y);
+
 void Check(bool condition, std::string_view message)
 {
     if (!condition)
@@ -71,10 +73,21 @@ hs::TickResult Tick(hs::GameSimulation &simulation,
     return simulation.TickFixed(input, kFixedStep);
 }
 
+hs::SettingsData test_settings;
+std::optional<hs::UiCommand> last_ui_command;
+
 hs::TickResult TickEdge(hs::GameSimulation &simulation, hs::GameAction action,
                         hs::EdgeKind kind, hs::Sequence &sequence,
                         const hs::HeldInputState &held = {})
 {
+    if (action == hs::GameAction::BasicAttack && kind == hs::EdgeKind::Pressed &&
+        simulation.Probe().phase != hs::SessionPhase::Playing)
+    {
+        const auto interaction = hs::ResolveUiInteraction(
+            simulation.Probe(), test_settings, held.cursor_normalized);
+        if (interaction.gameplay) simulation.ApplyUiAction(*interaction.gameplay);
+        last_ui_command = interaction.runtime;
+    }
     const std::array edges{hs::ActionEdge{++sequence, action, kind}};
     return Tick(simulation, held, edges);
 }
@@ -300,7 +313,7 @@ void TestLevelUpSelectionInputGuard()
     Debug(simulation, hs::DebugCommandKind::GrantExperience, 20);
     hs::HeldInputState held;
     held.basic_attack_held = true;
-    held.ui_cursor_pixels = {500.0f, 400.0f};
+    held.cursor_normalized = NormalizedCursor(500.0f, 400.0f);
     (void)Tick(simulation, held);
     Check(simulation.Probe().phase == hs::SessionPhase::CardSelection,
           "level up opens card selection");
@@ -393,6 +406,10 @@ void TestExperiencePickupDoesNotExpire()
         (void)Tick(simulation, held);
     Check(simulation.Probe().pickup_count == 1,
           "enemy death creates one experience pickup");
+    Check(std::ranges::none_of(simulation.PendingDomainSignals(),
+                              [](const hs::DomainSignal &signal) {
+              return signal.kind == hs::DomainSignalKind::ExperienceSpawned;
+          }), "experience drop does not create a duplicate spawn effect");
     hs::RenderSnapshotStorage pickup_snapshot(32, 2, 2, 8);
     Check(WriteSnapshot(simulation, pickup_snapshot),
           "death tick pickup snapshot");
@@ -455,7 +472,6 @@ hs::Float2 NormalizedCursor(float x, float y)
 void SetCursor(hs::HeldInputState &held, float x, float y)
 {
     held.cursor_normalized = NormalizedCursor(x, y);
-    held.ui_cursor_pixels = {x, y};
 }
 
 void TestUiHitRegionsMatchAnchors()
@@ -512,35 +528,25 @@ void TestUiHitRegionsMatchAnchors()
     SetCursor(held, 700.0f, 348.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.PendingUiCommands().size() == 1 &&
-              simulation.PendingUiCommands()[0].kind == hs::UiCommandKind::SetVsync &&
-              simulation.PendingUiCommands()[0].value == 0,
+    Check(last_ui_command && last_ui_command->kind == hs::UiCommandKind::SetVsync &&
+              last_ui_command->value == 0,
           "settings VSync button emits exact target value");
-    simulation.ClearUiCommands();
 
     SetCursor(held, 1'050.0f, 278.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.PendingUiCommands().size() == 1 &&
-              simulation.PendingUiCommands()[0].kind ==
-                  hs::UiCommandKind::SetMasterVolumePercent &&
-              simulation.PendingUiCommands()[0].value == 90,
+    Check(last_ui_command && last_ui_command->kind ==
+              hs::UiCommandKind::SetMasterVolumePercent &&
+              last_ui_command->value == 90,
           "settings volume control emits clamped percent");
-    simulation.ClearUiCommands();
 
     SetCursor(held, 1'100.0f, 578.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(simulation.PendingUiCommands().size() == 1 &&
-              simulation.PendingUiCommands()[0].kind ==
-                  hs::UiCommandKind::BeginSkillRebind &&
-              simulation.PendingUiCommands()[0].value == 0,
+    Check(last_ui_command && last_ui_command->kind ==
+              hs::UiCommandKind::BeginSkillRebind &&
+              last_ui_command->value == 0,
           "settings key button begins the selected slot rebind");
-    simulation.ClearUiCommands();
-
-    hs::SettingsData rebound;
-    rebound.skill_virtual_keys = {'W', 'Q', 'E', 'R'};
-    simulation.ApplySettings(rebound);
 
     (void)TickEdge(simulation, hs::GameAction::Pause, hs::EdgeKind::Pressed,
                    sequence, held);

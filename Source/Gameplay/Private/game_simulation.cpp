@@ -497,7 +497,6 @@ struct GameSimulation::SimulationWorld
         observer.enemy_hit_casts.reserve(256);
         observer.player_hit_casts.reserve(256);
         domain_signals.reserve(512);
-        ui_commands.reserve(32);
         collision_candidates.reserve(128);
     }
 
@@ -521,7 +520,6 @@ struct GameSimulation::SimulationWorld
     std::vector<AreaHitRecord> area_hits;
     std::vector<CastRuntime> cast_runtime;
     std::vector<DomainSignal> domain_signals;
-    std::vector<UiCommand> ui_commands;
     std::array<std::vector<std::size_t>, kGridCellCount> enemy_grid;
     std::vector<std::size_t> collision_candidates;
     std::array<CardView, 3> cards{};
@@ -558,7 +556,6 @@ struct GameSimulation::SimulationWorld
     std::uint8_t collection_skill_index{};
     std::uint8_t character_skill_index{};
     std::uint8_t character_slot_source{0xFF};
-    std::uint8_t pending_rebind_slot{0xFF};
     std::uint8_t selection_input_guard_frames{};
     bool selection_waiting_for_release{};
 
@@ -747,10 +744,6 @@ struct GameSimulation::SimulationWorld
         domain_signals.push_back(event);
     }
 
-    void EmitUiCommand(UiCommandKind kind, std::uint32_t value)
-    {
-        ui_commands.push_back({kind, value});
-    }
 
     void EmitVfx(DomainSignalKind effect, Float2 position,
                  Float2 direction = {0.0f, 1.0f}, float scale = 1.0f,
@@ -1060,15 +1053,8 @@ struct GameSimulation::SimulationWorld
 
     void ProcessInput()
     {
-        const bool selection_input_locked =
-            selection_input_guard_frames > 0 || selection_waiting_for_release;
         if (selection_input_guard_frames > 0) --selection_input_guard_frames;
         if (!input.held.basic_attack_held) selection_waiting_for_release = false;
-        const auto cursor_pixels = input.held.ui_cursor_pixels;
-        const auto clicked = [&](float x, float y, float width, float height) {
-            return cursor_pixels.x >= x && cursor_pixels.x <= x + width &&
-                   cursor_pixels.y >= y && cursor_pixels.y <= y + height;
-        };
         const auto aim_delta = Float2{input.held.aim_world.x - player.position.x,
                                       input.held.aim_world.z - player.position.y};
         if (LengthSquared(aim_delta) > 0.0001f)
@@ -1114,7 +1100,6 @@ struct GameSimulation::SimulationWorld
                 {
                     if (menu_page == 6)
                     {
-                        pending_rebind_slot = 0xFF;
                         menu_page = 0;
                     }
                     else
@@ -1128,275 +1113,6 @@ struct GameSimulation::SimulationWorld
                     menu_page = 0;
                 }
                 continue;
-            }
-            if (edge.action == GameAction::BasicAttack && edge.kind == EdgeKind::Pressed)
-            {
-                if (phase == SessionPhase::MainMenu ||
-                    (phase == SessionPhase::Paused && menu_page == 6))
-                {
-                    if (menu_page == 1)
-                    {
-                        bool selected_skill = false;
-                        for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
-                        {
-                            if (clicked(210.0f, 150.0f + static_cast<float>(skill) * 70.0f,
-                                        360.0f, 56.0f))
-                            {
-                                collection_skill_index = static_cast<std::uint8_t>(skill);
-                                selected_skill = true;
-                                break;
-                            }
-                        }
-                        if (!selected_skill && clicked(210.0f, 900.0f, 360.0f, 56.0f))
-                            menu_page = 0;
-                    }
-                    else if (menu_page == 2 || menu_page == 6)
-                    {
-                        auto &settings = config.settings;
-                        if (clicked(500, 250, 420, 56))
-                        {
-                            settings.borderless = !settings.borderless;
-                            EmitUiCommand(UiCommandKind::SetBorderless,
-                                          settings.borderless);
-                        }
-                        else if (clicked(500, 320, 420, 56))
-                        {
-                            settings.vsync = !settings.vsync;
-                            EmitUiCommand(UiCommandKind::SetVsync, settings.vsync);
-                        }
-                        else if (clicked(500, 390, 420, 56))
-                        {
-                            constexpr std::array caps{30u, 60u, 120u, 0u};
-                            const auto current = std::ranges::find(caps, settings.frame_cap);
-                            const auto index = current == caps.end()
-                                ? 0u : static_cast<unsigned>(current - caps.begin() + 1) % caps.size();
-                            settings.frame_cap = caps[index];
-                            EmitUiCommand(UiCommandKind::SetFrameCap, settings.frame_cap);
-                        }
-                        else if (clicked(500, 460, 420, 56))
-                        {
-                            settings.render_scale_percent =
-                                settings.render_scale_percent == 100 ? 75 : 100;
-                            EmitUiCommand(UiCommandKind::SetRenderScale,
-                                          settings.render_scale_percent);
-                        }
-                        else if (clicked(500, 530, 420, 56))
-                        {
-                            settings.shadow_resolution =
-                                settings.shadow_resolution == 2048 ? 1024 : 2048;
-                            EmitUiCommand(UiCommandKind::SetShadowResolution,
-                                          settings.shadow_resolution);
-                        }
-                        else if (clicked(500, 600, 420, 56))
-                        {
-                            settings.particle_percentage =
-                                settings.particle_percentage == 100 ? 50 : 100;
-                            EmitUiCommand(UiCommandKind::SetParticlePercentage,
-                                          settings.particle_percentage);
-                        }
-                        else if (clicked(500, 670, 420, 56))
-                        {
-                            settings.bloom = !settings.bloom;
-                            EmitUiCommand(UiCommandKind::SetBloom, settings.bloom);
-                        }
-                        else if (clicked(500, 740, 420, 56))
-                        {
-                            settings.outline = !settings.outline;
-                            EmitUiCommand(UiCommandKind::SetOutline, settings.outline);
-                        }
-                        else
-                        {
-                            const auto adjust_volume = [&](float &volume, UiCommandKind kind,
-                                                           float y) {
-                                if (!clicked(1'000, y, 420, 56)) return false;
-                                const auto delta = cursor_pixels.x < 1'210 ? -0.1f : 0.1f;
-                                volume = std::round(std::clamp(volume + delta, 0.0f, 1.0f) *
-                                                    10.0f) / 10.0f;
-                                EmitUiCommand(kind, static_cast<std::uint32_t>(
-                                    std::lround(volume * 100.0f)));
-                                return true;
-                            };
-                            if (adjust_volume(settings.master_volume,
-                                              UiCommandKind::SetMasterVolumePercent, 250) ||
-                                adjust_volume(settings.bgm_volume,
-                                              UiCommandKind::SetBgmVolumePercent, 320) ||
-                                adjust_volume(settings.sfx_volume,
-                                              UiCommandKind::SetSfxVolumePercent, 390) ||
-                                adjust_volume(settings.ui_volume,
-                                              UiCommandKind::SetUiVolumePercent, 460))
-                            {
-                            }
-                            else
-                            {
-                                for (std::uint32_t slot = 0; slot < 4; ++slot)
-                                {
-                                    if (clicked(1'000, 550.0f + slot * 70.0f, 420, 56))
-                                    {
-                                        pending_rebind_slot = static_cast<std::uint8_t>(slot);
-                                        EmitUiCommand(UiCommandKind::BeginSkillRebind, slot);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (clicked(760, 870, 400, 64))
-                        {
-                            pending_rebind_slot = 0xFF;
-                            menu_page = 0;
-                        }
-                    }
-                    else if (clicked(760.0f, 270.0f, 400.0f, 92.0f))
-                    {
-                        StartSession();
-                    }
-                    else if (clicked(760.0f, 420.0f, 400.0f, 92.0f))
-                    {
-                        menu_page = 1;
-                    }
-                    else if (clicked(760.0f, 570.0f, 400.0f, 92.0f))
-                    {
-                        menu_page = 2;
-                    }
-                    else if (clicked(760.0f, 720.0f, 400.0f, 92.0f))
-                    {
-                        phase = SessionPhase::QuitRequested;
-                    }
-                    continue;
-                }
-                if (phase == SessionPhase::Victory || phase == SessionPhase::Defeat)
-                {
-                    phase = SessionPhase::MainMenu;
-                    continue;
-                }
-                if (phase == SessionPhase::CardSelection ||
-                    phase == SessionPhase::RelicSelection)
-                {
-                    if (selection_input_locked) continue;
-                    if (clicked(760.0f, 790.0f, 400.0f, 72.0f))
-                    {
-                        auto &rerolls = phase == SessionPhase::RelicSelection
-                                            ? player.relic_rerolls
-                                            : player.level_rerolls;
-                        auto &sequence = phase == SessionPhase::RelicSelection
-                                             ? relic_reroll_sequence
-                                             : level_reroll_sequence;
-                        if (rerolls > 0)
-                        {
-                            --rerolls;
-                            ++sequence;
-                            if (phase == SessionPhase::RelicSelection) GenerateRelicCards(true);
-                            else GenerateLevelCards(true);
-                        }
-                    }
-                    else
-                    {
-                        for (std::size_t index = 0; index < 3; ++index)
-                        {
-                            if (clicked(360.0f + static_cast<float>(index) * 420.0f,
-                                        300.0f, 360.0f, 420.0f))
-                            {
-                                (void)SelectCard(index);
-                                break;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if (phase == SessionPhase::StatAllocation)
-                {
-                    if (selection_input_locked) continue;
-                    for (std::size_t index = 0; index < kStatCount; ++index)
-                    {
-                        if (clicked(390.0f + static_cast<float>(index % 3) * 400.0f,
-                                    310.0f + static_cast<float>(index / 3) * 260.0f,
-                                    340.0f, 180.0f))
-                        {
-                            AssignStat(static_cast<StatKind>(index));
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                if (phase == SessionPhase::Paused && menu_page >= 3 &&
-                    menu_page <= 5)
-                {
-                    if (clicked(350, 140, 280, 58))
-                    {
-                        menu_page = 3;
-                        character_slot_source = 0xFF;
-                    }
-                    else if (clicked(650, 140, 280, 58))
-                    {
-                        menu_page = 4;
-                        character_slot_source = 0xFF;
-                    }
-                    else if (clicked(950, 140, 280, 58))
-                    {
-                        menu_page = 5;
-                        character_slot_source = 0xFF;
-                    }
-                    else if (clicked(1'520, 140, 120, 58))
-                    {
-                        phase = SessionPhase::Playing;
-                        menu_page = 0;
-                        character_slot_source = 0xFF;
-                    }
-                    else if (menu_page == 4)
-                    {
-                        bool slot_clicked{};
-                        for (std::size_t slot = 0; slot < player.loadout.size(); ++slot)
-                        {
-                            if (!clicked(780.0f + static_cast<float>(slot) * 195.0f,
-                                         225.0f, 180.0f, 54.0f))
-                                continue;
-                            slot_clicked = true;
-                            if (character_slot_source == 0xFF)
-                            {
-                                if (player.loadout[slot] != SkillKind::Count)
-                                    character_slot_source = static_cast<std::uint8_t>(slot);
-                            }
-                            else if (character_slot_source == slot)
-                            {
-                                character_slot_source = 0xFF;
-                            }
-                            else
-                            {
-                                std::swap(player.loadout[character_slot_source],
-                                          player.loadout[slot]);
-                                character_slot_source = 0xFF;
-                            }
-                            break;
-                        }
-                        if (slot_clicked) continue;
-                        for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
-                        {
-                            if (player.skill_levels[skill] > 0 &&
-                                clicked(350, 240.0f + static_cast<float>(skill) * 78.0f,
-                                        360, 64))
-                            {
-                                character_skill_index = static_cast<std::uint8_t>(skill);
-                                break;
-                            }
-                        }
-                    }
-                    continue;
-                }
-                if (phase == SessionPhase::Paused && menu_page == 0)
-                {
-                    if (clicked(760, 420, 400, 72))
-                    {
-                        phase = SessionPhase::Playing;
-                    }
-                    else if (clicked(760, 520, 400, 72))
-                    {
-                        menu_page = 6;
-                    }
-                    else if (clicked(760, 620, 400, 72))
-                    {
-                        phase = SessionPhase::QuitRequested;
-                    }
-                    continue;
-                }
             }
             if (phase != SessionPhase::Playing)
             {
@@ -5535,6 +5251,7 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
         return {};
     }
     impl_->input = input;
+    for (const auto &action : input.ui_actions) ApplyUiAction(action);
     impl_->ProcessInput();
     if (impl_->phase != SessionPhase::Playing)
     {
@@ -5755,12 +5472,6 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
     return Result::Success();
 }
 
-void GameSimulation::ApplySettings(const SettingsData &settings) noexcept
-{
-    impl_->config.settings = settings;
-    impl_->pending_rebind_slot = 0xFF;
-}
-
 Result GameSimulation::ApplySimulationRules(const SimulationRules &data)
 {
     if (!impl_->initialized || impl_->phase != SessionPhase::MainMenu)
@@ -5768,6 +5479,91 @@ Result GameSimulation::ApplySimulationRules(const SimulationRules &data)
                                "Gameplay data Hot Reload requires the main menu.");
     impl_->data = data;
     return Result::Success();
+}
+
+void GameSimulation::ApplyUiAction(const UiAction &action)
+{
+    switch (action.kind)
+    {
+    case UiActionKind::StartSession:
+        if (impl_->phase == SessionPhase::MainMenu) impl_->StartSession();
+        break;
+    case UiActionKind::OpenCollection: impl_->menu_page = 1; break;
+    case UiActionKind::OpenSettings: impl_->menu_page = 2; break;
+    case UiActionKind::OpenPauseSettings: impl_->menu_page = 6; break;
+    case UiActionKind::ReturnToMainMenu:
+        impl_->phase = SessionPhase::MainMenu;
+        impl_->menu_page = 0;
+        break;
+    case UiActionKind::Quit: impl_->phase = SessionPhase::QuitRequested; break;
+    case UiActionKind::Back:
+        impl_->menu_page = 0;
+        break;
+    case UiActionKind::SelectCollectionSkill:
+        if (action.value < kCombatSkillCount) impl_->collection_skill_index = action.value;
+        break;
+    case UiActionKind::Reroll:
+        if (impl_->selection_input_guard_frames > 0 ||
+            impl_->selection_waiting_for_release) break;
+        if (impl_->phase == SessionPhase::RelicSelection && impl_->player.relic_rerolls > 0)
+        {
+            --impl_->player.relic_rerolls;
+            ++impl_->relic_reroll_sequence;
+            impl_->GenerateRelicCards(true);
+        }
+        else if (impl_->phase == SessionPhase::CardSelection &&
+                 impl_->player.level_rerolls > 0)
+        {
+            --impl_->player.level_rerolls;
+            ++impl_->level_reroll_sequence;
+            impl_->GenerateLevelCards(true);
+        }
+        break;
+    case UiActionKind::SelectCard:
+        if (impl_->selection_input_guard_frames == 0 &&
+            !impl_->selection_waiting_for_release) (void)impl_->SelectCard(action.value);
+        break;
+    case UiActionKind::AssignStat:
+        if (impl_->selection_input_guard_frames == 0 &&
+            !impl_->selection_waiting_for_release && action.value < kStatCount)
+            impl_->AssignStat(static_cast<StatKind>(action.value));
+        break;
+    case UiActionKind::OpenCharacterStats:
+    case UiActionKind::OpenCharacterSkills:
+    case UiActionKind::OpenCharacterRelics:
+        impl_->menu_page = static_cast<std::uint8_t>(
+            3 + static_cast<unsigned>(action.kind) -
+                static_cast<unsigned>(UiActionKind::OpenCharacterStats));
+        impl_->character_slot_source = 0xFF;
+        break;
+    case UiActionKind::CloseCharacter:
+    case UiActionKind::Resume:
+        impl_->phase = SessionPhase::Playing;
+        impl_->menu_page = 0;
+        impl_->character_slot_source = 0xFF;
+        break;
+    case UiActionKind::SelectLoadoutSlot:
+        if (action.value >= impl_->player.loadout.size()) break;
+        if (impl_->character_slot_source == 0xFF)
+        {
+            if (impl_->player.loadout[action.value] != SkillKind::Count)
+                impl_->character_slot_source = action.value;
+        }
+        else if (impl_->character_slot_source == action.value)
+            impl_->character_slot_source = 0xFF;
+        else
+        {
+            std::swap(impl_->player.loadout[impl_->character_slot_source],
+                      impl_->player.loadout[action.value]);
+            impl_->character_slot_source = 0xFF;
+        }
+        break;
+    case UiActionKind::SelectCharacterSkill:
+        if (action.value < kCombatSkillCount && impl_->player.skill_levels[action.value] > 0)
+            impl_->character_skill_index = action.value;
+        break;
+    }
+    impl_->checksum = impl_->CalculateChecksum();
 }
 
 void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
@@ -5799,7 +5595,6 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.collection_skill_index = impl_->collection_skill_index;
     model.character_skill_index = impl_->character_skill_index;
     model.character_slot_source = impl_->character_slot_source;
-    model.pending_rebind_slot = impl_->pending_rebind_slot;
 
     for (const auto &enemy : impl_->enemies)
     {
@@ -5878,16 +5673,6 @@ std::span<const DomainSignal> GameSimulation::PendingDomainSignals() const noexc
 void GameSimulation::ClearDomainSignals() noexcept
 {
     impl_->domain_signals.clear();
-}
-
-std::span<const UiCommand> GameSimulation::PendingUiCommands() const noexcept
-{
-    return impl_->ui_commands;
-}
-
-void GameSimulation::ClearUiCommands() noexcept
-{
-    impl_->ui_commands.clear();
 }
 
 Result GameSimulation::Shutdown()
