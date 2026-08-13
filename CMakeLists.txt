@@ -172,6 +172,7 @@ hs_configure_target(hs_gameplay)
 add_library(
     hs_renderer_d3d12 STATIC
     Source/RendererD3D12/Private/render_graph.cpp
+    Source/RendererD3D12/Private/renderer_diagnostics.cpp
     Source/RendererD3D12/Private/renderer.cpp
 )
 target_sources(

@@ -2,6 +2,9 @@
 
 #include <hs/renderer/render_graph.hpp>
 
+#include "d3d12_resources.hpp"
+#include "renderer_diagnostics.hpp"
+
 #include <D3D12MemAlloc.h>
 
 #include <Windows.h>
@@ -65,7 +68,6 @@ constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kTextureDescriptorCount =
     kPostTextureDescriptorCount + kCharacterDescriptorCount;
 constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
-constexpr std::uint32_t kFrameUploadSize = 576 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kRenderPassCount * 2);
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -158,67 +160,12 @@ struct GpuParticleSpawnCommand
 static_assert(sizeof(GpuParticleSpawnCommand) == 160);
 
 
-struct AllocationResource
-{
-    ComPtr<ID3D12Resource> resource;
-    D3D12MA::Allocation *allocation{};
-
-    AllocationResource() = default;
-    ~AllocationResource() { Reset(); }
-    AllocationResource(const AllocationResource &) = delete;
-    AllocationResource &operator=(const AllocationResource &) = delete;
-    AllocationResource(AllocationResource &&other) noexcept
-        : resource(std::move(other.resource)), allocation(std::exchange(other.allocation, nullptr))
-    {
-    }
-    AllocationResource &operator=(AllocationResource &&other) noexcept
-    {
-        if (this != &other)
-        {
-            Reset();
-            resource = std::move(other.resource);
-            allocation = std::exchange(other.allocation, nullptr);
-        }
-        return *this;
-    }
-
-    void Reset() noexcept
-    {
-        resource.Reset();
-        if (allocation)
-        {
-            allocation->Release();
-            allocation = nullptr;
-        }
-    }
-};
-
-struct FrameContext
-{
-    ComPtr<ID3D12CommandAllocator> allocator;
-    AllocationResource upload;
-    AllocationResource ui_upload;
-    std::byte *mapped{};
-    std::size_t upload_size{kFrameUploadSize};
-    std::byte *ui_mapped{};
-    std::uint64_t fence_value{};
-    bool timestamps_recorded{};
-    bool ui_initialized{};
-};
-
 struct UiCpuSurface
 {
     ComPtr<IWICBitmap> bitmap;
     ComPtr<ID2D1RenderTarget> target;
     ComPtr<ID2D1SolidColorBrush> brush;
 };
-
-[[nodiscard]] Result HResultFailure(std::string_view operation, HRESULT result)
-{
-    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                           std::format("{} failed: 0x{:08X}", operation,
-                                       static_cast<std::uint32_t>(result)));
-}
 
 [[nodiscard]] D3D12_RESOURCE_DESC BufferDescription(std::uint64_t size,
                                                     D3D12_RESOURCE_FLAGS flags =
