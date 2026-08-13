@@ -9,7 +9,7 @@ $legacy = Join-Path $Artifacts "legacy"
 $enhanced = Join-Path $Artifacts "enhanced"
 $options = Join-Path $Artifacts "options"
 
-function Test-Stage1Artifacts([string]$Directory, [int]$ParticleCapacity) {
+function Test-RenderArtifacts([string]$Directory, [int]$ParticleCapacity) {
     $required = @(
         "result.json",
         "spec.json",
@@ -93,8 +93,8 @@ finally {
     $legacyPng.Dispose()
     $enhancedPng.Dispose()
 }
-Test-Stage1Artifacts $legacy 10000
-Test-Stage1Artifacts $enhanced 10000
+Test-RenderArtifacts $legacy 10000
+Test-RenderArtifacts $enhanced 10000
 
 & $Executable --smoke --ticks=180 --barriers=enhanced --resize-test `
     --render-scale=75 --shadow=2048 --particles=50 --no-bloom --no-outline `
@@ -102,4 +102,4 @@ Test-Stage1Artifacts $enhanced 10000
 if ($LASTEXITCODE -ne 0) {
     throw "Stage 1 options smoke failed."
 }
-Test-Stage1Artifacts $options 5000
+Test-RenderArtifacts $options 5000

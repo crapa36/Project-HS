@@ -67,7 +67,7 @@ constexpr std::uint32_t kTextureDescriptorCount =
 constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
 constexpr std::uint32_t kFrameUploadSize = 576 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
-    static_cast<std::uint32_t>(kStage1RenderPassCount * 2);
+    static_cast<std::uint32_t>(kRenderPassCount * 2);
 constexpr DXGI_FORMAT kBackBufferFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr DXGI_FORMAT kDepthFormat = DXGI_FORMAT_D32_FLOAT;
 
@@ -164,10 +164,7 @@ struct AllocationResource
     D3D12MA::Allocation *allocation{};
 
     AllocationResource() = default;
-    ~AllocationResource()
-    {
-        Reset();
-    }
+    ~AllocationResource() { Reset(); }
     AllocationResource(const AllocationResource &) = delete;
     AllocationResource &operator=(const AllocationResource &) = delete;
     AllocationResource(AllocationResource &&other) noexcept
@@ -1615,7 +1612,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
 
     std::vector<SkinnedVertex> cooked_vertices;
     if (auto loaded = LoadCharacterAsset(
-            ExecutableDirectory() / "Cooked" / "stage1_archer.meshbin",
+            ExecutableDirectory() / "Cooked" / "archer.meshbin",
             cooked_vertices, archer_clips, archer_parents,
             archer_inverse_bind_matrices, archer_upper_body_weights,
             archer_transforms, archer_bone_count,

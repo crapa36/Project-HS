@@ -6,7 +6,7 @@
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/game_types.hpp>
-#include <hs/gameplay/game_data.hpp>
+#include <hs/game_rules/simulation_rules.hpp>
 #include <hs/renderer/renderer.hpp>
 
 #include <atomic>
@@ -25,6 +25,52 @@ struct GraphicsCommand
     GraphicsCommandKind kind{};
     std::uint32_t width{};
     std::uint32_t height{};
+};
+
+struct RenderPorts
+{
+    std::atomic<bool> &stop_requested;
+    std::atomic<bool> &simulation_done;
+    std::atomic<bool> &render_ready;
+    BoundedSpscQueue<ActionEdge, 256> &action_edges;
+    RenderSnapshotExchange &snapshots;
+    BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
+    BoundedSpscQueue<PresentationEvent, 1024> &audio_events;
+    BoundedSpscQueue<GraphicsCommand, 64> &graphics_commands;
+    BoundedSpscQueue<SettingsData, 8> &renderer_settings;
+    BoundedSpscQueue<NativeWindowMessage, 256> &window_messages;
+    BoundedSpscQueue<DebugCommand, 64> &debug_commands;
+    std::atomic<std::uint64_t> &rendered_frames;
+    std::atomic<std::uint32_t> &rendered_particles;
+    std::atomic<std::uint64_t> &dropped_input_edges;
+    std::atomic<std::uint64_t> &dropped_presentation_events;
+    std::atomic<bool> &devtools_capture_mouse;
+    std::atomic<bool> &devtools_capture_keyboard;
+};
+
+struct SimulationPorts
+{
+    std::atomic<bool> &stop_requested;
+    std::atomic<bool> &simulation_done;
+    std::atomic<HeldInputState> &held_input;
+    std::atomic<std::uint64_t> &focus_epoch;
+    std::atomic<float> &camera_target_x;
+    std::atomic<float> &camera_target_z;
+    std::atomic<std::uint32_t> &camera_zoom_percent;
+    BoundedSpscQueue<ActionEdge, 256> &action_edges;
+    RenderSnapshotExchange &snapshots;
+    BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
+    BoundedSpscQueue<SettingsData, 8> &simulation_settings;
+    BoundedSpscQueue<SimulationRules, 2> &gameplay_data_updates;
+    BoundedSpscQueue<UiCommand, 64> &ui_commands;
+    BoundedSpscQueue<DebugCommand, 64> &debug_commands;
+    std::atomic<Tick> &completed_tick;
+    std::atomic<GameplayChecksum> &checksum;
+    std::atomic<std::uint8_t> &session_phase;
+    std::atomic<std::uint32_t> &best_level;
+    std::atomic<std::uint64_t> &completed_run_kills;
+    std::atomic<std::uint64_t> &completed_run_wins;
+    std::atomic<std::uint64_t> &dropped_presentation_events;
 };
 
 struct RuntimeChannels
@@ -48,7 +94,7 @@ struct RuntimeChannels
     BoundedSpscQueue<GraphicsCommand, 64> graphics_commands;
     BoundedSpscQueue<SettingsData, 8> renderer_settings;
     BoundedSpscQueue<SettingsData, 8> simulation_settings;
-    BoundedSpscQueue<GameData, 2> gameplay_data_updates;
+    BoundedSpscQueue<SimulationRules, 2> gameplay_data_updates;
     BoundedSpscQueue<UiCommand, 64> ui_commands;
     BoundedSpscQueue<NativeWindowMessage, 256> window_messages;
     BoundedSpscQueue<DebugCommand, 64> debug_commands;
@@ -64,6 +110,25 @@ struct RuntimeChannels
     std::atomic<std::uint64_t> dropped_presentation_events{};
     std::atomic<bool> devtools_capture_mouse{};
     std::atomic<bool> devtools_capture_keyboard{};
+
+    [[nodiscard]] RenderPorts ForRender() noexcept
+    {
+        return {stop_requested, simulation_done, render_ready, action_edges, snapshots,
+                presentation_events, audio_events, graphics_commands, renderer_settings,
+                window_messages, debug_commands, rendered_frames, rendered_particles,
+                dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
+                devtools_capture_keyboard};
+    }
+
+    [[nodiscard]] SimulationPorts ForSimulation() noexcept
+    {
+        return {stop_requested, simulation_done, held_input, focus_epoch,
+                camera_target_x, camera_target_z, camera_zoom_percent, action_edges,
+                snapshots, presentation_events, simulation_settings,
+                gameplay_data_updates, ui_commands, debug_commands, completed_tick,
+                checksum, session_phase, best_level, completed_run_kills,
+                completed_run_wins, dropped_presentation_events};
+    }
 };
 
 } // namespace hs

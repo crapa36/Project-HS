@@ -144,8 +144,8 @@ struct PlaytestRecorder::Impl
     std::ofstream timeline;
     std::ofstream events;
     PlaytestRecorderConfig config;
-    SessionProbe last_probe;
-    std::optional<SessionProbe> terminal_probe;
+    SimulationObservation last_probe;
+    std::optional<SimulationObservation> terminal_probe;
     Float2 previous_position{};
     std::array<std::uint64_t, 4> skill_press_counts{};
     std::uint64_t frame_count{};
@@ -194,8 +194,13 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
                                "Cannot create playtest trace files.");
 
     std::ofstream(impl_->directory / "metadata.json", std::ios::trunc)
-        << Json{{"schema_version", 1}, {"seed", config.seed},
-                {"content_hash", config.content_hash}, {"tick_rate_hz", 60}}
+        << Json{{"format_version", 2},
+                {"simulation_version", kSimulationVersion},
+                {"gameplay_hash_version", kGameplayHashVersion},
+                {"simulation_rules_hash", config.content_hash},
+                {"tick_rate", 60},
+                {"determinism_profile", kDeterminismProfile},
+                {"seed", config.seed}}
                .dump(2)
         << '\n';
     impl_->timeline
@@ -211,7 +216,7 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
 }
 
 Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checksum,
-                                const SessionProbe &probe,
+                                const SimulationObservation &probe,
                                 std::span<const PresentationEvent> presentation_events)
 {
     if (!impl_->active || impl_->finished) return Result::Success();
@@ -621,11 +626,25 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
         std::ifstream metadata_stream(directory / "metadata.json");
         Json metadata;
         metadata_stream >> metadata;
-        if (!metadata_stream || metadata.value("schema_version", 0) != 1)
+        if (!metadata_stream || metadata.value("format_version", 0) != 2)
             return Invalid("Playtest metadata is missing or unsupported.");
         PlaytestReplay parsed;
-        parsed.seed = metadata.at("seed").get<std::uint64_t>();
-        parsed.content_hash = metadata.at("content_hash").get<std::uint64_t>();
+        parsed.header.format_version = metadata.at("format_version").get<std::uint32_t>();
+        parsed.header.simulation_version =
+            metadata.at("simulation_version").get<std::uint32_t>();
+        parsed.header.gameplay_hash_version =
+            metadata.at("gameplay_hash_version").get<std::uint32_t>();
+        parsed.header.simulation_rules_hash =
+            metadata.at("simulation_rules_hash").get<std::uint64_t>();
+        parsed.header.tick_rate = metadata.at("tick_rate").get<std::uint32_t>();
+        parsed.header.determinism_profile =
+            metadata.at("determinism_profile").get<std::uint32_t>();
+        parsed.header.seed = metadata.at("seed").get<std::uint64_t>();
+        if (parsed.header.simulation_version != kSimulationVersion ||
+            parsed.header.gameplay_hash_version != kGameplayHashVersion ||
+            parsed.header.tick_rate != 60 ||
+            parsed.header.determinism_profile != kDeterminismProfile)
+            return Invalid("Playtest replay is incompatible with this simulation build.");
 
         std::ifstream input(directory / "inputs.ndjson");
         std::string line;

@@ -20,6 +20,19 @@ enum class SkillTag : std::uint16_t
 
 using SkillTagMask = std::uint16_t;
 
+enum class AbilityHandlerId : std::uint8_t
+{
+    BasicProjectileCadence,
+    PiercingProjectile,
+    UniformFanProjectiles,
+    HoldReleaseLinearCharge,
+    ProjectileToAreaExplosion,
+    NearestUnhitTargetRicochet,
+    TargetedPeriodicArea,
+    ForwardRollLeaveTrap,
+    ForcedRetreatAndProjectile,
+};
+
 [[nodiscard]] SkillTagMask SkillTags(SkillKind skill) noexcept;
 [[nodiscard]] SkillTagMask UpgradeTags(SkillKind skill,
                                        std::uint8_t zero_based_upgrade) noexcept;
@@ -27,15 +40,16 @@ using SkillTagMask = std::uint16_t;
 
 struct SkillDefinition
 {
-    float cooldown_seconds{};
+    Tick cooldown_ticks{};
     float damage_coefficient{};
     float projectile_speed{};
     float range{};
     float collision_radius{};
     float area_radius{};
-    float duration_seconds{};
+    Tick duration_ticks{};
     std::uint8_t projectile_count{1};
     std::uint8_t pierce_count{};
+    AbilityHandlerId handler{AbilityHandlerId::BasicProjectileCadence};
 };
 
 struct EnemyDefinition
@@ -44,8 +58,8 @@ struct EnemyDefinition
     float move_speed{};
     std::int32_t damage{};
     float attack_range{};
-    float warning_seconds{};
-    float attack_cooldown_seconds{};
+    Tick warning_ticks{};
+    Tick attack_cooldown_ticks{};
     float projectile_speed{};
     float projectile_range{};
 };
@@ -53,7 +67,7 @@ struct EnemyDefinition
 struct BossDefinition
 {
     std::int32_t health{};
-    float recovery_seconds{};
+    Tick recovery_ticks{};
 };
 
 struct SpawnStage
@@ -75,7 +89,7 @@ struct RelicDefinitions
     struct BleedKillHeal
     {
         float maximum_hp_heal_fraction{};
-        float internal_cooldown_seconds{};
+        Tick internal_cooldown_ticks{};
     } bleed_kill_heal;
     struct BurnPropagation
     {
@@ -86,13 +100,13 @@ struct RelicDefinitions
     struct KillCooldownSurge
     {
         std::uint32_t kills_per_trigger{};
-        float cooldown_reduction_seconds{};
+        Tick cooldown_reduction_ticks{};
     } kill_cooldown_surge;
     struct BleedBurnExplosion
     {
         float radius{};
         float damage_multiplier{};
-        float per_target_cooldown_seconds{};
+        Tick per_target_cooldown_ticks{};
     } bleed_burn_explosion;
     struct RadialBasicAttack
     {
@@ -109,32 +123,32 @@ struct RelicDefinitions
     struct MovementEcho
     {
         float required_distance{};
-        float position_history_age_seconds{};
+        Tick position_history_age_ticks{};
         float damage_multiplier{};
     } movement_echo;
     struct AlternatingSkills
     {
-        float window_seconds{};
+        Tick window_ticks{};
         float cooldown_refund_fraction{};
     } alternating_skills;
     struct DifferentSkillTracker
     {
-        float window_seconds{};
+        Tick window_ticks{};
         float damage_multiplier{};
-        float per_target_cooldown_seconds{};
+        Tick per_target_cooldown_ticks{};
     } different_skill_tracker;
     struct DamageKnockback
     {
         float radius{};
         float push_distance{};
         float slow_fraction{};
-        float slow_duration_seconds{};
-        float cooldown_seconds{};
+        Tick slow_duration_ticks{};
+        Tick cooldown_ticks{};
     } damage_knockback;
     struct OnceRevive
     {
         float health_fraction{};
-        float invulnerability_seconds{};
+        Tick invulnerability_ticks{};
         std::uint32_t maximum_triggers_per_session{};
     } once_revive;
     struct CombatHitChain
@@ -149,9 +163,9 @@ struct RelicDefinitions
 inline constexpr std::size_t kRelicNameBytes = 64;
 inline constexpr std::size_t kRelicRuleBytes = 512;
 
-struct GameData
+struct SimulationRules
 {
-    std::uint32_t version{2};
+    std::uint32_t version{4};
     float arena_half_extent{60.0f};
     std::int32_t player_health{100};
     float player_attack{10.0f};
@@ -170,15 +184,24 @@ struct GameData
     std::array<SpawnStage, 7> spawn_stages{};
     std::array<WaveDefinition, 5> waves{};
     RelicDefinitions relics{};
-    std::array<std::array<char, kRelicNameBytes>, kRelicCount> relic_names{};
-    std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
-
-    [[nodiscard]] static GameData Defaults() noexcept;
+    [[nodiscard]] static SimulationRules Defaults() noexcept;
 };
 
-[[nodiscard]] std::uint64_t GameDataSchemaHash() noexcept;
-[[nodiscard]] Result LoadCookedGameData(const std::filesystem::path &path,
-                                        GameData &data,
-                                        std::uint64_t *content_hash = nullptr);
+struct PresentationCatalog
+{
+    std::array<std::array<char, kRelicNameBytes>, kRelicCount> relic_names{};
+    std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
+};
+
+struct CookedContentBundle
+{
+    SimulationRules simulation_rules{};
+    PresentationCatalog presentation{};
+};
+
+[[nodiscard]] std::uint64_t SimulationRulesSchemaHash() noexcept;
+[[nodiscard]] Result LoadCookedContent(const std::filesystem::path &path,
+                                       CookedContentBundle &content,
+                                       std::uint64_t *content_hash = nullptr);
 
 } // namespace hs

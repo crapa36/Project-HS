@@ -1,4 +1,4 @@
-#include <hs/gameplay/game_data.hpp>
+#include <hs/game_rules/simulation_rules.hpp>
 
 #include <hs/core/cooked_format.hpp>
 
@@ -64,29 +64,29 @@ SkillTagMask RelicPrerequisiteTags(RelicKind relic) noexcept
     return index < kRelicPrerequisites.size() ? kRelicPrerequisites[index] : 0;
 }
 
-GameData GameData::Defaults() noexcept
+SimulationRules SimulationRules::Defaults() noexcept
 {
-    GameData data;
+    SimulationRules data;
     data.skills = {
-        SkillDefinition{0.0f, 1.0f, 32.0f, 18.0f, 0.18f, 0.0f, 0.0f, 1, 0},
-        SkillDefinition{4.0f, 1.8f, 30.0f, 24.0f, 0.30f, 0.0f, 0.0f, 1, 255},
-        SkillDefinition{5.5f, 1.7f, 25.0f, 16.0f, 0.18f, 0.0f, 0.0f, 9, 1},
-        SkillDefinition{2.0f, 11.5f, 35.0f, 16.8f, 0.55f, 0.0f, 1.0f, 1, 10},
-        SkillDefinition{6.5f, 2.8f, 22.0f, 18.0f, 0.25f, 3.0f, 0.0f, 1, 0},
-        SkillDefinition{6.0f, 0.8f, 28.0f, 18.0f, 0.22f, 6.0f, 0.0f, 1, 5},
-        SkillDefinition{9.0f, 0.7f, 0.0f, 20.0f, 0.0f, 4.0f, 3.0f, 1, 0},
-        SkillDefinition{8.0f, 1.2f, 0.0f, 12.0f, 0.0f, 3.0f, 12.0f, 1, 0},
-        SkillDefinition{7.0f, 3.5f, 32.0f, 16.0f, 0.22f, 0.0f, 0.2f, 1, 3},
+        SkillDefinition{0, 1.0f, 32.0f, 18.0f, 0.18f, 0.0f, 0, 1, 0},
+        SkillDefinition{240, 1.8f, 30.0f, 24.0f, 0.30f, 0.0f, 0, 1, 255},
+        SkillDefinition{330, 1.7f, 25.0f, 16.0f, 0.18f, 0.0f, 0, 9, 1},
+        SkillDefinition{120, 11.5f, 35.0f, 16.8f, 0.55f, 0.0f, 60, 1, 10},
+        SkillDefinition{390, 2.8f, 22.0f, 18.0f, 0.25f, 3.0f, 0, 1, 0},
+        SkillDefinition{360, 0.8f, 28.0f, 18.0f, 0.22f, 6.0f, 0, 1, 5},
+        SkillDefinition{540, 0.7f, 0.0f, 20.0f, 0.0f, 4.0f, 180, 1, 0},
+        SkillDefinition{480, 1.2f, 0.0f, 12.0f, 0.0f, 3.0f, 720, 1, 0},
+        SkillDefinition{420, 3.5f, 32.0f, 16.0f, 0.22f, 0.0f, 12, 1, 3},
     };
     data.enemies = {
-        EnemyDefinition{15, 1.445f, 10, 1.0f, 0.35f, 1.2f, 0.0f, 0.0f},
-        EnemyDefinition{12, 1.19f, 8, 12.0f, 0.5f, 2.444444f, 6.875f, 18.0f},
-        EnemyDefinition{13, 3.825f, 25, 2.2f, 0.8f, 0.0f, 0.0f, 3.0f},
+        EnemyDefinition{15, 1.445f, 10, 1.0f, 21, 72, 0.0f, 0.0f},
+        EnemyDefinition{12, 1.19f, 8, 12.0f, 30, 147, 6.875f, 18.0f},
+        EnemyDefinition{13, 3.825f, 25, 2.2f, 48, 0, 0.0f, 3.0f},
     };
     data.bosses = {
-        BossDefinition{600, 1.8f},
-        BossDefinition{1'375, 1.5f},
-        BossDefinition{4'500, 1.2f},
+        BossDefinition{600, 108},
+        BossDefinition{1'375, 90},
+        BossDefinition{4'500, 72},
     };
     data.spawn_stages = {
         SpawnStage{0, 0.9f, {100, 0, 0}}, SpawnStage{2, 1.2f, {80, 20, 0}},
@@ -100,27 +100,28 @@ GameData GameData::Defaults() noexcept
     return data;
 }
 
-std::uint64_t GameDataSchemaHash() noexcept
+std::uint64_t SimulationRulesSchemaHash() noexcept
 {
-    return Fnv1a64("project_hs_game_data_v8");
+    return Fnv1a64("project_hs_content_bundle_v10");
 }
 
-Result LoadCookedGameData(const std::filesystem::path &path, GameData &data,
-                          std::uint64_t *content_hash)
+Result LoadCookedContent(const std::filesystem::path &path,
+                         CookedContentBundle &content,
+                         std::uint64_t *content_hash)
 {
     CookedHeader header;
     std::vector<std::byte> payload;
-    if (auto result = ReadCookedPayload(path, GameDataSchemaHash(), header, payload); !result)
+    if (auto result = ReadCookedPayload(path, SimulationRulesSchemaHash(), header, payload); !result)
     {
         return result;
     }
-    if (payload.size() != sizeof(GameData))
+    if (payload.size() != sizeof(CookedContentBundle))
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Cooked game data has an unexpected table size.");
     }
-    std::memcpy(&data, payload.data(), sizeof(data));
-    if (data.version != 2)
+    std::memcpy(&content, payload.data(), sizeof(content));
+    if (content.simulation_rules.version != 4)
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Cooked game data version is unsupported.");

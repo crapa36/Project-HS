@@ -1,12 +1,12 @@
 #pragma once
 
 #include <hs/core/input.hpp>
-#include <hs/core/presentation_event.hpp>
-#include <hs/core/render_snapshot.hpp>
 #include <hs/core/result.hpp>
 #include <hs/core/settings.hpp>
-#include <hs/gameplay/game_data.hpp>
+#include <hs/game_rules/simulation_rules.hpp>
 #include <hs/game_domain/game_types.hpp>
+#include <hs/game_domain/domain_signal.hpp>
+#include <hs/game_domain/game_read_model.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -16,14 +16,21 @@
 namespace hs
 {
 
+struct SimulationScenarioPolicy
+{
+    bool player_stationary{};
+    bool player_invulnerable{};
+    bool progression_enabled{true};
+    bool auto_collect_progression{};
+};
+
 struct SimulationConfig
 {
     std::uint64_t seed{1};
     bool automatic_choices{};
     bool start_in_main_menu{};
     SettingsData settings{};
-    bool stationary_combat_simulation{};
-    bool stationary_progression_simulation{};
+    SimulationScenarioPolicy scenario{};
 };
 
 struct TickResult
@@ -43,17 +50,19 @@ class GameSimulation
     GameSimulation &operator=(const GameSimulation &) = delete;
 
     [[nodiscard]] Result Initialize(const SimulationConfig &config);
-    [[nodiscard]] Result Initialize(const SimulationConfig &config, const GameData &data);
+    [[nodiscard]] Result Initialize(const SimulationConfig &config,
+                                    const SimulationRules &rules);
     [[nodiscard]] TickResult TickFixed(const InputFrame &input,
                                        std::chrono::nanoseconds fixed_delta);
     [[nodiscard]] GameplayChecksum ComputeChecksum() const;
-    [[nodiscard]] SessionProbe Probe() const noexcept;
+    [[nodiscard]] const SimulationRules &Rules() const noexcept;
+    [[nodiscard]] SimulationObservation Probe() const noexcept;
+    void WriteReadModel(GameReadModelStorage &model) const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);
     void ApplySettings(const SettingsData &settings) noexcept;
-    [[nodiscard]] Result ApplyGameData(const GameData &data);
-    [[nodiscard]] bool WriteRenderSnapshot(RenderSnapshotStorage &snapshot) const;
-    [[nodiscard]] std::span<const PresentationEvent> PendingPresentationEvents() const noexcept;
-    void ClearPresentationEvents() noexcept;
+    [[nodiscard]] Result ApplySimulationRules(const SimulationRules &rules);
+    [[nodiscard]] std::span<const DomainSignal> PendingDomainSignals() const noexcept;
+    void ClearDomainSignals() noexcept;
     [[nodiscard]] std::span<const UiCommand> PendingUiCommands() const noexcept;
     void ClearUiCommands() noexcept;
     [[nodiscard]] Result Shutdown();

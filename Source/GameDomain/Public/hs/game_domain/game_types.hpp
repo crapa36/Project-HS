@@ -16,6 +16,9 @@ inline constexpr std::size_t kRelicCount = 12;
 inline constexpr std::size_t kStatCount = 6;
 inline constexpr std::size_t kEnemyArchetypeCount = 6;
 inline constexpr std::size_t kPickupKindCount = 4;
+inline constexpr std::uint32_t kSimulationVersion = 2;
+inline constexpr std::uint32_t kGameplayHashVersion = 2;
+inline constexpr std::uint32_t kDeterminismProfile = 1;
 enum class UpgradeEffectMetric : std::uint8_t
 {
     ProjectilesCreated,
@@ -229,7 +232,6 @@ struct SessionProbe
     std::uint32_t kills{};
     std::uint64_t damage_dealt{};
     std::array<std::uint64_t, kCombatSkillCount> damage_by_skill{};
-    BalanceTelemetry balance{};
     std::uint64_t damage_taken{};
     std::uint64_t healing{};
     std::uint8_t level_rerolls_remaining{3};
@@ -248,6 +250,11 @@ struct SessionProbe
     bool final_boss_spawned{};
     bool final_boss_phase_two{};
     std::uint8_t menu_page{};
+};
+
+struct SimulationObservation : SessionProbe
+{
+    BalanceTelemetry balance{};
 };
 
 enum class DebugCommandKind : std::uint8_t

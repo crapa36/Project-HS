@@ -1,5 +1,6 @@
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/presentation/projector.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -35,6 +36,16 @@ using Json = nlohmann::json;
 constexpr std::array<std::string_view, hs::kCombatSkillCount> kSkillIds{
     "basic_attack", "piercing_shot", "multishot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
+
+bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &snapshot)
+{
+    static const hs::PresentationCatalog presentation;
+    static const hs::SettingsData settings;
+    hs::GameReadModelStorage model;
+    simulation.WriteReadModel(model);
+    return hs::ProjectRenderSnapshot(model.View(), simulation.Rules(), presentation,
+                                     settings, snapshot);
+}
 constexpr std::array<std::string_view, hs::kRelicCount> kRelicIds{
     "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge",
     "bleed_burn_explosion", "sixth_basic_radial", "basic_kill_tracking_arrow",
@@ -324,11 +335,12 @@ Json BuildDefinition(const Build &build)
 }
 
 Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
-              const hs::GameData &data)
+              const hs::SimulationRules &data)
 {
     hs::GameSimulation simulation;
     hs::SimulationConfig config{seed};
-    config.stationary_combat_simulation = true;
+    config.scenario = {.player_stationary = true, .player_invulnerable = true,
+                       .progression_enabled = false};
     if (auto initialized = simulation.Initialize(config, data); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
@@ -361,7 +373,7 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
         const auto before = simulation.Probe();
         if (before.phase == hs::SessionPhase::Victory) break;
         snapshot.Clear();
-        if (!simulation.WriteRenderSnapshot(snapshot))
+        if (!WriteSnapshot(simulation, snapshot))
             throw std::runtime_error("Combat target snapshot capacity was exceeded.");
 
         const auto input = MakeCombatInput(before, snapshot.View(), target_tick,
@@ -371,7 +383,7 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
         tick_microseconds.push_back(static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count()));
-        simulation.ClearPresentationEvents();
+        simulation.ClearDomainSignals();
         const auto probe = simulation.Probe();
         maximum_enemies = std::max(maximum_enemies,
                                    probe.normal_enemy_count + probe.boss_count);
@@ -667,31 +679,32 @@ Json CharacteristicMetrics(const hs::BalanceTelemetry &balance,
 }
 
 Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
-                    hs::Tick maximum_ticks, const hs::GameData &data,
+                    hs::Tick maximum_ticks, const hs::SimulationRules &data,
                     Build &final_build)
 {
     hs::GameSimulation simulation;
     hs::SimulationConfig config{seed};
-    config.stationary_combat_simulation = true;
-    config.stationary_progression_simulation = true;
+    config.scenario = {.player_stationary = true, .player_invulnerable = true,
+                       .progression_enabled = true,
+                       .auto_collect_progression = true};
     if (auto initialized = simulation.Initialize(config, data); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
     hs::RenderSnapshotStorage snapshot(20'000, 2, 2, 128);
     CombatControlState control;
     std::vector<Acquisition> acquisitions;
-    std::vector<hs::SessionProbe> checkpoints{simulation.Probe()};
+    std::vector<hs::SimulationObservation> checkpoints{simulation.Probe()};
     for (hs::Tick target_tick = 1; target_tick <= maximum_ticks; ++target_tick)
     {
         ResolveProgressionChoices(simulation, profile, seed, acquisitions);
         const auto before = simulation.Probe();
         if (before.phase == hs::SessionPhase::Victory) break;
         snapshot.Clear();
-        if (!simulation.WriteRenderSnapshot(snapshot))
+        if (!WriteSnapshot(simulation, snapshot))
             throw std::runtime_error("Progression target snapshot capacity was exceeded.");
         const auto input = MakeCombatInput(before, snapshot.View(), target_tick, control);
         (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-        simulation.ClearPresentationEvents();
+        simulation.ClearDomainSignals();
         const auto after = simulation.Probe();
         constexpr std::array phase_boundaries{hs::Tick{300 * 60},
                                                hs::Tick{600 * 60},
@@ -1057,11 +1070,12 @@ int main(int argc, char **argv)
                 "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE) --output=DIR");
 
         const auto executable = std::filesystem::absolute(argv[0]);
-        hs::GameData data;
-        if (auto loaded = hs::LoadCookedGameData(
-                executable.parent_path() / "Cooked" / "game_data.hsbin", data);
+        hs::CookedContentBundle content;
+        if (auto loaded = hs::LoadCookedContent(
+                executable.parent_path() / "Cooked" / "game_data.hsbin", content);
             !loaded)
             throw std::runtime_error(std::string(loaded.Message()));
+        const auto &data = content.simulation_rules;
         std::filesystem::create_directories(output_directory);
 
         if (!progression_suite_path.empty())

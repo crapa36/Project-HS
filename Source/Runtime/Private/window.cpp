@@ -12,7 +12,7 @@ namespace hs
 namespace
 {
 
-constexpr wchar_t kWindowClass[] = L"ProjectHS.Stage1";
+constexpr wchar_t kWindowClass[] = L"ProjectHS.Window";
 
 } // namespace
 

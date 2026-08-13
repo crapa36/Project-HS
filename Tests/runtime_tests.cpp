@@ -28,7 +28,7 @@ void Check(bool condition, std::string_view message)
 std::filesystem::path TestDirectory()
 {
     return std::filesystem::temp_directory_path() /
-           (L"ProjectHS_stage2_runtime_" + std::to_wstring(GetCurrentProcessId()));
+           (L"ProjectHS_runtime_" + std::to_wstring(GetCurrentProcessId()));
 }
 
 void WriteCorrupt(const std::filesystem::path &path)
@@ -91,7 +91,7 @@ void TestSettingsPersistence(const std::filesystem::path &root)
 void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
 {
     hs::ExperimentSpec source;
-    source.scenario_id = "stage2-runtime";
+    source.scenario_id = "runtime-integration";
     source.seed = 42;
     source.mode = hs::ExperimentMode::SimulationOnly;
     source.build_hash = "0123456789abcdef";
@@ -278,7 +278,7 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     const std::array edges{hs::ActionEdge{1, hs::GameAction::SkillQ,
                                          hs::EdgeKind::Pressed}};
     hs::InputFrame input{1, {}, edges};
-    hs::SessionProbe probe;
+    hs::SimulationObservation probe;
     probe.tick = 1;
     probe.phase = hs::SessionPhase::Playing;
     probe.balance.skill_uses[1] = 1;
@@ -360,7 +360,11 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
           "UTF-8 analysis reports normalized stat utility in Korean");
     hs::PlaytestReplay replay;
     Check(hs::LoadPlaytestReplay(directory, replay).Succeeded() &&
-              replay.seed == 42 && replay.content_hash == 99 &&
+              replay.header.format_version == 2 &&
+              replay.header.simulation_version == hs::kSimulationVersion &&
+              replay.header.gameplay_hash_version == hs::kGameplayHashVersion &&
+              replay.header.determinism_profile == hs::kDeterminismProfile &&
+              replay.header.seed == 42 && replay.header.simulation_rules_hash == 99 &&
               replay.frames.size() == 3 && replay.frames[0].expected_checksum == 1234 &&
               replay.frames[2].expected_checksum == 3234,
           "playtest inputs replay exactly");
@@ -383,12 +387,12 @@ int main()
         TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
         std::filesystem::remove_all(root, error);
-        std::cout << "stage2_runtime_tests passed\n";
+        std::cout << "runtime_tests passed\n";
         return 0;
     }
     catch (const std::exception &exception)
     {
-        std::cerr << "stage2_runtime_tests failed: " << exception.what() << '\n';
+        std::cerr << "runtime_tests failed: " << exception.what() << '\n';
         return 1;
     }
 }

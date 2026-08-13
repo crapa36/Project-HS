@@ -1,4 +1,5 @@
 #include <hs/runtime/application.hpp>
+#include <hs/presentation/projector.hpp>
 
 #include "runtime_channels.hpp"
 #include "vfx_catalog.hpp"
@@ -74,14 +75,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Cannot resolve the executable directory.")};
     }
-    GameData game_data;
+    CookedContentBundle content;
     std::uint64_t content_hash{};
     const auto cooked_game_data_path =
         executable_directory / "Cooked" / "game_data.hsbin";
     const auto cooked_particle_effects_path =
         executable_directory / "Cooked" / "particle_effects.hsbin";
-    if (auto loaded = LoadCookedGameData(
-            cooked_game_data_path, game_data, &content_hash);
+    if (auto loaded = LoadCookedContent(
+            cooked_game_data_path, content, &content_hash);
         !loaded)
     {
         return {loaded};
@@ -97,11 +98,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     {
         if (auto loaded = LoadPlaytestReplay(config.replay_directory, replay); !loaded)
             return {loaded};
-        if (!config.replay_compare && replay.content_hash != content_hash)
+        if (!config.replay_compare &&
+            replay.header.simulation_rules_hash != content_hash)
             return {Result::Failure(ErrorCode::InvalidState, "hs_playtest",
                                     "Replay content hash differs from the current content.")};
     }
-    const auto effective_seed = replaying ? replay.seed : config.seed;
+    const auto effective_seed = replaying ? replay.header.seed : config.seed;
     PlaytestRecorder playtest;
     if (config.record_playtest)
     {
@@ -158,7 +160,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         channels.stop_requested.store(true, std::memory_order_release);
     };
 
-    std::jthread render_thread([&](std::stop_token) {
+    auto render_ports = channels.ForRender();
+    std::jthread render_thread([&, render_ports](std::stop_token) mutable {
+        auto &channels = render_ports;
         SetThreadName(L"HS Render");
         D3D12Renderer renderer;
         RendererConfig renderer_config;
@@ -576,11 +580,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
     }
 
-    std::jthread simulation_thread([&](std::stop_token) {
+    auto simulation_ports = channels.ForSimulation();
+    std::jthread simulation_thread([&, simulation_ports](std::stop_token) mutable {
+        auto &channels = simulation_ports;
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
         if (auto initialized = simulation.Initialize(
-                {effective_seed, config.smoke, !config.smoke, settings}, game_data);
+                {effective_seed, config.smoke, !config.smoke, settings},
+                content.simulation_rules);
             !initialized)
         {
             set_failure(initialized);
@@ -644,6 +651,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         Sequence publish_sequence{};
         std::array<ActionEdge, 256> action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
+        GameReadModelStorage read_model;
         std::size_t next_timeline_action{};
         std::size_t replay_frame_index{};
         if (!config.heartbeat_path.empty())
@@ -667,10 +675,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
             for (std::uint32_t local_tick = 0; local_tick < tick_count; ++local_tick)
             {
-                GameData updated_game_data;
+                SimulationRules updated_game_data;
                 while (channels.gameplay_data_updates.TryPop(updated_game_data))
                 {
-                    if (auto applied = simulation.ApplyGameData(updated_game_data); !applied)
+                    if (auto applied = simulation.ApplySimulationRules(updated_game_data); !applied)
                     {
                         set_failure(applied);
                         break;
@@ -761,7 +769,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
                 const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
-                const auto probe = simulation.Probe();
+                simulation.WriteReadModel(read_model);
+                const auto model = read_model.View();
+                const auto &probe = model.session;
                 if (replaying && !config.replay_compare && tick.checksum !=
                                      replay.frames[replay_frame_index].expected_checksum)
                 {
@@ -774,7 +784,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 {
                     if (auto recorded = playtest.Record(
                             input, tick.checksum, probe,
-                            simulation.PendingPresentationEvents()); !recorded)
+                            [&] {
+                                std::vector<PresentationEvent> events;
+                                events.reserve(simulation.PendingDomainSignals().size());
+                                for (const auto &signal : simulation.PendingDomainSignals())
+                                    events.push_back(ProjectPresentation(signal));
+                                return events;
+                            }()); !recorded)
                     {
                         set_failure(recorded);
                         break;
@@ -807,15 +823,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 previous_phase = tick.phase;
 
-                for (const auto &presentation : simulation.PendingPresentationEvents())
+                for (const auto &signal : simulation.PendingDomainSignals())
                 {
+                    const auto presentation = ProjectPresentation(signal);
                     if (!channels.presentation_events.TryPush(presentation))
                     {
                         channels.dropped_presentation_events.fetch_add(
                             1, std::memory_order_relaxed);
                     }
                 }
-                simulation.ClearPresentationEvents();
+                simulation.ClearDomainSignals();
                 for (const auto &ui_command : simulation.PendingUiCommands())
                 {
                     if (!channels.ui_commands.TryPush(ui_command))
@@ -829,10 +846,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 simulation.ClearUiCommands();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
+                    simulation.WriteReadModel(read_model);
                     slot->storage->camera.distance = 28.0f *
                         static_cast<float>(channels.camera_zoom_percent.load(
                             std::memory_order_acquire)) / 100.0f;
-                    if (simulation.WriteRenderSnapshot(*slot->storage))
+                    if (ProjectRenderSnapshot(read_model.View(),
+                                              content.simulation_rules,
+                                              content.presentation,
+                                              settings,
+                                              *slot->storage))
                     {
                         channels.snapshots.Publish(*slot, ++publish_sequence);
                     }
@@ -918,16 +940,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 else
                 {
-                    GameData replacement;
+                    CookedContentBundle replacement;
                     std::uint64_t replacement_hash{};
-                    if (auto loaded = LoadCookedGameData(cooked_game_data_path,
-                                                         replacement,
-                                                         &replacement_hash);
+                    if (auto loaded = LoadCookedContent(cooked_game_data_path,
+                                                        replacement,
+                                                        &replacement_hash);
                         !loaded)
                     {
                         log << "rejected validation " << loaded.Message() << '\n';
                     }
-                    else if (!channels.gameplay_data_updates.TryPush(replacement))
+                    else if (!channels.gameplay_data_updates.TryPush(
+                                 replacement.simulation_rules))
                     {
                         log << "rejected queue_full\n";
                     }

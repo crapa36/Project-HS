@@ -136,17 +136,34 @@ target_link_libraries(hs_jobs PUBLIC hs_core PRIVATE Taskflow::Taskflow)
 target_compile_definitions(hs_jobs PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_jobs)
 
-add_library(hs_game_domain INTERFACE)
-target_include_directories(hs_game_domain INTERFACE Source/GameDomain/Public)
-target_link_libraries(hs_game_domain INTERFACE hs_core)
+add_library(hs_game_domain STATIC Source/GameDomain/Private/game_read_model.cpp)
+target_include_directories(hs_game_domain PUBLIC Source/GameDomain/Public)
+target_link_libraries(hs_game_domain PUBLIC hs_core)
+hs_configure_target(hs_game_domain)
+
+add_library(
+    hs_presentation STATIC
+    Source/Presentation/Private/projector.cpp
+    Source/Presentation/Private/snapshot_projector.cpp
+)
+target_include_directories(hs_presentation PUBLIC Source/Presentation/Public)
+target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain hs_game_rules)
+hs_configure_target(hs_presentation)
+
+add_library(
+    hs_game_rules STATIC
+    Source/GameRules/Private/simulation_rules.cpp
+)
+target_include_directories(hs_game_rules PUBLIC Source/GameRules/Public)
+target_link_libraries(hs_game_rules PUBLIC hs_core hs_game_domain)
+hs_configure_target(hs_game_rules)
 
 add_library(
     hs_gameplay STATIC
-    Source/Gameplay/Private/game_data.cpp
     Source/Gameplay/Private/game_simulation.cpp
 )
 target_include_directories(hs_gameplay PUBLIC Source/Gameplay/Public)
-target_link_libraries(hs_gameplay PUBLIC hs_core hs_game_domain)
+target_link_libraries(hs_gameplay PUBLIC hs_core hs_game_domain hs_game_rules)
 if(MSVC)
     target_compile_options(hs_gameplay PRIVATE /fp:strict)
 endif()
@@ -208,7 +225,7 @@ target_include_directories(hs_runtime PUBLIC Source/Runtime/Public)
 target_link_libraries(
     hs_runtime
     PUBLIC hs_core hs_gameplay
-    PRIVATE hs_jobs hs_renderer_d3d12 nlohmann_json::nlohmann_json
+    PRIVATE hs_jobs hs_presentation hs_renderer_d3d12 nlohmann_json::nlohmann_json
             user32 shell32 xaudio2 ole32 psapi
 )
 target_compile_definitions(hs_runtime PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
@@ -224,7 +241,7 @@ find_program(
     HINTS
         "$ENV{WindowsSdkBinPath}/x64"
 )
-set(HS_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/stage1.hlsl")
+set(HS_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/project_hs.hlsl")
 set(HS_SHADER_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Generated/Shaders")
 file(MAKE_DIRECTORY "${HS_SHADER_DIRECTORY}")
 
@@ -295,7 +312,7 @@ add_dependencies(ProjectHS hs_runtime_assets)
 
 add_executable(hs_experiment Source/Apps/Experiment/main.cpp)
 target_link_libraries(
-    hs_experiment PRIVATE hs_runtime hs_gameplay nlohmann_json::nlohmann_json dbghelp
+    hs_experiment PRIVATE hs_runtime hs_gameplay hs_presentation nlohmann_json::nlohmann_json dbghelp
 )
 target_compile_definitions(
     hs_experiment PRIVATE HS_ENABLE_VALIDATION=1 WIN32_LEAN_AND_MEAN NOMINMAX
@@ -306,7 +323,7 @@ add_dependencies(hs_experiment hs_runtime_assets)
 
 add_executable(hs_combat_sim Source/Apps/CombatSim/main.cpp)
 target_link_libraries(
-    hs_combat_sim PRIVATE hs_gameplay nlohmann_json::nlohmann_json psapi
+    hs_combat_sim PRIVATE hs_gameplay hs_presentation nlohmann_json::nlohmann_json psapi
 )
 target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_combat_sim)
@@ -345,7 +362,7 @@ set_target_properties(
 add_executable(hs_content Source/Apps/Content/main.cpp)
 target_link_libraries(
     hs_content
-    PRIVATE hs_core hs_gameplay nlohmann_json::nlohmann_json
+    PRIVATE hs_core hs_game_rules nlohmann_json::nlohmann_json
             DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
 )
 add_dependencies(hs_content hs_shaders)
@@ -387,7 +404,7 @@ add_custom_command(
     COMMAND "$<TARGET_FILE:hs_content>" --cook
     DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_1.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_2.dds"
@@ -437,20 +454,31 @@ if(HS_BUILD_TESTS)
     target_link_libraries(hs_tests PRIVATE hs_core hs_jobs hs_gameplay)
     hs_configure_target(hs_tests)
 
-    add_test(NAME foundation.stage1 COMMAND hs_tests foundation)
-    add_test(NAME adr.task_system COMMAND hs_tests jobs)
+    add_test(NAME foundation.core COMMAND hs_tests foundation)
+    add_test(NAME foundation.task-system COMMAND hs_tests jobs)
+    add_test(
+        NAME architecture.gameplay-dependencies
+        COMMAND ${CMAKE_COMMAND}
+            -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_gameplay_dependencies.cmake
+    )
+    add_executable(hs_rule_tests Tests/active_rule_tests.cpp)
+    target_link_libraries(hs_rule_tests PRIVATE hs_game_domain)
+    target_include_directories(hs_rule_tests PRIVATE Source/Gameplay/Private)
+    hs_configure_target(hs_rule_tests)
+    add_test(NAME simulation.rules COMMAND hs_rule_tests)
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
     add_test(NAME tools.content-status COMMAND hs_tools status)
     endif()
     add_test(
-        NAME smoke.stage1
+        NAME integration.render-smoke
         COMMAND
             ProjectHS --smoke --ticks=180 --barriers=legacy
             --resize-test
-            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/stage1
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/render-smoke
     )
-    set_tests_properties(smoke.stage1 PROPERTIES TIMEOUT 120)
+    set_tests_properties(integration.render-smoke PROPERTIES TIMEOUT 120)
     add_test(
         NAME vfx.showcase
         COMMAND
@@ -459,64 +487,75 @@ if(HS_BUILD_TESTS)
     )
     set_tests_properties(vfx.showcase PROPERTIES TIMEOUT 120)
     add_test(
-        NAME barriers.stage1
+        NAME rendering.barriers
         COMMAND
             powershell -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/compare_barriers.ps1"
             -Executable "$<TARGET_FILE:ProjectHS>"
             -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/barriers"
     )
-    set_tests_properties(barriers.stage1 PROPERTIES TIMEOUT 120)
+    set_tests_properties(rendering.barriers PROPERTIES TIMEOUT 120)
     add_test(
-        NAME experiment.stage1
+        NAME experiment.offscreen
         COMMAND
             hs_experiment
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment
     )
-    set_tests_properties(experiment.stage1 PROPERTIES TIMEOUT 120)
+    set_tests_properties(experiment.offscreen PROPERTIES TIMEOUT 120)
 
     if(HS_BUILD_CONTENT_TOOLS)
-    add_executable(hs_stage2_tests Tests/stage2_gameplay_tests.cpp)
-    target_link_libraries(hs_stage2_tests PRIVATE hs_core hs_gameplay)
-    hs_configure_target(hs_stage2_tests)
-    add_dependencies(hs_stage2_tests hs_cooked_content)
-    add_test(NAME gameplay.stage2 COMMAND hs_stage2_tests)
-    set_tests_properties(gameplay.stage2 PROPERTIES TIMEOUT 120)
+    add_executable(hs_gameplay_tests Tests/gameplay_tests.cpp)
+    target_link_libraries(hs_gameplay_tests PRIVATE hs_core hs_gameplay hs_presentation)
+    hs_configure_target(hs_gameplay_tests)
+    add_dependencies(hs_gameplay_tests hs_cooked_content)
+    add_test(NAME simulation.content COMMAND hs_gameplay_tests content)
+    add_test(NAME simulation.combat COMMAND hs_gameplay_tests combat)
+    add_test(NAME simulation.progression COMMAND hs_gameplay_tests progression)
+    add_test(NAME simulation.presentation-contract COMMAND hs_gameplay_tests presentation)
+    add_test(NAME simulation.determinism COMMAND hs_gameplay_tests determinism)
+    set_tests_properties(
+        simulation.content
+        simulation.combat
+        simulation.progression
+        simulation.presentation-contract
+        simulation.determinism
+        PROPERTIES TIMEOUT 120
+    )
     endif()
     add_test(
-        NAME combat-simulator.stage2
+        NAME scenario.combat-simulator
         COMMAND hs_combat_sim
             --suite=${CMAKE_CURRENT_SOURCE_DIR}/Tests/Data/combat_suite_smoke.json
             --output=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/combat-simulator
     )
-    set_tests_properties(combat-simulator.stage2 PROPERTIES TIMEOUT 30)
+    set_tests_properties(scenario.combat-simulator PROPERTIES TIMEOUT 30)
 
-    add_executable(hs_stage2_runtime_tests Tests/stage2_runtime_tests.cpp)
-    target_link_libraries(hs_stage2_runtime_tests PRIVATE hs_runtime)
-    target_include_directories(hs_stage2_runtime_tests PRIVATE
+    add_executable(hs_runtime_tests Tests/runtime_tests.cpp)
+    target_link_libraries(hs_runtime_tests PRIVATE hs_runtime)
+    target_include_directories(hs_runtime_tests PRIVATE
         Source/Runtime/Private
         Source/RendererD3D12/Public
     )
-    hs_configure_target(hs_stage2_runtime_tests)
-    add_test(NAME runtime.stage2 COMMAND hs_stage2_runtime_tests)
-    set_tests_properties(runtime.stage2 PROPERTIES TIMEOUT 30)
+    hs_configure_target(hs_runtime_tests)
+    add_test(NAME runtime.integration COMMAND hs_runtime_tests)
+    set_tests_properties(runtime.integration PROPERTIES TIMEOUT 30)
     add_test(
-        NAME experiment.stage2
+        NAME experiment.simulation
         COMMAND
             hs_experiment --simulation-only
-            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-stage2
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-simulation
     )
-    set_tests_properties(experiment.stage2 PROPERTIES TIMEOUT 30)
+    set_tests_properties(experiment.simulation PROPERTIES TIMEOUT 30)
     add_test(
-        NAME experiment.pipe.stage2
+        NAME experiment.pipe
         COMMAND
             hs_experiment --simulation-only --timeline-self-test
-            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-pipe-stage2
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment-pipe
     )
-    set_tests_properties(experiment.pipe.stage2 PROPERTIES TIMEOUT 30)
+    set_tests_properties(experiment.pipe PROPERTIES TIMEOUT 30)
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         add_test(
-            NAME shader-hot-reload.stage2
+            NAME rendering.shader-hot-reload
             COMMAND
                 powershell -NoProfile -ExecutionPolicy Bypass
                 -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/shader_hot_reload.ps1"
@@ -524,7 +563,7 @@ if(HS_BUILD_TESTS)
                 -Shader "${CMAKE_CURRENT_BINARY_DIR}/Shaders/scene_ps.dxil"
                 -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/shader-hot-reload"
         )
-        set_tests_properties(shader-hot-reload.stage2 PROPERTIES TIMEOUT 45)
+        set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 45)
     endif()
 endif()
 
@@ -562,7 +601,7 @@ install(
 if(HS_BUILD_CONTENT_TOOLS)
 install(
     FILES
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/stage1_archer.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"

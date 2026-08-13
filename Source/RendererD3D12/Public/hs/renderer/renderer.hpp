@@ -15,7 +15,7 @@
 namespace hs
 {
 
-inline constexpr std::size_t kStage1RenderPassCount = 11;
+inline constexpr std::size_t kRenderPassCount = 11;
 
 struct ParticleSpriteBinding
 {
@@ -94,7 +94,7 @@ struct NativeWindowMessage
 
 struct GpuPassTimings
 {
-    std::array<std::uint64_t, kStage1RenderPassCount> nanoseconds{};
+    std::array<std::uint64_t, kRenderPassCount> nanoseconds{};
     bool valid{};
 };
 

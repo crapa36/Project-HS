@@ -1,6 +1,6 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/cooked_particle_effects.hpp>
-#include <hs/gameplay/game_data.hpp>
+#include <hs/game_rules/simulation_rules.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -901,10 +901,19 @@ Type CheckedInteger(Source value, std::string_view file, std::string_view path)
     return static_cast<Type>(converted);
 }
 
-hs::GameData BuildGameData(const ContentSources &sources)
+hs::Tick ToTicks(double seconds, std::string_view file, std::string_view path)
 {
-    hs::GameData data{};
-    const auto defaults = hs::GameData::Defaults();
+    if (!std::isfinite(seconds) || seconds < 0.0)
+        Fail(file, path, "duration must be finite and non-negative");
+    return CheckedInteger<hs::Tick>(std::llround(seconds * 60.0), file, path);
+}
+
+hs::CookedContentBundle BuildGameData(const ContentSources &sources)
+{
+    hs::CookedContentBundle content{};
+    auto &data = content.simulation_rules;
+    auto &presentation = content.presentation;
+    const auto defaults = hs::SimulationRules::Defaults();
     data.version = defaults.version;
     data.skills = defaults.skills;
     data.enemies = defaults.enemies;
@@ -968,25 +977,30 @@ hs::GameData BuildGameData(const ContentSources &sources)
     for (std::size_t index = 0; index < relics.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
-        copy_text(data.relic_names[index],
+        copy_text(presentation.relic_names[index],
                   RequireString(relics[index], "relics", path, "display_name"),
                   path + "/display_name");
-        copy_text(data.relic_rules[index],
+        copy_text(presentation.relic_rules[index],
                   RequireString(relics[index], "relics", path, "rule"),
                   path + "/rule");
     }
+    const auto relic_ticks = [&](std::size_t index, std::string_view key) {
+        return ToTicks(relic_number(index, key), "relics",
+                       "$/entries/" + std::to_string(index) + "/parameters/" +
+                           std::string(key));
+    };
     data.relics.bleed_kill_heal = {
         relic_number(0, "maximum_hp_heal_fraction"),
-        relic_number(0, "internal_cooldown")};
+        relic_ticks(0, "internal_cooldown")};
     data.relics.burn_propagation = {
         relic_number(1, "search_radius"), relic_number(1, "copied_burn_strength"),
         relic_count(1, "maximum_targets")};
     data.relics.kill_cooldown_surge = {
         relic_count(2, "kills_per_trigger"),
-        relic_number(2, "all_active_cooldown_reduction")};
+        relic_ticks(2, "all_active_cooldown_reduction")};
     data.relics.bleed_burn_explosion = {
         relic_number(3, "radius"), relic_number(3, "damage_multiplier"),
-        relic_number(3, "per_target_cooldown")};
+        relic_ticks(3, "per_target_cooldown")};
     data.relics.radial_basic_attack = {
         relic_count(4, "cadence_interval"), relic_count(4, "direction_count"),
         relic_number(4, "damage_multiplier")};
@@ -995,20 +1009,20 @@ hs::GameData BuildGameData(const ContentSources &sources)
         relic_count(5, "maximum_triggers_per_original_attack")};
     data.relics.movement_echo = {
         relic_number(6, "required_cumulative_distance"),
-        relic_number(6, "position_history_age"),
+        relic_ticks(6, "position_history_age"),
         relic_number(6, "damage_multiplier")};
     data.relics.alternating_skills = {
-        relic_number(7, "window"), relic_number(7, "cooldown_refund_fraction")};
+        relic_ticks(7, "window"), relic_number(7, "cooldown_refund_fraction")};
     data.relics.different_skill_tracker = {
-        relic_number(8, "window"), relic_number(8, "damage_multiplier"),
-        relic_number(8, "per_target_cooldown")};
+        relic_ticks(8, "window"), relic_number(8, "damage_multiplier"),
+        relic_ticks(8, "per_target_cooldown")};
     data.relics.damage_knockback = {
         relic_number(9, "radius"), relic_number(9, "push_distance"),
-        relic_number(9, "slow_fraction"), relic_number(9, "slow_duration"),
-        relic_number(9, "cooldown")};
+        relic_number(9, "slow_fraction"), relic_ticks(9, "slow_duration"),
+        relic_ticks(9, "cooldown")};
     data.relics.once_revive = {
         relic_number(10, "revive_hp_fraction"),
-        relic_number(10, "invulnerability_duration"),
+        relic_ticks(10, "invulnerability_duration"),
         relic_count(10, "maximum_triggers_per_session")};
     data.relics.combat_hit_chain = {
         relic_count(11, "direct_hits_per_trigger"),
@@ -1025,9 +1039,35 @@ hs::GameData BuildGameData(const ContentSources &sources)
     data.arena_half_extent = static_cast<float>(width * 0.5);
 
     const auto &skills = sources.documents.at("skills")["entries"];
+    constexpr std::array<std::pair<std::string_view, hs::AbilityHandlerId>,
+                         hs::kCombatSkillCount> ability_handlers{{
+        {"basic_projectile_cadence", hs::AbilityHandlerId::BasicProjectileCadence},
+        {"piercing_projectile", hs::AbilityHandlerId::PiercingProjectile},
+        {"uniform_fan_projectiles", hs::AbilityHandlerId::UniformFanProjectiles},
+        {"hold_release_linear_charge", hs::AbilityHandlerId::HoldReleaseLinearCharge},
+        {"projectile_to_area_explosion", hs::AbilityHandlerId::ProjectileToAreaExplosion},
+        {"nearest_unhit_target_ricochet", hs::AbilityHandlerId::NearestUnhitTargetRicochet},
+        {"targeted_periodic_area", hs::AbilityHandlerId::TargetedPeriodicArea},
+        {"forward_roll_leave_trap", hs::AbilityHandlerId::ForwardRollLeaveTrap},
+        {"forced_retreat_and_projectile", hs::AbilityHandlerId::ForcedRetreatAndProjectile},
+    }};
+    for (std::size_t index = 0; index < skills.size(); ++index)
+    {
+        const auto path = "$/entries/" + std::to_string(index);
+        const auto logic = RequireString(skills[index], "skills", path, "logic_id");
+        if (logic != ability_handlers[index].first)
+            Fail("skills", path + "/logic_id",
+                 "logic_id does not match the typed ability handler");
+        data.skills[index].handler = ability_handlers[index].second;
+    }
     const auto number = [&](std::size_t index, std::string_view key) {
         return static_cast<float>(ParameterNumber(
             skills[index], "skills", "$/entries/" + std::to_string(index), key));
+    };
+    const auto skill_ticks = [&](std::size_t index, std::string_view key) {
+        return ToTicks(number(index, key), "skills",
+                       "$/entries/" + std::to_string(index) + "/parameters/" +
+                           std::string(key));
     };
     data.skills[0].damage_coefficient = number(0, "damage_multiplier");
     data.skills[0].projectile_speed = number(0, "projectile_speed");
@@ -1036,13 +1076,13 @@ hs::GameData BuildGameData(const ContentSources &sources)
     data.skills[0].pierce_count = CheckedInteger<std::uint8_t>(
         number(0, "pierce"), "skills", "$/entries/0/pierce");
 
-    data.skills[1].cooldown_seconds = number(1, "cooldown");
+    data.skills[1].cooldown_ticks = skill_ticks(1, "cooldown");
     data.skills[1].damage_coefficient = number(1, "damage_multiplier");
     data.skills[1].projectile_speed = number(1, "projectile_speed");
     data.skills[1].range = number(1, "range");
     data.skills[1].collision_radius = number(1, "collision_radius");
 
-    data.skills[2].cooldown_seconds = number(2, "cooldown");
+    data.skills[2].cooldown_ticks = skill_ticks(2, "cooldown");
     data.skills[2].damage_coefficient = number(2, "damage_multiplier_per_arrow");
     data.skills[2].projectile_speed = number(2, "projectile_speed");
     data.skills[2].range = number(2, "range");
@@ -1051,44 +1091,44 @@ hs::GameData BuildGameData(const ContentSources &sources)
     data.skills[2].pierce_count = CheckedInteger<std::uint8_t>(
         number(2, "pierce_per_arrow"), "skills", "$/entries/2/pierce_per_arrow");
 
-    data.skills[3].cooldown_seconds = number(3, "cooldown");
+    data.skills[3].cooldown_ticks = skill_ticks(3, "cooldown");
     data.skills[3].damage_coefficient = number(3, "maximum_damage_multiplier");
     data.skills[3].projectile_speed = number(3, "projectile_speed");
     data.skills[3].range = number(3, "maximum_range");
     data.skills[3].collision_radius = number(3, "maximum_collision_radius");
-    data.skills[3].duration_seconds = number(3, "maximum_charge_time");
+    data.skills[3].duration_ticks = skill_ticks(3, "maximum_charge_time");
     data.skills[3].pierce_count = CheckedInteger<std::uint8_t>(
         number(3, "pierce"), "skills", "$/entries/3/pierce");
 
-    data.skills[4].cooldown_seconds = number(4, "cooldown");
+    data.skills[4].cooldown_ticks = skill_ticks(4, "cooldown");
     data.skills[4].damage_coefficient = number(4, "explosion_damage_multiplier");
     data.skills[4].projectile_speed = number(4, "projectile_speed");
     data.skills[4].range = number(4, "range");
     data.skills[4].area_radius = number(4, "explosion_radius");
 
-    data.skills[5].cooldown_seconds = number(5, "cooldown");
+    data.skills[5].cooldown_ticks = skill_ticks(5, "cooldown");
     data.skills[5].damage_coefficient = number(5, "damage_multiplier");
     data.skills[5].range = number(5, "initial_range");
     data.skills[5].area_radius = number(5, "ricochet_search_radius");
     data.skills[5].pierce_count = CheckedInteger<std::uint8_t>(
         number(5, "maximum_ricochets"), "skills", "$/entries/5/maximum_ricochets");
 
-    data.skills[6].cooldown_seconds = number(6, "cooldown");
+    data.skills[6].cooldown_ticks = skill_ticks(6, "cooldown");
     data.skills[6].damage_coefficient = number(6, "damage_multiplier_per_tick");
     data.skills[6].range = number(6, "target_range");
     data.skills[6].area_radius = number(6, "radius");
-    data.skills[6].duration_seconds = number(6, "duration");
+    data.skills[6].duration_ticks = skill_ticks(6, "duration");
 
-    data.skills[7].cooldown_seconds = number(7, "cooldown");
+    data.skills[7].cooldown_ticks = skill_ticks(7, "cooldown");
     data.skills[7].damage_coefficient = number(7, "damage_multiplier");
     data.skills[7].range = number(7, "forward_roll_distance");
     data.skills[7].area_radius = number(7, "explosion_radius");
-    data.skills[7].duration_seconds = number(7, "active_duration");
+    data.skills[7].duration_ticks = skill_ticks(7, "active_duration");
 
-    data.skills[8].cooldown_seconds = number(8, "cooldown");
+    data.skills[8].cooldown_ticks = skill_ticks(8, "cooldown");
     data.skills[8].damage_coefficient = number(8, "damage_multiplier");
     data.skills[8].range = number(8, "projectile_range");
-    data.skills[8].duration_seconds = number(8, "forced_move_duration");
+    data.skills[8].duration_ticks = skill_ticks(8, "forced_move_duration");
     data.skills[8].pierce_count = CheckedInteger<std::uint8_t>(
         number(8, "pierce"), "skills", "$/entries/8/pierce");
 
@@ -1107,20 +1147,24 @@ hs::GameData BuildGameData(const ContentSources &sources)
         "$/entries/0/base_damage");
     data.enemies[0].attack_range = static_cast<float>(
         ParameterNumber(enemies[0], "enemies", "$/entries/0", "attack_range"));
-    data.enemies[0].warning_seconds = static_cast<float>(
-        ParameterNumber(enemies[0], "enemies", "$/entries/0", "telegraph_duration"));
-    data.enemies[0].attack_cooldown_seconds = static_cast<float>(
-        ParameterNumber(enemies[0], "enemies", "$/entries/0", "reattack_interval"));
+    data.enemies[0].warning_ticks = ToTicks(
+        ParameterNumber(enemies[0], "enemies", "$/entries/0", "telegraph_duration"),
+        "enemies", "$/entries/0/parameters/telegraph_duration");
+    data.enemies[0].attack_cooldown_ticks = ToTicks(
+        ParameterNumber(enemies[0], "enemies", "$/entries/0", "reattack_interval"),
+        "enemies", "$/entries/0/parameters/reattack_interval");
 
     data.enemies[1].damage = CheckedInteger<std::int32_t>(
         ParameterNumber(enemies[1], "enemies", "$/entries/1", "base_damage"), "enemies",
         "$/entries/1/base_damage");
     data.enemies[1].attack_range = static_cast<float>(ParameterNumber(
         enemies[1], "enemies", "$/entries/1", "maximum_hold_distance"));
-    data.enemies[1].warning_seconds = static_cast<float>(
-        ParameterNumber(enemies[1], "enemies", "$/entries/1", "telegraph_duration"));
-    data.enemies[1].attack_cooldown_seconds = static_cast<float>(
-        ParameterNumber(enemies[1], "enemies", "$/entries/1", "reattack_interval"));
+    data.enemies[1].warning_ticks = ToTicks(
+        ParameterNumber(enemies[1], "enemies", "$/entries/1", "telegraph_duration"),
+        "enemies", "$/entries/1/parameters/telegraph_duration");
+    data.enemies[1].attack_cooldown_ticks = ToTicks(
+        ParameterNumber(enemies[1], "enemies", "$/entries/1", "reattack_interval"),
+        "enemies", "$/entries/1/parameters/reattack_interval");
     data.enemies[1].projectile_speed = static_cast<float>(
         ParameterNumber(enemies[1], "enemies", "$/entries/1", "projectile_speed"));
     data.enemies[1].projectile_range = static_cast<float>(
@@ -1131,8 +1175,9 @@ hs::GameData BuildGameData(const ContentSources &sources)
         "$/entries/2/base_damage");
     data.enemies[2].attack_range = static_cast<float>(
         ParameterNumber(enemies[2], "enemies", "$/entries/2", "stop_distance"));
-    data.enemies[2].warning_seconds = static_cast<float>(
-        ParameterNumber(enemies[2], "enemies", "$/entries/2", "telegraph_duration"));
+    data.enemies[2].warning_ticks = ToTicks(
+        ParameterNumber(enemies[2], "enemies", "$/entries/2", "telegraph_duration"),
+        "enemies", "$/entries/2/parameters/telegraph_duration");
     data.enemies[2].projectile_range = static_cast<float>(
         ParameterNumber(enemies[2], "enemies", "$/entries/2", "explosion_radius"));
 
@@ -1146,11 +1191,13 @@ hs::GameData BuildGameData(const ContentSources &sources)
         const auto &phase2 = bosses[index]["phase2_pattern_interval_seconds"];
         if (single.is_number())
         {
-            data.bosses[index].recovery_seconds = single.get<float>();
+            data.bosses[index].recovery_ticks =
+                ToTicks(single.get<double>(), "bosses", path + "/single_pattern_recovery_seconds");
         }
         else if (phase2.is_number())
         {
-            data.bosses[index].recovery_seconds = phase2.get<float>();
+            data.bosses[index].recovery_ticks =
+                ToTicks(phase2.get<double>(), "bosses", path + "/phase2_pattern_interval_seconds");
         }
         else
         {
@@ -1201,7 +1248,7 @@ hs::GameData BuildGameData(const ContentSources &sources)
             waves[index]["duration_ticks"].get<double>(), "spawn_schedule",
             "$/waves/duration_ticks");
     }
-    return data;
+    return content;
 }
 
 bool AtomicWrite(const std::filesystem::path &path, std::span<const std::byte> bytes,
@@ -1239,13 +1286,14 @@ bool AtomicWrite(const std::filesystem::path &path, std::span<const std::byte> b
     return true;
 }
 
-bool WriteCookedGameData(const std::filesystem::path &path, const hs::GameData &data,
+bool WriteCookedGameData(const std::filesystem::path &path,
+                         const hs::CookedContentBundle &data,
                          std::uint64_t source_hash, std::string &error_message)
 {
-    static_assert(std::is_trivially_copyable_v<hs::GameData>);
+    static_assert(std::is_trivially_copyable_v<hs::CookedContentBundle>);
     const auto payload = std::as_bytes(std::span(&data, 1));
     hs::CookedHeader header;
-    header.schema_hash = hs::GameDataSchemaHash();
+    header.schema_hash = hs::SimulationRulesSchemaHash();
     header.source_hash = source_hash;
     header.table_count = 1;
     header.payload_size = static_cast<std::uint32_t>(payload.size());
@@ -2257,7 +2305,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
             GatherAnimation(*animation, bones, clip, looping, character);
             animation->Destroy();
         }
-        if (!WriteCharacterAsset(output / "stage1_archer.meshbin", character,
+        if (!WriteCharacterAsset(output / "archer.meshbin", character,
                                  error_message))
         {
             manager->Destroy();
@@ -2354,22 +2402,26 @@ int main(int argc, char **argv)
         if (!WriteVfxMaskArray(output / "vfx_masks.dds", particle_sprites,
                                error_message))
             throw std::runtime_error("vfx_masks.dds: " + error_message);
-        hs::GameData loaded{};
+        hs::CookedContentBundle loaded{};
         std::uint64_t loaded_hash{};
         if (const auto result =
-                hs::LoadCookedGameData(output / "game_data.hsbin", loaded, &loaded_hash);
+                hs::LoadCookedContent(output / "game_data.hsbin", loaded, &loaded_hash);
             !result)
         {
             throw std::runtime_error("game_data.hsbin self-check failed: " +
                                      std::string(result.Message()));
         }
-        if (loaded_hash != gameplay_hash || loaded.player_health != data.player_health ||
-            loaded.skills[1].damage_coefficient != data.skills[1].damage_coefficient ||
-            loaded.relics.bleed_burn_explosion.radius !=
-                data.relics.bleed_burn_explosion.radius ||
-            loaded.relics.damage_knockback.cooldown_seconds !=
-                data.relics.damage_knockback.cooldown_seconds ||
-            loaded.relic_rules[3] != data.relic_rules[3])
+        const auto &loaded_rules = loaded.simulation_rules;
+        const auto &rules = data.simulation_rules;
+        if (loaded_hash != gameplay_hash ||
+            loaded_rules.player_health != rules.player_health ||
+            loaded_rules.skills[1].damage_coefficient !=
+                rules.skills[1].damage_coefficient ||
+            loaded_rules.relics.bleed_burn_explosion.radius !=
+                rules.relics.bleed_burn_explosion.radius ||
+            loaded_rules.relics.damage_knockback.cooldown_ticks !=
+                rules.relics.damage_knockback.cooldown_ticks ||
+            loaded.presentation.relic_rules[3] != data.presentation.relic_rules[3])
         {
             throw std::runtime_error("game_data.hsbin self-check mismatch");
         }
@@ -2407,7 +2459,7 @@ int main(int argc, char **argv)
                  << "particle_effects=particle_effects.hsbin\n"
                  << "vfx_masks=vfx_masks.dds\n"
                  << "source_hash=" << source_hash << '\n'
-                 << "mesh=stage1_archer.meshbin\n";
+                 << "mesh=archer.meshbin\n";
         for (std::size_t index = 0; index < character.materials.size(); ++index)
         {
             manifest << "texture=archer_diffuse_" << index << ".dds\n"

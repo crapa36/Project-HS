@@ -1,6 +1,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/presentation/projector.hpp>
 #include <hs/runtime/application.hpp>
 #include <hs/runtime/experiment_pipe.hpp>
 #include <hs/runtime/experiment_spec.hpp>
@@ -402,7 +403,7 @@ CookedContentHash(const std::filesystem::path &path)
                                              std::string content_hash)
 {
     hs::ExperimentSpec spec;
-    spec.scenario_id = "stage2";
+    spec.scenario_id = "simulation";
     spec.seed = 1;
     spec.mode = hs::ExperimentMode::OffscreenRender;
     spec.build_hash = std::move(build_hash);
@@ -554,13 +555,15 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                                     error.message())};
     }
 
-    hs::GameData data;
-    if (auto loaded = hs::LoadCookedGameData(cooked_path, data); !loaded)
+    hs::CookedContentBundle content;
+    if (auto loaded = hs::LoadCookedContent(cooked_path, content); !loaded)
     {
         return {loaded};
     }
     hs::GameSimulation simulation;
-    if (auto initialized = simulation.Initialize({spec.seed, true, false}, data); !initialized)
+    if (auto initialized = simulation.Initialize({spec.seed, true, false},
+                                                 content.simulation_rules);
+        !initialized)
     {
         return {initialized};
     }
@@ -616,15 +619,16 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                  << probe.player_projectile_count + probe.enemy_projectile_count << ','
                  << probe.pickup_count << ',' << cpu_us << ',' << WorkingSetBytes() << ','
                  << ecs_count << ",0\n";
-        for (const auto &event : simulation.PendingPresentationEvents())
+        for (const auto &signal : simulation.PendingDomainSignals())
         {
+            const auto event = hs::ProjectPresentation(signal);
             events << nlohmann::json{{"sequence", event.sequence},
                                      {"tick", event.tick},
                                      {"kind", static_cast<unsigned>(event.kind)}}
                               .dump()
                    << '\n';
         }
-        simulation.ClearPresentationEvents();
+        simulation.ClearDomainSignals();
         if (tick.tick % 60 == 0)
             (void)WriteHeartbeat(heartbeat_path, tick.tick, "running");
         if ((spec.termination.on_victory && tick.phase == hs::SessionPhase::Victory) ||

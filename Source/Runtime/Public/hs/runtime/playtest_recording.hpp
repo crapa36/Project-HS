@@ -13,6 +13,17 @@
 namespace hs
 {
 
+struct ReplayHeader
+{
+    std::uint32_t format_version{2};
+    std::uint32_t simulation_version{kSimulationVersion};
+    std::uint32_t gameplay_hash_version{kGameplayHashVersion};
+    std::uint64_t simulation_rules_hash{};
+    std::uint32_t tick_rate{60};
+    std::uint32_t determinism_profile{kDeterminismProfile};
+    std::uint64_t seed{};
+};
+
 struct PlaytestRecorderConfig
 {
     std::filesystem::path output_directory;
@@ -35,8 +46,7 @@ struct PlaytestReplayFrame
 
 struct PlaytestReplay
 {
-    std::uint64_t seed{};
-    std::uint64_t content_hash{};
+    ReplayHeader header{};
     std::vector<PlaytestReplayFrame> frames;
 };
 
@@ -50,7 +60,7 @@ class PlaytestRecorder
 
     [[nodiscard]] Result Start(const PlaytestRecorderConfig &config);
     [[nodiscard]] Result Record(const InputFrame &input, GameplayChecksum checksum,
-                                const SessionProbe &probe,
+                                const SimulationObservation &probe,
                                 std::span<const PresentationEvent> events);
     [[nodiscard]] Result Finish(bool execution_valid);
     [[nodiscard]] const std::filesystem::path &Directory() const noexcept;
