@@ -54,6 +54,8 @@ class GameSimulation
                                        std::chrono::nanoseconds fixed_delta);
     [[nodiscard]] GameplayChecksum ComputeChecksum() const;
     [[nodiscard]] const SimulationRules &Rules() const noexcept;
+    [[nodiscard]] SessionProbe GetSessionView() const noexcept;
+    [[nodiscard]] SimulationDiagnostics GetDiagnostics() const noexcept;
     [[nodiscard]] SimulationObservation Probe() const noexcept;
     void WriteReadModel(GameReadModelStorage &model) const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);

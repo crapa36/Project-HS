@@ -67,7 +67,10 @@ struct SimulationPorts
     std::atomic<Tick> &completed_tick;
     std::atomic<GameplayChecksum> &checksum;
     std::atomic<std::uint8_t> &session_phase;
-    std::atomic<std::uint8_t> &menu_page;
+    std::atomic<std::uint8_t> &ui_page;
+    std::atomic<std::uint8_t> &collection_skill;
+    std::atomic<std::uint8_t> &character_skill;
+    std::atomic<std::uint8_t> &loadout_source;
     std::atomic<std::uint8_t> &pending_rebind_slot;
     std::atomic<std::uint32_t> &best_level;
     std::atomic<std::uint64_t> &completed_run_kills;
@@ -104,7 +107,10 @@ struct RuntimeChannels
     std::atomic<Tick> completed_tick{};
     std::atomic<GameplayChecksum> checksum{};
     std::atomic<std::uint8_t> session_phase{};
-    std::atomic<std::uint8_t> menu_page{};
+    std::atomic<std::uint8_t> ui_page{};
+    std::atomic<std::uint8_t> collection_skill{};
+    std::atomic<std::uint8_t> character_skill{};
+    std::atomic<std::uint8_t> loadout_source{0xFF};
     std::atomic<std::uint8_t> pending_rebind_slot{0xFF};
     std::atomic<std::uint32_t> best_level{1};
     std::atomic<std::uint64_t> completed_run_kills{};
@@ -131,7 +137,8 @@ struct RuntimeChannels
                 camera_target_x, camera_target_z, camera_zoom_percent, action_edges,
                 snapshots, presentation_events, gameplay_data_updates,
                 presentation_settings, ui_actions,
-                debug_commands, completed_tick, checksum, session_phase, menu_page,
+                debug_commands, completed_tick, checksum, session_phase, ui_page,
+                collection_skill, character_skill, loadout_source,
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events};
     }

@@ -101,7 +101,7 @@
           "parameters": [
             {"key": "maximum_stacks", "value": 5, "unit": "count"},
             {"key": "duration", "value": 4, "unit": "seconds"},
-            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.3333333333333333, "unit": "seconds"},
             {"key": "attack_power_multiplier_per_tick", "value": 0.25, "unit": "multiplier"}
           ],
           "rules": [
@@ -115,7 +115,7 @@
           "parameters": [
             {"key": "maximum_instances", "value": 1, "unit": "count"},
             {"key": "duration", "value": 4, "unit": "seconds"},
-            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.3333333333333333, "unit": "seconds"},
             {"key": "attack_power_multiplier_per_tick", "value": 0.45, "unit": "multiplier"}
           ],
           "rules": [

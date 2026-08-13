@@ -555,14 +555,14 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                                     error.message())};
     }
 
-    hs::CookedContentBundle content;
-    if (auto loaded = hs::LoadCookedContent(cooked_path, content); !loaded)
+    hs::SimulationRules rules;
+    if (auto loaded = hs::LoadSimulationRules(cooked_path, rules); !loaded)
     {
         return {loaded};
     }
     hs::GameSimulation simulation;
     if (auto initialized = simulation.Initialize({spec.seed, true, false},
-                                                 content.simulation_rules);
+                                                 rules);
         !initialized)
     {
         return {initialized};
@@ -621,12 +621,14 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                  << ecs_count << ",0\n";
         for (const auto &signal : simulation.PendingDomainSignals())
         {
-            const auto event = hs::ProjectPresentation(signal);
-            events << nlohmann::json{{"sequence", event.sequence},
-                                     {"tick", event.tick},
-                                     {"kind", static_cast<unsigned>(event.kind)}}
-                              .dump()
-                   << '\n';
+            std::array<hs::PresentationEvent, 2> projected{};
+            const auto count = hs::ProjectPresentation(signal, projected);
+            for (const auto &event : std::span(projected).first(count))
+                events << nlohmann::json{{"sequence", event.sequence},
+                                         {"tick", event.tick},
+                                         {"kind", static_cast<unsigned>(event.kind)}}
+                                  .dump()
+                       << '\n';
         }
         simulation.ClearDomainSignals();
         if (tick.tick % 60 == 0)
@@ -680,7 +682,7 @@ int main(int argc, char **argv)
     const auto executable = ExecutablePath();
     const auto build_hash_value = HashFile(executable);
     const auto content_hash_value =
-        CookedContentHash(executable.parent_path() / "Cooked" / "game_data.hsbin");
+        CookedContentHash(executable.parent_path() / "Cooked" / "simulation_rules.hsbin");
     if (executable.empty() || !build_hash_value || !content_hash_value)
     {
         std::cerr << "Cannot calculate build/content hashes.\n";
@@ -785,7 +787,7 @@ int main(int argc, char **argv)
     const auto run = spec.mode == hs::ExperimentMode::SimulationOnly
                          ? RunSimulationExperiment(
                                spec, config.artifact_directory,
-                               executable.parent_path() / "Cooked" / "game_data.hsbin")
+                               executable.parent_path() / "Cooked" / "simulation_rules.hsbin")
                          : hs::RunApplication(config);
     if (!run.result)
     {

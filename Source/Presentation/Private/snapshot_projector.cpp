@@ -18,11 +18,10 @@ bool HasUpgrade(std::uint8_t m,std::uint8_t o) noexcept{return o&&(m&(1u<<(o-1))
 bool HasRelic(std::uint16_t m,RelicKind r) noexcept{return m&(1u<<static_cast<unsigned>(r));}
 Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtract(Float2 a,Float2 b) noexcept{return {a.x-b.x,a.y-b.y};} Float2 Multiply(Float2 v,float s) noexcept{return {v.x*s,v.y*s};}
 float LengthSquared(Float2 v) noexcept{return v.x*v.x+v.y*v.y;} Float2 Normalize(Float2 v) noexcept{auto l=std::sqrt(LengthSquared(v));return l>.0001f?Multiply(v,1/l):Float2{0,1};} Float2 Rotate(Float2 v,float r) noexcept{auto c=std::cos(r),s=std::sin(r);return {v.x*c-v.y*s,v.x*s+v.y*c};}
-std::int32_t RoundDamage(float v) noexcept{return std::max(1,static_cast<std::int32_t>(std::lround(v)));}
-Tick PresentationCooldownTicks(const GameReadModel&m,const SimulationRules&r,SkillKind s) noexcept{auto i=static_cast<std::size_t>(s);auto t=static_cast<float>(r.skills[i].cooldown_ticks);t*=1-.03f*m.session.stat_points[static_cast<std::size_t>(StatKind::CooldownReduction)];if((s==SkillKind::PiercingShot||s==SkillKind::ExplosiveArrow||s==SkillKind::RicochetArrow)&&HasUpgrade(m.player.upgrades[i],8))t*=s==SkillKind::RicochetArrow?.85f:.75f;return std::max<Tick>(15,static_cast<Tick>(std::llround(t)));}
 } // namespace
-bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &rules,
+bool ProjectRenderSnapshot(const GameReadModel &model,
                            const PresentationCatalog &presentation,
+                           const PresentationUiState &ui,
                            const SettingsData &settings,
                            RenderSnapshotStorage &snapshot,
                            std::uint8_t pending_rebind_slot)
@@ -126,12 +125,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
         {
             elapsed = std::min(maximum_ticks, static_cast<Tick>(elapsed / 0.65f));
         }
-        const auto ratio = static_cast<float>(elapsed) /
-                           static_cast<float>(maximum_ticks);
-        const auto range = std::lerp(
-            4.2f,
-            rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)].range,
-            ratio);
+        const auto range = model.charge_range;
         const auto center = Add(model.player.position,
                                 Multiply(model.player.aim, range * 0.5f));
         complete &= snapshot.AddInstance(
@@ -140,7 +134,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
              {0.10f, 0.03f, range}, 0xFFFFFFFFu, RenderMesh::Area});
     }
 
-    const auto arena_size = rules.arena_half_extent * 2.0f;
+    const auto arena_size = model.arena_half_extent * 2.0f;
     complete &= snapshot.AddInstance(
         {{0.0f, -0.05f, 0.0f}, 0.0f, {arena_size, 0.1f, arena_size},
          0xFF181818u, RenderMesh::Ground});
@@ -148,8 +142,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
     constexpr float kBoundaryThickness = 0.6f;
     constexpr float kBoundaryHeightScale = 12.0f;
     constexpr std::uint32_t kBoundaryColor = 0xFF20A0FFu;
-    const auto boundary_center = rules.arena_half_extent + kBoundaryThickness * 0.5f;
-    const auto boundary_length = rules.arena_half_extent * 2.0f + kBoundaryThickness * 2.0f;
+    const auto boundary_center = model.arena_half_extent + kBoundaryThickness * 0.5f;
+    const auto boundary_length = model.arena_half_extent * 2.0f + kBoundaryThickness * 2.0f;
     for (const auto &instance : std::array{
              RenderInstance{{-boundary_center, 0.6f, 0.0f}, 0.0f,
                             {kBoundaryThickness, kBoundaryHeightScale, boundary_length},
@@ -199,8 +193,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
              kEnemyRenderId | enemy.id.value, status_visual_mask});
         if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking)
         {
-            const auto range = rules.enemies[
-                static_cast<std::size_t>(EnemyKind::Ranged)].projectile_range;
+            const auto range = enemy.warning_extent;
             const auto center = Add(enemy.position,
                                     Multiply(enemy.locked_aim, range * 0.5f));
             complete &= snapshot.AddInstance(
@@ -210,8 +203,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
         }
         if (!enemy.boss && enemy.kind == EnemyKind::Suicide && enemy.attacking)
         {
-            const auto radius = rules.enemies[
-                    static_cast<std::size_t>(EnemyKind::Suicide)].projectile_range;
+            const auto radius = enemy.warning_extent;
             complete &= snapshot.AddInstance(
                 {{enemy.position.x, 0.025f, enemy.position.y}, 0.0f,
                  {radius, 0.03f, radius}, 0x803030FFu, RenderMesh::Area});
@@ -586,14 +578,14 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
     };
 
     if (probe.phase == SessionPhase::MainMenu ||
-        (probe.phase == SessionPhase::Paused && probe.menu_page == 6))
+        (probe.phase == SessionPhase::Paused && ui.page == 6))
     {
         if (probe.phase == SessionPhase::MainMenu)
             add_ui(UiModel::Kind::Text, {760, 120}, {400, 80}, 0xFFFFFFFFu,
                    "PROJECT HS", 1.0f, 54);
-        if (probe.menu_page == 1)
+        if (ui.page == 1)
         {
-            const auto selected = std::min<std::size_t>(model.collection_skill_index,
+            const auto selected = std::min<std::size_t>(ui.collection_skill,
                                                          kCombatSkillCount - 1);
             add_ui(UiModel::Kind::Panel, {160, 70}, {1'600, 930}, 0xD0202430u,
                    "스킬 도감");
@@ -628,7 +620,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             add_ui(UiModel::Kind::Button, {210, 900}, {360, 56}, 0xFF3A5068u,
                    "돌아가기");
         }
-        else if (probe.menu_page == 2 || probe.menu_page == 6)
+        else if (ui.page == 2 || ui.page == 6)
         {
             const auto enabled = [](bool value) { return value ? "켜짐" : "꺼짐"; };
             add_ui(UiModel::Kind::Panel, {450, 180}, {1'020, 790}, 0xD0202430u,
@@ -688,8 +680,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             }
         }
     }
-    else if (!(probe.phase == SessionPhase::Paused && probe.menu_page >= 3 &&
-               probe.menu_page <= 5))
+    else if (!(probe.phase == SessionPhase::Paused && ui.page >= 3 &&
+               ui.page <= 5))
     {
         const auto time = probe.final_boss_spawned ? probe.boss_fight_ticks
                                                    : probe.growth_ticks;
@@ -728,9 +720,9 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
         add_ui(UiModel::Kind::Text, {1'520, 32}, {360, 50}, 0xFFFFFFFFu,
                std::format("유물 {:03X}", probe.relic_mask));
 
-        for (const auto &wave : rules.waves)
+        for (const auto &wave : model.waves)
         {
-            const auto start = static_cast<Tick>(wave.minute) * Seconds(60.0f);
+            const auto start = wave.start;
             if (probe.growth_ticks < start &&
                 start - probe.growth_ticks <= Seconds(5.0f))
             {
@@ -740,7 +732,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                 break;
             }
             if (probe.growth_ticks >= start &&
-                probe.growth_ticks < start + wave.duration_ticks)
+                probe.growth_ticks < start + wave.duration)
             {
                 add_ui(UiModel::Kind::Text, {610, 180}, {700, 64}, 0xFFFF4040u,
                        "대규모 웨이브 발생", 1.0f, 36);
@@ -824,7 +816,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
     }
     else if (probe.phase == SessionPhase::Paused)
     {
-        if (probe.menu_page == 0)
+        if (ui.page == 0)
         {
             add_ui(UiModel::Kind::Panel, {660, 300}, {600, 480}, 0xE0181D28u,
                    "일시정지", 1.0f, 38);
@@ -837,7 +829,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             add_ui(UiModel::Kind::Text, {760, 710}, {400, 32}, 0xFFB8C2D0u,
                    "Esc: 계속", 1.0f, 20);
         }
-        else if (probe.menu_page >= 3 && probe.menu_page <= 5)
+        else if (ui.page >= 3 && ui.page <= 5)
         {
             add_ui(UiModel::Kind::Panel, {260, 80}, {1'400, 920}, 0xF0181D28u,
                    "");
@@ -847,7 +839,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             {
                 add_ui(UiModel::Kind::Button,
                        {350.0f + static_cast<float>(index) * 300.0f, 140},
-                       {280, 58}, probe.menu_page == index + 3 ? 0xFF507098u
+                       {280, 58}, ui.page == index + 3 ? 0xFF507098u
                                                                : 0xFF34495Eu,
                        tabs[index], 1.0f, 24);
             }
@@ -856,7 +848,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
             add_ui(UiModel::Kind::Text, {300, 95}, {1'300, 38}, 0xFFFFFFFFu,
                    "캐릭터 정보  ·  Tab 또는 Esc로 닫기", 1.0f, 26);
 
-            if (probe.menu_page == 3)
+            if (ui.page == 3)
             {
                 const auto attack = model.effective_attack;
                 const auto attack_speed = model.effective_attack_speed;
@@ -877,7 +869,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                            "쿨타임 감소           {:.0f}%\n"
                            "자석 반경             {:.1f}m",
                            probe.level, probe.health, probe.max_health, attack,
-                           RoundDamage(attack * rules.skills[0].damage_coefficient),
+                           model.skills[0].displayed_damage,
                            attack_speed, move_speed, cooldown_reduction * 100.0f,
                            magnet_radius),
                        1.0f, 23);
@@ -896,8 +888,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                     "현재 전투 기록\n\n총 피해              {}\n직접 피해            {}\n"
                     "파생 효과 피해        {}\n지속 피해            {}\n받은 피해            {}\n"
                     "회복량                {}\n처치 수              {}",
-                    probe.damage_dealt, probe.balance.direct_damage,
-                    probe.balance.derived_damage, probe.balance.damage_over_time,
+                    probe.damage_dealt, model.direct_damage,
+                    model.derived_damage, model.damage_over_time,
                     probe.damage_taken, probe.healing, probe.kills),
                        1.0f, 23);
                 add_ui(UiModel::Kind::Text, {990, 585}, {570, 42}, 0xFFFFFFFFu,
@@ -916,10 +908,10 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                     ++damage_row;
                 }
             }
-            else if (probe.menu_page == 4)
+            else if (ui.page == 4)
             {
                 constexpr std::array<std::string_view, 4> slot_names{"Q", "W", "E", "R"};
-                auto selected = std::min<std::size_t>(model.character_skill_index,
+                auto selected = std::min<std::size_t>(ui.character_skill,
                                                        kCombatSkillCount - 1);
                 if (probe.skill_levels[selected] == 0) selected = 0;
                 for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
@@ -946,28 +938,27 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                         : std::format("{}  비어 있음", slot_names[slot]);
                     add_ui(UiModel::Kind::Button,
                            {780.0f + static_cast<float>(slot) * 195.0f, 225.0f},
-                           {180, 54}, model.character_slot_source == slot
+                           {180, 54}, ui.loadout_source == slot
                                           ? 0xFFB87828u
                                           : 0xFF34495Eu,
                            label, 1.0f, 18);
                 }
 
-                const auto &definition = rules.skills[selected];
-                const auto damage = RoundDamage(
-                    model.effective_attack * definition.damage_coefficient);
+                const auto &definition = model.skills[selected];
+                const auto damage = definition.displayed_damage;
                 std::string parameters = selected == 0
                     ? std::format("1발 피해 {}  ·  공격속도 {:.3f}회/초  ·  사거리 {:.1f}m",
-                                  damage, model.effective_attack_speed, definition.range)
+                                  damage, model.effective_attack_speed,
+                                  definition.effective_range)
                     : std::format("표기 피해 {}  ·  쿨타임 {:.2f}초  ·  사거리 {:.1f}m",
                                   damage,
-                                  static_cast<float>(PresentationCooldownTicks(model, rules,
-                                      static_cast<SkillKind>(selected))) / 60.0f,
-                                  definition.range);
+                                  static_cast<float>(definition.effective_cooldown) / 60.0f,
+                                  definition.effective_range);
                 if (definition.area_radius > 0.0f)
                     parameters += std::format("  ·  범위 {:.1f}m", definition.area_radius);
-                if (definition.duration_ticks > 0)
+                if (definition.duration > 0)
                     parameters += std::format("  ·  지속 {:.1f}초",
-                                              definition.duration_ticks / 60.0f);
+                                              definition.duration / 60.0f);
                 if (definition.projectile_count > 1)
                     parameters += std::format("  ·  발사 {}개", definition.projectile_count);
                 if (definition.pierce_count > 0)
@@ -993,7 +984,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model, const SimulationRules &ru
                             std::format("강화 {} · {}  ·  기여 피해 {}\n{}",
                                         static_cast<unsigned>(upgrade) + 1,
                                         skill_upgrade_names[selected][upgrade],
-                                        probe.balance.upgrade_damage[selected][upgrade],
+                                        model.upgrade_damage[selected][upgrade],
                                         skill_upgrade_descriptions[selected][upgrade]),
                            1.0f, 19);
                     ++upgrade_row;

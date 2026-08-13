@@ -160,9 +160,6 @@ struct RelicDefinitions
     } combat_hit_chain;
 };
 
-inline constexpr std::size_t kRelicNameBytes = 64;
-inline constexpr std::size_t kRelicRuleBytes = 512;
-
 struct SimulationRules
 {
     std::uint32_t version{4};
@@ -178,6 +175,11 @@ struct SimulationRules
     float magnet_pickup_chance_multiplier{0.25f};
     float relic_chest_base_chance{0.00001f};
     float relic_chest_miss_increment{0.000004f};
+    Tick status_tick_interval{20};
+    Tick bleed_duration{240};
+    float bleed_tick_coefficient{0.25f};
+    Tick burn_duration{240};
+    float burn_tick_coefficient{0.45f};
     std::array<SkillDefinition, kCombatSkillCount> skills{};
     std::array<EnemyDefinition, 3> enemies{};
     std::array<BossDefinition, 3> bosses{};
@@ -187,21 +189,10 @@ struct SimulationRules
     [[nodiscard]] static SimulationRules Defaults() noexcept;
 };
 
-struct PresentationCatalog
-{
-    std::array<std::array<char, kRelicNameBytes>, kRelicCount> relic_names{};
-    std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
-};
-
-struct CookedContentBundle
-{
-    SimulationRules simulation_rules{};
-    PresentationCatalog presentation{};
-};
-
 [[nodiscard]] std::uint64_t SimulationRulesSchemaHash() noexcept;
-[[nodiscard]] Result LoadCookedContent(const std::filesystem::path &path,
-                                       CookedContentBundle &content,
-                                       std::uint64_t *content_hash = nullptr);
+[[nodiscard]] std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept;
+[[nodiscard]] Result LoadSimulationRules(const std::filesystem::path &path,
+                                         SimulationRules &rules,
+                                         std::uint64_t *content_hash = nullptr);
 
 } // namespace hs

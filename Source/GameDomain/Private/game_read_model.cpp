@@ -53,9 +53,14 @@ GameReadModel GameReadModelStorage::View() const noexcept
             effective_attack_speed,
             effective_move_speed,
             effective_magnet_radius,
-            collection_skill_index,
-            character_skill_index,
-            character_slot_source};
+            arena_half_extent,
+            charge_range,
+            skills,
+            waves,
+            direct_damage,
+            derived_damage,
+            damage_over_time,
+            upgrade_damage};
 }
 
 } // namespace hs

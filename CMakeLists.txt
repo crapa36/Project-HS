@@ -143,11 +143,12 @@ hs_configure_target(hs_game_domain)
 
 add_library(
     hs_presentation STATIC
+    Source/Presentation/Private/presentation_catalog.cpp
     Source/Presentation/Private/projector.cpp
     Source/Presentation/Private/snapshot_projector.cpp
 )
 target_include_directories(hs_presentation PUBLIC Source/Presentation/Public)
-target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain hs_game_rules)
+target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain)
 hs_configure_target(hs_presentation)
 
 add_library(
@@ -363,7 +364,7 @@ set_target_properties(
 add_executable(hs_content Source/Apps/Content/main.cpp)
 target_link_libraries(
     hs_content
-    PRIVATE hs_core hs_game_rules nlohmann_json::nlohmann_json
+    PRIVATE hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json
             DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
 )
 add_dependencies(hs_content hs_shaders)
@@ -418,7 +419,8 @@ add_custom_command(
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_3.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/simulation_rules.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
     VERBATIM
@@ -452,7 +454,7 @@ endif()
 if(HS_BUILD_TESTS)
     enable_testing()
     add_executable(hs_tests Tests/foundation_tests.cpp)
-    target_link_libraries(hs_tests PRIVATE hs_core hs_jobs hs_gameplay)
+    target_link_libraries(hs_tests PRIVATE hs_core hs_jobs)
     hs_configure_target(hs_tests)
 
     add_test(NAME foundation.core COMMAND hs_tests foundation)
@@ -468,6 +470,10 @@ if(HS_BUILD_TESTS)
     target_include_directories(hs_rule_tests PRIVATE Source/Gameplay/Private)
     hs_configure_target(hs_rule_tests)
     add_test(NAME simulation.rules COMMAND hs_rule_tests)
+    add_executable(hs_simulation_tests Tests/simulation_tests.cpp)
+    target_link_libraries(hs_simulation_tests PRIVATE hs_core hs_game_rules hs_gameplay)
+    hs_configure_target(hs_simulation_tests)
+    add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
     add_test(NAME tools.content-status COMMAND hs_tools status)
@@ -603,7 +609,8 @@ if(HS_BUILD_CONTENT_TOOLS)
 install(
     FILES
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/game_data.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/simulation_rules.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"

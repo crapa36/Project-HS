@@ -62,6 +62,7 @@ struct EnemyView
     Float2 position{};
     Float2 velocity{};
     Float2 locked_aim{};
+    float warning_extent{};
     Tick spawned_tick{};
     std::int32_t health{};
     std::int32_t max_health{};
@@ -124,12 +125,29 @@ struct BossActionView
     std::uint64_t cast_id{};
 };
 
+struct SkillRuntimeView
+{
+    Tick effective_cooldown{};
+    std::int32_t displayed_damage{};
+    float effective_range{};
+    float area_radius{};
+    Tick duration{};
+    std::uint8_t projectile_count{};
+    std::uint8_t pierce_count{};
+};
+
+struct WaveView
+{
+    Tick start{};
+    Tick duration{};
+};
+
 struct GameReadModel
 {
     Tick tick{};
     GameplayChecksum checksum{};
     std::uint64_t seed{};
-    SimulationObservation session{};
+    SessionProbe session{};
     PlayerView player{};
     std::span<const EnemyView> enemies;
     std::span<const ProjectileView> projectiles;
@@ -140,9 +158,15 @@ struct GameReadModel
     float effective_attack_speed{};
     float effective_move_speed{};
     float effective_magnet_radius{};
-    std::uint8_t collection_skill_index{};
-    std::uint8_t character_skill_index{};
-    std::uint8_t character_slot_source{0xFF};
+    float arena_half_extent{};
+    float charge_range{};
+    std::array<SkillRuntimeView, kCombatSkillCount> skills{};
+    std::array<WaveView, 5> waves{};
+    std::uint64_t direct_damage{};
+    std::uint64_t derived_damage{};
+    std::uint64_t damage_over_time{};
+    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
+        upgrade_damage{};
 };
 
 class GameReadModelStorage
@@ -165,15 +189,21 @@ class GameReadModelStorage
     Tick tick{};
     GameplayChecksum checksum{};
     std::uint64_t seed{};
-    SimulationObservation session{};
+    SessionProbe session{};
     PlayerView player{};
     float effective_attack{};
     float effective_attack_speed{};
     float effective_move_speed{};
     float effective_magnet_radius{};
-    std::uint8_t collection_skill_index{};
-    std::uint8_t character_skill_index{};
-    std::uint8_t character_slot_source{0xFF};
+    float arena_half_extent{};
+    float charge_range{};
+    std::array<SkillRuntimeView, kCombatSkillCount> skills{};
+    std::array<WaveView, 5> waves{};
+    std::uint64_t direct_damage{};
+    std::uint64_t derived_damage{};
+    std::uint64_t damage_over_time{};
+    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
+        upgrade_damage{};
 
   private:
     std::vector<EnemyView> enemies_;

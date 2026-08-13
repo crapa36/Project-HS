@@ -75,18 +75,26 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                 "Cannot resolve the executable directory.")};
     }
-    CookedContentBundle content;
+    SimulationRules simulation_rules;
+    PresentationCatalog presentation_catalog;
     std::uint64_t content_hash{};
-    const auto cooked_game_data_path =
-        executable_directory / "Cooked" / "game_data.hsbin";
+    const auto cooked_simulation_rules_path =
+        executable_directory / "Cooked" / "simulation_rules.hsbin";
+    const auto cooked_presentation_path =
+        executable_directory / "Cooked" / "presentation_catalog.hsbin";
     const auto cooked_particle_effects_path =
         executable_directory / "Cooked" / "particle_effects.hsbin";
-    if (auto loaded = LoadCookedContent(
-            cooked_game_data_path, content, &content_hash);
+    if (auto loaded = LoadSimulationRules(cooked_simulation_rules_path,
+                                          simulation_rules, &content_hash);
+        !loaded)
+        return {loaded};
+    if (auto loaded = LoadPresentationCatalog(cooked_presentation_path,
+                                              presentation_catalog, &content_hash);
         !loaded)
     {
         return {loaded};
     }
+    auto simulation_rules_hash = SimulationRulesHash(simulation_rules);
     VfxCatalog vfx_catalog;
     if (auto loaded = VfxCatalog::Load(
             cooked_particle_effects_path, vfx_catalog);
@@ -99,7 +107,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (auto loaded = LoadPlaytestReplay(config.replay_directory, replay); !loaded)
             return {loaded};
         if (!config.replay_compare &&
-            replay.header.simulation_rules_hash != content_hash)
+            replay.header.simulation_rules_hash != simulation_rules_hash)
             return {Result::Failure(ErrorCode::InvalidState, "hs_playtest",
                                     "Replay content hash differs from the current content.")};
     }
@@ -108,7 +116,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     if (config.record_playtest)
     {
         if (auto started = playtest.Start(
-                {config.playtest_output_directory, effective_seed, content_hash}); !started)
+                {config.playtest_output_directory, effective_seed,
+                 simulation_rules_hash, content_hash}); !started)
             return {started};
     }
     SaveStore save_store(config.smoke
@@ -139,8 +148,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         SessionProbe session;
         session.phase = static_cast<SessionPhase>(
             channels.session_phase.load(std::memory_order_acquire));
-        session.menu_page = channels.menu_page.load(std::memory_order_acquire);
-        const auto interaction = ResolveUiInteraction(session, settings, cursor);
+        PresentationUiState ui{
+            channels.ui_page.load(std::memory_order_acquire),
+            channels.collection_skill.load(std::memory_order_acquire),
+            channels.character_skill.load(std::memory_order_acquire),
+            channels.loadout_source.load(std::memory_order_acquire)};
+        const auto interaction = ResolveUiInteraction(session, ui, settings, cursor);
+        channels.ui_page.store(ui.page, std::memory_order_release);
+        channels.collection_skill.store(ui.collection_skill, std::memory_order_release);
+        channels.character_skill.store(ui.character_skill, std::memory_order_release);
+        channels.loadout_source.store(ui.loadout_source, std::memory_order_release);
         if (interaction.gameplay) (void)channels.ui_actions.TryPush(*interaction.gameplay);
         if (interaction.runtime) (void)channels.ui_commands.TryPush(*interaction.runtime);
     });
@@ -597,7 +614,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         SettingsData projection_settings = settings;
         if (auto initialized = simulation.Initialize(
                 {effective_seed, config.smoke, !config.smoke},
-                content.simulation_rules);
+                simulation_rules);
             !initialized)
         {
             set_failure(initialized);
@@ -716,6 +733,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 while (action_count < action_storage.size() &&
                        channels.action_edges.TryPop(action))
                 {
+                    const auto current_phase = static_cast<SessionPhase>(
+                        channels.session_phase.load(std::memory_order_acquire));
+                    const auto ui_page = channels.ui_page.load(std::memory_order_acquire);
+                    if (action.kind == EdgeKind::Pressed &&
+                        action.action == GameAction::Pause &&
+                        ((current_phase == SessionPhase::Paused && ui_page == 6) ||
+                         (current_phase == SessionPhase::MainMenu && ui_page != 0)))
+                    {
+                        channels.ui_page.store(0, std::memory_order_release);
+                        continue;
+                    }
+                    if (action.kind == EdgeKind::Pressed &&
+                        action.action == GameAction::CharacterPage)
+                    {
+                        channels.ui_page.store(
+                            current_phase == SessionPhase::Playing ? 3 : 0,
+                            std::memory_order_release);
+                        channels.loadout_source.store(0xFF, std::memory_order_release);
+                    }
                     action_storage[action_count++] = action;
                 }
 
@@ -801,13 +837,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 if (playtest.Active())
                 {
+                    const auto diagnostics = simulation.GetDiagnostics();
+                    SimulationObservation recorded_probe;
+                    static_cast<SessionProbe &>(recorded_probe) = probe;
+                    recorded_probe.balance = diagnostics.balance;
                     if (auto recorded = playtest.Record(
-                            input, tick.checksum, probe,
+                            input, tick.checksum, recorded_probe,
                             [&] {
                                 std::vector<PresentationEvent> events;
-                                events.reserve(simulation.PendingDomainSignals().size());
+                                events.reserve(simulation.PendingDomainSignals().size() * 2);
                                 for (const auto &signal : simulation.PendingDomainSignals())
-                                    events.push_back(ProjectPresentation(signal));
+                                {
+                                    std::array<PresentationEvent, 2> projected{};
+                                    const auto count = ProjectPresentation(signal, projected);
+                                    events.insert(events.end(), projected.begin(),
+                                                  projected.begin() + count);
+                                }
                                 return events;
                             }()); !recorded)
                     {
@@ -822,7 +867,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                std::memory_order_release);
                 channels.session_phase.store(static_cast<std::uint8_t>(tick.phase),
                                              std::memory_order_release);
-                channels.menu_page.store(probe.menu_page, std::memory_order_release);
                 if ((tick.phase == SessionPhase::Victory ||
                      tick.phase == SessionPhase::Defeat) &&
                     tick.phase != previous_phase)
@@ -845,23 +889,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
                 for (const auto &signal : simulation.PendingDomainSignals())
                 {
-                    const auto presentation = ProjectPresentation(signal);
-                    if (!channels.presentation_events.TryPush(presentation))
-                    {
-                        channels.dropped_presentation_events.fetch_add(
-                            1, std::memory_order_relaxed);
-                    }
+                    std::array<PresentationEvent, 2> projected{};
+                    const auto count = ProjectPresentation(signal, projected);
+                    for (const auto &presentation :
+                         std::span(projected).first(count))
+                        if (!channels.presentation_events.TryPush(presentation))
+                            channels.dropped_presentation_events.fetch_add(
+                                1, std::memory_order_relaxed);
                 }
                 simulation.ClearDomainSignals();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
-                    simulation.WriteReadModel(read_model);
                     slot->storage->camera.distance = 28.0f *
                         static_cast<float>(channels.camera_zoom_percent.load(
                             std::memory_order_acquire)) / 100.0f;
-                    if (ProjectRenderSnapshot(read_model.View(),
-                                              content.simulation_rules,
-                                              content.presentation,
+                    if (ProjectRenderSnapshot(read_model.View(), presentation_catalog,
+                                              {channels.ui_page.load(std::memory_order_acquire),
+                                               channels.collection_skill.load(std::memory_order_acquire),
+                                               channels.character_skill.load(std::memory_order_acquire),
+                                               channels.loadout_source.load(std::memory_order_acquire)},
                                               projection_settings,
                                               *slot->storage,
                                               channels.pending_rebind_slot.load(
@@ -920,7 +966,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #if defined(HS_DEVELOPMENT_TOOLS)
     std::error_code hot_reload_error;
     auto observed_cooked_write =
-        std::filesystem::last_write_time(cooked_game_data_path, hot_reload_error);
+        std::filesystem::last_write_time(cooked_simulation_rules_path, hot_reload_error);
     auto next_hot_reload_check = std::chrono::steady_clock::now();
 #endif
 
@@ -938,7 +984,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     std::chrono::milliseconds(250);
             hot_reload_error.clear();
             const auto write =
-                std::filesystem::last_write_time(cooked_game_data_path, hot_reload_error);
+                std::filesystem::last_write_time(cooked_simulation_rules_path, hot_reload_error);
             if (!hot_reload_error && write != observed_cooked_write)
             {
                 observed_cooked_write = write;
@@ -951,23 +997,23 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 else
                 {
-                    CookedContentBundle replacement;
+                    SimulationRules replacement;
                     std::uint64_t replacement_hash{};
-                    if (auto loaded = LoadCookedContent(cooked_game_data_path,
-                                                        replacement,
-                                                        &replacement_hash);
+                    if (auto loaded = LoadSimulationRules(cooked_simulation_rules_path,
+                                                          replacement,
+                                                          &replacement_hash);
                         !loaded)
                     {
                         log << "rejected validation " << loaded.Message() << '\n';
                     }
-                    else if (!channels.gameplay_data_updates.TryPush(
-                                 replacement.simulation_rules))
+                    else if (!channels.gameplay_data_updates.TryPush(replacement))
                     {
                         log << "rejected queue_full\n";
                     }
                     else
                     {
                         content_hash = replacement_hash;
+                        simulation_rules_hash = SimulationRulesHash(replacement);
                         log << "applied content_hash=" << replacement_hash << '\n';
                     }
                 }

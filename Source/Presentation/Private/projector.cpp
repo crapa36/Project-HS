@@ -4,6 +4,7 @@
 #include <array>
 #include <algorithm>
 #include <ranges>
+#include <utility>
 #include <cmath>
 #include <string_view>
 
@@ -45,30 +46,32 @@ constexpr std::array<std::string_view, 64> kVfxAssets{
     "particle.status.bleed_apply", "particle.status.bleed_tick",
     "particle.status.burn_apply", "particle.status.burn_tick",
     "particle.status.slow_apply", "particle.status.slow_area"};
-static_assert(static_cast<std::size_t>(DomainSignalKind::BossAnnouncement) ==
+static_assert(static_cast<std::size_t>(DomainSignalKind::BossSpawnWarning) ==
               kVfxAssets.size());
 
 } // namespace
 
-PresentationEvent ProjectPresentation(const DomainSignal &signal) noexcept
+std::size_t ProjectPresentation(const DomainSignal &signal,
+                                std::span<PresentationEvent> output) noexcept
 {
-    PresentationEvent event;
+    if (output.empty()) return 0;
+    auto &event = output.front();
     event.sequence = signal.sequence;
     event.tick = signal.tick;
-    if (signal.kind == DomainSignalKind::BossAnnouncement)
+    if (signal.kind == DomainSignalKind::BossSpawnWarning)
     {
         event.kind = PresentationKind::Ui;
         event.asset = {0x626F73735F737061ull};
-        return event;
+        return 1;
     }
-    if (signal.kind == DomainSignalKind::AbilityUsedAudio ||
-        signal.kind == DomainSignalKind::ArrowReleasedAudio)
+    if (signal.kind == DomainSignalKind::AbilityUsed ||
+        signal.kind == DomainSignalKind::ArrowReleased)
     {
         event.kind = PresentationKind::Audio;
-        event.asset = {signal.kind == DomainSignalKind::AbilityUsedAudio
+        event.asset = {signal.kind == DomainSignalKind::AbilityUsed
                            ? 0x736B696C6C5F7573ull
                            : 0x6172726F775F7368ull};
-        return event;
+        return 1;
     }
     event.kind = PresentationKind::Vfx;
     event.position = signal.position;
@@ -78,10 +81,11 @@ PresentationEvent ProjectPresentation(const DomainSignal &signal) noexcept
     event.parameters = EncodeVfxParameters(
         {signal.direction, signal.scale, signal.target,
          has_target ? static_cast<std::uint32_t>(VfxEventFlag::HasTarget) : 0u});
-    return event;
+    return 1;
 }
 
 UiInteraction ResolveUiInteraction(const SessionProbe &session,
+                                   PresentationUiState &ui,
                                    const SettingsData &settings,
                                    Float2 cursor_normalized)
 {
@@ -91,15 +95,16 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
         return cursor.x >= x && cursor.x <= x + width &&
                cursor.y >= y && cursor.y <= y + height;
     };
-    const auto action = [](UiActionKind kind, std::uint8_t value = 0) {
-        return UiInteraction{UiAction{kind, value}, std::nullopt};
+    const auto action = [](UiActionKind kind, std::uint8_t value = 0,
+                           std::uint8_t secondary = 0) {
+        return UiInteraction{UiAction{kind, value, secondary}, std::nullopt};
     };
     const auto command = [](UiCommandKind kind, std::uint32_t value) {
         return UiInteraction{std::nullopt, UiCommand{kind, value}};
     };
     const auto &probe = session;
 
-    if (probe.menu_page == 2 || probe.menu_page == 6)
+    if (ui.page == 2 || ui.page == 6)
     {
         if (clicked(500, 250, 420, 56))
             return command(UiCommandKind::SetBorderless, !settings.borderless);
@@ -144,25 +149,30 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
             if (clicked(1000, 550.0f + slot * 70.0f, 420, 56))
                 return command(UiCommandKind::BeginSkillRebind, slot);
         if (clicked(760, 870, 400, 64))
-            return {UiAction{UiActionKind::Back, 0},
-                    UiCommand{UiCommandKind::CancelSkillRebind, 0}};
+        {
+            ui.page = 0;
+            return {std::nullopt, UiCommand{UiCommandKind::CancelSkillRebind, 0}};
+        }
         return {};
     }
 
     if (probe.phase == SessionPhase::MainMenu)
     {
-        if (probe.menu_page == 1)
+        if (ui.page == 1)
         {
             for (std::uint8_t skill = 0; skill < kCombatSkillCount; ++skill)
                 if (clicked(210, 150.0f + skill * 70.0f, 360, 56))
-                    return action(UiActionKind::SelectCollectionSkill, skill);
-            if (clicked(210, 900, 360, 56)) return action(UiActionKind::Back);
+                {
+                    ui.collection_skill = skill;
+                    return {};
+                }
+            if (clicked(210, 900, 360, 56)) { ui.page = 0; return {}; }
         }
         else
         {
             if (clicked(760, 270, 400, 92)) return action(UiActionKind::StartSession);
-            if (clicked(760, 420, 400, 92)) return action(UiActionKind::OpenCollection);
-            if (clicked(760, 570, 400, 92)) return action(UiActionKind::OpenSettings);
+            if (clicked(760, 420, 400, 92)) { ui.page = 1; return {}; }
+            if (clicked(760, 570, 400, 92)) { ui.page = 2; return {}; }
             if (clicked(760, 720, 400, 92)) return action(UiActionKind::Quit);
         }
     }
@@ -181,27 +191,48 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
                         310.0f + (index / 3) * 260.0f, 340, 180))
                 return action(UiActionKind::AssignStat, index);
     }
-    if (probe.phase == SessionPhase::Paused && probe.menu_page >= 3 &&
-        probe.menu_page <= 5)
+    if (probe.phase == SessionPhase::Paused && ui.page >= 3 && ui.page <= 5)
     {
-        if (clicked(350, 140, 280, 58)) return action(UiActionKind::OpenCharacterStats);
-        if (clicked(650, 140, 280, 58)) return action(UiActionKind::OpenCharacterSkills);
-        if (clicked(950, 140, 280, 58)) return action(UiActionKind::OpenCharacterRelics);
-        if (clicked(1520, 140, 120, 58)) return action(UiActionKind::CloseCharacter);
-        if (probe.menu_page == 4)
+        if (clicked(350, 140, 280, 58)) { ui.page = 3; return {}; }
+        if (clicked(650, 140, 280, 58)) { ui.page = 4; return {}; }
+        if (clicked(950, 140, 280, 58)) { ui.page = 5; return {}; }
+        if (clicked(1520, 140, 120, 58))
+        {
+            ui = {};
+            return action(UiActionKind::Resume);
+        }
+        if (ui.page == 4)
         {
             for (std::uint8_t slot = 0; slot < 4; ++slot)
                 if (clicked(780.0f + slot * 195.0f, 225, 180, 54))
-                    return action(UiActionKind::SelectLoadoutSlot, slot);
+                {
+                    if (ui.loadout_source == 0xFF)
+                    {
+                        if (probe.skill_loadout[slot] != SkillKind::Count)
+                            ui.loadout_source = slot;
+                        return {};
+                    }
+                    if (ui.loadout_source == slot)
+                    {
+                        ui.loadout_source = 0xFF;
+                        return {};
+                    }
+                    const auto source = std::exchange(ui.loadout_source,
+                                                      std::uint8_t{0xFF});
+                    return action(UiActionKind::SwapLoadoutSlots, source, slot);
+                }
             for (std::uint8_t skill = 0; skill < kCombatSkillCount; ++skill)
                 if (clicked(350, 240.0f + skill * 78.0f, 360, 64))
-                    return action(UiActionKind::SelectCharacterSkill, skill);
+                {
+                    if (probe.skill_levels[skill] > 0) ui.character_skill = skill;
+                    return {};
+                }
         }
     }
-    if (probe.phase == SessionPhase::Paused && probe.menu_page == 0)
+    if (probe.phase == SessionPhase::Paused && ui.page == 0)
     {
         if (clicked(760, 420, 400, 72)) return action(UiActionKind::Resume);
-        if (clicked(760, 520, 400, 72)) return action(UiActionKind::OpenPauseSettings);
+        if (clicked(760, 520, 400, 72)) { ui.page = 6; return {}; }
         if (clicked(760, 620, 400, 72)) return action(UiActionKind::Quit);
     }
     if (probe.phase == SessionPhase::Victory || probe.phase == SessionPhase::Defeat)

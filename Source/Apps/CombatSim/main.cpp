@@ -43,8 +43,7 @@ bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &sn
     static const hs::SettingsData settings;
     hs::GameReadModelStorage model;
     simulation.WriteReadModel(model);
-    return hs::ProjectRenderSnapshot(model.View(), simulation.Rules(), presentation,
-                                     settings, snapshot);
+    return hs::ProjectRenderSnapshot(model.View(), presentation, {}, settings, snapshot);
 }
 constexpr std::array<std::string_view, hs::kRelicCount> kRelicIds{
     "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge",
@@ -1070,12 +1069,11 @@ int main(int argc, char **argv)
                 "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE) --output=DIR");
 
         const auto executable = std::filesystem::absolute(argv[0]);
-        hs::CookedContentBundle content;
-        if (auto loaded = hs::LoadCookedContent(
-                executable.parent_path() / "Cooked" / "game_data.hsbin", content);
+        hs::SimulationRules data;
+        if (auto loaded = hs::LoadSimulationRules(
+                executable.parent_path() / "Cooked" / "simulation_rules.hsbin", data);
             !loaded)
             throw std::runtime_error(std::string(loaded.Message()));
-        const auto &data = content.simulation_rules;
         std::filesystem::create_directories(output_directory);
 
         if (!progression_suite_path.empty())

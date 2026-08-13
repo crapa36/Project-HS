@@ -43,17 +43,15 @@ struct HeldInputState
 
 enum class UiActionKind : std::uint8_t
 {
-    StartSession, OpenCollection, OpenSettings, Quit, Back,
-    SelectCollectionSkill, Reroll, SelectCard, AssignStat,
-    OpenCharacterStats, OpenCharacterSkills, OpenCharacterRelics,
-    CloseCharacter, SelectLoadoutSlot, SelectCharacterSkill,
-    Resume, OpenPauseSettings, ReturnToMainMenu,
+    StartSession, Quit, Reroll, SelectCard, AssignStat,
+    Resume, ReturnToMainMenu, SwapLoadoutSlots,
 };
 
 struct UiAction
 {
     UiActionKind kind{};
     std::uint8_t value{};
+    std::uint8_t secondary{};
 
     bool operator==(const UiAction &) const = default;
 };

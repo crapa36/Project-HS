@@ -15,7 +15,7 @@ namespace hs
 
 struct ReplayHeader
 {
-    std::uint32_t format_version{3};
+    std::uint32_t format_version{4};
     std::uint32_t simulation_version{kSimulationVersion};
     std::uint32_t gameplay_hash_version{kGameplayHashVersion};
     std::uint64_t simulation_rules_hash{};
@@ -28,7 +28,8 @@ struct PlaytestRecorderConfig
 {
     std::filesystem::path output_directory;
     std::uint64_t seed{};
-    std::uint64_t content_hash{};
+    std::uint64_t simulation_rules_hash{};
+    std::uint64_t content_source_hash{};
 };
 
 struct PlaytestReplayFrame

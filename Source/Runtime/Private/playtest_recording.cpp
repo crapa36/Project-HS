@@ -104,7 +104,8 @@ Json InputJson(const InputFrame &input, GameplayChecksum checksum)
     Json ui_actions = Json::array();
     for (const auto &action : input.ui_actions)
         ui_actions.push_back({{"kind", static_cast<std::uint8_t>(action.kind)},
-                              {"value", action.value}});
+                              {"value", action.value},
+                              {"secondary", action.secondary}});
     return {{"target_tick", input.target_tick},
             {"move_target", {input.held.move_target_world.x,
                               input.held.move_target_world.y,
@@ -197,10 +198,11 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
                                "Cannot create playtest trace files.");
 
     std::ofstream(impl_->directory / "metadata.json", std::ios::trunc)
-        << Json{{"format_version", 3},
+        << Json{{"format_version", 4},
                 {"simulation_version", kSimulationVersion},
                 {"gameplay_hash_version", kGameplayHashVersion},
-                {"simulation_rules_hash", config.content_hash},
+                {"simulation_rules_hash", config.simulation_rules_hash},
+                {"content_source_hash", config.content_source_hash},
                 {"tick_rate", 60},
                 {"determinism_profile", kDeterminismProfile},
                 {"seed", config.seed}}
@@ -500,7 +502,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         probe.balance.skill_boss_damage.begin(),
         probe.balance.skill_boss_damage.end(), std::uint64_t{});
     Json output{{"schema_version", 5}, {"seed", impl_->config.seed},
-                {"content_hash", impl_->config.content_hash},
+                {"content_hash", impl_->config.content_source_hash},
                 {"execution_valid", execution_valid}, {"outcome", outcome},
                 {"tick", probe.tick}, {"growth_tick", probe.growth_ticks},
                 {"boss_fight_tick", probe.boss_fight_ticks}, {"level", probe.level},
@@ -629,7 +631,7 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
         std::ifstream metadata_stream(directory / "metadata.json");
         Json metadata;
         metadata_stream >> metadata;
-        if (!metadata_stream || metadata.value("format_version", 0) != 3)
+        if (!metadata_stream || metadata.value("format_version", 0) != 4)
             return Invalid("Playtest metadata is missing or unsupported.");
         PlaytestReplay parsed;
         parsed.header.format_version = metadata.at("format_version").get<std::uint32_t>();
@@ -683,11 +685,12 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             for (const auto &action_json : json.at("ui_actions"))
             {
                 const auto kind = action_json.at("kind").get<std::uint8_t>();
-                if (kind > static_cast<std::uint8_t>(UiActionKind::ReturnToMainMenu))
+                if (kind > static_cast<std::uint8_t>(UiActionKind::SwapLoadoutSlots))
                     return Invalid("Playtest input contains an invalid UI action.");
                 frame.ui_actions.push_back(
                     {static_cast<UiActionKind>(kind),
-                     action_json.at("value").get<std::uint8_t>()});
+                     action_json.at("value").get<std::uint8_t>(),
+                     action_json.value("secondary", std::uint8_t{})});
             }
             parsed.frames.push_back(std::move(frame));
         }

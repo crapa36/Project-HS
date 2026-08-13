@@ -73,9 +73,9 @@ enum class DomainSignalKind : std::uint8_t
     BurnTicked,
     SlowApplied,
     SlowArea,
-    BossAnnouncement,
-    AbilityUsedAudio,
-    ArrowReleasedAudio,
+    BossSpawnWarning,
+    AbilityUsed,
+    ArrowReleased,
     Count,
 };
 

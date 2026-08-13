@@ -1,6 +1,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/game_rules/simulation_rules.hpp>
+#include <hs/presentation/presentation_catalog.hpp>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -908,9 +909,15 @@ hs::Tick ToTicks(double seconds, std::string_view file, std::string_view path)
     return CheckedInteger<hs::Tick>(std::llround(seconds * 60.0), file, path);
 }
 
-hs::CookedContentBundle BuildGameData(const ContentSources &sources)
+struct BuiltGameData
 {
-    hs::CookedContentBundle content{};
+    hs::SimulationRules simulation_rules{};
+    hs::PresentationCatalog presentation{};
+};
+
+BuiltGameData BuildGameData(const ContentSources &sources)
+{
+    BuiltGameData content{};
     auto &data = content.simulation_rules;
     auto &presentation = content.presentation;
     const auto defaults = hs::SimulationRules::Defaults();
@@ -933,6 +940,28 @@ hs::CookedContentBundle BuildGameData(const ContentSources &sources)
         RequireNumber(stats, "stats", "$/entries/0/base_values", "movement_speed_mps"));
     data.player_magnet_radius = static_cast<float>(
         RequireNumber(stats, "stats", "$/entries/0/base_values", "magnet_radius_m"));
+
+    const auto &statuses = sources.documents.at("stats")["entries"][0]["statuses"];
+    data.status_tick_interval = ToTicks(
+        ParameterNumber(statuses[1], "stats", "$/entries/0/statuses/1", "tick_interval"),
+        "stats", "$/entries/0/statuses/1/parameters/tick_interval");
+    data.bleed_duration = ToTicks(
+        ParameterNumber(statuses[1], "stats", "$/entries/0/statuses/1", "duration"),
+        "stats", "$/entries/0/statuses/1/parameters/duration");
+    data.bleed_tick_coefficient = static_cast<float>(ParameterNumber(
+        statuses[1], "stats", "$/entries/0/statuses/1",
+        "attack_power_multiplier_per_tick"));
+    data.burn_duration = ToTicks(
+        ParameterNumber(statuses[2], "stats", "$/entries/0/statuses/2", "duration"),
+        "stats", "$/entries/0/statuses/2/parameters/duration");
+    data.burn_tick_coefficient = static_cast<float>(ParameterNumber(
+        statuses[2], "stats", "$/entries/0/statuses/2",
+        "attack_power_multiplier_per_tick"));
+    const auto burn_tick_interval = ToTicks(
+        ParameterNumber(statuses[2], "stats", "$/entries/0/statuses/2", "tick_interval"),
+        "stats", "$/entries/0/statuses/2/parameters/tick_interval");
+    if (burn_tick_interval != data.status_tick_interval)
+        Fail("stats", "$/entries/0/statuses", "bleed and burn tick intervals must match");
 
     const auto &experience = sources.documents.at("level")["entries"][0]["experience"];
     data.utility_pickup_base_chance = static_cast<float>(RequireNumber(
@@ -1286,14 +1315,15 @@ bool AtomicWrite(const std::filesystem::path &path, std::span<const std::byte> b
     return true;
 }
 
-bool WriteCookedGameData(const std::filesystem::path &path,
-                         const hs::CookedContentBundle &data,
-                         std::uint64_t source_hash, std::string &error_message)
+template <typename T>
+bool WriteCookedTable(const std::filesystem::path &path, const T &data,
+                      std::uint64_t schema_hash, std::uint64_t source_hash,
+                      std::string &error_message)
 {
-    static_assert(std::is_trivially_copyable_v<hs::CookedContentBundle>);
+    static_assert(std::is_trivially_copyable_v<T>);
     const auto payload = std::as_bytes(std::span(&data, 1));
     hs::CookedHeader header;
-    header.schema_hash = hs::SimulationRulesSchemaHash();
+    header.schema_hash = schema_hash;
     header.source_hash = source_hash;
     header.table_count = 1;
     header.payload_size = static_cast<std::uint32_t>(payload.size());
@@ -2387,10 +2417,17 @@ int main(int argc, char **argv)
         }
 
         std::string error_message;
-        if (!WriteCookedGameData(output / "game_data.hsbin", data, gameplay_hash,
-                                 error_message))
+        if (!WriteCookedTable(output / "simulation_rules.hsbin", data.simulation_rules,
+                              hs::SimulationRulesSchemaHash(), gameplay_hash,
+                              error_message))
         {
-            throw std::runtime_error("game_data.hsbin: " + error_message);
+            throw std::runtime_error("simulation_rules.hsbin: " + error_message);
+        }
+        if (!WriteCookedTable(output / "presentation_catalog.hsbin",
+                              data.presentation, hs::PresentationCatalogSchemaHash(),
+                              source_hash, error_message))
+        {
+            throw std::runtime_error("presentation_catalog.hsbin: " + error_message);
         }
         std::vector<ParticleSpriteSource> particle_sprites;
         if (!WriteCookedParticleEffects(output / "particle_effects.hsbin",
@@ -2402,16 +2439,16 @@ int main(int argc, char **argv)
         if (!WriteVfxMaskArray(output / "vfx_masks.dds", particle_sprites,
                                error_message))
             throw std::runtime_error("vfx_masks.dds: " + error_message);
-        hs::CookedContentBundle loaded{};
+        hs::SimulationRules loaded_rules{};
+        hs::PresentationCatalog loaded_presentation{};
         std::uint64_t loaded_hash{};
-        if (const auto result =
-                hs::LoadCookedContent(output / "game_data.hsbin", loaded, &loaded_hash);
+        if (const auto result = hs::LoadSimulationRules(
+                output / "simulation_rules.hsbin", loaded_rules, &loaded_hash);
             !result)
         {
-            throw std::runtime_error("game_data.hsbin self-check failed: " +
+            throw std::runtime_error("simulation_rules.hsbin self-check failed: " +
                                      std::string(result.Message()));
         }
-        const auto &loaded_rules = loaded.simulation_rules;
         const auto &rules = data.simulation_rules;
         if (loaded_hash != gameplay_hash ||
             loaded_rules.player_health != rules.player_health ||
@@ -2420,10 +2457,16 @@ int main(int argc, char **argv)
             loaded_rules.relics.bleed_burn_explosion.radius !=
                 rules.relics.bleed_burn_explosion.radius ||
             loaded_rules.relics.damage_knockback.cooldown_ticks !=
-                rules.relics.damage_knockback.cooldown_ticks ||
-            loaded.presentation.relic_rules[3] != data.presentation.relic_rules[3])
+                rules.relics.damage_knockback.cooldown_ticks)
         {
-            throw std::runtime_error("game_data.hsbin self-check mismatch");
+            throw std::runtime_error("simulation_rules.hsbin self-check mismatch");
+        }
+        if (const auto result = hs::LoadPresentationCatalog(
+                output / "presentation_catalog.hsbin", loaded_presentation);
+            !result || loaded_presentation.relic_rules[3] !=
+                           data.presentation.relic_rules[3])
+        {
+            throw std::runtime_error("presentation_catalog.hsbin self-check mismatch");
         }
 
         CharacterCookResult character;
@@ -2455,7 +2498,8 @@ int main(int argc, char **argv)
 
         std::ofstream manifest(output / "manifest.txt", std::ios::trunc);
         manifest << "fbx_sdk=2020.3.7-vs2022\n"
-                 << "game_data=game_data.hsbin\n"
+                 << "simulation_rules=simulation_rules.hsbin\n"
+                 << "presentation_catalog=presentation_catalog.hsbin\n"
                  << "particle_effects=particle_effects.hsbin\n"
                  << "vfx_masks=vfx_masks.dds\n"
                  << "source_hash=" << source_hash << '\n'

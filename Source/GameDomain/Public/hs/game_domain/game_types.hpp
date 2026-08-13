@@ -17,7 +17,7 @@ inline constexpr std::size_t kStatCount = 6;
 inline constexpr std::size_t kEnemyArchetypeCount = 6;
 inline constexpr std::size_t kPickupKindCount = 4;
 inline constexpr std::uint32_t kSimulationVersion = 2;
-inline constexpr std::uint32_t kGameplayHashVersion = 2;
+inline constexpr std::uint32_t kGameplayHashVersion = 3;
 inline constexpr std::uint32_t kDeterminismProfile = 1;
 enum class UpgradeEffectMetric : std::uint8_t
 {
@@ -249,10 +249,14 @@ struct SessionProbe
     std::uint8_t card_count{};
     bool final_boss_spawned{};
     bool final_boss_phase_two{};
-    std::uint8_t menu_page{};
 };
 
 struct SimulationObservation : SessionProbe
+{
+    BalanceTelemetry balance{};
+};
+
+struct SimulationDiagnostics
 {
     BalanceTelemetry balance{};
 };

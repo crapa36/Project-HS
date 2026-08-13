@@ -98,12 +98,6 @@ struct ActiveRuleTable
         return hooks[static_cast<std::size_t>(hook)];
     }
 
-    [[nodiscard]] bool Contains(RuleHook hook, RelicKind relic) const noexcept
-    {
-        return std::ranges::any_of(For(hook), [relic](const ActiveRule &rule) {
-            return rule.id == relic;
-        });
-    }
 };
 
 } // namespace hs::gameplay_detail
