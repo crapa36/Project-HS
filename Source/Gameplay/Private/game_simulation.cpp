@@ -835,8 +835,6 @@ struct GameSimulation::SimulationWorld
         pickup.guaranteed_boss_chest = guaranteed;
         pickups.push_back(pickup);
         ++balance.pickup_drops[static_cast<std::size_t>(kind)];
-        if (kind == PickupKind::Experience)
-            EmitVfx(DomainSignalKind::ExperienceSpawned, position);
     }
 
     ProjectileActor *FireProjectile(SkillKind skill, Float2 position, Float2 direction,
