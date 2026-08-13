@@ -31,18 +31,6 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(taskflow)
 
-set(FLECS_SHARED OFF CACHE BOOL "" FORCE)
-set(FLECS_STATIC ON CACHE BOOL "" FORCE)
-set(FLECS_PIC OFF CACHE BOOL "" FORCE)
-set(FLECS_TESTS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    flecs
-    GIT_REPOSITORY https://github.com/SanderMertens/flecs.git
-    GIT_TAG fb55f3c25660425cfe1bc4cf5e6bff8b3f18a9b8
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(flecs)
-
 FetchContent_Declare(
     nlohmann_json
     URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
@@ -148,13 +136,17 @@ target_link_libraries(hs_jobs PUBLIC hs_core PRIVATE Taskflow::Taskflow)
 target_compile_definitions(hs_jobs PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_jobs)
 
+add_library(hs_game_domain INTERFACE)
+target_include_directories(hs_game_domain INTERFACE Source/GameDomain/Public)
+target_link_libraries(hs_game_domain INTERFACE hs_core)
+
 add_library(
     hs_gameplay STATIC
     Source/Gameplay/Private/game_data.cpp
     Source/Gameplay/Private/game_simulation.cpp
 )
 target_include_directories(hs_gameplay PUBLIC Source/Gameplay/Public)
-target_link_libraries(hs_gameplay PUBLIC hs_core PRIVATE flecs::flecs_static)
+target_link_libraries(hs_gameplay PUBLIC hs_core hs_game_domain)
 if(MSVC)
     target_compile_options(hs_gameplay PRIVATE /fp:strict)
 endif()

@@ -6,7 +6,7 @@
 #include <hs/core/result.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/gameplay/game_data.hpp>
-#include <hs/gameplay/gameplay_types.hpp>
+#include <hs/game_domain/game_types.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -59,8 +59,8 @@ class GameSimulation
     [[nodiscard]] Result Shutdown();
 
   private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    struct SimulationWorld;
+    std::unique_ptr<SimulationWorld> impl_;
 };
 
 } // namespace hs

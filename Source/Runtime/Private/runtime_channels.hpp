@@ -5,7 +5,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/settings.hpp>
-#include <hs/gameplay/gameplay_types.hpp>
+#include <hs/game_domain/game_types.hpp>
 #include <hs/gameplay/game_data.hpp>
 #include <hs/renderer/renderer.hpp>
 

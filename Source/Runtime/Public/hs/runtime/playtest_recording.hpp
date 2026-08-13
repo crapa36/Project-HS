@@ -3,7 +3,7 @@
 #include <hs/core/input.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
-#include <hs/gameplay/gameplay_types.hpp>
+#include <hs/game_domain/game_types.hpp>
 
 #include <filesystem>
 #include <memory>

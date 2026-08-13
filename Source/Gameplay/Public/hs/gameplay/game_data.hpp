@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/core/result.hpp>
-#include <hs/gameplay/gameplay_types.hpp>
+#include <hs/game_domain/game_types.hpp>
 
 #include <array>
 #include <cstddef>

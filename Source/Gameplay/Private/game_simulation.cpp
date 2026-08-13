@@ -1,8 +1,6 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/cooked_format.hpp>
 
-#include <flecs.h>
-
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -63,29 +61,6 @@ constexpr std::uint64_t kEnemyRenderId = 2ull << 60;
 constexpr std::uint64_t kProjectileRenderId = 3ull << 60;
 constexpr std::uint64_t kAreaRenderId = 4ull << 60;
 constexpr std::uint64_t kPickupRenderId = 5ull << 60;
-
-struct DeterministicKey
-{
-    std::uint64_t value{};
-};
-struct PlayerTag
-{
-};
-struct EnemyTag
-{
-};
-struct BossTag
-{
-};
-struct ProjectileTag
-{
-};
-struct AreaTag
-{
-};
-struct PickupTag
-{
-};
 
 struct SlowEffect
 {
@@ -197,12 +172,12 @@ struct EnemyActor
 {
     EntityId id{};
     std::uint64_t random_key{};
-    flecs::entity_t ecs{};
     EnemyKind kind{EnemyKind::Melee};
     std::optional<BossKind> boss;
     Float2 position{};
     Float2 previous_position{};
     Float2 velocity{};
+    Tick spawned_tick{};
     std::int32_t health{};
     std::int32_t max_health{};
     std::int32_t damage{};
@@ -214,7 +189,6 @@ struct EnemyActor
     Tick attack_resolve{};
     std::uint64_t attack_cast_id{};
     Float2 locked_aim{};
-    Tick spawned_tick{};
     Tick pattern_ready{};
     std::uint8_t last_pattern{255};
     std::uint8_t repeat_count{};
@@ -243,11 +217,11 @@ struct EnemyActor
 struct ProjectileActor
 {
     EntityId id{};
-    flecs::entity_t ecs{};
     bool player_owned{};
     Float2 position{};
     Float2 previous_position{};
     Float2 velocity{};
+    Tick spawned_tick{};
     float remaining_range{};
     float radius{};
     std::int32_t damage{};
@@ -289,7 +263,6 @@ enum class AreaKind : std::uint8_t
 struct AreaActor
 {
     EntityId id{};
-    flecs::entity_t ecs{};
     AreaKind kind{AreaKind::Damage};
     Float2 position{};
     Float2 direction{0.0f, 1.0f};
@@ -322,7 +295,6 @@ struct AreaActor
 struct PickupActor
 {
     EntityId id{};
-    flecs::entity_t ecs{};
     PickupKind kind{PickupKind::Experience};
     Float2 position{};
     std::uint32_t value{};
@@ -553,9 +525,9 @@ bool SegmentCircle(Float2 from, Float2 to, Float2 center, float radius) noexcept
 
 } // namespace
 
-struct GameSimulation::Impl
+struct GameSimulation::SimulationWorld
 {
-    Impl()
+    SimulationWorld()
     {
         enemies.reserve(1'024);
         projectiles.reserve(3'072);
@@ -573,7 +545,6 @@ struct GameSimulation::Impl
         collision_candidates.reserve(128);
     }
 
-    flecs::world world;
     GameData data{GameData::Defaults()};
     SimulationConfig config{};
     PlayerState player{};
@@ -643,33 +614,6 @@ struct GameSimulation::Impl
     EntityId AllocateId() noexcept
     {
         return {next_entity_id++};
-    }
-
-    flecs::entity_t CreateEcsEntity(EntityId id, bool boss, bool projectile, bool area,
-                                    bool pickup)
-    {
-        auto entity = world.entity().set<DeterministicKey>({id.value});
-        if (projectile)
-        {
-            entity.add<ProjectileTag>();
-        }
-        else if (area)
-        {
-            entity.add<AreaTag>();
-        }
-        else if (pickup)
-        {
-            entity.add<PickupTag>();
-        }
-        else if (boss)
-        {
-            entity.add<EnemyTag>().add<BossTag>();
-        }
-        else
-        {
-            entity.add<EnemyTag>();
-        }
-        return entity.id();
     }
 
     float EffectiveAttack() const noexcept
@@ -888,7 +832,6 @@ struct GameSimulation::Impl
         EnemyActor enemy;
         enemy.id = AllocateId();
         enemy.random_key = random_key != 0 ? random_key : next_enemy_random_key++;
-        enemy.ecs = CreateEcsEntity(enemy.id, false, false, false, false);
         enemy.kind = kind;
         enemy.position = enemy.previous_position = position;
         enemy.max_health = enemy.health = RoundDamage(
@@ -912,7 +855,6 @@ struct GameSimulation::Impl
         EnemyActor boss;
         boss.id = AllocateId();
         boss.random_key = next_enemy_random_key++;
-        boss.ecs = CreateEcsEntity(boss.id, true, false, false, false);
         boss.boss = kind;
         boss.position = boss.previous_position =
             player.position.x >= 0.0f ? Float2{-59.0f, -59.0f} : Float2{59.0f, 59.0f};
@@ -936,7 +878,6 @@ struct GameSimulation::Impl
     {
         PickupActor pickup;
         pickup.id = AllocateId();
-        pickup.ecs = CreateEcsEntity(pickup.id, false, false, false, true);
         pickup.kind = kind;
         pickup.position = position;
         pickup.value = value;
@@ -968,9 +909,9 @@ struct GameSimulation::Impl
                       .projectile_speed;
         ProjectileActor projectile;
         projectile.id = AllocateId();
-        projectile.ecs = CreateEcsEntity(projectile.id, false, true, false, false);
         projectile.player_owned = player_owned;
         projectile.position = projectile.previous_position = position;
+        projectile.spawned_tick = tick;
         const auto normalized = Normalize(direction);
         projectile.velocity = Multiply(
             normalized, player_owned ? projectile_speed
@@ -1044,7 +985,6 @@ struct GameSimulation::Impl
                 ~player.upgrades[static_cast<std::size_t>(skill)]) == 0);
         AreaActor area;
         area.id = AllocateId();
-        area.ecs = CreateEcsEntity(area.id, false, false, true, false);
         area.kind = kind;
         area.position = position;
         area.radius = radius;
@@ -1107,13 +1047,6 @@ struct GameSimulation::Impl
 
     void StartSession()
     {
-        const auto destroy = [this](flecs::entity_t entity) {
-            if (entity != 0 && world.is_alive(entity)) world.entity(entity).destruct();
-        };
-        for (const auto &enemy : enemies) destroy(enemy.ecs);
-        for (const auto &projectile : projectiles) destroy(projectile.ecs);
-        for (const auto &area : areas) destroy(area.ecs);
-        for (const auto &pickup : pickups) destroy(pickup.ecs);
         phase = SessionPhase::Playing;
         player = {};
         player.health = player.max_health = data.player_health;
@@ -5152,15 +5085,8 @@ struct GameSimulation::Impl
         }
     }
 
-    void StructuralMergePhase()
+    void CommitCleanupBarrier()
     {
-        const auto destroy = [this](flecs::entity_t entity) {
-            if (entity != 0 && world.is_alive(entity)) world.entity(entity).destruct();
-        };
-        for (const auto &enemy : enemies) if (enemy.dead) destroy(enemy.ecs);
-        for (const auto &projectile : projectiles) if (projectile.dead) destroy(projectile.ecs);
-        for (const auto &area : areas) if (area.dead) destroy(area.ecs);
-        for (const auto &pickup : pickups) if (pickup.dead) destroy(pickup.ecs);
         std::erase_if(enemies, [](const EnemyActor &enemy) { return enemy.dead; });
         std::erase_if(projectiles, [](const ProjectileActor &projectile) { return projectile.dead; });
         std::erase_if(areas, [](const AreaActor &area) { return area.dead; });
@@ -5420,6 +5346,7 @@ struct GameSimulation::Impl
             vector2(projectile.position);
             vector2(projectile.previous_position);
             vector2(projectile.velocity);
+            value(projectile.spawned_tick);
             value(projectile.remaining_range);
             value(projectile.radius);
             value(projectile.damage);
@@ -5608,69 +5535,24 @@ struct GameSimulation::Impl
         return hash;
     }
 
-    void BuildPipeline()
+    void RunPipeline()
     {
-        world.set_threads(1);
-        auto pipeline_phase =
-            world.entity("InputPhase").add(flecs::Phase).depends_on(flecs::OnUpdate);
-        auto add_phase = [&](const char *name) {
-            auto next = world.entity(name).add(flecs::Phase).depends_on(pipeline_phase);
-            pipeline_phase = next;
-            return next;
-        };
-        auto session = add_phase("SessionTimerPhase");
-        auto spawn = add_phase("SpawnPhase");
-        auto ai = add_phase("AiIntentPhase");
-        auto cast = add_phase("CastAttackPhase");
-        auto movement = add_phase("MovementPhase");
-        auto grid = add_phase("SpatialGridPhase");
-        auto collision = add_phase("CollisionHitPhase");
-        auto damage = add_phase("DamageStatusPhase");
-        auto death = add_phase("DeathDropPhase");
-        auto xp = add_phase("XpCardPhase");
-        auto merge = add_phase("StructuralMergePhase");
-        auto checksum_phase = add_phase("ChecksumSnapshotPhase");
-        world.system<>("SessionTimer").kind(session).run([this](flecs::iter &iterator) {
-            while (iterator.next()) SessionTimerPhase();
-        });
-        world.system<>("Spawn").kind(spawn).run([this](flecs::iter &iterator) {
-            while (iterator.next()) SpawnPhase();
-        });
-        world.system<>("AiIntent").kind(ai).run([this](flecs::iter &iterator) {
-            while (iterator.next()) AiIntentPhase();
-        });
-        world.system<>("CastAttack").kind(cast).run([this](flecs::iter &iterator) {
-            while (iterator.next()) CastAttackPhase();
-        });
-        world.system<>("Movement").kind(movement).run([this](flecs::iter &iterator) {
-            while (iterator.next()) MovementPhase();
-        });
-        world.system<>("SpatialGrid").kind(grid).run([this](flecs::iter &iterator) {
-            while (iterator.next()) SpatialGridPhase();
-        });
-        world.system<>("CollisionHit").kind(collision).run([this](flecs::iter &iterator) {
-            while (iterator.next()) CollisionHitPhase();
-        });
-        world.system<>("DamageStatus").kind(damage).run([this](flecs::iter &iterator) {
-            while (iterator.next()) DamageStatusPhase();
-        });
-        world.system<>("DeathDrop").kind(death).run([this](flecs::iter &iterator) {
-            while (iterator.next()) DeathDropPhase();
-        });
-        world.system<>("XpCard").kind(xp).run([this](flecs::iter &iterator) {
-            while (iterator.next()) XpCardPhase();
-        });
-        world.system<>("StructuralMerge").kind(merge).run([this](flecs::iter &iterator) {
-            while (iterator.next()) StructuralMergePhase();
-        });
-        world.system<>("ChecksumSnapshot").kind(checksum_phase).run(
-            [this](flecs::iter &iterator) {
-                while (iterator.next()) checksum = CalculateChecksum();
-            });
+        SessionTimerPhase();
+        SpawnPhase();
+        AiIntentPhase();
+        CastAttackPhase();
+        MovementPhase();
+        SpatialGridPhase();
+        CollisionHitPhase();
+        DamageStatusPhase();
+        DeathDropPhase();
+        XpCardPhase();
+        CommitCleanupBarrier();
+        checksum = CalculateChecksum();
     }
 };
 
-GameSimulation::GameSimulation() : impl_(std::make_unique<Impl>())
+GameSimulation::GameSimulation() : impl_(std::make_unique<SimulationWorld>())
 {
 }
 
@@ -5697,8 +5579,6 @@ Result GameSimulation::Initialize(const SimulationConfig &config, const GameData
     impl_->player.move_speed = data.player_move_speed;
     impl_->player.magnet_radius = data.player_magnet_radius;
     impl_->player.skill_levels[0] = 1;
-    impl_->world.entity("Archer").set<DeterministicKey>({0}).add<PlayerTag>();
-    impl_->BuildPipeline();
     impl_->initialized = true;
     impl_->checksum = impl_->CalculateChecksum();
     return Result::Success();
@@ -5720,8 +5600,9 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
         impl_->checksum = impl_->CalculateChecksum();
         return {impl_->tick, impl_->checksum, impl_->phase};
     }
+    (void)fixed_delta;
     ++impl_->tick;
-    impl_->world.progress(std::chrono::duration<float>(fixed_delta).count());
+    impl_->RunPipeline();
     return {impl_->tick, impl_->checksum, impl_->phase};
 }
 
@@ -6977,7 +6858,6 @@ Result GameSimulation::Shutdown()
     {
         return Result::Success();
     }
-    impl_->world.quit();
     impl_->initialized = false;
     return Result::Success();
 }
