@@ -57,10 +57,7 @@ GameReadModel GameReadModelStorage::View() const noexcept
             charge_range,
             skills,
             waves,
-            direct_damage,
-            derived_damage,
-            damage_over_time,
-            upgrade_damage};
+            summary};
 }
 
 } // namespace hs

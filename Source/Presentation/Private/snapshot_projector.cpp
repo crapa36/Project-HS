@@ -117,14 +117,6 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     if (model.player.charging &&
         model.player.charging_skill == SkillKind::ChargedShot)
     {
-        const auto mask = model.player.upgrades[
-            static_cast<std::size_t>(SkillKind::ChargedShot)];
-        const auto maximum_ticks = HasUpgrade(mask, 1) ? Seconds(1.4f) : Seconds(1.0f);
-        auto elapsed = std::min(model.tick - model.player.charge_start, maximum_ticks);
-        if (HasUpgrade(mask, 2))
-        {
-            elapsed = std::min(maximum_ticks, static_cast<Tick>(elapsed / 0.65f));
-        }
         const auto range = model.charge_range;
         const auto center = Add(model.player.position,
                                 Multiply(model.player.aim, range * 0.5f));
@@ -888,8 +880,9 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     "현재 전투 기록\n\n총 피해              {}\n직접 피해            {}\n"
                     "파생 효과 피해        {}\n지속 피해            {}\n받은 피해            {}\n"
                     "회복량                {}\n처치 수              {}",
-                    probe.damage_dealt, model.direct_damage,
-                    model.derived_damage, model.damage_over_time,
+                    probe.damage_dealt, model.summary.direct_damage,
+                    model.summary.derived_damage,
+                    model.summary.damage_over_time,
                     probe.damage_taken, probe.healing, probe.kills),
                        1.0f, 23);
                 add_ui(UiModel::Kind::Text, {990, 585}, {570, 42}, 0xFFFFFFFFu,
@@ -984,7 +977,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                             std::format("강화 {} · {}  ·  기여 피해 {}\n{}",
                                         static_cast<unsigned>(upgrade) + 1,
                                         skill_upgrade_names[selected][upgrade],
-                                        model.upgrade_damage[selected][upgrade],
+                                        model.summary.upgrade_damage[selected][upgrade],
                                         skill_upgrade_descriptions[selected][upgrade]),
                            1.0f, 19);
                     ++upgrade_row;

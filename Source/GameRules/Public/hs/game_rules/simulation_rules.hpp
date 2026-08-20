@@ -175,11 +175,11 @@ struct SimulationRules
     float magnet_pickup_chance_multiplier{0.25f};
     float relic_chest_base_chance{0.00001f};
     float relic_chest_miss_increment{0.000004f};
-    Tick status_tick_interval{20};
+    Tick status_tick_interval{30};
     Tick bleed_duration{240};
-    float bleed_tick_coefficient{0.25f};
+    float bleed_tick_coefficient{0.20f};
     Tick burn_duration{240};
-    float burn_tick_coefficient{0.45f};
+    float burn_tick_coefficient{0.35f};
     std::array<SkillDefinition, kCombatSkillCount> skills{};
     std::array<EnemyDefinition, 3> enemies{};
     std::array<BossDefinition, 3> bosses{};

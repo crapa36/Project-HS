@@ -20,6 +20,7 @@ enum class RuleHook : std::uint8_t
     AfterDamage,
     OnStatusApplied,
     OnPlayerDamaged,
+    OnPlayerDeath,
     OnEnemyKilled,
     OnAbilityUsed,
     OnDistanceMoved,
@@ -81,7 +82,7 @@ struct ActiveRuleTable
             RuleHandlerId::DifferentSkillTracker);
         add(RuleHook::OnPlayerDamaged, RelicKind::DamageKnockback,
             RuleHandlerId::DamageKnockback);
-        add(RuleHook::OnPlayerDamaged, RelicKind::OnceRevive,
+        add(RuleHook::OnPlayerDeath, RelicKind::OnceRevive,
             RuleHandlerId::OnceRevive);
         add(RuleHook::AfterDamage, RelicKind::CombatHitChain,
             RuleHandlerId::CombatHitChain);

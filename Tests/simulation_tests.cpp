@@ -63,6 +63,12 @@ void TestPauseDoesNotAdvance()
 void TestRulesHashAndAbilityMapping()
 {
     const auto rules = hs::SimulationRules::Defaults();
+    Check(rules.status_tick_interval == 30 &&
+              rules.bleed_duration == 240 &&
+              rules.bleed_tick_coefficient == 0.20f &&
+              rules.burn_duration == 240 &&
+              rules.burn_tick_coefficient == 0.35f,
+          "default status rules match the gameplay specification");
     constexpr std::array expected{
         hs::AbilityHandlerId::BasicProjectileCadence,
         hs::AbilityHandlerId::PiercingProjectile,
@@ -85,6 +91,37 @@ void TestRulesHashAndAbilityMapping()
           "gameplay rule changes rules hash");
 }
 
+void TestSameTickFinalBossVictory()
+{
+    auto rules = hs::SimulationRules::Defaults();
+    for (auto &stage : rules.spawn_stages) stage.per_second = 0.0f;
+    for (auto &wave : rules.waves) wave.count = 0;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({91}, rules).Succeeded(),
+          "victory priority initialize");
+    Check(simulation.ApplyDebugCommand(
+              {hs::DebugCommandKind::SetGrowthTick, 15 * 60 * 60 - 1})
+              .Succeeded(),
+          "advance to final boss tick");
+    hs::InputFrame input{};
+    input.target_tick = 1;
+    (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    Check(simulation.GetSessionView().final_boss_spawned,
+          "final boss spawned");
+    Check(simulation.ApplyDebugCommand(
+              {hs::DebugCommandKind::DamageFinalBoss, 1'000'000})
+              .Succeeded(),
+          "kill final boss");
+    Check(simulation.ApplyDebugCommand(
+              {hs::DebugCommandKind::DamagePlayer, 1'000'000})
+              .Succeeded(),
+          "kill player");
+    input.target_tick = 2;
+    const auto result = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    Check(result.phase == hs::SessionPhase::Victory,
+          "same-tick final boss and player death resolves victory");
+}
+
 } // namespace
 
 int main()
@@ -94,6 +131,7 @@ int main()
         TestDeterminism();
         TestPauseDoesNotAdvance();
         TestRulesHashAndAbilityMapping();
+        TestSameTickFinalBossVictory();
         std::cout << "simulation_tests passed\n";
         return 0;
     }

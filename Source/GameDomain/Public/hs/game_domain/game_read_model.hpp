@@ -142,6 +142,15 @@ struct WaveView
     Tick duration{};
 };
 
+struct SessionSummaryView
+{
+    std::uint64_t direct_damage{};
+    std::uint64_t derived_damage{};
+    std::uint64_t damage_over_time{};
+    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
+        upgrade_damage{};
+};
+
 struct GameReadModel
 {
     Tick tick{};
@@ -162,11 +171,7 @@ struct GameReadModel
     float charge_range{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};
     std::array<WaveView, 5> waves{};
-    std::uint64_t direct_damage{};
-    std::uint64_t derived_damage{};
-    std::uint64_t damage_over_time{};
-    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
-        upgrade_damage{};
+    SessionSummaryView summary{};
 };
 
 class GameReadModelStorage
@@ -199,11 +204,7 @@ class GameReadModelStorage
     float charge_range{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};
     std::array<WaveView, 5> waves{};
-    std::uint64_t direct_damage{};
-    std::uint64_t derived_damage{};
-    std::uint64_t damage_over_time{};
-    std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
-        upgrade_damage{};
+    SessionSummaryView summary{};
 
   private:
     std::vector<EnemyView> enemies_;
