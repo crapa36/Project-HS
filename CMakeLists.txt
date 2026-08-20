@@ -13,6 +13,7 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 option(HS_BUILD_TESTS "Build Project HS tests" ON)
+option(HS_BUILD_RUNTIME "Build the D3D12 runtime and applications" ON)
 option(HS_BUILD_CONTENT_TOOLS "Build FBX content cooker and content-dependent tests" ON)
 option(HS_ENABLE_VALIDATION "Enable D3D12 validation" OFF)
 option(HS_ENABLE_GPU_VALIDATION "Enable D3D12 GPU-based validation" OFF)
@@ -31,81 +32,87 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(taskflow)
 
-FetchContent_Declare(
-    nlohmann_json
-    URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
-    URL_HASH SHA256=42F6E95CAD6EC532FD372391373363B62A14AF6D771056DBFC86160E6DFFF7AA
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
+    FetchContent_Declare(
+        nlohmann_json
+        URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+        URL_HASH SHA256=42F6E95CAD6EC532FD372391373363B62A14AF6D771056DBFC86160E6DFFF7AA
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(nlohmann_json)
+endif()
 
-set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
-set(BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(
-    directxtex
-    GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
-    GIT_TAG 4feb3e1
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(directxtex)
+if(HS_BUILD_CONTENT_TOOLS)
+    set(BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        directxtex
+        GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
+        GIT_TAG 4feb3e1
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(directxtex)
+endif()
 
-FetchContent_Declare(
-    imgui
-    GIT_REPOSITORY https://github.com/ocornut/imgui.git
-    GIT_TAG v1.91.9b
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(imgui)
+if(HS_BUILD_RUNTIME)
+    FetchContent_Declare(
+        imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG v1.91.9b
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(imgui)
 
-FetchContent_Declare(
-    agility
-    URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.4
-    URL_HASH SHA256=D30F756CE05BB4B7705FC1B04A5DED32ED62F2C2A2B392AE8D3318181395C8BC
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(agility)
+    FetchContent_Declare(
+        agility
+        URL https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.619.4
+        URL_HASH SHA256=D30F756CE05BB4B7705FC1B04A5DED32ED62F2C2A2B392AE8D3318181395C8BC
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(agility)
 
-FetchContent_Declare(
-    winpix
-    URL https://www.nuget.org/api/v2/package/WinPixEventRuntime/1.0.240308001
-    URL_HASH SHA256=726ACC93D6968E2146261A1E415521747D50AD69894C2B42B5D0D4C29FD66EC4
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(winpix)
-add_library(WinPixEventRuntime SHARED IMPORTED GLOBAL)
-set_target_properties(
-    WinPixEventRuntime PROPERTIES
-    IMPORTED_IMPLIB "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.lib"
-    IMPORTED_LOCATION "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
-    INTERFACE_INCLUDE_DIRECTORIES "${winpix_SOURCE_DIR}/Include"
-)
+    FetchContent_Declare(
+        winpix
+        URL https://www.nuget.org/api/v2/package/WinPixEventRuntime/1.0.240308001
+        URL_HASH SHA256=726ACC93D6968E2146261A1E415521747D50AD69894C2B42B5D0D4C29FD66EC4
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(winpix)
+    add_library(WinPixEventRuntime SHARED IMPORTED GLOBAL)
+    set_target_properties(
+        WinPixEventRuntime PROPERTIES
+        IMPORTED_IMPLIB "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.lib"
+        IMPORTED_LOCATION "${winpix_SOURCE_DIR}/bin/x64/WinPixEventRuntime.dll"
+        INTERFACE_INCLUDE_DIRECTORIES "${winpix_SOURCE_DIR}/Include"
+    )
 
-set(HS_FONT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Generated/Fonts")
-file(MAKE_DIRECTORY "${HS_FONT_DIRECTORY}")
-file(
-    DOWNLOAD
-    "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf"
-    "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
-    EXPECTED_HASH SHA256=194018E6B2B293A7964F037B25C0249CE1418BC9AB3C971060A03AA57861E252
-    TLS_VERIFY ON
-)
-file(
-    DOWNLOAD
-    "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/OFL.txt"
-    "${HS_FONT_DIRECTORY}/NotoSansKR-OFL.txt"
-    EXPECTED_HASH SHA256=1C05C68C34F9708415AADA51F17E1B0092D2CEA709BF4A94CD38114F9E73D7D9
-    TLS_VERIFY ON
-)
+    set(HS_FONT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Generated/Fonts")
+    file(MAKE_DIRECTORY "${HS_FONT_DIRECTORY}")
+    file(
+        DOWNLOAD
+        "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/NotoSansKR%5Bwght%5D.ttf"
+        "${HS_FONT_DIRECTORY}/NotoSansKR.ttf"
+        EXPECTED_HASH SHA256=194018E6B2B293A7964F037B25C0249CE1418BC9AB3C971060A03AA57861E252
+        TLS_VERIFY ON
+    )
+    file(
+        DOWNLOAD
+        "https://raw.githubusercontent.com/google/fonts/7ff85c87f93ea6cca5f41c69f2e4edcb90240f26/ofl/notosanskr/OFL.txt"
+        "${HS_FONT_DIRECTORY}/NotoSansKR-OFL.txt"
+        EXPECTED_HASH SHA256=1C05C68C34F9708415AADA51F17E1B0092D2CEA709BF4A94CD38114F9E73D7D9
+        TLS_VERIFY ON
+    )
 
-set(D3D12MA_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
-set(D3D12MA_AGILITY_SDK_DIRECTORY "${agility_SOURCE_DIR}" CACHE STRING "" FORCE)
-FetchContent_Declare(
-    d3d12ma
-    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
-    GIT_TAG 1d86c1130f61453634b1df85782e1fecfd59a525
-    GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(d3d12ma)
+    set(D3D12MA_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
+    set(D3D12MA_AGILITY_SDK_DIRECTORY "${agility_SOURCE_DIR}" CACHE STRING "" FORCE)
+    FetchContent_Declare(
+        d3d12ma
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
+        GIT_TAG 1d86c1130f61453634b1df85782e1fecfd59a525
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(d3d12ma)
+endif()
 
 function(hs_configure_target target)
     target_compile_features(${target} PUBLIC cxx_std_23)
@@ -162,6 +169,9 @@ hs_configure_target(hs_game_rules)
 add_library(
     hs_gameplay STATIC
     Source/Gameplay/Private/game_simulation.cpp
+    Source/Gameplay/Private/simulation_combat.cpp
+    Source/Gameplay/Private/simulation_progression.cpp
+    Source/Gameplay/Private/simulation_tick.cpp
 )
 target_include_directories(hs_gameplay PUBLIC Source/Gameplay/Public)
 target_link_libraries(hs_gameplay PUBLIC hs_core hs_game_domain hs_game_rules)
@@ -170,6 +180,7 @@ if(MSVC)
 endif()
 hs_configure_target(hs_gameplay)
 
+if(HS_BUILD_RUNTIME)
 add_library(
     hs_renderer_d3d12 STATIC
     Source/RendererD3D12/Private/render_graph.cpp
@@ -235,7 +246,9 @@ target_compile_definitions(
     hs_runtime PRIVATE $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
 hs_configure_target(hs_runtime)
+endif()
 
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
 find_program(
     HS_DXC
     NAMES dxc.exe
@@ -274,7 +287,9 @@ hs_compile_shader(outline_ps.dxil OutlinePS ps_6_0)
 hs_compile_shader(fxaa_ps.dxil FxaaPS ps_6_0)
 hs_compile_shader(ui_ps.dxil UiPS ps_6_0)
 add_custom_target(hs_shaders ALL DEPENDS ${HS_SHADER_OUTPUTS})
+endif()
 
+if(HS_BUILD_RUNTIME)
 add_custom_target(
     hs_runtime_assets ALL
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Shaders"
@@ -322,13 +337,16 @@ target_compile_definitions(
 )
 hs_configure_target(hs_experiment)
 add_dependencies(hs_experiment hs_runtime_assets)
+endif()
 
-add_executable(hs_combat_sim Source/Apps/CombatSim/main.cpp)
-target_link_libraries(
-    hs_combat_sim PRIVATE hs_gameplay hs_presentation nlohmann_json::nlohmann_json psapi
-)
-target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-hs_configure_target(hs_combat_sim)
+if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
+    add_executable(hs_combat_sim Source/Apps/CombatSim/main.cpp)
+    target_link_libraries(
+        hs_combat_sim PRIVATE hs_gameplay hs_presentation nlohmann_json::nlohmann_json psapi
+    )
+    target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    hs_configure_target(hs_combat_sim)
+endif()
 
 if(HS_BUILD_CONTENT_TOOLS)
 set(
@@ -429,9 +447,10 @@ add_custom_target(
     hs_cooked_content ALL
     DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
 )
+add_dependencies(hs_combat_sim hs_cooked_content)
+if(HS_BUILD_RUNTIME)
 add_dependencies(ProjectHS hs_cooked_content)
 add_dependencies(hs_experiment hs_cooked_content)
-add_dependencies(hs_combat_sim hs_cooked_content)
 
 add_executable(hs_tools Source/Apps/Tools/main.cpp)
 target_link_libraries(hs_tools PRIVATE nlohmann_json::nlohmann_json)
@@ -450,6 +469,7 @@ target_compile_definitions(
 add_dependencies(hs_tools hs_content ProjectHS)
 hs_configure_target(hs_tools)
 endif()
+endif()
 
 if(HS_BUILD_TESTS)
     enable_testing()
@@ -460,10 +480,10 @@ if(HS_BUILD_TESTS)
     add_test(NAME foundation.core COMMAND hs_tests foundation)
     add_test(NAME foundation.task-system COMMAND hs_tests jobs)
     add_test(
-        NAME architecture.gameplay-dependencies
+        NAME architecture.layers
         COMMAND ${CMAKE_COMMAND}
             -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_gameplay_dependencies.cmake
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_architecture.cmake
     )
     add_executable(hs_rule_tests Tests/active_rule_tests.cpp)
     target_link_libraries(hs_rule_tests PRIVATE hs_game_domain)
@@ -476,8 +496,11 @@ if(HS_BUILD_TESTS)
     add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
+    if(TARGET hs_tools)
     add_test(NAME tools.content-status COMMAND hs_tools status)
     endif()
+    endif()
+    if(HS_BUILD_RUNTIME)
     add_test(
         NAME integration.render-smoke
         COMMAND
@@ -509,6 +532,7 @@ if(HS_BUILD_TESTS)
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment
     )
     set_tests_properties(experiment.offscreen PROPERTIES TIMEOUT 120)
+    endif()
 
     if(HS_BUILD_CONTENT_TOOLS)
     add_executable(hs_gameplay_tests Tests/gameplay_tests.cpp)
@@ -529,6 +553,7 @@ if(HS_BUILD_TESTS)
         PROPERTIES TIMEOUT 120
     )
     endif()
+    if(TARGET hs_combat_sim)
     add_test(
         NAME scenario.combat-simulator
         COMMAND hs_combat_sim
@@ -536,7 +561,9 @@ if(HS_BUILD_TESTS)
             --output=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/combat-simulator
     )
     set_tests_properties(scenario.combat-simulator PROPERTIES TIMEOUT 30)
+    endif()
 
+    if(HS_BUILD_RUNTIME)
     add_executable(hs_runtime_tests Tests/runtime_tests.cpp)
     target_link_libraries(hs_runtime_tests PRIVATE hs_runtime)
     target_include_directories(hs_runtime_tests PRIVATE
@@ -572,8 +599,10 @@ if(HS_BUILD_TESTS)
         )
         set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 45)
     endif()
+    endif()
 endif()
 
+if(HS_BUILD_RUNTIME)
 install(
     TARGETS ProjectHS
     RUNTIME DESTINATION .
@@ -634,3 +663,4 @@ set(
     "${CMAKE_BINARY_DIR};${PROJECT_NAME};Runtime;/"
 )
 include(CPack)
+endif()

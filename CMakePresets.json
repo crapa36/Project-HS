@@ -17,6 +17,15 @@
       }
     },
     {
+      "name": "msvc-core",
+      "inherits": "msvc-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "HS_BUILD_RUNTIME": "OFF",
+        "HS_BUILD_CONTENT_TOOLS": "OFF"
+      }
+    },
+    {
       "name": "msvc-debug",
       "inherits": "msvc-base",
       "cacheVariables": {
@@ -51,6 +60,15 @@
   ],
   "buildPresets": [
     {
+      "name": "msvc-core",
+      "configurePreset": "msvc-core",
+      "targets": [
+        "hs_tests",
+        "hs_rule_tests",
+        "hs_simulation_tests"
+      ]
+    },
+    {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug"
     },
@@ -68,6 +86,18 @@
     }
   ],
   "testPresets": [
+    {
+      "name": "msvc-core",
+      "configurePreset": "msvc-core",
+      "filter": {
+        "include": {
+          "name": "^(foundation\\.|architecture\\.layers$|simulation\\.(rules|determinism-core)$)"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
     {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug",
@@ -91,6 +121,23 @@
     }
   ],
   "workflowPresets": [
+    {
+      "name": "verify-core",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-core"
+        },
+        {
+          "type": "build",
+          "name": "msvc-core"
+        },
+        {
+          "type": "test",
+          "name": "msvc-core"
+        }
+      ]
+    },
     {
       "name": "verify",
       "steps": [
