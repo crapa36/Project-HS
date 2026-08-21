@@ -22,15 +22,15 @@ namespace
 
 using Json = nlohmann::json;
 
-constexpr std::array<std::string_view, kCombatSkillCount> kSkillIds{
+constexpr std::array<std::string_view, kCombatSkillCount> kPlaytestSkillIds{
     "basic_attack", "piercing_shot", "multi_shot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
-constexpr std::array<std::string_view, kRelicCount> kRelicIds{
+constexpr std::array<std::string_view, kRelicCount> kPlaytestRelicIds{
     "bleed_kill_heal", "burn_propagation", "kill_cooldown_surge", "bleed_burn_explosion",
     "radial_basic_attack", "basic_kill_tracker", "movement_echo",
     "alternating_skills", "different_skill_tracker", "damage_knockback",
     "once_revive", "combat_hit_chain"};
-constexpr std::array<std::string_view, kStatCount> kStatIds{
+constexpr std::array<std::string_view, kStatCount> kPlaytestStatIds{
     "max_health", "move_speed", "attack_power", "attack_speed",
     "cooldown_reduction", "magnet_radius"};
 constexpr std::array<std::string_view, kStatCount> kStatUtilityUnits{
@@ -40,15 +40,6 @@ constexpr std::array<std::string_view, kEnemyArchetypeCount> kEnemyIds{
     "melee", "ranged", "suicide", "boss_5m", "boss_10m", "boss_final"};
 constexpr std::array<std::string_view, kPickupKindCount> kPickupIds{
     "experience", "heal", "magnet", "relic_chest"};
-constexpr std::array<std::string_view, kUpgradeEffectMetricCount> kUpgradeEffectIds{
-    "projectiles_created", "areas_created", "explosions_created",
-    "bleed_stacks_applied",
-    "burn_applications", "slow_applications", "slow_target_ticks",
-    "bleed_active_ticks", "burn_active_ticks", "slow_active_ticks",
-    "cooldown_ticks_saved", "healing", "displacement_millimetres",
-    "extra_targets_hit", "extra_bounces", "charge_ticks_saved",
-    "duration_ticks_added", "marks_applied", "kills", "damage_amplified",
-    "activations"};
 constexpr std::array<std::string_view, kUpgradeEffectMetricCount> kUpgradeEffectUnits{
     "count", "count", "count", "stacks", "count", "count", "target_ticks",
     "stack_ticks", "target_ticks", "stack_ticks", "ticks", "health",
@@ -60,11 +51,6 @@ constexpr std::array<std::string_view, kUpgradeEffectMetricCount> kUpgradeEffect
     "화상 실제 대상 틱", "둔화 실제 중첩 틱", "쿨타임 단축 틱", "회복량",
     "강제 이동 거리(mm)", "추가 적중 대상", "추가 도탄", "충전 단축 틱",
     "지속시간 증가 틱", "표식 부여", "처치", "추가 피해", "발동"};
-constexpr std::array<std::string_view, kUpgradeRelicSynergyMetricCount>
-    kSynergyMetricIds{"damage", "damage_events", "activations", "healing",
-                      "burn_applications", "slow_applications",
-                      "slow_target_ticks"};
-
 double Ratio(std::uint64_t numerator, std::uint64_t denominator)
 {
     return denominator == 0 ? 0.0 : static_cast<double>(numerator) /
@@ -134,7 +120,7 @@ Json SkillLoadout(const std::array<SkillKind, 4> &loadout)
     Json result = Json::array();
     for (const auto skill : loadout)
         result.push_back(skill < SkillKind::Count
-                             ? Json(kSkillIds[static_cast<std::size_t>(skill)])
+                             ? Json(kPlaytestSkillIds[static_cast<std::size_t>(skill)])
                              : Json(nullptr));
     return result;
 }
@@ -329,10 +315,10 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         {
             Json effects = Json::object();
             for (std::size_t effect = 0; effect < kUpgradeEffectMetricCount; ++effect)
-                effects[kUpgradeEffectIds[effect]] =
+                effects[kUpgradeEffectMetricIds[effect]] =
                     {{"value", probe.balance.upgrade_effects[skill][upgrade][effect]},
                      {"unit", kUpgradeEffectUnits[effect]}};
-            Json metric{{"skill", kSkillIds[skill]}, {"upgrade", upgrade + 1},
+            Json metric{{"skill", kPlaytestSkillIds[skill]}, {"upgrade", upgrade + 1},
                         {"selected", (probe.upgrade_masks[skill] &
                                       (1u << upgrade)) != 0},
                         {"damage", probe.balance.upgrade_damage[skill][upgrade]},
@@ -363,7 +349,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         }
         const auto boss_damage = probe.balance.skill_boss_damage[skill];
         skill_metrics.push_back(
-            {{"id", kSkillIds[skill]}, {"level", probe.skill_levels[skill]},
+            {{"id", kPlaytestSkillIds[skill]}, {"level", probe.skill_levels[skill]},
              {"damage", probe.damage_by_skill[skill]}, {"uses", uses},
              {"damage_to_normal", probe.damage_by_skill[skill] -
                                       std::min(probe.damage_by_skill[skill], boss_damage)},
@@ -379,10 +365,10 @@ Result PlaytestRecorder::Finish(bool execution_valid)
     {
         Json effects = Json::object();
         for (std::size_t effect = 0; effect < kUpgradeEffectMetricCount; ++effect)
-            effects[kUpgradeEffectIds[effect]] =
+            effects[kUpgradeEffectMetricIds[effect]] =
                 {{"value", probe.balance.relic_effects[index][effect]},
                  {"unit", kUpgradeEffectUnits[effect]}};
-        Json metric{{"id", kRelicIds[index]},
+        Json metric{{"id", kPlaytestRelicIds[index]},
                     {"acquired", (probe.relic_mask & (1u << index)) != 0},
                     {"damage", probe.balance.relic_damage[index]},
                     {"triggers", probe.balance.relic_triggers[index]},
@@ -409,11 +395,11 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         for (std::size_t metric = 0;
              metric < kUpgradeRelicSynergyMetricCount; ++metric)
             if (entry.metrics[metric] != 0)
-                effects[kSynergyMetricIds[metric]] = entry.metrics[metric];
+                effects[kUpgradeRelicSynergyMetricIds[metric]] = entry.metrics[metric];
         synergy_metrics.push_back(
-            {{"skill", kSkillIds[static_cast<std::size_t>(entry.skill)]},
+            {{"skill", kPlaytestSkillIds[static_cast<std::size_t>(entry.skill)]},
              {"upgrade", entry.upgrade + 1},
-             {"relic", kRelicIds[static_cast<std::size_t>(entry.relic)]},
+             {"relic", kPlaytestRelicIds[static_cast<std::size_t>(entry.relic)]},
              {"effects", std::move(effects)}});
     }
     Json enemy_metrics = Json::array();
@@ -461,7 +447,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         stat_contribution[index] = static_cast<double>(
             probe.balance.stat_utility[index]) / stat_denominators[index];
         stat_metrics.push_back(
-            {{"id", kStatIds[index]}, {"points", probe.stat_points[index]},
+            {{"id", kPlaytestStatIds[index]}, {"points", probe.stat_points[index]},
              {"raw_utility", probe.balance.stat_utility[index]},
              {"raw_unit", kStatUtilityUnits[index]},
              {"realized_utility", stat_contribution[index]},
@@ -471,7 +457,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
     }
     Json damage = Json::array();
     for (std::size_t index = 0; index < probe.damage_by_skill.size(); ++index)
-        damage.push_back({{"skill", kSkillIds[index]},
+        damage.push_back({{"skill", kPlaytestSkillIds[index]},
                           {"damage", probe.damage_by_skill[index]}});
     Json findings = Json::array();
     if (probe.growth_ticks >= 54'000 && (probe.level < 20 || probe.level > 30))
@@ -488,7 +474,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
             probe.balance.skill_uses[index] >= 20 && probe.damage_dealt != 0 &&
             probe.damage_by_skill[index] * 20 < probe.damage_dealt)
             findings.push_back({{"severity", "review"}, {"category", "skill_balance"},
-                                {"skill", kSkillIds[index]},
+                                {"skill", kPlaytestSkillIds[index]},
                                 {"uses", probe.balance.skill_uses[index]},
                                 {"damage", probe.damage_by_skill[index]},
                                 {"damage_per_use", Ratio(
@@ -562,7 +548,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
         for (std::size_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
         {
             if ((probe.upgrade_masks[skill] & (1u << upgrade)) == 0) continue;
-            report << "- " << kSkillIds[skill] << " / 강화 " << upgrade + 1
+            report << "- " << kPlaytestSkillIds[skill] << " / 강화 " << upgrade + 1
                    << ": " << probe.balance.upgrade_damage[skill][upgrade]
                    << " 피해 (" << probe.balance.upgrade_triggers[skill][upgrade]
                    << "회)";
@@ -582,13 +568,13 @@ Result PlaytestRecorder::Finish(bool execution_valid)
          index < probe.balance.upgrade_relic_synergy_count; ++index)
     {
         const auto &entry = probe.balance.upgrade_relic_synergies[index];
-        report << "- " << kSkillIds[static_cast<std::size_t>(entry.skill)]
+        report << "- " << kPlaytestSkillIds[static_cast<std::size_t>(entry.skill)]
                << " / 강화 " << static_cast<unsigned>(entry.upgrade) + 1
-               << " × " << kRelicIds[static_cast<std::size_t>(entry.relic)];
+               << " × " << kPlaytestRelicIds[static_cast<std::size_t>(entry.relic)];
         for (std::size_t metric = 0;
              metric < kUpgradeRelicSynergyMetricCount; ++metric)
             if (entry.metrics[metric] != 0)
-                report << " · " << kSynergyMetricIds[metric] << ' '
+                report << " · " << kUpgradeRelicSynergyMetricIds[metric] << ' '
                        << entry.metrics[metric];
         report << '\n';
     }
@@ -596,7 +582,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
     for (std::size_t stat = 0; stat < kStatCount; ++stat)
     {
         if (probe.stat_points[stat] == 0) continue;
-        report << "- " << kStatIds[stat] << ": "
+        report << "- " << kPlaytestStatIds[stat] << ": "
                << std::format("{:.2f}%", stat_contribution[stat] * 100.0 /
                                            probe.stat_points[stat])
                << " / 포인트\n";

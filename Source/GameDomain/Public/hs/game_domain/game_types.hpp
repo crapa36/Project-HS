@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace hs
 {
@@ -59,6 +60,19 @@ enum class UpgradeRelicSynergyMetric : std::uint8_t
 };
 inline constexpr std::size_t kUpgradeRelicSynergyMetricCount =
     static_cast<std::size_t>(UpgradeRelicSynergyMetric::Count);
+inline constexpr std::array<std::string_view, kUpgradeEffectMetricCount>
+    kUpgradeEffectMetricIds{
+        "projectiles_created", "areas_created", "explosions_created",
+        "bleed_stacks_applied", "burn_applications", "slow_applications",
+        "slow_target_ticks", "bleed_active_ticks", "burn_active_ticks",
+        "slow_active_ticks", "cooldown_ticks_saved", "healing",
+        "displacement_millimetres", "extra_targets_hit", "extra_bounces",
+        "charge_ticks_saved", "duration_ticks_added", "marks_applied", "kills",
+        "damage_amplified", "activations"};
+inline constexpr std::array<std::string_view, kUpgradeRelicSynergyMetricCount>
+    kUpgradeRelicSynergyMetricIds{"damage", "damage_events", "activations", "healing",
+                                   "burn_applications", "slow_applications",
+                                   "slow_target_ticks"};
 inline constexpr std::size_t kMaxUpgradeRelicSynergies = 256;
 enum class SessionPhase : std::uint8_t
 {

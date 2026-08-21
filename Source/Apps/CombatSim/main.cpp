@@ -1,11 +1,9 @@
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/core/process_info.hpp>
 #include <hs/presentation/projector.hpp>
 
 #include <nlohmann/json.hpp>
-
-#include <Windows.h>
-#include <Psapi.h>
 
 #include <algorithm>
 #include <array>
@@ -33,7 +31,7 @@ namespace
 {
 using Json = nlohmann::json;
 
-constexpr std::array<std::string_view, hs::kCombatSkillCount> kSkillIds{
+constexpr std::array<std::string_view, hs::kCombatSkillCount> kCombatSuiteSkillIds{
     "basic_attack", "piercing_shot", "multishot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
 
@@ -45,28 +43,15 @@ bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &sn
     simulation.WriteReadModel(model);
     return hs::ProjectRenderSnapshot(model.View(), presentation, {}, settings, snapshot);
 }
-constexpr std::array<std::string_view, hs::kRelicCount> kRelicIds{
+constexpr std::array<std::string_view, hs::kRelicCount> kCombatSuiteRelicIds{
     "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge",
     "bleed_burn_explosion", "sixth_basic_radial", "basic_kill_tracking_arrow",
     "movement_afterimage_arrow", "alternating_active_refund",
     "cross_active_tracking_arrow", "on_damage_push_slow", "once_revive",
     "combat_hit_chain"};
-constexpr std::array<std::string_view, hs::kStatCount> kStatIds{
+constexpr std::array<std::string_view, hs::kStatCount> kCombatSuiteStatIds{
     "maximum_hp", "movement_speed", "attack_power", "basic_attack_speed",
     "cooldown_reduction", "magnet_radius"};
-constexpr std::array<std::string_view, hs::kUpgradeEffectMetricCount> kEffectIds{
-    "projectiles_created", "areas_created", "explosions_created",
-    "bleed_stacks_applied", "burn_applications", "slow_applications",
-    "slow_target_ticks", "bleed_active_ticks", "burn_active_ticks",
-    "slow_active_ticks", "cooldown_ticks_saved", "healing",
-    "displacement_millimetres", "extra_targets_hit", "extra_bounces",
-    "charge_ticks_saved", "duration_ticks_added", "marks_applied", "kills",
-    "damage_amplified", "activations"};
-constexpr std::array<std::string_view, hs::kUpgradeRelicSynergyMetricCount>
-    kSynergyMetricIds{"damage", "damage_events", "activations", "healing",
-                      "burn_applications", "slow_applications",
-                      "slow_target_ticks"};
-
 struct CombatBuild
 {
     std::string id;
@@ -135,7 +120,7 @@ CombatSimulationSuite LoadCombatSimulationSuite(const std::filesystem::path &pat
             throw std::runtime_error("Build ids must be non-empty and unique.");
         for (const auto &skill : source.at("skills"))
         {
-            const auto index = RequireIdIndex(skill.get<std::string>(), kSkillIds, "skill");
+            const auto index = RequireIdIndex(skill.get<std::string>(), kCombatSuiteSkillIds, "skill");
             if (index == 0 || build.skills.size() == 4 ||
                 std::ranges::find(build.skills, index) != build.skills.end())
                 throw std::runtime_error("Each build requires 0-4 unique active skills.");
@@ -143,7 +128,7 @@ CombatSimulationSuite LoadCombatSimulationSuite(const std::filesystem::path &pat
         }
         for (const auto &[skill_id, upgrades] : source.at("upgrades").items())
         {
-            const auto skill = RequireIdIndex(skill_id, kSkillIds, "upgrade skill");
+            const auto skill = RequireIdIndex(skill_id, kCombatSuiteSkillIds, "upgrade skill");
             if (skill != 0 && std::ranges::find(build.skills, skill) == build.skills.end())
                 throw std::runtime_error("Upgrades require the owning skill in the build.");
             for (const auto &ordinal_json : upgrades)
@@ -159,14 +144,14 @@ CombatSimulationSuite LoadCombatSimulationSuite(const std::filesystem::path &pat
         }
         for (const auto &relic : source.at("relics"))
         {
-            const auto index = RequireIdIndex(relic.get<std::string>(), kRelicIds, "relic");
+            const auto index = RequireIdIndex(relic.get<std::string>(), kCombatSuiteRelicIds, "relic");
             if (std::ranges::find(build.relics, index) != build.relics.end())
                 throw std::runtime_error("Relics must be unique.");
             build.relics.push_back(static_cast<std::uint8_t>(index));
         }
         for (const auto &[stat_id, points_json] : source.at("stats").items())
         {
-            const auto stat = RequireIdIndex(stat_id, kStatIds, "stat");
+            const auto stat = RequireIdIndex(stat_id, kCombatSuiteStatIds, "stat");
             const auto points = points_json.get<std::uint32_t>();
             if (points > 10) throw std::runtime_error("Stat points must be in [0, 10].");
             build.stats[stat] = static_cast<std::uint8_t>(points);
@@ -195,14 +180,6 @@ ProgressionSimulationSuite LoadProgressionSimulationSuite(const std::filesystem:
         std::set(suite.seeds.begin(), suite.seeds.end()).size() != suite.seeds.size())
         throw std::runtime_error("seeds must contain 1-8 unique values.");
     return suite;
-}
-
-std::uint64_t WorkingSetBytes() noexcept
-{
-    PROCESS_MEMORY_COUNTERS counters{.cb = sizeof(counters)};
-    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
-               ? counters.WorkingSetSize
-               : 0;
 }
 
 hs::Float3 SelectNearestEnemyAim(const hs::RenderSnapshot &snapshot,
@@ -313,21 +290,21 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
 Json BuildDefinitionJson(const CombatBuild &build)
 {
     Json skills = Json::array();
-    for (const auto skill : build.skills) skills.push_back(kSkillIds[skill]);
+    for (const auto skill : build.skills) skills.push_back(kCombatSuiteSkillIds[skill]);
     Json upgrades = Json::object();
     for (std::size_t skill = 0; skill < build.upgrade_masks.size(); ++skill)
     {
         if (build.upgrade_masks[skill] == 0) continue;
-        upgrades[std::string(kSkillIds[skill])] = Json::array();
+        upgrades[std::string(kCombatSuiteSkillIds[skill])] = Json::array();
         for (std::size_t upgrade = 0; upgrade < hs::kUpgradeCount; ++upgrade)
             if ((build.upgrade_masks[skill] & (1u << upgrade)) != 0)
-                upgrades[std::string(kSkillIds[skill])].push_back(upgrade + 1);
+                upgrades[std::string(kCombatSuiteSkillIds[skill])].push_back(upgrade + 1);
     }
     Json relics = Json::array();
-    for (const auto relic : build.relics) relics.push_back(kRelicIds[relic]);
+    for (const auto relic : build.relics) relics.push_back(kCombatSuiteRelicIds[relic]);
     Json stats = Json::object();
     for (std::size_t stat = 0; stat < build.stats.size(); ++stat)
-        stats[std::string(kStatIds[stat])] = build.stats[stat];
+        stats[std::string(kCombatSuiteStatIds[stat])] = build.stats[stat];
     return {{"id", build.id}, {"skills", std::move(skills)},
             {"upgrades", std::move(upgrades)}, {"relics", std::move(relics)},
             {"stats", std::move(stats)}};
@@ -391,7 +368,8 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                                            probe.enemy_projectile_count);
         maximum_pickups = std::max(maximum_pickups, probe.pickup_count);
         if (target_tick % 60 == 0)
-            maximum_memory = std::max(maximum_memory, WorkingSetBytes());
+            maximum_memory = std::max(maximum_memory,
+                                      hs::CurrentProcessWorkingSetBytes());
         if (tick.phase == hs::SessionPhase::Victory) break;
     }
 
@@ -409,10 +387,10 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
     const auto cpu_total = std::accumulate(tick_microseconds.begin(),
                                            tick_microseconds.end(), std::uint64_t{});
     Json skills = Json::array();
-    for (std::size_t skill = 0; skill < kSkillIds.size(); ++skill)
+    for (std::size_t skill = 0; skill < kCombatSuiteSkillIds.size(); ++skill)
     {
         const auto uses = probe.balance.skill_uses[skill];
-        skills.push_back({{"id", kSkillIds[skill]},
+        skills.push_back({{"id", kCombatSuiteSkillIds[skill]},
                           {"damage", probe.damage_by_skill[skill]},
                           {"boss_damage", probe.balance.skill_boss_damage[skill]},
                           {"uses", uses},
@@ -424,15 +402,16 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                           {"kills", probe.balance.skill_kills[skill]}});
     }
     Json upgrades = Json::array();
-    for (std::size_t skill = 0; skill < kSkillIds.size(); ++skill)
+    for (std::size_t skill = 0; skill < kCombatSuiteSkillIds.size(); ++skill)
         for (std::size_t upgrade = 0; upgrade < hs::kUpgradeCount; ++upgrade)
             if ((build.upgrade_masks[skill] & (1u << upgrade)) != 0)
             {
                 Json effects = Json::object();
-                for (std::size_t metric = 0; metric < kEffectIds.size(); ++metric)
-                    effects[std::string(kEffectIds[metric])] =
+                for (std::size_t metric = 0; metric < hs::kUpgradeEffectMetricIds.size();
+                     ++metric)
+                    effects[std::string(hs::kUpgradeEffectMetricIds[metric])] =
                         probe.balance.upgrade_effects[skill][upgrade][metric];
-                upgrades.push_back({{"skill", kSkillIds[skill]},
+                upgrades.push_back({{"skill", kCombatSuiteSkillIds[skill]},
                                     {"ordinal", upgrade + 1},
                                     {"damage", probe.balance.upgrade_damage[skill][upgrade]},
                                     {"triggers", probe.balance.upgrade_triggers[skill][upgrade]},
@@ -442,10 +421,10 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
     for (const auto relic : build.relics)
     {
         Json effects = Json::object();
-        for (std::size_t metric = 0; metric < kEffectIds.size(); ++metric)
-            effects[std::string(kEffectIds[metric])] =
+        for (std::size_t metric = 0; metric < hs::kUpgradeEffectMetricIds.size(); ++metric)
+            effects[std::string(hs::kUpgradeEffectMetricIds[metric])] =
                 probe.balance.relic_effects[relic][metric];
-        relics.push_back({{"id", kRelicIds[relic]},
+        relics.push_back({{"id", kCombatSuiteRelicIds[relic]},
                           {"damage", probe.balance.relic_damage[relic]},
                           {"triggers", probe.balance.relic_triggers[relic]},
                           {"effects", std::move(effects)}});
@@ -741,7 +720,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
                           acquisition.owning_skill_uses;
         const auto triggers = probe.balance.upgrade_triggers[skill][upgrade];
         upgrades.push_back(
-            {{"skill", kSkillIds[skill]}, {"ordinal", upgrade + 1},
+            {{"skill", kCombatSuiteSkillIds[skill]}, {"ordinal", upgrade + 1},
              {"acquired_tick", acquisition.tick}, {"active_seconds", active_seconds},
              {"owning_skill_uses", uses}, {"damage", damage},
              {"damage_dps", damage / active_seconds}, {"damage_triggers", triggers},
@@ -766,7 +745,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
                 1.0 / 60.0,
                 static_cast<double>(probe.tick - acquired_tick) / 60.0);
             relics.push_back(
-                {{"id", kRelicIds[relic]},
+                {{"id", kCombatSuiteRelicIds[relic]},
                  {"acquired_tick", acquired_tick},
                  {"active_seconds", active_seconds},
                  {"damage", probe.balance.relic_damage[relic]},
@@ -784,11 +763,11 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
         for (std::size_t metric = 0;
              metric < hs::kUpgradeRelicSynergyMetricCount; ++metric)
             if (entry.metrics[metric] != 0)
-                effects[kSynergyMetricIds[metric]] = entry.metrics[metric];
+                effects[hs::kUpgradeRelicSynergyMetricIds[metric]] = entry.metrics[metric];
         synergies.push_back(
-            {{"skill", kSkillIds[static_cast<std::size_t>(entry.skill)]},
+            {{"skill", kCombatSuiteSkillIds[static_cast<std::size_t>(entry.skill)]},
              {"ordinal", entry.upgrade + 1},
-             {"relic", kRelicIds[static_cast<std::size_t>(entry.relic)]},
+             {"relic", kCombatSuiteRelicIds[static_cast<std::size_t>(entry.relic)]},
              {"effects", std::move(effects)}});
     }
     Json situations = Json::array();
@@ -814,11 +793,11 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
                 {
                     const auto value = after.balance.upgrade_effects[skill][upgrade][metric] -
                                        before.balance.upgrade_effects[skill][upgrade][metric];
-                    if (value != 0) effects[kEffectIds[metric]] = value;
+                    if (value != 0) effects[hs::kUpgradeEffectMetricIds[metric]] = value;
                 }
                 if (damage == 0 && effects.empty()) continue;
                 phase_upgrades.push_back(
-                    {{"skill", kSkillIds[skill]}, {"ordinal", upgrade + 1},
+                    {{"skill", kCombatSuiteSkillIds[skill]}, {"ordinal", upgrade + 1},
                      {"direct_damage", damage}, {"direct_dps", damage / seconds},
                      {"effects", std::move(effects)}});
             }
@@ -828,7 +807,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
     }
     const auto elapsed_seconds = std::max(1.0, static_cast<double>(probe.tick) / 60.0);
     Json result{{"profile_id", profile.id}, {"seed", seed},
-                {"focus_skill", kSkillIds[profile.focus_skill]},
+                {"focus_skill", kCombatSuiteSkillIds[profile.focus_skill]},
                 {"focus_upgrade_half", profile.variant == 0 ? "1-4" : "5-8"},
                 {"outcome", probe.phase == hs::SessionPhase::Victory ? "victory" :
                             probe.phase == hs::SessionPhase::Defeat ? "defeat" : "incomplete"},
@@ -863,11 +842,11 @@ Json AggregateProgression(const Json &runs)
             const auto &selected_skills = run.at("final_build").at("skills");
             if (skill == 0 || std::ranges::any_of(selected_skills,
                     [&](const Json &selected) {
-                        return selected.get<std::string>() == kSkillIds[skill];
+                        return selected.get<std::string>() == kCombatSuiteSkillIds[skill];
                     }))
                 ++selected_runs;
         }
-        skills.push_back({{"id", kSkillIds[skill]}, {"selected_runs", selected_runs},
+        skills.push_back({{"id", kCombatSuiteSkillIds[skill]}, {"selected_runs", selected_runs},
                           {"total_damage", damage}, {"total_uses", uses},
                           {"mean_dps", dps / runs.size()},
                           {"damage_per_use", uses == 0.0 ? 0.0 : damage / uses}});
@@ -886,7 +865,7 @@ Json AggregateProgression(const Json &runs)
             {
                 for (const auto &metric : run.at("upgrades"))
                 {
-                    if (metric.at("skill").get<std::string>() != kSkillIds[skill] ||
+                    if (metric.at("skill").get<std::string>() != kCombatSuiteSkillIds[skill] ||
                         metric.at("ordinal").get<std::size_t>() != upgrade + 1)
                         continue;
                     ++selected_runs;
@@ -906,7 +885,7 @@ Json AggregateProgression(const Json &runs)
             }
             coverage_complete &= selected_runs != 0;
             upgrades.push_back(
-                {{"skill", kSkillIds[skill]}, {"ordinal", upgrade + 1},
+                {{"skill", kCombatSuiteSkillIds[skill]}, {"ordinal", upgrade + 1},
                  {"selected_runs", selected_runs},
                  {"effect_observed_runs", observed_runs},
                  {"direct_damage", actual_damage},
@@ -931,7 +910,7 @@ Json AggregateProgression(const Json &runs)
         Json characteristic_totals = Json::object();
         for (const auto &run : runs)
             for (const auto &metric : run.at("relics"))
-                if (metric.at("id").get<std::string>() == kRelicIds[relic])
+                if (metric.at("id").get<std::string>() == kCombatSuiteRelicIds[relic])
                 {
                     ++acquired_runs;
                     damage += metric.at("damage").get<double>();
@@ -943,7 +922,7 @@ Json AggregateProgression(const Json &runs)
                         characteristic_totals[id] =
                             characteristic_totals.value(id, 0.0) + value.get<double>();
                 }
-            relics.push_back({{"id", kRelicIds[relic]},
+            relics.push_back({{"id", kCombatSuiteRelicIds[relic]},
                               {"acquired_runs", acquired_runs},
                               {"direct_damage", damage},
                               {"mean_session_direct_dps",
@@ -1083,7 +1062,7 @@ int main(int argc, char **argv)
             for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
                 for (std::uint8_t variant = 0; variant < 2; ++variant)
                     profiles.push_back(
-                        {std::string(kSkillIds[skill]) + '-' +
+                        {std::string(kCombatSuiteSkillIds[skill]) + '-' +
                              (variant == 0 ? "upgrades-1-4" : "upgrades-5-8"),
                          static_cast<std::uint8_t>(skill), variant});
 
@@ -1181,7 +1160,7 @@ int main(int argc, char **argv)
                             << row.at("ordinal") << ','
                             << row.at("relic").get<std::string>() << ','
                             << row.at("observed_runs");
-                for (const auto id : kSynergyMetricIds)
+                for (const auto id : hs::kUpgradeRelicSynergyMetricIds)
                     synergy_csv << ',' << effects.value(std::string(id), 0ull);
                 synergy_csv << '\n';
             }
