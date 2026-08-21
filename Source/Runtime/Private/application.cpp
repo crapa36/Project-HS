@@ -6,6 +6,7 @@
 #include "window.hpp"
 
 #include <hs/core/fixed_step_clock.hpp>
+#include <hs/core/process_info.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/jobs/task_system.hpp>
 #include <hs/renderer/renderer.hpp>
@@ -14,8 +15,6 @@
 #include <hs/runtime/save_store.hpp>
 
 #include <Windows.h>
-#include <Psapi.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -46,30 +45,11 @@ void WriteText(const std::filesystem::path &path, std::string_view text)
     stream << text;
 }
 
-std::filesystem::path ExecutableDirectory()
-{
-    std::array<wchar_t, 32'768> path{};
-    const auto size = GetModuleFileNameW(nullptr, path.data(),
-                                         static_cast<DWORD>(path.size()));
-    if (size == 0 || size == path.size())
-    {
-        return {};
-    }
-    return std::filesystem::path(path.data()).parent_path();
-}
-
-std::uint64_t WorkingSetBytes() noexcept
-{
-    PROCESS_MEMORY_COUNTERS counters{.cb = sizeof(PROCESS_MEMORY_COUNTERS)};
-    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
-        ? counters.WorkingSetSize : 0;
-}
-
 } // namespace
 
 ApplicationResult RunApplication(const ApplicationConfig &config)
 {
-    const auto executable_directory = ExecutableDirectory();
+    const auto executable_directory = CurrentExecutableDirectory();
     if (executable_directory.empty())
     {
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -491,7 +471,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 last_tick = frame.rendered_tick;
                 timeline_lines.push_back(
                     std::format("{},{},{},{},{},{}\n", frame.frame, last_tick,
-                                frame_microseconds, WorkingSetBytes(),
+                                frame_microseconds, CurrentProcessWorkingSetBytes(),
                                 snapshots.current.instances.size(),
                                 devtools.input_queue_depth +
                                     devtools.presentation_queue_depth +
@@ -522,18 +502,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     channels.rendered_particles.store(renderer.LastParticleCount(),
                                                       std::memory_order_release);
-                    constexpr std::string_view pass_names[] = {
-                        "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
-                        "GBuffer+Depth", "Deferred Cel Lighting", "Forward Transparent/OIT",
-                        "OIT Composite", "Bloom", "ToneMap", "Screen-space Outline", "FXAA",
-                        "Game UI"};
                     const auto gpu_timings = renderer.LastGpuPassTimings();
                     if (gpu_timings.valid)
                     {
                         for (std::size_t pass = 0; pass < gpu_timings.nanoseconds.size(); ++pass)
                         {
                             gpu_lines.push_back(std::format(
-                                "{},{},{},{}\n", frame.frame, last_tick, pass_names[pass],
+                                "{},{},{},{}\n", frame.frame, last_tick, kRenderPassNames[pass],
                                 gpu_timings.nanoseconds[pass]));
                         }
                     }
