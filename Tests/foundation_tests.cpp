@@ -1,11 +1,16 @@
 #include <hs/core/bounded_spsc_queue.hpp>
+#include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/snapshot_exchange.hpp>
+#include <hs/core/windows_command_line.hpp>
 #include <hs/jobs/task_system.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -217,6 +222,56 @@ void TestVfxEventParameters()
           "VFX event parameter round-trip");
 }
 
+void TestCookedHeaderValidation()
+{
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("hs_cooked_header_" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                       ".hsbin");
+    hs::CookedHeader expected;
+    expected.schema_hash = 0x1234;
+    expected.payload_size = 0;
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char *>(&expected), sizeof(expected));
+    }
+
+    hs::CookedHeader actual;
+    Check(static_cast<bool>(hs::ReadCookedHeader(path, actual, expected.schema_hash)),
+          "cooked header read");
+    Check(actual.schema_hash == expected.schema_hash, "cooked header fields");
+    std::vector<std::byte> payload;
+    Check(static_cast<bool>(hs::ReadCookedPayload(path, expected.schema_hash, actual, payload)),
+          "cooked payload reuses header validation");
+    Check(payload.empty(), "empty cooked payload");
+    Check(!hs::ReadCookedHeader(path, actual, expected.schema_hash + 1),
+          "cooked schema mismatch");
+
+    expected.table_offset = 0;
+    {
+        std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+        stream.write(reinterpret_cast<const char *>(&expected), sizeof(expected));
+    }
+    Check(!hs::ReadCookedHeader(path, actual), "cooked structural mismatch");
+    std::filesystem::remove(path);
+}
+
+void TestWindowsCommandLineQuoting()
+{
+    Check(hs::QuoteWindowsCommandLineArgument(L"") == L"\"\"", "empty argument quote");
+    Check(hs::QuoteWindowsCommandLineArgument(L"plain") == L"\"plain\"",
+          "plain argument quote");
+    Check(hs::QuoteWindowsCommandLineArgument(L"has space") == L"\"has space\"",
+          "space argument quote");
+    Check(hs::QuoteWindowsCommandLineArgument(L"has\"quote") == L"\"has\\\"quote\"",
+          "quote argument quote");
+    Check(hs::QuoteWindowsCommandLineArgument(L"slash\\\"quote") ==
+              L"\"slash\\\\\\\"quote\"",
+          "backslash before quote");
+    Check(hs::QuoteWindowsCommandLineArgument(L"trailing\\") == L"\"trailing\\\\\"",
+          "trailing backslash");
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -230,6 +285,8 @@ int main(int argc, char **argv)
             TestSpscQueueSize();
             TestSnapshotExchange();
             TestVfxEventParameters();
+            TestCookedHeaderValidation();
+            TestWindowsCommandLineQuoting();
         }
         if (group == "all" || group == "jobs") TestTaskSystem();
         Check(group == "all" || group == "foundation" || group == "jobs",

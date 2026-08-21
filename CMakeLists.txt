@@ -128,10 +128,13 @@ add_library(
     hs_core STATIC
     Source/Core/Private/cooked_format.cpp
     Source/Core/Private/fixed_step_clock.cpp
+    Source/Core/Private/process_info.cpp
     Source/Core/Private/render_snapshot.cpp
     Source/Core/Private/snapshot_exchange.cpp
 )
 target_include_directories(hs_core PUBLIC Source/Core/Public)
+target_link_libraries(hs_core PRIVATE psapi)
+target_compile_definitions(hs_core PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_core)
 
 add_library(
@@ -246,7 +249,7 @@ target_link_libraries(
     hs_runtime
     PUBLIC hs_core hs_gameplay
     PRIVATE hs_jobs hs_presentation hs_renderer_d3d12 nlohmann_json::nlohmann_json
-            user32 shell32 xaudio2 ole32 psapi
+            user32 shell32 xaudio2 ole32
 )
 target_compile_definitions(hs_runtime PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_definitions(
@@ -349,7 +352,7 @@ endif()
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS)
     add_executable(hs_combat_sim Source/Apps/CombatSim/main.cpp)
     target_link_libraries(
-        hs_combat_sim PRIVATE hs_gameplay hs_presentation nlohmann_json::nlohmann_json psapi
+        hs_combat_sim PRIVATE hs_gameplay hs_presentation nlohmann_json::nlohmann_json
     )
     target_compile_definitions(hs_combat_sim PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     hs_configure_target(hs_combat_sim)
@@ -391,6 +394,7 @@ add_executable(
     Source/Apps/Content/main.cpp
     Source/Apps/Content/character_asset_cooker.cpp
     Source/Apps/Content/content_cooker.cpp
+    Source/Apps/Content/content_source_inventory.cpp
     Source/Apps/Content/game_data_cooker.cpp
     Source/Apps/Content/game_data_validation.cpp
     Source/Apps/Content/particle_effect_cooker.cpp
@@ -467,8 +471,12 @@ if(HS_BUILD_RUNTIME)
 add_dependencies(ProjectHS hs_cooked_content)
 add_dependencies(hs_experiment hs_cooked_content)
 
-add_executable(hs_content_tools Source/Apps/ContentTools/main.cpp)
-target_link_libraries(hs_content_tools PRIVATE nlohmann_json::nlohmann_json)
+add_executable(
+    hs_content_tools
+    Source/Apps/ContentTools/main.cpp
+    Source/Apps/Content/content_source_inventory.cpp
+)
+target_link_libraries(hs_content_tools PRIVATE hs_core nlohmann_json::nlohmann_json)
 target_compile_definitions(
     hs_content_tools
     PRIVATE

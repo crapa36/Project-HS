@@ -1,5 +1,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
+#include <hs/core/process_info.hpp>
+#include <hs/core/windows_command_line.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/presentation/projector.hpp>
 #include <hs/runtime/application.hpp>
@@ -9,7 +11,6 @@
 #include <nlohmann/json.hpp>
 
 #include <Windows.h>
-#include <Psapi.h>
 #include <DbgHelp.h>
 
 #include <algorithm>
@@ -45,13 +46,6 @@ std::string UtcNow()
     return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
                        time.wYear, time.wMonth, time.wDay, time.wHour,
                        time.wMinute, time.wSecond, time.wMilliseconds);
-}
-
-std::uint64_t WorkingSetBytes() noexcept
-{
-    PROCESS_MEMORY_COUNTERS counters{.cb = sizeof(PROCESS_MEMORY_COUNTERS)};
-    return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters))
-        ? counters.WorkingSetSize : 0;
 }
 
 struct Arguments
@@ -106,30 +100,6 @@ struct Arguments
                                    "Spec and artifact paths must not be empty.");
     }
     return hs::Result::Success();
-}
-
-[[nodiscard]] std::filesystem::path ExecutablePath()
-{
-    std::array<wchar_t, 32'768> path{};
-    const auto length =
-        GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    if (length == 0 || length == path.size())
-    {
-        return {};
-    }
-    return std::filesystem::path(path.data());
-}
-
-[[nodiscard]] std::wstring QuoteArgument(std::wstring_view value)
-{
-    std::wstring quoted(1, L'"');
-    for (const auto character : value)
-    {
-        if (character == L'"') quoted.push_back(L'\\');
-        quoted.push_back(character);
-    }
-    quoted.push_back(L'"');
-    return quoted;
 }
 
 [[nodiscard]] hs::Result WriteHeartbeat(const std::filesystem::path &path,
@@ -215,9 +185,11 @@ struct Arguments
                                   bool warp)
 {
 #if defined(HS_DEVELOPMENT_TOOLS)
-    auto command = QuoteArgument(executable.wstring()) + L" --child --spec=" +
-                   QuoteArgument(spec_path.wstring()) + L" --artifacts=" +
-                   QuoteArgument(artifact_directory.wstring());
+    auto command = hs::QuoteWindowsCommandLineArgument(executable.wstring()) +
+                   L" --child --spec=" +
+                   hs::QuoteWindowsCommandLineArgument(spec_path.wstring()) +
+                   L" --artifacts=" +
+                   hs::QuoteWindowsCommandLineArgument(artifact_directory.wstring());
     if (warp) command += L" --warp";
 
     STARTUPINFOW startup{sizeof(startup)};
@@ -347,12 +319,8 @@ struct Arguments
 [[nodiscard]] std::optional<std::uint64_t>
 ReadCookedSourceHash(const std::filesystem::path &path)
 {
-    std::ifstream stream(path, std::ios::binary);
     hs::CookedHeader header;
-    stream.read(reinterpret_cast<char *>(&header), sizeof(header));
-    if (!stream || header.magic != std::array{'H', 'S', 'B', 'N'} ||
-        header.format_version != hs::kCookedFormatVersion ||
-        header.endian_marker != hs::kLittleEndianMarker)
+    if (auto result = hs::ReadCookedHeader(path, header); !result)
     {
         return std::nullopt;
     }
@@ -617,7 +585,8 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
         timeline << tick.tick << ',' << tick.checksum << ','
                  << static_cast<unsigned>(tick.phase) << ',' << probe.normal_enemy_count << ','
                  << probe.player_projectile_count + probe.enemy_projectile_count << ','
-                 << probe.pickup_count << ',' << cpu_us << ',' << WorkingSetBytes() << ','
+                 << probe.pickup_count << ',' << cpu_us << ','
+                 << hs::CurrentProcessWorkingSetBytes() << ','
                  << ecs_count << ",0\n";
         for (const auto &signal : simulation.PendingDomainSignals())
         {
@@ -658,7 +627,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                           {"player_projectile_count", probe.player_projectile_count},
                           {"enemy_projectile_count", probe.enemy_projectile_count},
                           {"pickup_count", probe.pickup_count},
-                          {"memory_bytes", WorkingSetBytes()},
+                          {"memory_bytes", hs::CurrentProcessWorkingSetBytes()},
                           {"ecs_count", 1u + probe.normal_enemy_count + probe.boss_count +
                                             probe.player_projectile_count +
                                             probe.enemy_projectile_count + probe.pickup_count},
@@ -679,7 +648,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    const auto executable = ExecutablePath();
+    const auto executable = hs::CurrentExecutablePath();
     const auto build_hash_value = HashFile(executable);
     const auto content_hash_value =
         ReadCookedSourceHash(executable.parent_path() / "Cooked" / "simulation_rules.hsbin");

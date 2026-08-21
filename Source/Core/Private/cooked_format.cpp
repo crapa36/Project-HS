@@ -113,9 +113,8 @@ AssetId MakeAssetId(std::string_view normalized) noexcept
     return {Fnv1a64(normalized)};
 }
 
-Result ReadCookedPayload(const std::filesystem::path &path,
-                         std::uint64_t expected_schema_hash, CookedHeader &header,
-                         std::vector<std::byte> &payload)
+Result ReadCookedHeader(const std::filesystem::path &path, CookedHeader &header,
+                        std::uint64_t expected_schema_hash)
 {
     std::ifstream stream(path, std::ios::binary);
     if (!stream.read(reinterpret_cast<char *>(&header), sizeof(header)))
@@ -132,6 +131,19 @@ Result ReadCookedPayload(const std::filesystem::path &path,
         return Result::Failure(ErrorCode::InvalidArgument, "hs_core",
                                "Cooked file header is incompatible.");
     }
+    return Result::Success();
+}
+
+Result ReadCookedPayload(const std::filesystem::path &path,
+                         std::uint64_t expected_schema_hash, CookedHeader &header,
+                         std::vector<std::byte> &payload)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (auto result = ReadCookedHeader(path, header, expected_schema_hash); !result)
+    {
+        return result;
+    }
+    stream.seekg(sizeof(header));
     payload.resize(header.payload_size);
     if (!stream.read(reinterpret_cast<char *>(payload.data()),
                      static_cast<std::streamsize>(payload.size())) ||
