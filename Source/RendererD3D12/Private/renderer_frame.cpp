@@ -327,11 +327,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     ImGui::SameLine();
     if (ImGui::Button("Reroll")) debug_command = 14;
     ImGui::SeparatorText("RenderGraph");
-    constexpr std::string_view passes[]{
-        "GPU Particle Spawn/Update", "3-cascade Directional Shadow", "GBuffer+Depth",
-        "Deferred Cel Lighting", "Forward Transparent/OIT", "OIT Composite", "Bloom",
-        "ToneMap", "Screen-space Outline", "FXAA", "Game UI"};
-    for (const auto pass : passes)
+    for (const auto pass : kRenderPassNames)
         ImGui::BulletText("%.*s", static_cast<int>(pass.size()), pass.data());
     ImGui::End();
     ImGui::Render();
@@ -792,7 +788,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto back_buffer = impl_->graph.ImportTexture(
         {impl_->back_buffers[back_buffer_index].Get()}, Access::Present, "BackBuffer");
 
-    auto particle_pass = impl_->graph.AddPass("GPU Particle Spawn/Update", QueueHint::Direct);
+    auto particle_pass = impl_->graph.AddPass(kRenderPassNames[0], QueueHint::Direct);
     particle_pass.ReadWrite(particles, Access::UnorderedWrite);
     particle_pass.ReadWrite(particle_alive_input, Access::UnorderedWrite);
     particle_pass.ReadWrite(particle_alive_output, Access::UnorderedWrite);
@@ -852,8 +848,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         context.UavBarrier(indirect_arguments);
     });
 
-    auto shadow_pass =
-        impl_->graph.AddPass("3-cascade Directional Shadow", QueueHint::Direct);
+    auto shadow_pass = impl_->graph.AddPass(kRenderPassNames[1], QueueHint::Direct);
     shadow_pass.Write(shadow, Access::DepthWrite);
     shadow_pass.SetExecute([&](RenderPassContext &) {
         const auto shadow_size =
@@ -898,7 +893,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->RSSetScissorRects(1, &scissor);
     });
 
-    auto gbuffer_pass = impl_->graph.AddPass("GBuffer+Depth", QueueHint::Direct);
+    auto gbuffer_pass = impl_->graph.AddPass(kRenderPassNames[2], QueueHint::Direct);
     gbuffer_pass.Write(gbuffer_base, Access::RenderTarget);
     gbuffer_pass.Write(gbuffer_normal, Access::RenderTarget);
     gbuffer_pass.Write(gbuffer_position, Access::RenderTarget);
@@ -939,7 +934,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     });
 
-    auto lighting_pass = impl_->graph.AddPass("Deferred Cel Lighting", QueueHint::Direct);
+    auto lighting_pass = impl_->graph.AddPass(kRenderPassNames[3], QueueHint::Direct);
     lighting_pass.Read(gbuffer_base, Access::ShaderRead);
     lighting_pass.Read(gbuffer_normal, Access::ShaderRead);
     lighting_pass.Read(gbuffer_position, Access::ShaderRead);
@@ -951,8 +946,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->deferred_pipeline.Get(), hdr_rtv);
     });
 
-    auto transparent_pass =
-        impl_->graph.AddPass("Forward Transparent/OIT", QueueHint::Direct);
+    auto transparent_pass = impl_->graph.AddPass(kRenderPassNames[4], QueueHint::Direct);
     transparent_pass.Read(depth, Access::DepthRead);
     transparent_pass.Read(particles, Access::ShaderRead);
     transparent_pass.Read(particle_alive_output, Access::ShaderRead);
@@ -983,7 +977,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             0);
     });
 
-    auto composite_pass = impl_->graph.AddPass("OIT Composite", QueueHint::Direct);
+    auto composite_pass = impl_->graph.AddPass(kRenderPassNames[5], QueueHint::Direct);
     composite_pass.Read(hdr, Access::ShaderRead);
     composite_pass.Read(oit_accumulation, Access::ShaderRead);
     composite_pass.Read(oit_revealage, Access::ShaderRead);
@@ -994,7 +988,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->composite_pipeline.Get(), post_a_rtv);
     });
 
-    auto bloom_pass = impl_->graph.AddPass("Bloom", QueueHint::Direct);
+    auto bloom_pass = impl_->graph.AddPass(kRenderPassNames[6], QueueHint::Direct);
     bloom_pass.Read(post_a, Access::ShaderRead);
     bloom_pass.Write(post_b, Access::RenderTarget);
     bloom_pass.SetExecute([&](RenderPassContext &) {
@@ -1003,15 +997,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->bloom_pipeline.Get(), post_b_rtv);
     });
 
-    auto tone_map_pass = impl_->graph.AddPass("ToneMap", QueueHint::Direct);
+    auto tone_map_pass = impl_->graph.AddPass(kRenderPassNames[7], QueueHint::Direct);
     tone_map_pass.Read(post_b, Access::ShaderRead);
     tone_map_pass.Write(post_a, Access::RenderTarget);
     tone_map_pass.SetExecute([&](RenderPassContext &) {
         draw_fullscreen(impl_->tone_map_pipeline.Get(), post_a_rtv);
     });
 
-    auto outline_pass =
-        impl_->graph.AddPass("Screen-space Outline", QueueHint::Direct);
+    auto outline_pass = impl_->graph.AddPass(kRenderPassNames[8], QueueHint::Direct);
     outline_pass.Read(post_a, Access::ShaderRead);
     outline_pass.Read(gbuffer_position, Access::ShaderRead);
     outline_pass.Write(post_b, Access::RenderTarget);
@@ -1019,7 +1012,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->outline_pipeline.Get(), post_b_rtv);
     });
 
-    auto fxaa_pass = impl_->graph.AddPass("FXAA", QueueHint::Direct);
+    auto fxaa_pass = impl_->graph.AddPass(kRenderPassNames[9], QueueHint::Direct);
     fxaa_pass.Read(post_b, Access::ShaderRead);
     fxaa_pass.Write(back_buffer, Access::RenderTarget);
     fxaa_pass.SetExecute([&](RenderPassContext &) {
@@ -1028,7 +1021,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->fxaa_pipeline.Get(), rtv);
     });
 
-    auto ui_pass = impl_->graph.AddPass("Game UI", QueueHint::Direct);
+    auto ui_pass = impl_->graph.AddPass(kRenderPassNames[10], QueueHint::Direct);
     ui_pass.Read(ui, Access::ShaderRead);
     ui_pass.ReadWrite(back_buffer, Access::RenderTarget);
     ui_pass.SetExecute([&](RenderPassContext &) {

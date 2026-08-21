@@ -281,7 +281,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
 
     std::vector<SkinnedVertex> cooked_vertices;
     if (auto loaded = LoadCharacterAsset(
-            ExecutableDirectory() / "Cooked" / "archer.meshbin",
+            CurrentExecutableDirectory() / "Cooked" / "archer.meshbin",
             cooked_vertices, archer_clips, archer_parents,
             archer_inverse_bind_matrices, archer_upper_body_weights,
             archer_transforms, archer_bone_count,
@@ -374,7 +374,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
 
     std::vector<AllocationResource> uploads;
     uploads.reserve(static_cast<std::size_t>(archer_material_count) * 2);
-    const auto cooked = ExecutableDirectory() / "Cooked";
+    const auto cooked = CurrentExecutableDirectory() / "Cooked";
     auto upload_array = [&](AllocationResource &texture,
                             std::wstring_view prefix) -> Result {
         D3D12_RESOURCE_DESC texture_description{};

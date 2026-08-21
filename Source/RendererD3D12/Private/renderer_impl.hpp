@@ -1,5 +1,7 @@
 #pragma once
 
+#include <hs/core/dds_format.hpp>
+#include <hs/core/process_info.hpp>
 #include <hs/renderer/renderer.hpp>
 
 #include "render_graph.hpp"
@@ -198,13 +200,6 @@ struct UiCpuSurface
     return properties;
 }
 
-[[nodiscard]] inline std::filesystem::path ExecutableDirectory()
-{
-    std::array<wchar_t, 32'768> path{};
-    const auto length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
-    return std::filesystem::path(std::wstring_view(path.data(), length)).parent_path();
-}
-
 [[nodiscard]] inline std::string Utf8(std::wstring_view text)
 {
     if (text.empty()) return {};
@@ -235,33 +230,6 @@ struct UiCpuSurface
     return Result::Success();
 }
 
-struct DdsPixelFormat
-{
-    std::uint32_t size;
-    std::uint32_t flags;
-    std::uint32_t four_cc;
-    std::uint32_t rgb_bit_count;
-    std::uint32_t red_mask;
-    std::uint32_t green_mask;
-    std::uint32_t blue_mask;
-    std::uint32_t alpha_mask;
-};
-
-struct DdsHeader
-{
-    std::uint32_t size;
-    std::uint32_t flags;
-    std::uint32_t height;
-    std::uint32_t width;
-    std::uint32_t pitch;
-    std::uint32_t depth;
-    std::uint32_t mip_count;
-    std::array<std::uint32_t, 11> reserved;
-    DdsPixelFormat pixel_format;
-    std::uint32_t caps;
-    std::array<std::uint32_t, 4> remaining_caps;
-};
-
 struct DdsHeaderDx10
 {
     DXGI_FORMAT format;
@@ -278,9 +246,8 @@ struct DdsHeaderDx10
                                     std::vector<std::byte> &storage)
 {
     if (auto loaded = ReadBinary(path, storage); !loaded) return loaded;
-    constexpr std::uint32_t dds_magic = 0x20534444;
     constexpr std::uint32_t dx10 = 0x30315844;
-    if (storage.size() < sizeof(dds_magic) + sizeof(header) + sizeof(DdsHeaderDx10))
+    if (storage.size() < sizeof(kDdsMagic) + sizeof(header) + sizeof(DdsHeaderDx10))
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "VFX mask DDS header is truncated.");
     std::uint32_t magic{};
@@ -289,7 +256,7 @@ struct DdsHeaderDx10
     std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
     std::memcpy(&extension, storage.data() + sizeof(magic) + sizeof(header),
                 sizeof(extension));
-    if (magic != dds_magic || header.size != 124 || header.pixel_format.size != 32 ||
+    if (magic != kDdsMagic || header.size != 124 || header.pixel_format.size != 32 ||
         header.pixel_format.four_cc != dx10 || header.width != 512 ||
         header.height != 512 || header.mip_count != 10 ||
         extension.format != DXGI_FORMAT_BC4_UNORM ||
@@ -325,8 +292,7 @@ struct DdsHeaderDx10
     {
         return loaded;
     }
-    constexpr std::uint32_t dds_magic = 0x20534444;
-    if (storage.size() < sizeof(dds_magic) + sizeof(DdsHeader))
+    if (storage.size() < sizeof(kDdsMagic) + sizeof(DdsHeader))
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Character DDS header is truncated.");
@@ -336,7 +302,7 @@ struct DdsHeaderDx10
     std::memcpy(&magic, storage.data(), sizeof(magic));
     std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
     const auto pixel_bytes = static_cast<std::uint64_t>(header.width) * header.height * 4;
-    if (magic != dds_magic || header.size != 124 || header.pixel_format.size != 32 ||
+    if (magic != kDdsMagic || header.size != 124 || header.pixel_format.size != 32 ||
         header.pixel_format.rgb_bit_count != 32 || header.width == 0 ||
         header.height == 0 || header.pitch != header.width * 4 ||
         sizeof(magic) + sizeof(header) + pixel_bytes != storage.size())
@@ -518,7 +484,7 @@ inline std::filesystem::file_time_type LatestShaderWrite()
 {
     std::filesystem::file_time_type latest{};
     std::error_code error;
-    const auto directory = ExecutableDirectory() / "Shaders";
+    const auto directory = CurrentExecutableDirectory() / "Shaders";
     for (const auto &entry : std::filesystem::directory_iterator(directory, error))
     {
         if (error) break;

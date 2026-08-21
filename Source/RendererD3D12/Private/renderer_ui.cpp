@@ -54,7 +54,7 @@ Result D3D12Renderer::Impl::CreateUiTexture()
     if (FAILED(result) || FAILED(base_dwrite_factory.As(&ui_dwrite_factory)))
         return HResultFailure("Create DirectWrite UI factory", FAILED(result) ? result : E_FAIL);
 
-    const auto font_path = ExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf";
+    const auto font_path = CurrentExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf";
     ComPtr<IDWriteFontFile> font_file;
     ComPtr<IDWriteFontSetBuilder1> font_builder;
     ComPtr<IDWriteFontSet> font_set;

@@ -11,11 +11,17 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string_view>
 
 namespace hs
 {
 
 inline constexpr std::size_t kRenderPassCount = 11;
+inline constexpr std::array<std::string_view, kRenderPassCount> kRenderPassNames{
+    "GPU Particle Spawn/Update", "3-cascade Directional Shadow", "GBuffer+Depth",
+    "Deferred Cel Lighting", "Forward Transparent/OIT", "OIT Composite", "Bloom",
+    "ToneMap", "Screen-space Outline", "FXAA", "Game UI"};
+static_assert(kRenderPassNames.size() == kRenderPassCount);
 
 struct ParticleSpriteBinding
 {

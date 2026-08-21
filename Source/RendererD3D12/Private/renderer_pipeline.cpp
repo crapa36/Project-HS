@@ -114,7 +114,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
         return HResultFailure("CreateRootSignature", result);
     }
 
-    const auto shader_directory = ExecutableDirectory() / "Shaders";
+    const auto shader_directory = CurrentExecutableDirectory() / "Shaders";
     std::vector<std::byte> scene_vertex;
     std::vector<std::byte> scene_pixel;
     std::vector<std::byte> shadow_vertex;

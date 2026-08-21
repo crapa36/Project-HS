@@ -71,7 +71,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     const auto imgui_font_path =
-        (ExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf").string();
+        (CurrentExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf").string();
     ImGui::GetIO().Fonts->AddFontFromFileTTF(
         imgui_font_path.c_str(), 16.0f, nullptr,
         ImGui::GetIO().Fonts->GetGlyphRangesKorean());
