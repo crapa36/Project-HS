@@ -432,7 +432,7 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     const auto mask = player.upgrades[skill_index];
     RuntimeForCast(cast_id, skill).upgrade_mask = mask;
     const auto skill_release_ticks = AnimationMarkerTicks(
-        kBasicArrowReleaseTicks, recovery_ticks[skill_index]);
+        kSkillArrowReleaseTicks, recovery_ticks[skill_index]);
     player.facing = player.aim;
     const auto target_delta = Float2{input.held.aim_world.x - player.position.x,
                                      input.held.aim_world.z - player.position.y};

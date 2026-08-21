@@ -38,7 +38,8 @@ constexpr Tick Seconds(float value) noexcept
 
 constexpr float kTickSeconds = 1.0f / 60.0f;
 constexpr Tick kInputBufferTicks = 9;
-constexpr Tick kBasicArrowReleaseTicks = 6;
+constexpr Tick kBasicArrowReleaseTicks = 14;
+constexpr Tick kSkillArrowReleaseTicks = 6;
 constexpr Tick kRecoilClipTicks = 41;
 constexpr Tick kAnimationBlendOutTicks = 6;
 constexpr float kBasicAttackRate = 60.0f /
