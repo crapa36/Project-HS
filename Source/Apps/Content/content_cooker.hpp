@@ -1,5 +1,7 @@
 #pragma once
 
+#include "content_source_inventory.hpp"
+
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/game_rules/simulation_rules.hpp>
@@ -20,10 +22,6 @@
 #include <unordered_set>
 #include <vector>
 
-#ifndef HS_GAME_DATA_DIRECTORY
-#define HS_GAME_DATA_DIRECTORY "ContentSource/GameData"
-#endif
-
 #ifndef HS_SCHEMA_FILE
 #define HS_SCHEMA_FILE "Schemas/game.schema.json"
 #endif
@@ -32,30 +30,15 @@
 #define HS_VFX_TEXTURE_DIRECTORY "ContentSource/Textures/VFX"
 #endif
 
-#ifndef HS_CHARACTER_MODEL
-#define HS_CHARACTER_MODEL "ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
-#endif
-
-#ifndef HS_CHARACTER_ANIMATION_DIRECTORY
-#define HS_CHARACTER_ANIMATION_DIRECTORY "ContentSource/Animations/Characters/Archer"
-#endif
-
 namespace hs::content
 {
 
 using Json = nlohmann::json;
 
-inline constexpr std::array<std::string_view, 13> kDocumentNames = {
-    "audio_cues", "bosses",   "characters", "enemies", "level",
-    "materials",  "particles", "relics",    "skills",  "spawn_schedule",
-    "stats",      "ui_strings", "upgrades",
-};
-
 struct ContentSources
 {
     std::unordered_map<std::string, Json> documents;
-    std::string source_bytes;
-    std::string all_source_bytes;
+    ContentSourceInventory inventory;
 };
 
 struct BuiltGameData

@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -17,27 +16,6 @@ namespace hs::content
 {
     throw std::runtime_error(std::string(file) + ":" + std::string(path) + ": " +
                              std::string(message));
-}
-
-std::string ReadText(const std::filesystem::path &path)
-{
-    std::ifstream stream(path, std::ios::binary | std::ios::ate);
-    if (!stream)
-    {
-        throw std::runtime_error(path.string() + ": cannot open file");
-    }
-    const auto size = stream.tellg();
-    if (size <= 0)
-    {
-        throw std::runtime_error(path.string() + ": file is empty");
-    }
-    std::string text(static_cast<std::size_t>(size), '\0');
-    stream.seekg(0);
-    if (!stream.read(text.data(), static_cast<std::streamsize>(size)))
-    {
-        throw std::runtime_error(path.string() + ": cannot read complete file");
-    }
-    return text;
 }
 
 const Json &RequireMember(const Json &object, std::string_view file,
@@ -659,27 +637,8 @@ void ValidateDocuments(const ContentSources &sources)
 
 ContentSources LoadAndValidateSources()
 {
-    const std::filesystem::path root = HS_GAME_DATA_DIRECTORY;
-    std::set<std::string, std::less<>> found_files;
-    for (const auto &entry : std::filesystem::directory_iterator(root))
-    {
-        if (entry.is_regular_file() && entry.path().extension() == ".json")
-        {
-            found_files.emplace(entry.path().stem().string());
-        }
-    }
-    std::set<std::string, std::less<>> expected_files;
-    for (const auto name : kDocumentNames)
-    {
-        expected_files.emplace(name);
-    }
-    if (found_files != expected_files)
-    {
-        throw std::runtime_error(root.string() +
-                                 ": expected exactly the 13 declared category JSON files");
-    }
-
-    const auto schema_text = ReadText(HS_SCHEMA_FILE);
+    ValidateGameDataDirectory();
+    const auto schema_text = ReadRequiredText(HS_SCHEMA_FILE);
     Json schema;
     try
     {
@@ -700,10 +659,12 @@ ContentSources LoadAndValidateSources()
     }
 
     ContentSources sources;
-    for (const auto name : kDocumentNames)
+    sources.inventory = LoadContentSourceInventory();
+    for (std::size_t index = 0; index < kDocumentNames.size(); ++index)
     {
-        const auto path = root / (std::string(name) + ".json");
-        auto text = ReadText(path);
+        const auto name = kDocumentNames[index];
+        const auto path = GameDataCategoryPath(name);
+        const auto &text = sources.inventory.document_text[index];
         Json document;
         try
         {
@@ -714,38 +675,8 @@ ContentSources LoadAndValidateSources()
             throw std::runtime_error(path.string() + ": " + exception.what());
         }
         ValidateRoot(document, name);
-        sources.all_source_bytes.append(name);
-        sources.all_source_bytes.push_back('\0');
-        sources.all_source_bytes.append(text);
-        sources.all_source_bytes.push_back('\0');
-        if (name != "particles")
-        {
-            sources.source_bytes.append(name);
-            sources.source_bytes.push_back('\0');
-            sources.source_bytes.append(text);
-            sources.source_bytes.push_back('\0');
-        }
         sources.documents.emplace(name, std::move(document));
     }
-    const auto append_asset = [&](std::string_view name,
-                                  const std::filesystem::path &path) {
-        sources.source_bytes.append(name);
-        sources.source_bytes.push_back('\0');
-        sources.source_bytes.append(ReadText(path));
-        sources.source_bytes.push_back('\0');
-        sources.all_source_bytes.append(name);
-        sources.all_source_bytes.push_back('\0');
-        sources.all_source_bytes.append(ReadText(path));
-        sources.all_source_bytes.push_back('\0');
-    };
-    const auto animation_root =
-        std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY);
-    append_asset("character/archer/model", HS_CHARACTER_MODEL);
-    append_asset("character/archer/idle", animation_root / "Idle.fbx");
-    append_asset("character/archer/run", animation_root / "RunForward.fbx");
-    append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
-    append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
-    append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
     ValidateDocuments(sources);
     return sources;
 }

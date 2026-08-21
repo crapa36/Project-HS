@@ -79,8 +79,8 @@ int RunContent(std::string_view mode)
 {
         const auto sources = LoadAndValidateSources();
         const auto data = BuildGameData(sources);
-        const auto gameplay_hash = hs::Fnv1a64(sources.source_bytes);
-        const auto source_hash = hs::Fnv1a64(sources.all_source_bytes);
+        const auto gameplay_hash = ComputeGameplaySourceHash(sources.inventory);
+        const auto source_hash = ComputeContentSourceHash(sources.inventory);
         if (mode == "--validate-only")
         {
             std::cout << "content.validated documents=" << kDocumentNames.size()

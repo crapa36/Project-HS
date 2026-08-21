@@ -2,6 +2,10 @@
 #define NOMINMAX
 #endif
 
+#include "../Content/content_source_inventory.hpp"
+
+#include <hs/core/windows_command_line.hpp>
+
 #include <nlohmann/json.hpp>
 
 #include <Windows.h>
@@ -15,24 +19,11 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef HS_GAME_DATA_DIRECTORY
-#define HS_GAME_DATA_DIRECTORY "ContentSource/GameData"
-#endif
-
-#ifndef HS_CHARACTER_MODEL
-#define HS_CHARACTER_MODEL "ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
-#endif
-
-#ifndef HS_CHARACTER_ANIMATION_DIRECTORY
-#define HS_CHARACTER_ANIMATION_DIRECTORY "ContentSource/Animations/Characters/Archer"
-#endif
 
 #ifndef HS_CONTENT_EXECUTABLE
 #define HS_CONTENT_EXECUTABLE "hs_content.exe"
@@ -62,54 +53,12 @@ namespace
 
 using Json = nlohmann::ordered_json;
 
-constexpr std::array<std::string_view, 13> kGameDataCategories = {
-    "audio_cues", "bosses",   "characters", "enemies", "level",
-    "materials",  "particles", "relics",    "skills",  "spawn_schedule",
-    "stats",      "ui_strings", "upgrades",
-};
-
-bool IsGameDataCategory(std::string_view value)
-{
-    return std::ranges::find(kGameDataCategories, value) != kGameDataCategories.end();
-}
-
-std::filesystem::path GameDataCategoryPath(std::string_view category)
-{
-    if (!IsGameDataCategory(category))
-    {
-        throw std::runtime_error("unknown category '" + std::string(category) + "'");
-    }
-    return std::filesystem::path(HS_GAME_DATA_DIRECTORY) /
-           (std::string(category) + ".json");
-}
-
-std::string ReadText(const std::filesystem::path &path)
-{
-    std::ifstream stream(path, std::ios::binary | std::ios::ate);
-    if (!stream)
-    {
-        throw std::runtime_error(path.string() + ": cannot open file");
-    }
-    const auto size = stream.tellg();
-    if (size <= 0)
-    {
-        throw std::runtime_error(path.string() + ": file is empty");
-    }
-    std::string text(static_cast<std::size_t>(size), '\0');
-    stream.seekg(0);
-    if (!stream.read(text.data(), static_cast<std::streamsize>(size)))
-    {
-        throw std::runtime_error(path.string() + ": cannot read complete file");
-    }
-    return text;
-}
-
 Json ParseDocument(const std::filesystem::path &path, std::string_view category)
 {
     Json document;
     try
     {
-        document = Json::parse(ReadText(path));
+        document = Json::parse(hs::content::ReadRequiredText(path));
     }
     catch (const Json::exception &exception)
     {
@@ -127,65 +76,15 @@ Json ParseDocument(const std::filesystem::path &path, std::string_view category)
     return document;
 }
 
-void ValidateGameDataDocuments()
-{
-    const std::filesystem::path root = HS_GAME_DATA_DIRECTORY;
-    std::set<std::string, std::less<>> found;
-    for (const auto &entry : std::filesystem::directory_iterator(root))
-    {
-        if (entry.is_regular_file() && entry.path().extension() == ".json")
-        {
-            found.emplace(entry.path().stem().string());
-        }
-    }
-    std::set<std::string, std::less<>> expected;
-    for (const auto category : kGameDataCategories)
-    {
-        expected.emplace(category);
-        static_cast<void>(ParseDocument(GameDataCategoryPath(category), category));
-    }
-    if (found != expected)
-    {
-        throw std::runtime_error(root.string() +
-                                 ": expected exactly 13 category JSON files");
-    }
-}
-
-std::wstring Quote(std::wstring_view value)
-{
-    std::wstring quoted(1, L'"');
-    std::size_t backslashes = 0;
-    for (const auto character : value)
-    {
-        if (character == L'\\')
-        {
-            ++backslashes;
-            continue;
-        }
-        if (character == L'"')
-        {
-            quoted.append(backslashes * 2 + 1, L'\\');
-            quoted.push_back(L'"');
-            backslashes = 0;
-            continue;
-        }
-        quoted.append(backslashes, L'\\');
-        backslashes = 0;
-        quoted.push_back(character);
-    }
-    quoted.append(backslashes * 2, L'\\');
-    quoted.push_back(L'"');
-    return quoted;
-}
-
 DWORD RunProcess(const std::filesystem::path &executable,
                  std::span<const std::wstring_view> arguments)
 {
-    std::wstring command = Quote(executable.wstring());
+    std::wstring command =
+        hs::QuoteWindowsCommandLineArgument(executable.wstring());
     for (const auto argument : arguments)
     {
         command.push_back(L' ');
-        command += Quote(argument);
+        command += hs::QuoteWindowsCommandLineArgument(argument);
     }
 
     STARTUPINFOW startup{.cb = sizeof(startup)};
@@ -215,47 +114,10 @@ DWORD RunContentCooker(std::wstring_view mode)
     return RunProcess(HS_CONTENT_EXECUTABLE, arguments);
 }
 
-std::uint64_t ComputeContentSourceHash()
-{
-    constexpr std::uint64_t offset = 14695981039346656037ull;
-    constexpr std::uint64_t prime = 1099511628211ull;
-    auto hash = offset;
-    const auto append = [&](std::string_view bytes) {
-        for (const auto byte : bytes)
-        {
-            hash ^= static_cast<unsigned char>(byte);
-            hash *= prime;
-        }
-    };
-    for (const auto category : kGameDataCategories)
-    {
-        append(category);
-        append(std::string_view("\0", 1));
-        append(ReadText(GameDataCategoryPath(category)));
-        append(std::string_view("\0", 1));
-    }
-    const auto append_asset = [&](std::string_view name,
-                                  const std::filesystem::path &path) {
-        append(name);
-        append(std::string_view("\0", 1));
-        append(ReadText(path));
-        append(std::string_view("\0", 1));
-    };
-    const auto animation_root =
-        std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY);
-    append_asset("character/archer/model", HS_CHARACTER_MODEL);
-    append_asset("character/archer/idle", animation_root / "Idle.fbx");
-    append_asset("character/archer/run", animation_root / "RunForward.fbx");
-    append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
-    append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
-    append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
-    return hash;
-}
-
 std::uint64_t ReadCookedSourceHash()
 {
-    const auto manifest = ReadText(std::filesystem::path(HS_COOKED_DIRECTORY) /
-                                   "manifest.txt");
+    const auto manifest = hs::content::ReadRequiredText(
+        std::filesystem::path(HS_COOKED_DIRECTORY) / "manifest.txt");
     constexpr std::string_view prefix = "source_hash=";
     const auto start = manifest.find(prefix);
     if (start == std::string::npos)
@@ -534,7 +396,7 @@ void WriteAndFlush(const std::filesystem::path &path, std::string_view text)
 void SetGameDataParameter(std::string_view category, std::string_view entry_id,
                   std::string_view parameter_key, std::string_view number_text)
 {
-    const auto path = GameDataCategoryPath(category);
+    const auto path = hs::content::GameDataCategoryPath(category);
     auto document = ParseDocument(path, category);
     auto &entry = LocateCategoryEntry(document, category, entry_id);
     auto &parameter = LocateNumericParameter(entry, parameter_key);
@@ -620,14 +482,14 @@ int main(int argc, char **argv)
         const std::string_view command = argv[1];
         if (command == "validate" && argc == 2)
         {
-            ValidateGameDataDocuments();
             const auto exit_code = RunContentCooker(L"--validate-only");
             if (exit_code != 0)
             {
                 std::cerr << "tools.error hs_content validation exit=" << exit_code << '\n';
                 return 1;
             }
-            std::cout << "tools.validated documents=" << kGameDataCategories.size() << '\n';
+            std::cout << "tools.validated documents=" << hs::content::kDocumentNames.size()
+                      << '\n';
             return 0;
         }
         if (command == "cook" && argc == 2)
@@ -643,7 +505,8 @@ int main(int argc, char **argv)
         }
         if (command == "status" && argc == 2)
         {
-            const auto source = ComputeContentSourceHash();
+            const auto source = hs::content::ComputeContentSourceHash(
+                hs::content::LoadContentSourceInventory());
             const auto cooked = ReadCookedSourceHash();
             std::cout << "tools.status source_hash=" << source
                       << " cooked_hash=" << cooked
@@ -673,7 +536,8 @@ int main(int argc, char **argv)
         if (command == "list" && argc == 3)
         {
             const std::string_view category = argv[2];
-            PrintCategoryEntryIds(ParseDocument(GameDataCategoryPath(category), category), category);
+            PrintCategoryEntryIds(
+                ParseDocument(hs::content::GameDataCategoryPath(category), category), category);
             return 0;
         }
         if (command == "set" && argc == 6)
