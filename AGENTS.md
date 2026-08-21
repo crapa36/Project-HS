@@ -1,112 +1,135 @@
-# Project HS Agent Guide
+# Project HS
 
-Project HS is a C++23 Windows game using Direct3D 12.
-It builds with CMake 3.30+, Ninja, and MSVC.
+Project-specific rules only. Do not duplicate general engineering guidance here.
 
-Read `ARCHITECTURE.md` for module responsibilities and dependency rules.
+## Canonical Project Context
 
-## Working rules
+Read `ARCHITECTURE.md` before changing module boundaries, ownership, public APIs, or build structure.
 
-1. Trace the complete code path before editing it.
-2. Make the smallest correct change.
-3. Reuse existing helpers, targets, tests, types, and conventions.
-4. Fix root causes at shared boundaries; do not suppress errors downstream.
-5. Preserve public APIs unless the task explicitly changes them.
-6. Preserve behavior, formats, CLI semantics, and test expectations during structural work.
-7. Do not weaken validation, error handling, determinism, or architecture checks.
-8. Do not add external dependencies unless explicitly required.
-9. Do not perform unrelated cleanup.
+More specific rules override this file:
 
-## Dependency direction
+* `Source/Gameplay/AGENTS.md`
+* `Source/RendererD3D12/AGENTS.md`
+
+`Tests/check_architecture.cmake` mechanically enforces the module graph.
+
+## Build Contract
+
+Current project toolchain:
+
+* Windows
+* MSVC
+* Ninja
+* CMake 3.30+
+* C++23
+* Direct3D 12 runtime
+
+The main build switches are:
 
 ```text
-Core
-├── Jobs
-├── GameDomain
-│   ├── GameRules
-│   │   └── Gameplay
-│   └── Presentation
-└── RendererD3D12
-
-Runtime composes concrete subsystems.
-Apps are entry points and composition targets.
+HS_BUILD_RUNTIME
+HS_BUILD_CONTENT_TOOLS
+HS_BUILD_TESTS
+HS_ENABLE_VALIDATION
+HS_ENABLE_GPU_VALIDATION
 ```
 
-- Core must not depend on higher Project HS modules.
-- Jobs may depend on Core.
-- GameDomain may depend on Core.
-- GameRules may depend on Core and GameDomain.
-- Gameplay may depend on Core, GameDomain, and GameRules.
-- Presentation may depend on Core and GameDomain.
-- RendererD3D12 may depend on Core and native D3D12 dependencies.
-- Runtime may compose Core, Jobs, Gameplay, Presentation, and RendererD3D12.
-- Production modules must not include another module's `Private` headers.
+Runtime and content tools default to enabled.
 
-## Deterministic Gameplay
+The low-level configuration intentionally disables both:
 
-Gameplay is deterministic fixed-step simulation code.
+```text
+HS_BUILD_RUNTIME=OFF
+HS_BUILD_CONTENT_TOOLS=OFF
+```
 
-Do not introduce into Gameplay:
+This path must remain able to build and test Core, Jobs, GameDomain, GameRules, Gameplay, and Presentation without requiring the D3D12 runtime or content toolchain.
 
-- D3D12 or DXGI knowledge;
-- windowing, audio, presentation, or renderer dependencies;
-- runtime/filesystem orchestration;
-- wall-clock-driven simulation decisions;
-- nondeterministic iteration that affects state or checksums.
+Do not introduce a low-level dependency that makes `verify-core` require runtime/content-only prerequisites.
 
-Preserve `/fp:strict`, phase ordering, seeds, and checksum expectations.
-An unexpected checksum change is a regression until its cause is proven.
+## Architecture
 
-See `Source/Gameplay/AGENTS.md` for local rules.
+The canonical module DAG is defined in `ARCHITECTURE.md`.
 
-## Renderer
+Cross-module production code must use another module's `Public` API. Do not include another module's `Private` implementation.
 
-RendererD3D12 is the concrete Windows/D3D12 backend.
-Do not add an interface, factory, registry, or generic backend layer without a real second backend.
-Do not leak D3D12 types into GameDomain, GameRules, or Gameplay.
+Do not move a higher-level type into Core merely to bypass a dependency restriction.
 
-See `Source/RendererD3D12/AGENTS.md` for local rules.
+The architecture test is:
+
+```text
+architecture.layers
+```
+
+Any module-boundary change must keep it passing.
+
+## Deterministic Simulation
+
+Deterministic fixed-step simulation is a project contract.
+
+Gameplay uses MSVC `/fp:strict`, deterministic phase ordering, explicit seeds, and checksum verification.
+
+`Source/Gameplay/Private/simulation_pipeline.hpp` is the authoritative simulation phase order.
+
+An unexpected gameplay checksum change is a regression until the semantic cause is established.
+
+Do not update a checksum oracle merely to accept a structural or implementation-only change.
+
+The simulation clock and content cooker share the 60 Hz tick convention. A tick-rate change must update the clock, content time-to-tick conversion, tick-based rules, and determinism tests together.
+
+Gameplay-specific implementation rules live in `Source/Gameplay/AGENTS.md`.
+
+## Content Pipeline
+
+Authoritative content inputs are under:
+
+```text
+ContentSource/
+Schemas/
+Content/Shaders/
+```
+
+The content pipeline is:
+
+```text
+ContentSource + Schemas + shader/assets
+                ↓
+             hs_content
+                ↓
+        Build/<preset>/Cooked
+```
+
+Cooked and generated build outputs are not source files. Change their source input, schema, cooker, shader source, or build rule instead.
+
+Simulation and presentation cooked data are deliberately separate:
+
+```text
+simulation_rules.hsbin
+presentation_catalog.hsbin
+```
+
+Do not recombine simulation ownership with presentation-only data for convenience.
+
+Full content builds require Autodesk FBX SDK 2020.3.7 for VS2022. `HS_FBX_SDK_ROOT` may override its default location.
 
 ## Verification
 
-Fast low-level verification:
+For Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, architecture, or low-level build changes:
 
 ```powershell
 cmake --workflow --preset verify-core
 ```
 
-Full integration verification:
+`verify-core` uses `msvc-core`, builds the low-level test targets, and runs the foundation, architecture, rules, and determinism-core checks without Runtime or content tools.
+
+For changes that require Runtime, renderer, content cooking, assets, or integration behavior:
 
 ```powershell
 cmake --workflow --preset verify
 ```
 
-The core workflow must not require the D3D12 runtime, DXC, font download,
-DirectXTex, or FBX SDK. Full verification requires the provisioned MSVC/Ninja,
-DXC, FBX SDK, D3D12 runtime, content, and GPU environment used by integration tests.
+Use `msvc-gpu-validation` when investigating D3D12 synchronization, barrier, resource-state, lifetime, or GPU-validation failures.
 
-If a prerequisite is unavailable, report it exactly. Never disable a check.
+Shader hot-reload validation requires a Debug configuration.
 
-## Ponytail rule
-
-Before writing code, stop at the first option that works:
-
-1. Do we need it?
-2. Does Project HS already provide it?
-3. Does the standard library provide it?
-4. Does the native platform provide it?
-5. Does an installed dependency provide it?
-6. Can existing code be simplified instead?
-7. Only then write the minimum new code.
-
-Prefer deletion to addition, movement to rewriting, and mechanical checks to prose.
-Do not create speculative interfaces, factories, registries, service containers,
-plugin systems, dependency injection, ECS migrations, or generic backends.
-
-For a deliberate simplification with a real ceiling, use:
-
-```cpp
-// ponytail: <known ceiling>; upgrade when <specific trigger>
-```
-
-Do not add `ponytail:` comments to ordinary implementation choices.
+Renderer-specific requirements live in `Source/RendererD3D12/AGENTS.md`.
