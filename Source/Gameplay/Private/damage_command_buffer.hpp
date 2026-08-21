@@ -14,12 +14,7 @@ namespace hs::gameplay_detail
 
 inline constexpr std::uint8_t kNoCombatSource = 0xFF;
 
-enum class EffectCommandKind : std::uint8_t
-{
-    DealDamage,
-};
-
-struct EffectCommand
+struct DamageCommand
 {
     std::uint64_t sequence{};
     std::uint64_t target{};
@@ -37,7 +32,6 @@ struct EffectCommand
     std::array<std::uint8_t, 3> amplified_upgrades{};
     std::array<std::int32_t, 3> amplified_damage{};
     std::uint8_t amplified_count{};
-    EffectCommandKind kind{EffectCommandKind::DealDamage};
 };
 
 enum class ProcPermission : std::uint8_t
@@ -73,16 +67,16 @@ struct ProcContext
                       : damage};
 }
 
-struct CombatTransaction
+struct DamageCommandBuffer
 {
-    std::vector<EffectCommand> commands;
+    std::vector<DamageCommand> commands;
 
     void Reserve(std::size_t count) { commands.reserve(count); }
-    void Push(EffectCommand command) { commands.push_back(std::move(command)); }
-    void Order()
+    void Enqueue(DamageCommand command) { commands.push_back(std::move(command)); }
+    void SortByTargetAndSequence()
     {
-        std::ranges::sort(commands, [](const EffectCommand &left,
-                                      const EffectCommand &right) {
+        std::ranges::sort(commands, [](const DamageCommand &left,
+                                      const DamageCommand &right) {
             return std::tie(left.target, left.sequence) <
                    std::tie(right.target, right.sequence);
         });

@@ -106,7 +106,7 @@ void TestSameTickFinalBossVictory()
     hs::InputFrame input{};
     input.target_tick = 1;
     (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-    Check(simulation.GetSessionView().final_boss_spawned,
+    Check(simulation.GetSessionProbe().final_boss_spawned,
           "final boss spawned");
     Check(simulation.ApplyDebugCommand(
               {hs::DebugCommandKind::DamageFinalBoss, 1'000'000})

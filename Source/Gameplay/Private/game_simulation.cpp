@@ -18,7 +18,7 @@ Result GameSimulation::Initialize(const SimulationConfig &config)
 }
 
 Result GameSimulation::Initialize(const SimulationConfig &config,
-                                  const SimulationRules &data)
+                                  const SimulationRules &rules)
 {
     if (impl_->initialized)
     {
@@ -26,15 +26,15 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
                                "GameSimulation already initialized.");
     }
     impl_->config = config;
-    impl_->data = data;
-    impl_->phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
-    impl_->player.health = impl_->player.max_health = data.player_health;
-    impl_->player.attack = data.player_attack;
-    impl_->player.attack_speed = data.player_attack_speed;
-    impl_->player.move_speed = data.player_move_speed;
-    impl_->player.magnet_radius = data.player_magnet_radius;
+    impl_->rules = rules;
+    impl_->session_phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
+    impl_->player.health = impl_->player.max_health = rules.player_health;
+    impl_->player.attack = rules.player_attack;
+    impl_->player.attack_speed = rules.player_attack_speed;
+    impl_->player.move_speed = rules.player_move_speed;
+    impl_->player.magnet_radius = rules.player_magnet_radius;
     impl_->player.skill_levels[0] = 1;
-    impl_->active_rules.Rebuild(impl_->player.relic_mask);
+    impl_->relic_rules.Rebuild(impl_->player.relic_mask);
     impl_->initialized = true;
     impl_->checksum = impl_->CalculateChecksum();
     return Result::Success();
@@ -47,20 +47,20 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
     {
         return {};
     }
-    impl_->input = input;
+    impl_->current_input = input;
     for (const auto &action : input.ui_actions) ApplyUiAction(action);
     impl_->ProcessInput();
-    if (impl_->phase != SessionPhase::Playing)
+    if (impl_->session_phase != SessionPhase::Playing)
     {
         impl_->player.buffered_skill = SkillKind::Count;
         impl_->player.buffered_skill_expires = 0;
         impl_->checksum = impl_->CalculateChecksum();
-        return {impl_->tick, impl_->checksum, impl_->phase};
+        return {impl_->tick, impl_->checksum, impl_->session_phase};
     }
     (void)fixed_delta;
     ++impl_->tick;
     impl_->RunPipeline();
-    return {impl_->tick, impl_->checksum, impl_->phase};
+    return {impl_->tick, impl_->checksum, impl_->session_phase};
 }
 
 GameplayChecksum GameSimulation::ComputeChecksum() const
@@ -70,16 +70,16 @@ GameplayChecksum GameSimulation::ComputeChecksum() const
 
 const SimulationRules &GameSimulation::Rules() const noexcept
 {
-    return impl_->data;
+    return impl_->rules;
 }
 
-SessionProbe GameSimulation::GetSessionView() const noexcept
+SessionProbe GameSimulation::GetSessionProbe() const noexcept
 {
     SessionProbe probe;
     probe.tick = impl_->tick;
     probe.growth_ticks = impl_->growth_ticks;
     probe.boss_fight_ticks = impl_->boss_fight_ticks;
-    probe.phase = impl_->phase;
+    probe.phase = impl_->session_phase;
     probe.level = impl_->player.level;
     probe.experience = impl_->player.experience;
     probe.experience_to_next = ExperienceForLevel(impl_->player.level);
@@ -201,7 +201,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
                                    "Debug relic is invalid.");
         }
         impl_->player.relic_mask |= 1u << command.value;
-        impl_->active_rules.Rebuild(impl_->player.relic_mask);
+        impl_->relic_rules.Rebuild(impl_->player.relic_mask);
         break;
     case DebugCommandKind::SpawnEnemy:
         impl_->SpawnEnemy(static_cast<EnemyKind>(command.value % 3), command.position);
@@ -241,10 +241,10 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         break;
     case DebugCommandKind::Reroll:
     {
-        auto &rerolls = impl_->phase == SessionPhase::RelicSelection
+        auto &rerolls = impl_->session_phase == SessionPhase::RelicSelection
                             ? impl_->player.relic_rerolls
                             : impl_->player.level_rerolls;
-        auto &sequence = impl_->phase == SessionPhase::RelicSelection
+        auto &sequence = impl_->session_phase == SessionPhase::RelicSelection
                              ? impl_->relic_reroll_sequence
                              : impl_->level_reroll_sequence;
         if (rerolls == 0 || impl_->card_count == 0)
@@ -254,12 +254,12 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         }
         --rerolls;
         ++sequence;
-        if (impl_->phase == SessionPhase::RelicSelection) impl_->GenerateRelicCards(true);
+        if (impl_->session_phase == SessionPhase::RelicSelection) impl_->GenerateRelicCards(true);
         else impl_->GenerateLevelCards(true);
         break;
     }
     case DebugCommandKind::TogglePause:
-        impl_->phase = impl_->phase == SessionPhase::Paused ? SessionPhase::Playing
+        impl_->session_phase = impl_->session_phase == SessionPhase::Paused ? SessionPhase::Playing
                                                             : SessionPhase::Paused;
         break;
     }
@@ -267,19 +267,19 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
     return Result::Success();
 }
 
-Result GameSimulation::ApplySimulationRules(const SimulationRules &data)
+Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
 {
-    if (!impl_->initialized || impl_->phase != SessionPhase::MainMenu)
+    if (!impl_->initialized || impl_->session_phase != SessionPhase::MainMenu)
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "Gameplay data Hot Reload requires the main menu.");
-    impl_->data = data;
+    impl_->rules = rules;
     return Result::Success();
 }
 
-SimulationObservation GameSimulation::Probe() const noexcept
+SimulationObservation GameSimulation::GetObservation() const noexcept
 {
     SimulationObservation observation;
-    static_cast<SessionProbe &>(observation) = GetSessionView();
+    static_cast<SessionProbe &>(observation) = GetSessionProbe();
     observation.balance = impl_->balance;
     return observation;
 }
@@ -294,22 +294,22 @@ void GameSimulation::ApplyUiAction(const UiAction &action)
     switch (action.kind)
     {
     case UiActionKind::StartSession:
-        if (impl_->phase == SessionPhase::MainMenu) impl_->StartSession();
+        if (impl_->session_phase == SessionPhase::MainMenu) impl_->StartSession();
         break;
     case UiActionKind::ReturnToMainMenu:
-        impl_->phase = SessionPhase::MainMenu;
+        impl_->session_phase = SessionPhase::MainMenu;
         break;
-    case UiActionKind::Quit: impl_->phase = SessionPhase::QuitRequested; break;
+    case UiActionKind::Quit: impl_->session_phase = SessionPhase::QuitRequested; break;
     case UiActionKind::Reroll:
         if (impl_->selection_input_guard_frames > 0 ||
             impl_->selection_waiting_for_release) break;
-        if (impl_->phase == SessionPhase::RelicSelection && impl_->player.relic_rerolls > 0)
+        if (impl_->session_phase == SessionPhase::RelicSelection && impl_->player.relic_rerolls > 0)
         {
             --impl_->player.relic_rerolls;
             ++impl_->relic_reroll_sequence;
             impl_->GenerateRelicCards(true);
         }
-        else if (impl_->phase == SessionPhase::CardSelection &&
+        else if (impl_->session_phase == SessionPhase::CardSelection &&
                  impl_->player.level_rerolls > 0)
         {
             --impl_->player.level_rerolls;
@@ -327,7 +327,7 @@ void GameSimulation::ApplyUiAction(const UiAction &action)
             impl_->AssignStat(static_cast<StatKind>(action.value));
         break;
     case UiActionKind::Resume:
-        impl_->phase = SessionPhase::Playing;
+        impl_->session_phase = SessionPhase::Playing;
         break;
     case UiActionKind::SwapLoadoutSlots:
         if (action.value < impl_->player.loadout.size() &&
@@ -345,7 +345,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.tick = impl_->tick;
     model.checksum = impl_->checksum;
     model.seed = impl_->config.seed;
-    model.session = GetSessionView();
+    model.session = GetSessionProbe();
     model.player = {impl_->player.position,
                     impl_->player.aim,
                     impl_->player.facing,
@@ -365,21 +365,21 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.effective_attack_speed = impl_->EffectiveAttackSpeed();
     model.effective_move_speed = impl_->EffectiveMoveSpeed();
     model.effective_magnet_radius = impl_->EffectiveMagnetRadius();
-    model.arena_half_extent = impl_->data.arena_half_extent;
+    model.arena_half_extent = impl_->rules.arena_half_extent;
     for (std::size_t index = 0; index < model.skills.size(); ++index)
     {
         const auto skill = static_cast<SkillKind>(index);
-        const auto &definition = impl_->data.skills[index];
+        const auto &definition = impl_->rules.skills[index];
         model.skills[index] = {
-            index == 0 ? Tick{} : impl_->CooldownTicks(skill),
+            index == 0 ? Tick{} : impl_->EffectiveCooldownTicks(skill),
             RoundDamage(impl_->EffectiveAttack() * definition.damage_coefficient),
             definition.range, definition.area_radius, definition.duration_ticks,
             definition.projectile_count, definition.pierce_count};
     }
     for (std::size_t index = 0; index < model.waves.size(); ++index)
         model.waves[index] = {
-            static_cast<Tick>(impl_->data.waves[index].minute) * Seconds(60.0f),
-            impl_->data.waves[index].duration_ticks};
+            static_cast<Tick>(impl_->rules.waves[index].minute) * Seconds(60.0f),
+            impl_->rules.waves[index].duration_ticks};
     if (impl_->player.charging &&
         impl_->player.charging_skill == SkillKind::ChargedShot)
     {

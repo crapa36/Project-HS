@@ -107,7 +107,7 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
     return Result::Success();
 }
 
-const CookedVfxDefinition *VfxCatalog::Find(EffectId id) const noexcept
+const CookedVfxDefinition *VfxCatalog::FindEffect(EffectId id) const noexcept
 {
     const auto found = std::lower_bound(definitions_.begin(), definitions_.end(), id.value,
         [](const CookedVfxDefinition &definition, std::uint64_t value) { return definition.effect_id < value; });
@@ -123,13 +123,13 @@ const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
     return found != sprites_.end() && found->sprite_id == id.value ? &*found : nullptr;
 }
 
-Result VfxCatalog::Expand(const PresentationEvent &event, std::uint32_t quality_percent,
+Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t quality_percent,
                           std::vector<ParticleSpawnCommand> &particles,
-                          std::vector<EffectLineSpawnCommand> &lines) const
+                          std::vector<VfxLineSpawnCommand> &lines) const
 {
     if (event.kind != PresentationKind::Vfx)
         return Result::Success();
-    const auto *definition = Find(event.asset);
+    const auto *definition = FindEffect(event.asset);
     if (!definition)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX effect ID is missing.");
     const auto parameters = DecodeVfxParameters(event.parameters);

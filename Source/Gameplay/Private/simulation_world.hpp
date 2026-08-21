@@ -3,10 +3,9 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/cooked_format.hpp>
 
-#include "ability_runtime.hpp"
-#include "active_rules.hpp"
-#include "combat_transaction.hpp"
-#include "rule_dispatcher.hpp"
+#include "cast_runtime.hpp"
+#include "relic_rule_table.hpp"
+#include "damage_command_buffer.hpp"
 #include "simulation_pipeline.hpp"
 #include "status_state.hpp"
 
@@ -473,7 +472,7 @@ using namespace gameplay_detail;
 
 struct GameSimulation::SimulationWorld
 {
-    SimulationRules data{SimulationRules::Defaults()};
+    SimulationRules rules{SimulationRules::Defaults()};
     SimulationConfig config{};
     PlayerState player{};
     std::vector<EnemyActor> enemies;
@@ -483,20 +482,20 @@ struct GameSimulation::SimulationWorld
     std::vector<EnemyActor> pending_enemy_spawns;
     std::vector<ProjectileActor> pending_projectile_spawns;
     std::vector<AreaActor> pending_area_spawns;
-    CombatTransaction combat;
-    ActiveRuleTable active_rules;
-    std::vector<ScheduledAction> scheduled;
+    DamageCommandBuffer combat;
+    RelicRuleTable relic_rules;
+    std::vector<ScheduledAction> scheduled_actions;
     std::vector<BossAction> boss_actions;
     std::vector<CastHitRecord> cast_hits;
     std::vector<AreaHitRecord> area_hits;
-    std::vector<CastRuntime> cast_runtime;
+    std::vector<CastRuntime> cast_runtimes;
     std::vector<DomainSignal> domain_signals;
     std::array<std::vector<std::size_t>, kGridCellCount> enemy_grid;
     std::vector<std::size_t> collision_candidates;
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};
     std::vector<ActiveWave> waves;
-    InputFrame input{};
+    InputFrame current_input{};
     Tick tick{};
     Tick growth_ticks{};
     Tick boss_fight_ticks{};
@@ -517,20 +516,20 @@ struct GameSimulation::SimulationWorld
     std::array<std::uint64_t, kCombatSkillCount> damage_by_skill{};
     std::uint64_t damage_taken{};
     std::uint64_t healing{};
-    BalanceObserver observer{};
-    BalanceTelemetry &balance{observer.metrics};
+    BalanceObserver balance_observer{};
+    BalanceTelemetry &balance{balance_observer.metrics};
     GameplayChecksum checksum{};
-    SessionPhase phase{SessionPhase::Playing};
+    SessionPhase session_phase{SessionPhase::Playing};
     bool initialized{};
     bool final_boss_spawned{};
     std::uint8_t selection_input_guard_frames{};
     bool selection_waiting_for_release{};
-    SimulationPhaseId current_phase{SimulationPhaseId::GameplayHash};
+    SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
     SimulationWorld();
     std::uint64_t Random(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     float RandomUnit(std::uint64_t entity, std::uint64_t purpose) const noexcept;
-    EntityId AllocateId() noexcept;
+    EntityId AllocateEntityId() noexcept;
     float EffectiveAttack() const noexcept;
     float EffectiveMoveSpeed() const noexcept;
     float EffectiveAttackSpeed() const noexcept;
@@ -549,7 +548,7 @@ struct GameSimulation::SimulationWorld
                                    Float2 before, Float2 after) noexcept;
     float EffectiveMagnetRadius() const noexcept;
     static std::size_t EnemyTelemetryIndex(const EnemyActor &enemy) noexcept;
-    Tick CooldownTicks(SkillKind skill) const noexcept;
+    Tick EffectiveCooldownTicks(SkillKind skill) const noexcept;
     EnemyActor *FindEnemy(std::uint64_t id) noexcept;
     const EnemyActor *FindEnemy(std::uint64_t id) const noexcept;
     bool IsBoss(const EnemyActor &enemy) const noexcept;
@@ -584,15 +583,15 @@ struct GameSimulation::SimulationWorld
                          std::uint8_t source_upgrade = kNoTelemetrySource,
                          std::uint8_t source_relic = kNoTelemetrySource,
                          std::uint8_t source_enemy = kNoTelemetrySource);
-    void Schedule(const ScheduledAction &action);
-    void DealDamage(std::uint64_t target, std::int32_t amount, SkillKind skill,
+    void ScheduleAction(const ScheduledAction &action);
+    void QueueDamage(std::uint64_t target, std::int32_t amount, SkillKind skill,
                     EffectOrigin origin, std::uint64_t cast_id,
                     std::uint8_t bleed = 0, bool burn = false,
                     float slow = 0.0f, Tick slow_duration = 0,
                     std::uint8_t source_upgrade = kNoTelemetrySource,
                     std::uint8_t source_relic = kNoTelemetrySource,
                     std::uint8_t source_enemy = kNoTelemetrySource);
-    void DamageArea(Float2 position, float radius, std::int32_t damage, SkillKind skill,
+    void QueueAreaDamage(Float2 position, float radius, std::int32_t damage, SkillKind skill,
                     EffectOrigin origin, std::uint64_t cast_id,
                     std::uint8_t bleed = 0, bool burn = false,
                     float slow = 0.0f, Tick slow_duration = 0,
@@ -616,7 +615,7 @@ struct GameSimulation::SimulationWorld
     void RecordHit(ProjectileActor &projectile, std::uint64_t target);
     std::uint8_t IncrementCastHit(std::uint64_t cast, std::uint64_t target);
     std::uint8_t IncrementAreaHit(std::uint64_t area, std::uint64_t target);
-    CastRuntime &RuntimeForCast(std::uint64_t cast, SkillKind skill);
+    CastRuntime &FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill);
     void OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy);
     void ExplodeProjectile(ProjectileActor &projectile);
     void CollisionHitPhase();
@@ -654,12 +653,12 @@ struct GameSimulation::SimulationWorld
     void HandleMovementEcho(Tick release_ticks, std::uint64_t cast_id);
     void HandleAlternatingSkills(SkillKind skill, std::size_t cooldown_index);
     void HandleDamageKnockback();
-    void HandleCombatHitChain(const EffectCommand &event);
+    void HandleCombatHitChain(const DamageCommand &event);
     void HandleBleedBurnExplosion(EnemyActor &enemy,
-                                  const EffectCommand &event,
+                                  const DamageCommand &event,
                                   std::uint8_t source_upgrade);
     void HandleDifferentSkillTracker(EnemyActor &enemy,
-                                     const EffectCommand &event);
+                                     const DamageCommand &event);
     void HandleKillCooldownSurge();
     void HandleBasicKillTracker(EnemyActor &enemy, CastRuntime *runtime);
     void HandleBleedKillHeal(const EnemyActor &enemy);
@@ -668,9 +667,9 @@ struct GameSimulation::SimulationWorld
     void DispatchBasicAttackRules(Tick release_ticks, std::uint64_t cast_id);
     void DispatchAbilityRules(SkillKind skill, std::size_t cooldown_index);
     void DispatchPlayerDamagedRules();
-    void DispatchAfterDamageRules(EnemyActor &enemy, const EffectCommand &event);
+    void DispatchAfterDamageRules(EnemyActor &enemy, const DamageCommand &event);
     void DispatchStatusAppliedRules(EnemyActor &enemy,
-                                    const EffectCommand &event,
+                                    const DamageCommand &event,
                                     std::uint8_t source_upgrade);
     void DispatchEnemyKilledRules(EnemyActor &enemy, CastRuntime *runtime);
     bool DispatchPlayerDeathRules();

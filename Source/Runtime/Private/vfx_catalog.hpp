@@ -3,7 +3,7 @@
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
-#include <hs/renderer/particle_spawn_command.hpp>
+#include <hs/renderer/vfx_spawn_command.hpp>
 
 #include <filesystem>
 #include <span>
@@ -17,12 +17,12 @@ class VfxCatalog
   public:
     [[nodiscard]] static Result Load(const std::filesystem::path &path,
                                      VfxCatalog &catalog);
-    [[nodiscard]] const CookedVfxDefinition *Find(EffectId id) const noexcept;
+    [[nodiscard]] const CookedVfxDefinition *FindEffect(EffectId id) const noexcept;
     [[nodiscard]] const CookedParticleSprite *FindSprite(AssetId id) const noexcept;
-    [[nodiscard]] Result Expand(const PresentationEvent &event,
+    [[nodiscard]] Result ExpandEvent(const PresentationEvent &event,
                                 std::uint32_t quality_percent,
                                 std::vector<ParticleSpawnCommand> &particles,
-                                std::vector<EffectLineSpawnCommand> &lines) const;
+                                std::vector<VfxLineSpawnCommand> &lines) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return payload_hash_; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return sprite_count_; }
 

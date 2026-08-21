@@ -42,7 +42,7 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
         }
         else
         {
-            phase = SessionPhase::RelicSelection;
+            session_phase = SessionPhase::RelicSelection;
             GuardSelectionInput();
         }
     }
@@ -157,7 +157,7 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
 void GameSimulation::SimulationWorld::GuardSelectionInput()
 {
     selection_input_guard_frames = 12;
-    selection_waiting_for_release = input.held.basic_attack_held;
+    selection_waiting_for_release = current_input.held.basic_attack_held;
 }
 
 void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
@@ -234,14 +234,14 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     else
     {
         player.relic_mask |= 1u << card.subject;
-        active_rules.Rebuild(player.relic_mask);
+        relic_rules.Rebuild(player.relic_mask);
         card_count = 0;
-        phase = SessionPhase::Playing;
+        session_phase = SessionPhase::Playing;
         return true;
     }
     ++player.pending_stat_points;
     card_count = 0;
-    phase = SessionPhase::StatAllocation;
+    session_phase = SessionPhase::StatAllocation;
     GuardSelectionInput();
     if (config.automatic_choices)
     {
@@ -271,13 +271,13 @@ void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
         {
             --player.pending_levels;
             GenerateLevelCards();
-            phase = SessionPhase::CardSelection;
+            session_phase = SessionPhase::CardSelection;
             GuardSelectionInput();
             if (config.automatic_choices) SelectCard(0);
         }
         else
         {
-            phase = SessionPhase::Playing;
+            session_phase = SessionPhase::Playing;
         }
     }
 }
@@ -300,7 +300,7 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
         if (!assigned)
         {
             player.pending_stat_points = 0;
-            phase = SessionPhase::Playing;
+            session_phase = SessionPhase::Playing;
         }
     }
 }
@@ -321,13 +321,13 @@ void GameSimulation::SimulationWorld::XpCardPhase()
         const auto global_experience_magnet =
             pickup.kind == PickupKind::Experience && pickup.globally_attracted;
         const auto radius = global_experience_magnet
-                                ? data.arena_half_extent * 3.0f
+                                ? rules.arena_half_extent * 3.0f
                                 : EffectiveMagnetRadius();
         if (LengthSquared(delta) <= radius * radius)
         {
             if (!global_experience_magnet &&
-                LengthSquared(delta) > data.player_magnet_radius *
-                                               data.player_magnet_radius)
+                LengthSquared(delta) > rules.player_magnet_radius *
+                                               rules.player_magnet_radius)
                 pickup.attracted_by_magnet_stat = true;
             pickup.position = Add(pickup.position,
                                   Multiply(Normalize(delta),
@@ -345,12 +345,12 @@ void GameSimulation::SimulationWorld::XpCardPhase()
         ++player.level;
         ++player.pending_levels;
     }
-    if (player.pending_levels > 0 && phase == SessionPhase::Playing)
+    if (player.pending_levels > 0 && session_phase == SessionPhase::Playing)
     {
         CancelChargedShot();
         --player.pending_levels;
         GenerateLevelCards();
-        phase = SessionPhase::CardSelection;
+        session_phase = SessionPhase::CardSelection;
         GuardSelectionInput();
         if (config.automatic_choices) SelectCard(0);
     }

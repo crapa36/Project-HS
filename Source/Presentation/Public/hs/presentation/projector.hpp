@@ -10,25 +10,37 @@
 
 #include <optional>
 #include <span>
+#include <cstdint>
 
 namespace hs
 {
 
 struct UiInteraction
 {
-    std::optional<UiAction> gameplay;
-    std::optional<UiCommand> runtime;
+    std::optional<UiAction> gameplay_action;
+    std::optional<UiCommand> runtime_command;
+};
+
+enum class UiPage : std::uint8_t
+{
+    Root = 0,
+    Collection = 1,
+    MainMenuSettings = 2,
+    CharacterOverview = 3,
+    CharacterSkills = 4,
+    CharacterStats = 5,
+    PauseSettings = 6,
 };
 
 struct PresentationUiState
 {
-    std::uint8_t page{};
-    std::uint8_t collection_skill{};
-    std::uint8_t character_skill{};
-    std::uint8_t loadout_source{0xFF};
+    UiPage page{UiPage::Root};
+    std::uint8_t selected_collection_skill{};
+    std::uint8_t selected_character_skill{};
+    std::uint8_t loadout_source_slot{0xFF};
 };
 
-[[nodiscard]] std::size_t ProjectPresentation(
+[[nodiscard]] std::size_t ProjectDomainSignal(
     const DomainSignal &signal, std::span<PresentationEvent> output) noexcept;
 [[nodiscard]] UiInteraction ResolveUiInteraction(const SessionProbe &session,
                                                  PresentationUiState &ui,

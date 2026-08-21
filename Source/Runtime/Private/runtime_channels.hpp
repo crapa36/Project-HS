@@ -15,14 +15,8 @@
 namespace hs
 {
 
-enum class GraphicsCommandKind : std::uint8_t
+struct ResizeCommand
 {
-    Resize,
-};
-
-struct GraphicsCommand
-{
-    GraphicsCommandKind kind{};
     std::uint32_t width{};
     std::uint32_t height{};
 };
@@ -36,7 +30,7 @@ struct RenderPorts
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
     BoundedSpscQueue<PresentationEvent, 1024> &audio_events;
-    BoundedSpscQueue<GraphicsCommand, 64> &graphics_commands;
+    BoundedSpscQueue<ResizeCommand, 64> &resize_commands;
     BoundedSpscQueue<SettingsData, 8> &renderer_settings;
     BoundedSpscQueue<NativeWindowMessage, 256> &window_messages;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
@@ -60,12 +54,12 @@ struct SimulationPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
-    BoundedSpscQueue<SimulationRules, 2> &gameplay_data_updates;
+    BoundedSpscQueue<SimulationRules, 2> &simulation_rules_updates;
     BoundedSpscQueue<SettingsData, 8> &presentation_settings;
     BoundedSpscQueue<UiAction, 64> &ui_actions;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
     std::atomic<Tick> &completed_tick;
-    std::atomic<GameplayChecksum> &checksum;
+    std::atomic<GameplayChecksum> &gameplay_checksum;
     std::atomic<std::uint8_t> &session_phase;
     std::atomic<std::uint8_t> &ui_page;
     std::atomic<std::uint8_t> &collection_skill;
@@ -96,16 +90,16 @@ struct RuntimeChannels
     RenderSnapshotExchange snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
     BoundedSpscQueue<PresentationEvent, 1024> audio_events;
-    BoundedSpscQueue<GraphicsCommand, 64> graphics_commands;
+    BoundedSpscQueue<ResizeCommand, 64> resize_commands;
     BoundedSpscQueue<SettingsData, 8> renderer_settings;
-    BoundedSpscQueue<SimulationRules, 2> gameplay_data_updates;
+    BoundedSpscQueue<SimulationRules, 2> simulation_rules_updates;
     BoundedSpscQueue<SettingsData, 8> presentation_settings;
     BoundedSpscQueue<UiAction, 64> ui_actions;
     BoundedSpscQueue<UiCommand, 64> ui_commands;
     BoundedSpscQueue<NativeWindowMessage, 256> window_messages;
     BoundedSpscQueue<DebugCommand, 64> debug_commands;
     std::atomic<Tick> completed_tick{};
-    std::atomic<GameplayChecksum> checksum{};
+    std::atomic<GameplayChecksum> gameplay_checksum{};
     std::atomic<std::uint8_t> session_phase{};
     std::atomic<std::uint8_t> ui_page{};
     std::atomic<std::uint8_t> collection_skill{};
@@ -125,7 +119,7 @@ struct RuntimeChannels
     [[nodiscard]] RenderPorts ForRender() noexcept
     {
         return {stop_requested, simulation_done, render_ready, action_edges, snapshots,
-                presentation_events, audio_events, graphics_commands, renderer_settings,
+                presentation_events, audio_events, resize_commands, renderer_settings,
                 window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
                 devtools_capture_keyboard};
@@ -135,9 +129,9 @@ struct RuntimeChannels
     {
         return {stop_requested, simulation_done, held_input, focus_epoch,
                 camera_target_x, camera_target_z, camera_zoom_percent, action_edges,
-                snapshots, presentation_events, gameplay_data_updates,
+                 snapshots, presentation_events, simulation_rules_updates,
                 presentation_settings, ui_actions,
-                debug_commands, completed_tick, checksum, session_phase, ui_page,
+                 debug_commands, completed_tick, gameplay_checksum, session_phase, ui_page,
                 collection_skill, character_skill, loadout_source,
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events};

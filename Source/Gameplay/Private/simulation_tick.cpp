@@ -15,13 +15,13 @@ GameSimulation::SimulationWorld::SimulationWorld()
     pending_area_spawns.reserve(128);
     pickups.reserve(1'536);
     combat.Reserve(4'096);
-    scheduled.reserve(512);
+    scheduled_actions.reserve(512);
     boss_actions.reserve(32);
     cast_hits.reserve(1'024);
     area_hits.reserve(1'024);
-    cast_runtime.reserve(512);
-    observer.enemy_hit_casts.reserve(256);
-    observer.player_hit_casts.reserve(256);
+    cast_runtimes.reserve(512);
+    balance_observer.enemy_hit_casts.reserve(256);
+    balance_observer.player_hit_casts.reserve(256);
     domain_signals.reserve(512);
     collision_candidates.reserve(128);
 }
@@ -37,14 +37,14 @@ float GameSimulation::SimulationWorld::RandomUnit(std::uint64_t entity, std::uin
            static_cast<float>(0x1000000u);
 }
 
-EntityId GameSimulation::SimulationWorld::AllocateId() noexcept
+EntityId GameSimulation::SimulationWorld::AllocateEntityId() noexcept
 {
     return {next_entity_id++};
 }
 
 float GameSimulation::SimulationWorld::EffectiveMoveSpeed() const noexcept
 {
-    return data.player_move_speed *
+    return rules.player_move_speed *
            (1.0f + 0.03f * player.stats[static_cast<std::size_t>(StatKind::MoveSpeed)]);
 }
 
@@ -97,9 +97,9 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
                 std::uint64_t random_key)
 {
     const auto minute = static_cast<std::uint32_t>(growth_ticks / Seconds(60.0f));
-    const auto &definition = data.enemies[static_cast<std::size_t>(kind)];
+    const auto &definition = rules.enemies[static_cast<std::size_t>(kind)];
     EnemyActor enemy;
-    enemy.id = AllocateId();
+    enemy.id = AllocateEntityId();
     enemy.random_key = random_key != 0 ? random_key : next_enemy_random_key++;
     enemy.kind = kind;
     enemy.position = enemy.previous_position = position;
@@ -116,7 +116,7 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
     enemy.attack_cooldown_ticks = definition.attack_cooldown_ticks;
     enemy.spawned_tick = tick;
     enemy.status.slows.reserve(8);
-    if (current_phase == SimulationPhaseId::Spawn)
+    if (pipeline_phase == SimulationPhaseId::Spawn)
         pending_enemy_spawns.push_back(std::move(enemy));
     else
         enemies.push_back(std::move(enemy));
@@ -126,9 +126,9 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
 
 bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind)
 {
-    const auto &definition = data.bosses[static_cast<std::size_t>(kind)];
+    const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
     EnemyActor boss;
-    boss.id = AllocateId();
+    boss.id = AllocateEntityId();
     boss.random_key = next_enemy_random_key++;
     boss.boss = kind;
     boss.position = boss.previous_position =
@@ -141,7 +141,7 @@ bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind)
     boss.pattern_ready = tick + 90;
     boss.status.slows.reserve(8);
     const auto position = boss.position;
-    if (current_phase == SimulationPhaseId::Spawn)
+    if (pipeline_phase == SimulationPhaseId::Spawn)
         pending_enemy_spawns.push_back(std::move(boss));
     else
         enemies.push_back(std::move(boss));
@@ -155,7 +155,7 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
                  bool guaranteed)
 {
     PickupActor pickup;
-    pickup.id = AllocateId();
+    pickup.id = AllocateEntityId();
     pickup.kind = kind;
     pickup.position = position;
     pickup.value = value;
@@ -167,14 +167,14 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
 
 void GameSimulation::SimulationWorld::StartSession()
 {
-    phase = SessionPhase::Playing;
+    session_phase = SessionPhase::Playing;
     player = {};
-    active_rules.Rebuild(player.relic_mask);
-    player.health = player.max_health = data.player_health;
-    player.attack = data.player_attack;
-    player.attack_speed = data.player_attack_speed;
-    player.move_speed = data.player_move_speed;
-    player.magnet_radius = data.player_magnet_radius;
+    relic_rules.Rebuild(player.relic_mask);
+    player.health = player.max_health = rules.player_health;
+    player.attack = rules.player_attack;
+    player.attack_speed = rules.player_attack_speed;
+    player.move_speed = rules.player_move_speed;
+    player.magnet_radius = rules.player_magnet_radius;
     player.skill_levels[0] = 1;
     player.level_rerolls = 3;
     player.relic_rerolls = 3;
@@ -190,7 +190,7 @@ void GameSimulation::SimulationWorld::StartSession()
     next_enemy_random_key = 1;
     damage_dealt = damage_taken = healing = 0;
     damage_by_skill = {};
-    observer.Reset();
+    balance_observer.Reset();
     enemies.clear();
     projectiles.clear();
     pending_enemy_spawns.clear();
@@ -199,11 +199,11 @@ void GameSimulation::SimulationWorld::StartSession()
     areas.clear();
     pickups.clear();
     combat.Clear();
-    scheduled.clear();
+    scheduled_actions.clear();
     boss_actions.clear();
     cast_hits.clear();
     area_hits.clear();
-    cast_runtime.clear();
+    cast_runtimes.clear();
     domain_signals.clear();
     waves.clear();
     cards = {};
@@ -213,49 +213,49 @@ void GameSimulation::SimulationWorld::StartSession()
 void GameSimulation::SimulationWorld::ProcessInput()
 {
     if (selection_input_guard_frames > 0) --selection_input_guard_frames;
-    if (!input.held.basic_attack_held) selection_waiting_for_release = false;
-    const auto aim_delta = Float2{input.held.aim_world.x - player.position.x,
-                                  input.held.aim_world.z - player.position.y};
+    if (!current_input.held.basic_attack_held) selection_waiting_for_release = false;
+    const auto aim_delta = Float2{current_input.held.aim_world.x - player.position.x,
+                                  current_input.held.aim_world.z - player.position.y};
     if (LengthSquared(aim_delta) > 0.0001f)
     {
         player.aim = Normalize(aim_delta, player.aim);
     }
-    if (input.held.move_held && phase == SessionPhase::Playing)
+    if (current_input.held.move_held && session_phase == SessionPhase::Playing)
     {
-        player.move_target = {input.held.move_target_world.x,
-                              input.held.move_target_world.z};
+        player.move_target = {current_input.held.move_target_world.x,
+                              current_input.held.move_target_world.z};
         player.has_move_target = true;
     }
-    for (const auto &edge : input.ordered_edges)
+    for (const auto &edge : current_input.ordered_edges)
     {
         if (edge.action == GameAction::CharacterPage &&
             edge.kind == EdgeKind::Pressed)
         {
-            if (phase == SessionPhase::Playing)
+            if (session_phase == SessionPhase::Playing)
             {
                 CancelChargedShot();
-                phase = SessionPhase::Paused;
+                session_phase = SessionPhase::Paused;
             }
-            else if (phase == SessionPhase::Paused)
+            else if (session_phase == SessionPhase::Paused)
             {
-                phase = SessionPhase::Playing;
+                session_phase = SessionPhase::Playing;
             }
             continue;
         }
         if (edge.action == GameAction::Pause && edge.kind == EdgeKind::Pressed)
         {
-            if (phase == SessionPhase::Playing)
+            if (session_phase == SessionPhase::Playing)
             {
                 CancelChargedShot();
-                phase = SessionPhase::Paused;
+                session_phase = SessionPhase::Paused;
             }
-            else if (phase == SessionPhase::Paused)
+            else if (session_phase == SessionPhase::Paused)
             {
-                phase = SessionPhase::Playing;
+                session_phase = SessionPhase::Playing;
             }
             continue;
         }
-        if (phase != SessionPhase::Playing)
+        if (session_phase != SessionPhase::Playing)
         {
             continue;
         }
@@ -359,7 +359,7 @@ void GameSimulation::SimulationWorld::RunPipeline()
 {
     for (const auto phase_id : gameplay_detail::kSimulationPipeline)
     {
-        current_phase = phase_id;
+        pipeline_phase = phase_id;
         switch (phase_id)
         {
         case SimulationPhaseId::SessionTimer: SessionTimerPhase(); break;
@@ -416,7 +416,7 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
     std::erase_if(cast_hits, [this](const CastHitRecord &record) {
         return record.cast_id + 256 < next_cast_id;
     });
-    std::erase_if(cast_runtime, [this](const CastRuntime &runtime) {
+    std::erase_if(cast_runtimes, [this](const CastRuntime &runtime) {
         return runtime.cast_id + 256 < next_cast_id;
     });
     std::erase_if(area_hits, [this](const AreaHitRecord &record) {
@@ -449,7 +449,7 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(tick);
     value(growth_ticks);
     value(boss_fight_ticks);
-    value(phase);
+    value(session_phase);
     value(selection_input_guard_frames);
     value(selection_waiting_for_release);
     value(next_entity_id);
@@ -715,8 +715,8 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
             value(event.amplified_damage[index]);
         }
     }
-    count(scheduled.size());
-    for (const auto &action : scheduled)
+    count(scheduled_actions.size());
+    for (const auto &action : scheduled_actions)
     {
         value(action.due);
         value(action.kind);
@@ -765,8 +765,8 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(record.target);
         value(record.count);
     }
-    count(cast_runtime.size());
-    for (const auto &runtime : cast_runtime)
+    count(cast_runtimes.size());
+    for (const auto &runtime : cast_runtimes)
     {
         value(runtime.cast_id);
         value(runtime.skill);
@@ -803,7 +803,7 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
 
 void GameSimulation::SimulationWorld::SessionTimerPhase()
 {
-    if (phase != SessionPhase::Playing)
+    if (session_phase != SessionPhase::Playing)
     {
         return;
     }
@@ -844,8 +844,8 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
 const SpawnStage &GameSimulation::SimulationWorld::CurrentSpawnStage() const noexcept
 {
     const auto minute = growth_ticks / Seconds(60.0f);
-    const SpawnStage *selected = &data.spawn_stages.front();
-    for (const auto &stage : data.spawn_stages)
+    const SpawnStage *selected = &rules.spawn_stages.front();
+    for (const auto &stage : rules.spawn_stages)
     {
         if (stage.start_minute <= minute)
         {
@@ -862,7 +862,7 @@ Float2 GameSimulation::SimulationWorld::SpawnPosition(std::uint64_t salt) const 
     auto position = Add(
         player.position,
         {std::cos(angle) * distance, std::sin(angle) * distance});
-    const auto extent = data.arena_half_extent - 1.0f;
+    const auto extent = rules.arena_half_extent - 1.0f;
     position.x = std::clamp(position.x, -extent, extent);
     position.y = std::clamp(position.y, -extent, extent);
     return position;
@@ -879,7 +879,7 @@ EnemyKind GameSimulation::SimulationWorld::ChooseEnemyKind(std::uint64_t salt) c
 
 void GameSimulation::SimulationWorld::SpawnPhase()
 {
-    if (phase != SessionPhase::Playing)
+    if (session_phase != SessionPhase::Playing)
     {
         return;
     }
@@ -894,7 +894,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
             SpawnEnemy(ChooseEnemyKind(salt), SpawnPosition(salt), salt);
         }
     }
-    for (const auto &wave : data.waves)
+    for (const auto &wave : rules.waves)
     {
         if (growth_ticks == static_cast<Tick>(wave.minute) * Seconds(60.0f))
         {
@@ -1022,7 +1022,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         {
             constexpr float kAreaRadius = 2.2f;
             const auto center = Add(player.position, Multiply(player_velocity, 0.75f));
-            const auto safe_extent = data.arena_half_extent - kAreaRadius * 2.0f;
+            const auto safe_extent = rules.arena_half_extent - kAreaRadius * 2.0f;
             const Float2 clamped_center{
                 std::clamp(center.x, -safe_extent, safe_extent),
                 std::clamp(center.y, -safe_extent, safe_extent)};
@@ -1088,7 +1088,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
 
     const auto recovery = kind == BossKind::Final && boss.final_phase == 2
                               ? Seconds(boss.phase_pattern_count % 3 == 0 ? 2.0f : 1.2f)
-                              : data.bosses[static_cast<std::size_t>(kind)].recovery_ticks;
+                              : rules.bosses[static_cast<std::size_t>(kind)].recovery_ticks;
     boss.pattern_ready = last_due + recovery;
 }
 
@@ -1112,14 +1112,14 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
         {
             if (tick >= enemy.attack_resolve)
             {
-                const auto &definition = data.enemies[static_cast<std::size_t>(enemy.kind)];
+                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.kind)];
                 if (enemy.kind == EnemyKind::Melee)
                 {
                     if (distance <= 1.0f)
                     {
                         EmitVfx(DomainSignalKind::MeleeEnemyHit, player.position,
                                 enemy.locked_aim, 1.0f, 0.1f);
-                        DealDamage(0, enemy.damage, SkillKind::Count,
+                        QueueDamage(0, enemy.damage, SkillKind::Count,
                                    EffectOrigin::Original, enemy.attack_cast_id,
                                    0, false, 0.0f, 0, kNoTelemetrySource,
                                    kNoTelemetrySource,
@@ -1149,7 +1149,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                 {
                     EmitVfx(DomainSignalKind::SuicideEnemyExploded,
                             enemy.position, {}, 1.0f, 0.15f);
-                    DealDamage(0, enemy.damage, SkillKind::Count,
+                    QueueDamage(0, enemy.damage, SkillKind::Count,
                                EffectOrigin::Original, enemy.attack_cast_id,
                                0, false, 0.0f, 0, kNoTelemetrySource,
                                kNoTelemetrySource,

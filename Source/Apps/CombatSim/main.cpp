@@ -67,7 +67,7 @@ constexpr std::array<std::string_view, hs::kUpgradeRelicSynergyMetricCount>
                       "burn_applications", "slow_applications",
                       "slow_target_ticks"};
 
-struct Build
+struct CombatBuild
 {
     std::string id;
     std::vector<std::uint8_t> skills;
@@ -76,20 +76,20 @@ struct Build
     std::array<std::uint8_t, hs::kStatCount> stats{};
 };
 
-struct Suite
+struct CombatSimulationSuite
 {
     hs::Tick maximum_ticks{};
     std::vector<std::uint64_t> seeds;
-    std::vector<Build> builds;
+    std::vector<CombatBuild> builds;
 };
 
-struct ProgressionSuite
+struct ProgressionSimulationSuite
 {
     hs::Tick maximum_ticks{};
     std::vector<std::uint64_t> seeds;
 };
 
-struct DraftProfile
+struct ProgressionDraftProfile
 {
     std::string id;
     std::uint8_t focus_skill{};
@@ -97,7 +97,7 @@ struct DraftProfile
 };
 
 template <std::size_t Size>
-std::size_t IdIndex(std::string_view value,
+std::size_t RequireIdIndex(std::string_view value,
                     const std::array<std::string_view, Size> &ids,
                     std::string_view category)
 {
@@ -108,7 +108,7 @@ std::size_t IdIndex(std::string_view value,
     return static_cast<std::size_t>(found - ids.begin());
 }
 
-Suite LoadSuite(const std::filesystem::path &path)
+CombatSimulationSuite LoadCombatSimulationSuite(const std::filesystem::path &path)
 {
     std::ifstream stream(path);
     Json root;
@@ -119,7 +119,7 @@ Suite LoadSuite(const std::filesystem::path &path)
     const auto seconds = root.at("duration_seconds").get<std::uint32_t>();
     if (seconds == 0 || seconds > 1'800)
         throw std::runtime_error("duration_seconds must be in [1, 1800].");
-    Suite suite;
+    CombatSimulationSuite suite;
     suite.maximum_ticks = static_cast<hs::Tick>(seconds) * 60;
     suite.seeds = root.at("seeds").get<std::vector<std::uint64_t>>();
     if (suite.seeds.empty() || suite.seeds.size() > 32 ||
@@ -129,13 +129,13 @@ Suite LoadSuite(const std::filesystem::path &path)
     std::set<std::string> build_ids;
     for (const auto &source : root.at("builds"))
     {
-        Build build;
+        CombatBuild build;
         build.id = source.at("id").get<std::string>();
         if (build.id.empty() || !build_ids.insert(build.id).second)
             throw std::runtime_error("Build ids must be non-empty and unique.");
         for (const auto &skill : source.at("skills"))
         {
-            const auto index = IdIndex(skill.get<std::string>(), kSkillIds, "skill");
+            const auto index = RequireIdIndex(skill.get<std::string>(), kSkillIds, "skill");
             if (index == 0 || build.skills.size() == 4 ||
                 std::ranges::find(build.skills, index) != build.skills.end())
                 throw std::runtime_error("Each build requires 0-4 unique active skills.");
@@ -143,7 +143,7 @@ Suite LoadSuite(const std::filesystem::path &path)
         }
         for (const auto &[skill_id, upgrades] : source.at("upgrades").items())
         {
-            const auto skill = IdIndex(skill_id, kSkillIds, "upgrade skill");
+            const auto skill = RequireIdIndex(skill_id, kSkillIds, "upgrade skill");
             if (skill != 0 && std::ranges::find(build.skills, skill) == build.skills.end())
                 throw std::runtime_error("Upgrades require the owning skill in the build.");
             for (const auto &ordinal_json : upgrades)
@@ -159,14 +159,14 @@ Suite LoadSuite(const std::filesystem::path &path)
         }
         for (const auto &relic : source.at("relics"))
         {
-            const auto index = IdIndex(relic.get<std::string>(), kRelicIds, "relic");
+            const auto index = RequireIdIndex(relic.get<std::string>(), kRelicIds, "relic");
             if (std::ranges::find(build.relics, index) != build.relics.end())
                 throw std::runtime_error("Relics must be unique.");
             build.relics.push_back(static_cast<std::uint8_t>(index));
         }
         for (const auto &[stat_id, points_json] : source.at("stats").items())
         {
-            const auto stat = IdIndex(stat_id, kStatIds, "stat");
+            const auto stat = RequireIdIndex(stat_id, kStatIds, "stat");
             const auto points = points_json.get<std::uint32_t>();
             if (points > 10) throw std::runtime_error("Stat points must be in [0, 10].");
             build.stats[stat] = static_cast<std::uint8_t>(points);
@@ -177,7 +177,7 @@ Suite LoadSuite(const std::filesystem::path &path)
     return suite;
 }
 
-ProgressionSuite LoadProgressionSuite(const std::filesystem::path &path)
+ProgressionSimulationSuite LoadProgressionSimulationSuite(const std::filesystem::path &path)
 {
     std::ifstream stream(path);
     Json root;
@@ -188,7 +188,7 @@ ProgressionSuite LoadProgressionSuite(const std::filesystem::path &path)
     const auto seconds = root.at("duration_seconds").get<std::uint32_t>();
     if (seconds < 900 || seconds > 1'800)
         throw std::runtime_error("duration_seconds must be in [900, 1800].");
-    ProgressionSuite suite;
+    ProgressionSimulationSuite suite;
     suite.maximum_ticks = static_cast<hs::Tick>(seconds) * 60;
     suite.seeds = root.at("seeds").get<std::vector<std::uint64_t>>();
     if (suite.seeds.empty() || suite.seeds.size() > 8 ||
@@ -205,7 +205,7 @@ std::uint64_t WorkingSetBytes() noexcept
                : 0;
 }
 
-hs::Float3 SelectAim(const hs::RenderSnapshot &snapshot,
+hs::Float3 SelectNearestEnemyAim(const hs::RenderSnapshot &snapshot,
                      hs::Float2 player_position)
 {
     hs::Float2 best{player_position.x, player_position.y + 20.0f};
@@ -230,7 +230,7 @@ hs::Float3 SelectAim(const hs::RenderSnapshot &snapshot,
     return {best.x, 0.0f, best.y};
 }
 
-hs::GameAction SlotAction(std::size_t slot)
+hs::GameAction SkillSlotAction(std::size_t slot)
 {
     constexpr std::array actions{hs::GameAction::SkillQ, hs::GameAction::SkillW,
                                  hs::GameAction::SkillE, hs::GameAction::SkillR};
@@ -255,7 +255,7 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
 {
     state.held = {};
     state.held.basic_attack_held = true;
-    state.held.aim_world = SelectAim(snapshot, probe.player_position);
+    state.held.aim_world = SelectNearestEnemyAim(snapshot, probe.player_position);
     std::span<const hs::ActionEdge> edge_span;
     if (state.charged_release_tick != 0 &&
         target_tick >= state.charged_release_tick)
@@ -265,7 +265,7 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
             probe.skill_loadout.begin());
         if (slot < probe.skill_loadout.size())
         {
-            state.edges[0] = {++state.sequence, SlotAction(slot),
+            state.edges[0] = {++state.sequence, SkillSlotAction(slot),
                               hs::EdgeKind::Released};
             edge_span = state.edges;
         }
@@ -284,7 +284,7 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
             if (skill == hs::SkillKind::Count ||
                 probe.cooldown_ticks[static_cast<std::size_t>(skill) - 1] != 0)
                 continue;
-            state.edges[0] = {++state.sequence, SlotAction(slot),
+            state.edges[0] = {++state.sequence, SkillSlotAction(slot),
                               hs::EdgeKind::Pressed};
             edge_span = state.edges;
             state.next_slot = (slot + 1) % probe.skill_loadout.size();
@@ -310,7 +310,7 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
     return {target_tick, state.held, edge_span};
 }
 
-Json BuildDefinition(const Build &build)
+Json BuildDefinitionJson(const CombatBuild &build)
 {
     Json skills = Json::array();
     for (const auto skill : build.skills) skills.push_back(kSkillIds[skill]);
@@ -333,14 +333,14 @@ Json BuildDefinition(const Build &build)
             {"stats", std::move(stats)}};
 }
 
-Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
-              const hs::SimulationRules &data)
+Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maximum_ticks,
+              const hs::SimulationRules &rules)
 {
     hs::GameSimulation simulation;
     hs::SimulationConfig config{seed};
     config.scenario = {.player_stationary = true, .player_invulnerable = true,
                        .progression_enabled = false};
-    if (auto initialized = simulation.Initialize(config, data); !initialized)
+    if (auto initialized = simulation.Initialize(config, rules); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
     const auto apply = [&](hs::DebugCommand command) {
@@ -369,7 +369,7 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
 
     for (hs::Tick target_tick = 1; target_tick <= maximum_ticks; ++target_tick)
     {
-        const auto before = simulation.Probe();
+        const auto before = simulation.GetObservation();
         if (before.phase == hs::SessionPhase::Victory) break;
         snapshot.Clear();
         if (!WriteSnapshot(simulation, snapshot))
@@ -383,7 +383,7 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - started).count()));
         simulation.ClearDomainSignals();
-        const auto probe = simulation.Probe();
+        const auto probe = simulation.GetObservation();
         maximum_enemies = std::max(maximum_enemies,
                                    probe.normal_enemy_count + probe.boss_count);
         maximum_projectiles = std::max(maximum_projectiles,
@@ -395,7 +395,7 @@ Json RunBuild(const Build &build, std::uint64_t seed, hs::Tick maximum_ticks,
         if (tick.phase == hs::SessionPhase::Victory) break;
     }
 
-    const auto probe = simulation.Probe();
+    const auto probe = simulation.GetObservation();
     if (probe.player_position.x != 0.0f || probe.player_position.y != 0.0f ||
         probe.health != probe.max_health)
         throw std::runtime_error("Stationary invulnerable combat contract was violated.");
@@ -494,7 +494,7 @@ std::uint64_t Mix(std::uint64_t value) noexcept
     return value ^ (value >> 31);
 }
 
-std::uint64_t CardScore(const hs::CardView &card, const DraftProfile &profile,
+std::uint64_t CardScore(const hs::CardView &card, const ProgressionDraftProfile &profile,
                         std::uint64_t seed, const hs::SessionProbe &probe)
 {
     const auto preferred_half = [&](std::uint8_t upgrade) {
@@ -542,12 +542,12 @@ struct Acquisition
 };
 
 void ResolveProgressionChoices(hs::GameSimulation &simulation,
-                               const DraftProfile &profile, std::uint64_t seed,
+                               const ProgressionDraftProfile &profile, std::uint64_t seed,
                                std::vector<Acquisition> &acquisitions)
 {
     for (std::size_t guard = 0; guard < 64; ++guard)
     {
-        const auto probe = simulation.Probe();
+        const auto probe = simulation.GetObservation();
         if (probe.phase == hs::SessionPhase::StatAllocation)
         {
             constexpr std::array allowed{hs::StatKind::AttackPower,
@@ -623,9 +623,9 @@ void ResolveProgressionChoices(hs::GameSimulation &simulation,
     throw std::runtime_error("Progression choice resolution did not converge.");
 }
 
-Build FinalBuild(const DraftProfile &profile, const hs::SessionProbe &probe)
+CombatBuild FinalBuild(const ProgressionDraftProfile &profile, const hs::SessionProbe &probe)
 {
-    Build build;
+    CombatBuild build;
     build.id = profile.id;
     for (const auto skill : probe.skill_loadout)
         if (skill != hs::SkillKind::Count)
@@ -677,26 +677,26 @@ Json CharacteristicMetrics(const hs::BalanceTelemetry &balance,
     return CharacteristicMetrics(balance.upgrade_effects[skill][upgrade]);
 }
 
-Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
-                    hs::Tick maximum_ticks, const hs::SimulationRules &data,
-                    Build &final_build)
+Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
+                    hs::Tick maximum_ticks, const hs::SimulationRules &rules,
+                    CombatBuild &final_build)
 {
     hs::GameSimulation simulation;
     hs::SimulationConfig config{seed};
     config.scenario = {.player_stationary = true, .player_invulnerable = true,
                        .progression_enabled = true,
                        .auto_collect_progression = true};
-    if (auto initialized = simulation.Initialize(config, data); !initialized)
+    if (auto initialized = simulation.Initialize(config, rules); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
     hs::RenderSnapshotStorage snapshot(20'000, 2, 2, 128);
     CombatControlState control;
     std::vector<Acquisition> acquisitions;
-    std::vector<hs::SimulationObservation> checkpoints{simulation.Probe()};
+    std::vector<hs::SimulationObservation> checkpoints{simulation.GetObservation()};
     for (hs::Tick target_tick = 1; target_tick <= maximum_ticks; ++target_tick)
     {
         ResolveProgressionChoices(simulation, profile, seed, acquisitions);
-        const auto before = simulation.Probe();
+        const auto before = simulation.GetObservation();
         if (before.phase == hs::SessionPhase::Victory) break;
         snapshot.Clear();
         if (!WriteSnapshot(simulation, snapshot))
@@ -704,7 +704,7 @@ Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
         const auto input = MakeCombatInput(before, snapshot.View(), target_tick, control);
         (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
         simulation.ClearDomainSignals();
-        const auto after = simulation.Probe();
+        const auto after = simulation.GetObservation();
         constexpr std::array phase_boundaries{hs::Tick{300 * 60},
                                                hs::Tick{600 * 60},
                                                hs::Tick{900 * 60}};
@@ -715,7 +715,7 @@ Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
             checkpoints.push_back(after);
     }
     ResolveProgressionChoices(simulation, profile, seed, acquisitions);
-    const auto probe = simulation.Probe();
+    const auto probe = simulation.GetObservation();
     if (probe.player_position.x != 0.0f || probe.player_position.y != 0.0f ||
         probe.health != probe.max_health)
         throw std::runtime_error("Stationary progression contract was violated.");
@@ -838,7 +838,7 @@ Json RunProgression(const DraftProfile &profile, std::uint64_t seed,
                 {"incoming_damage", probe.damage_taken},
                 {"skill_uses", probe.balance.skill_uses},
                 {"skill_damage", probe.damage_by_skill},
-                {"final_build", BuildDefinition(final_build)},
+                {"final_build", BuildDefinitionJson(final_build)},
                 {"upgrades", std::move(upgrades)}, {"relics", std::move(relics)},
                 {"situations", std::move(situations)},
                 {"upgrade_relic_synergies", std::move(synergies)},
@@ -985,7 +985,7 @@ Json AggregateProgression(const Json &runs)
             {"upgrade_relic_synergies", std::move(synergies)}};
 }
 
-Json Aggregate(const Suite &suite, const Json &runs)
+Json Aggregate(const CombatSimulationSuite &suite, const Json &runs)
 {
     Json aggregates = Json::array();
     for (const auto &build : suite.builds)
@@ -1030,7 +1030,7 @@ Json Aggregate(const Suite &suite, const Json &runs)
     return aggregates;
 }
 
-void ValidatePairedWorkloads(const Suite &suite, const Json &runs)
+void ValidatePairedWorkloads(const CombatSimulationSuite &suite, const Json &runs)
 {
     for (const auto seed : suite.seeds)
     {
@@ -1069,17 +1069,17 @@ int main(int argc, char **argv)
                 "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE) --output=DIR");
 
         const auto executable = std::filesystem::absolute(argv[0]);
-        hs::SimulationRules data;
+        hs::SimulationRules rules;
         if (auto loaded = hs::LoadSimulationRules(
-                executable.parent_path() / "Cooked" / "simulation_rules.hsbin", data);
+                executable.parent_path() / "Cooked" / "simulation_rules.hsbin", rules);
             !loaded)
             throw std::runtime_error(std::string(loaded.Message()));
         std::filesystem::create_directories(output_directory);
 
         if (!progression_suite_path.empty())
         {
-            const auto suite = LoadProgressionSuite(progression_suite_path);
-            std::vector<DraftProfile> profiles;
+            const auto suite = LoadProgressionSimulationSuite(progression_suite_path);
+            std::vector<ProgressionDraftProfile> profiles;
             for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
                 for (std::uint8_t variant = 0; variant < 2; ++variant)
                     profiles.push_back(
@@ -1117,10 +1117,10 @@ int main(int argc, char **argv)
                 {
                     const auto request = requests[index];
                     futures.push_back(std::async(std::launch::async, [&, request] {
-                        Build final_build;
+                        CombatBuild final_build;
                         auto run = RunProgression(profiles[request.profile_index],
                                                   suite.seeds[request.seed_index],
-                                                  suite.maximum_ticks, data,
+                                                  suite.maximum_ticks, rules,
                                                   final_build);
                         return Execution{std::move(run)};
                     }));
@@ -1195,7 +1195,7 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        const auto suite = LoadSuite(suite_path);
+        const auto suite = LoadCombatSimulationSuite(suite_path);
 
         Json runs = Json::array();
         for (std::size_t seed_index = 0; seed_index < suite.seeds.size(); ++seed_index)
@@ -1203,16 +1203,16 @@ int main(int argc, char **argv)
             for (std::size_t offset = 0; offset < suite.builds.size(); ++offset)
             {
                 const auto build_index = (seed_index + offset) % suite.builds.size();
-                runs.push_back(RunBuild(suite.builds[build_index],
+                runs.push_back(RunCombatBuild(suite.builds[build_index],
                                         suite.seeds[seed_index],
-                                        suite.maximum_ticks, data));
+                                        suite.maximum_ticks, rules));
             }
         }
         ValidatePairedWorkloads(suite, runs);
         const auto aggregates = Aggregate(suite, runs);
         Json builds = Json::array();
         for (const auto &build : suite.builds)
-            builds.push_back(BuildDefinition(build));
+            builds.push_back(BuildDefinitionJson(build));
         Json report{{"schema_version", 1},
                     {"execution_valid", true},
                     {"method", "stationary_invulnerable_fixed_tick"},

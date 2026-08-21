@@ -1,5 +1,4 @@
-#include "active_rules.hpp"
-#include "rule_dispatcher.hpp"
+#include "relic_rule_table.hpp"
 #include "simulation_pipeline.hpp"
 
 #include <algorithm>
@@ -21,30 +20,29 @@ int main()
     using namespace hs::gameplay_detail;
     try
     {
-        ActiveRuleTable table;
+        RelicRuleTable table;
         const auto acquired = static_cast<std::uint16_t>(
             (1u << static_cast<unsigned>(RelicKind::BurnPropagation)) |
             (1u << static_cast<unsigned>(RelicKind::BleedKillHeal)) |
             (1u << static_cast<unsigned>(RelicKind::KillCooldownSurge)));
         table.Rebuild(acquired);
-        const auto rules = table.For(RuleHook::OnEnemyKilled);
+        const auto rules = table.RulesFor(RelicRuleHook::OnEnemyKilled);
         Check(rules.size() == 3, "only acquired rules are active");
-        Check(std::ranges::is_sorted(rules, {}, &ActiveRule::id),
+        Check(std::ranges::is_sorted(rules, {}, &ActiveRelicRule::id),
               "equal-priority rules use stable typed ids");
-        Check(rules[0].handler == RuleHandlerId::BleedKillHeal &&
-                  rules[1].handler == RuleHandlerId::BurnPropagation &&
-                  rules[2].handler == RuleHandlerId::KillCooldownSurge,
+        Check(rules[0].handler == RelicRuleHandlerId::BleedKillHeal &&
+                  rules[1].handler == RelicRuleHandlerId::BurnPropagation &&
+                  rules[2].handler == RelicRuleHandlerId::KillCooldownSurge,
               "active rules resolve to static handlers");
-        std::vector<RuleHandlerId> executed;
-        DispatchRules(
-            table, RuleHook::OnEnemyKilled,
-            [&](const ActiveRule &rule) { executed.push_back(rule.handler); });
-        Check(executed == std::vector{RuleHandlerId::BleedKillHeal,
-                                     RuleHandlerId::BurnPropagation,
-                                     RuleHandlerId::KillCooldownSurge},
+        std::vector<RelicRuleHandlerId> executed;
+        for (const auto &rule : table.RulesFor(RelicRuleHook::OnEnemyKilled))
+            executed.push_back(rule.handler);
+        Check(executed == std::vector{RelicRuleHandlerId::BleedKillHeal,
+                                     RelicRuleHandlerId::BurnPropagation,
+                                     RelicRuleHandlerId::KillCooldownSurge},
               "dispatcher preserves the ordered hook table");
-        Check(table.For(RuleHook::OnProjectileHit).empty() &&
-                  table.For(RuleHook::BeforeDamage).empty(),
+        Check(table.RulesFor(RelicRuleHook::OnProjectileHit).empty() &&
+                  table.RulesFor(RelicRuleHook::BeforeDamage).empty(),
               "unused semantic hooks remain explicit and allocation free");
         constexpr auto &pipeline = kSimulationPipeline;
         Check(pipeline[2] == SimulationPhaseId::SpawnBarrier &&
@@ -52,12 +50,12 @@ int main()
                   pipeline[pipeline.size() - 2] == SimulationPhaseId::CleanupBarrier &&
                   pipeline.back() == SimulationPhaseId::GameplayHash,
               "phase-specific visibility barriers are explicit and ordered");
-        std::cout << "active_rule_tests passed\n";
+        std::cout << "gameplay_internal_tests passed\n";
         return 0;
     }
     catch (const std::exception &exception)
     {
-        std::cerr << "active_rule_tests failed: " << exception.what() << '\n';
+        std::cerr << "gameplay_internal_tests failed: " << exception.what() << '\n';
         return 1;
     }
 }

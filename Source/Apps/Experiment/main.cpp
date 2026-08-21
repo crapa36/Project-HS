@@ -345,7 +345,7 @@ struct Arguments
 }
 
 [[nodiscard]] std::optional<std::uint64_t>
-CookedContentHash(const std::filesystem::path &path)
+ReadCookedSourceHash(const std::filesystem::path &path)
 {
     std::ifstream stream(path, std::ios::binary);
     hs::CookedHeader header;
@@ -607,7 +607,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
         hs::InputFrame input;
         input.target_tick = target;
         tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-        const auto probe = simulation.Probe();
+        const auto probe = simulation.GetObservation();
         const auto cpu_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                 std::chrono::steady_clock::now() - tick_start)
                                 .count();
@@ -622,7 +622,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
         for (const auto &signal : simulation.PendingDomainSignals())
         {
             std::array<hs::PresentationEvent, 2> projected{};
-            const auto count = hs::ProjectPresentation(signal, projected);
+            const auto count = hs::ProjectDomainSignal(signal, projected);
             for (const auto &event : std::span(projected).first(count))
                 events << nlohmann::json{{"sequence", event.sequence},
                                          {"tick", event.tick},
@@ -638,7 +638,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
             break;
     }
 
-    const auto probe = simulation.Probe();
+    const auto probe = simulation.GetObservation();
     (void)WriteHeartbeat(heartbeat_path, tick.tick, "finished");
     if (auto shutdown = simulation.Shutdown(); !shutdown && result) result = shutdown;
     const bool valid = result.Succeeded() && timeline.good() && events.good();
@@ -682,7 +682,7 @@ int main(int argc, char **argv)
     const auto executable = ExecutablePath();
     const auto build_hash_value = HashFile(executable);
     const auto content_hash_value =
-        CookedContentHash(executable.parent_path() / "Cooked" / "simulation_rules.hsbin");
+        ReadCookedSourceHash(executable.parent_path() / "Cooked" / "simulation_rules.hsbin");
     if (executable.empty() || !build_hash_value || !content_hash_value)
     {
         std::cerr << "Cannot calculate build/content hashes.\n";

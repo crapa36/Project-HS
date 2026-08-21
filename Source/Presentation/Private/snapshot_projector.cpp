@@ -570,14 +570,14 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     };
 
     if (probe.phase == SessionPhase::MainMenu ||
-        (probe.phase == SessionPhase::Paused && ui.page == 6))
+        (probe.phase == SessionPhase::Paused && ui.page == UiPage::PauseSettings))
     {
         if (probe.phase == SessionPhase::MainMenu)
             add_ui(UiModel::Kind::Text, {760, 120}, {400, 80}, 0xFFFFFFFFu,
                    "PROJECT HS", 1.0f, 54);
-        if (ui.page == 1)
+        if (ui.page == UiPage::Collection)
         {
-            const auto selected = std::min<std::size_t>(ui.collection_skill,
+            const auto selected = std::min<std::size_t>(ui.selected_collection_skill,
                                                          kCombatSkillCount - 1);
             add_ui(UiModel::Kind::Panel, {160, 70}, {1'600, 930}, 0xD0202430u,
                    "스킬 도감");
@@ -612,7 +612,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             add_ui(UiModel::Kind::Button, {210, 900}, {360, 56}, 0xFF3A5068u,
                    "돌아가기");
         }
-        else if (ui.page == 2 || ui.page == 6)
+        else if (ui.page == UiPage::MainMenuSettings ||
+                 ui.page == UiPage::PauseSettings)
         {
             const auto enabled = [](bool value) { return value ? "켜짐" : "꺼짐"; };
             add_ui(UiModel::Kind::Panel, {450, 180}, {1'020, 790}, 0xD0202430u,
@@ -672,8 +673,10 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             }
         }
     }
-    else if (!(probe.phase == SessionPhase::Paused && ui.page >= 3 &&
-               ui.page <= 5))
+    else if (!(probe.phase == SessionPhase::Paused &&
+               (ui.page == UiPage::CharacterOverview ||
+                ui.page == UiPage::CharacterSkills ||
+                ui.page == UiPage::CharacterStats)))
     {
         const auto time = probe.final_boss_spawned ? probe.boss_fight_ticks
                                                    : probe.growth_ticks;
@@ -808,7 +811,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     }
     else if (probe.phase == SessionPhase::Paused)
     {
-        if (ui.page == 0)
+        if (ui.page == UiPage::Root)
         {
             add_ui(UiModel::Kind::Panel, {660, 300}, {600, 480}, 0xE0181D28u,
                    "일시정지", 1.0f, 38);
@@ -821,17 +824,23 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             add_ui(UiModel::Kind::Text, {760, 710}, {400, 32}, 0xFFB8C2D0u,
                    "Esc: 계속", 1.0f, 20);
         }
-        else if (ui.page >= 3 && ui.page <= 5)
+        else if (ui.page == UiPage::CharacterOverview ||
+                 ui.page == UiPage::CharacterSkills ||
+                 ui.page == UiPage::CharacterStats)
         {
             add_ui(UiModel::Kind::Panel, {260, 80}, {1'400, 920}, 0xF0181D28u,
                    "");
             constexpr std::array<std::string_view, 3> tabs{
                 "능력치·피해", "스킬·강화", "유물"};
+            constexpr std::array tab_pages{
+                UiPage::CharacterOverview, UiPage::CharacterSkills,
+                UiPage::CharacterStats};
             for (std::size_t index = 0; index < tabs.size(); ++index)
             {
                 add_ui(UiModel::Kind::Button,
                        {350.0f + static_cast<float>(index) * 300.0f, 140},
-                       {280, 58}, ui.page == index + 3 ? 0xFF507098u
+                        {280, 58}, ui.page == tab_pages[index]
+                                      ? 0xFF507098u
                                                                : 0xFF34495Eu,
                        tabs[index], 1.0f, 24);
             }
@@ -840,7 +849,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             add_ui(UiModel::Kind::Text, {300, 95}, {1'300, 38}, 0xFFFFFFFFu,
                    "캐릭터 정보  ·  Tab 또는 Esc로 닫기", 1.0f, 26);
 
-            if (ui.page == 3)
+            if (ui.page == UiPage::CharacterOverview)
             {
                 const auto attack = model.effective_attack;
                 const auto attack_speed = model.effective_attack_speed;
@@ -901,10 +910,10 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     ++damage_row;
                 }
             }
-            else if (ui.page == 4)
+            else if (ui.page == UiPage::CharacterSkills)
             {
                 constexpr std::array<std::string_view, 4> slot_names{"Q", "W", "E", "R"};
-                auto selected = std::min<std::size_t>(ui.character_skill,
+                auto selected = std::min<std::size_t>(ui.selected_character_skill,
                                                        kCombatSkillCount - 1);
                 if (probe.skill_levels[selected] == 0) selected = 0;
                 for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
@@ -931,7 +940,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                         : std::format("{}  비어 있음", slot_names[slot]);
                     add_ui(UiModel::Kind::Button,
                            {780.0f + static_cast<float>(slot) * 195.0f, 225.0f},
-                           {180, 54}, ui.loadout_source == slot
+                           {180, 54}, ui.loadout_source_slot == slot
                                           ? 0xFFB87828u
                                           : 0xFF34495Eu,
                            label, 1.0f, 18);

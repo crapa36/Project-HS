@@ -191,15 +191,15 @@ void TestVfxCatalog()
 
     std::vector<hs::ParticleSpawnCommand> full;
     std::vector<hs::ParticleSpawnCommand> half;
-    std::vector<hs::EffectLineSpawnCommand> lines;
-    Check(catalog.Expand(event, 100, full, lines).Succeeded() && !full.empty(),
+    std::vector<hs::VfxLineSpawnCommand> lines;
+    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && !full.empty(),
           "expand full-quality VFX");
     Check(std::ranges::all_of(full, [](const auto &command) {
               return command.renderer == hs::VfxRenderer::Mesh &&
                      command.primitive == hs::VfxPrimitive::Shard;
           }),
           "hit VFX uses procedural mesh shards instead of sprites");
-    Check(catalog.Expand(event, 50, half, lines).Succeeded() && half.size() == full.size(),
+    Check(catalog.ExpandEvent(event, 50, half, lines).Succeeded() && half.size() == full.size(),
           "expand half-quality VFX");
       for (std::size_t index = 0; index < full.size(); ++index)
       {
@@ -231,20 +231,20 @@ void TestVfxCatalog()
       {
           event.asset = hs::MakeAssetId(effect_id);
           std::vector<hs::ParticleSpawnCommand> particles;
-          std::vector<hs::EffectLineSpawnCommand> effect_lines;
-          Check(catalog.Find(event.asset) != nullptr,
+          std::vector<hs::VfxLineSpawnCommand> effect_lines;
+          Check(catalog.FindEffect(event.asset) != nullptr,
                 "new VFX exists in cooked catalog");
-          Check(catalog.Expand(event, 100, particles, effect_lines).Succeeded() &&
+          Check(catalog.ExpandEvent(event, 100, particles, effect_lines).Succeeded() &&
                     !particles.empty(),
                 "new VFX expands into particles");
       }
 
       event.asset = hs::MakeAssetId("particle.line.ricochet");
-    Check(!catalog.Expand(event, 100, full, lines).Succeeded(), "line target required");
+    Check(!catalog.ExpandEvent(event, 100, full, lines).Succeeded(), "line target required");
     parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
     parameters.target = {4.0f, 0.0f, 5.0f};
     event.parameters = hs::EncodeVfxParameters(parameters);
-    Check(catalog.Expand(event, 100, full, lines).Succeeded() && lines.size() == 1 &&
+    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && lines.size() == 1 &&
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
@@ -253,8 +253,8 @@ void TestVfxCatalog()
                                   hs::VfxPrimitive primitive) {
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
-        std::vector<hs::EffectLineSpawnCommand> ignored_lines;
-        Check(catalog.Expand(event, 100, particles, ignored_lines).Succeeded() &&
+        std::vector<hs::VfxLineSpawnCommand> ignored_lines;
+        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded() &&
                   std::ranges::any_of(particles, [&](const auto &command) {
                       return command.renderer == renderer && command.primitive == primitive;
                   }),
