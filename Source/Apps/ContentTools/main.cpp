@@ -62,20 +62,20 @@ namespace
 
 using Json = nlohmann::ordered_json;
 
-constexpr std::array<std::string_view, 13> kCategories = {
+constexpr std::array<std::string_view, 13> kGameDataCategories = {
     "audio_cues", "bosses",   "characters", "enemies", "level",
     "materials",  "particles", "relics",    "skills",  "spawn_schedule",
     "stats",      "ui_strings", "upgrades",
 };
 
-bool IsCategory(std::string_view value)
+bool IsGameDataCategory(std::string_view value)
 {
-    return std::ranges::find(kCategories, value) != kCategories.end();
+    return std::ranges::find(kGameDataCategories, value) != kGameDataCategories.end();
 }
 
-std::filesystem::path CategoryPath(std::string_view category)
+std::filesystem::path GameDataCategoryPath(std::string_view category)
 {
-    if (!IsCategory(category))
+    if (!IsGameDataCategory(category))
     {
         throw std::runtime_error("unknown category '" + std::string(category) + "'");
     }
@@ -127,7 +127,7 @@ Json ParseDocument(const std::filesystem::path &path, std::string_view category)
     return document;
 }
 
-void ValidateLocalDocuments()
+void ValidateGameDataDocuments()
 {
     const std::filesystem::path root = HS_GAME_DATA_DIRECTORY;
     std::set<std::string, std::less<>> found;
@@ -139,10 +139,10 @@ void ValidateLocalDocuments()
         }
     }
     std::set<std::string, std::less<>> expected;
-    for (const auto category : kCategories)
+    for (const auto category : kGameDataCategories)
     {
         expected.emplace(category);
-        static_cast<void>(ParseDocument(CategoryPath(category), category));
+        static_cast<void>(ParseDocument(GameDataCategoryPath(category), category));
     }
     if (found != expected)
     {
@@ -209,13 +209,13 @@ DWORD RunProcess(const std::filesystem::path &executable,
     return exit_code;
 }
 
-DWORD RunContent(std::wstring_view mode)
+DWORD RunContentCooker(std::wstring_view mode)
 {
     const std::array arguments{mode};
     return RunProcess(HS_CONTENT_EXECUTABLE, arguments);
 }
 
-std::uint64_t SourceHash()
+std::uint64_t ComputeContentSourceHash()
 {
     constexpr std::uint64_t offset = 14695981039346656037ull;
     constexpr std::uint64_t prime = 1099511628211ull;
@@ -227,11 +227,11 @@ std::uint64_t SourceHash()
             hash *= prime;
         }
     };
-    for (const auto category : kCategories)
+    for (const auto category : kGameDataCategories)
     {
         append(category);
         append(std::string_view("\0", 1));
-        append(ReadText(CategoryPath(category)));
+        append(ReadText(GameDataCategoryPath(category)));
         append(std::string_view("\0", 1));
     }
     const auto append_asset = [&](std::string_view name,
@@ -252,7 +252,7 @@ std::uint64_t SourceHash()
     return hash;
 }
 
-std::uint64_t CookedSourceHash()
+std::uint64_t ReadCookedSourceHash()
 {
     const auto manifest = ReadText(std::filesystem::path(HS_COOKED_DIRECTORY) /
                                    "manifest.txt");
@@ -272,7 +272,7 @@ std::uint64_t CookedSourceHash()
     return value;
 }
 
-void PrintEntryIds(const Json &document, std::string_view category)
+void PrintCategoryEntryIds(const Json &document, std::string_view category)
 {
     if (document.contains("entries") && document["entries"].is_array())
     {
@@ -357,7 +357,7 @@ std::size_t ParseOneBasedIndex(std::string_view value, std::string_view prefix,
     return one_based - 1;
 }
 
-Json &LocateEntry(Json &document, std::string_view category, std::string_view entry_id)
+Json &LocateCategoryEntry(Json &document, std::string_view category, std::string_view entry_id)
 {
     std::vector<Json *> matches;
     FindObjectsWithId(document, entry_id, matches);
@@ -477,7 +477,7 @@ double ParseNumber(std::string_view text)
     return value;
 }
 
-void AssignNumber(Json &target, double value)
+void AssignJsonNumberPreservingType(Json &target, double value)
 {
     if (target.is_number_unsigned())
     {
@@ -531,14 +531,14 @@ void WriteAndFlush(const std::filesystem::path &path, std::string_view text)
     }
 }
 
-void SetParameter(std::string_view category, std::string_view entry_id,
+void SetGameDataParameter(std::string_view category, std::string_view entry_id,
                   std::string_view parameter_key, std::string_view number_text)
 {
-    const auto path = CategoryPath(category);
+    const auto path = GameDataCategoryPath(category);
     auto document = ParseDocument(path, category);
-    auto &entry = LocateEntry(document, category, entry_id);
+    auto &entry = LocateCategoryEntry(document, category, entry_id);
     auto &parameter = LocateNumericParameter(entry, parameter_key);
-    AssignNumber(parameter, ParseNumber(number_text));
+    AssignJsonNumberPreservingType(parameter, ParseNumber(number_text));
 
     auto temporary = path;
     temporary += L".tmp";
@@ -560,7 +560,7 @@ void SetParameter(std::string_view category, std::string_view entry_id,
     DWORD validation_exit{};
     try
     {
-        validation_exit = RunContent(L"--validate-only");
+        validation_exit = RunContentCooker(L"--validate-only");
     }
     catch (...)
     {
@@ -595,14 +595,14 @@ void SetParameter(std::string_view category, std::string_view entry_id,
 void PrintUsage()
 {
     std::cerr << "usage:\n"
-              << "  hs_tools validate\n"
-              << "  hs_tools cook\n"
-              << "  hs_tools status\n"
-              << "  hs_tools hot-reload\n"
-              << "  hs_tools shader-reload\n"
-              << "  hs_tools list <category>\n"
-              << "  hs_tools set <category> <entry-id> <parameter-key> <number>\n"
-              << "  hs_tools preview\n";
+              << "  hs_content_tools validate\n"
+              << "  hs_content_tools cook\n"
+              << "  hs_content_tools status\n"
+              << "  hs_content_tools hot-reload\n"
+              << "  hs_content_tools shader-reload\n"
+              << "  hs_content_tools list <category>\n"
+              << "  hs_content_tools set <category> <entry-id> <parameter-key> <number>\n"
+              << "  hs_content_tools preview\n";
 }
 
 } // namespace
@@ -620,19 +620,19 @@ int main(int argc, char **argv)
         const std::string_view command = argv[1];
         if (command == "validate" && argc == 2)
         {
-            ValidateLocalDocuments();
-            const auto exit_code = RunContent(L"--validate-only");
+            ValidateGameDataDocuments();
+            const auto exit_code = RunContentCooker(L"--validate-only");
             if (exit_code != 0)
             {
                 std::cerr << "tools.error hs_content validation exit=" << exit_code << '\n';
                 return 1;
             }
-            std::cout << "tools.validated documents=" << kCategories.size() << '\n';
+            std::cout << "tools.validated documents=" << kGameDataCategories.size() << '\n';
             return 0;
         }
         if (command == "cook" && argc == 2)
         {
-            const auto exit_code = RunContent(L"--cook");
+            const auto exit_code = RunContentCooker(L"--cook");
             if (exit_code != 0)
             {
                 std::cerr << "tools.error hs_content Cook exit=" << exit_code << '\n';
@@ -643,8 +643,8 @@ int main(int argc, char **argv)
         }
         if (command == "status" && argc == 2)
         {
-            const auto source = SourceHash();
-            const auto cooked = CookedSourceHash();
+            const auto source = ComputeContentSourceHash();
+            const auto cooked = ReadCookedSourceHash();
             std::cout << "tools.status source_hash=" << source
                       << " cooked_hash=" << cooked
                       << " synchronized=" << (source == cooked ? "true" : "false")
@@ -653,7 +653,7 @@ int main(int argc, char **argv)
         }
         if (command == "hot-reload" && argc == 2)
         {
-            const auto exit_code = RunContent(L"--cook");
+            const auto exit_code = RunContentCooker(L"--cook");
             if (exit_code != 0)
                 return 1;
             std::cout << "tools.hot_reload requested; running game applies it only at main menu\n";
@@ -673,12 +673,12 @@ int main(int argc, char **argv)
         if (command == "list" && argc == 3)
         {
             const std::string_view category = argv[2];
-            PrintEntryIds(ParseDocument(CategoryPath(category), category), category);
+            PrintCategoryEntryIds(ParseDocument(GameDataCategoryPath(category), category), category);
             return 0;
         }
         if (command == "set" && argc == 6)
         {
-            SetParameter(argv[2], argv[3], argv[4], argv[5]);
+            SetGameDataParameter(argv[2], argv[3], argv[4], argv[5]);
             return 0;
         }
         if (command == "preview" && argc == 2)
