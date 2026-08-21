@@ -1,4 +1,4 @@
-#include <hs/renderer/render_graph.hpp>
+#include "render_graph.hpp"
 
 #include <Windows.h>
 #include <d3d12.h>

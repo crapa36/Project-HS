@@ -44,7 +44,7 @@ struct ParticleSpawnCommand
     std::uint32_t seed{};
 };
 
-struct EffectLineSpawnCommand
+struct VfxLineSpawnCommand
 {
     Sequence sequence{};
     Tick tick{};

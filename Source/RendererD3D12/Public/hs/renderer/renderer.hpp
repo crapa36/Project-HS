@@ -4,7 +4,7 @@
 #include <hs/core/result.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/types.hpp>
-#include <hs/renderer/particle_spawn_command.hpp>
+#include <hs/renderer/vfx_spawn_command.hpp>
 
 #include <cstdint>
 #include <array>
@@ -78,7 +78,7 @@ struct DevToolsFrameData
     std::uint32_t input_queue_depth{};
     std::uint32_t presentation_queue_depth{};
     std::uint32_t particle_queue_depth{};
-    std::uint32_t graphics_queue_depth{};
+    std::uint32_t resize_queue_depth{};
     std::uint32_t debug_queue_depth{};
     std::uint64_t dropped_input{};
     std::uint64_t dropped_presentation{};
@@ -114,7 +114,7 @@ class D3D12Renderer
     [[nodiscard]] Result Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                 std::span<const PresentationEvent> events,
                                 std::span<const ParticleSpawnCommand> particle_spawns,
-                                std::span<const EffectLineSpawnCommand> effect_lines,
+                                std::span<const VfxLineSpawnCommand> effect_lines,
                                 const DevToolsFrameData &devtools,
                                 RendererFrameResult &frame_result);
     [[nodiscard]] Result CapturePng(const std::filesystem::path &path);
