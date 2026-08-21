@@ -151,8 +151,9 @@ hs_configure_target(hs_game_domain)
 add_library(
     hs_presentation STATIC
     Source/Presentation/Private/presentation_catalog.cpp
-    Source/Presentation/Private/projector.cpp
+    Source/Presentation/Private/presentation_event_projector.cpp
     Source/Presentation/Private/snapshot_projector.cpp
+    Source/Presentation/Private/ui_interaction.cpp
 )
 target_include_directories(hs_presentation PUBLIC Source/Presentation/Public)
 target_link_libraries(hs_presentation PUBLIC hs_core hs_game_domain)
@@ -186,6 +187,12 @@ add_library(
     Source/RendererD3D12/Private/render_graph.cpp
     Source/RendererD3D12/Private/renderer_diagnostics.cpp
     Source/RendererD3D12/Private/renderer.cpp
+    Source/RendererD3D12/Private/renderer_capture.cpp
+    Source/RendererD3D12/Private/renderer_device.cpp
+    Source/RendererD3D12/Private/renderer_frame.cpp
+    Source/RendererD3D12/Private/renderer_pipeline.cpp
+    Source/RendererD3D12/Private/renderer_resources.cpp
+    Source/RendererD3D12/Private/renderer_ui.cpp
 )
 target_sources(
     hs_renderer_d3d12 PRIVATE
@@ -379,7 +386,15 @@ set_target_properties(
     IMPORTED_LOCATION_DEBUG "${HS_FBX_SDK_ROOT}/lib/x64/debug/zlib-mt.lib"
 )
 
-add_executable(hs_content Source/Apps/Content/main.cpp)
+add_executable(
+    hs_content
+    Source/Apps/Content/main.cpp
+    Source/Apps/Content/character_asset_cooker.cpp
+    Source/Apps/Content/content_cooker.cpp
+    Source/Apps/Content/game_data_cooker.cpp
+    Source/Apps/Content/game_data_validation.cpp
+    Source/Apps/Content/particle_effect_cooker.cpp
+)
 target_link_libraries(
     hs_content
     PRIVATE hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json
@@ -452,10 +467,10 @@ if(HS_BUILD_RUNTIME)
 add_dependencies(ProjectHS hs_cooked_content)
 add_dependencies(hs_experiment hs_cooked_content)
 
-add_executable(hs_tools Source/Apps/Tools/main.cpp)
-target_link_libraries(hs_tools PRIVATE nlohmann_json::nlohmann_json)
+add_executable(hs_content_tools Source/Apps/ContentTools/main.cpp)
+target_link_libraries(hs_content_tools PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(
-    hs_tools
+    hs_content_tools
     PRIVATE
         HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
@@ -466,8 +481,8 @@ target_compile_definitions(
         HS_CMAKE_EXECUTABLE="${CMAKE_COMMAND}"
         HS_BINARY_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}"
 )
-add_dependencies(hs_tools hs_content ProjectHS)
-hs_configure_target(hs_tools)
+add_dependencies(hs_content_tools hs_content ProjectHS)
+hs_configure_target(hs_content_tools)
 endif()
 endif()
 
@@ -485,19 +500,19 @@ if(HS_BUILD_TESTS)
             -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_architecture.cmake
     )
-    add_executable(hs_rule_tests Tests/active_rule_tests.cpp)
-    target_link_libraries(hs_rule_tests PRIVATE hs_game_domain)
-    target_include_directories(hs_rule_tests PRIVATE Source/Gameplay/Private)
-    hs_configure_target(hs_rule_tests)
-    add_test(NAME simulation.rules COMMAND hs_rule_tests)
+    add_executable(hs_gameplay_internal_tests Tests/gameplay_internal_tests.cpp)
+    target_link_libraries(hs_gameplay_internal_tests PRIVATE hs_game_domain)
+    target_include_directories(hs_gameplay_internal_tests PRIVATE Source/Gameplay/Private)
+    hs_configure_target(hs_gameplay_internal_tests)
+    add_test(NAME simulation.internal-invariants COMMAND hs_gameplay_internal_tests)
     add_executable(hs_simulation_tests Tests/simulation_tests.cpp)
     target_link_libraries(hs_simulation_tests PRIVATE hs_core hs_game_rules hs_gameplay)
     hs_configure_target(hs_simulation_tests)
     add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
-    if(TARGET hs_tools)
-    add_test(NAME tools.content-status COMMAND hs_tools status)
+    if(TARGET hs_content_tools)
+    add_test(NAME tools.content-status COMMAND hs_content_tools status)
     endif()
     endif()
     if(HS_BUILD_RUNTIME)

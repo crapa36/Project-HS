@@ -13,6 +13,6 @@ jobs:
       - name: Configure
         run: cmake -S . -B Build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DHS_BUILD_CONTENT_TOOLS=OFF
       - name: Build
-        run: cmake --build Build/ci --target hs_tests hs_rule_tests hs_simulation_tests --parallel
+        run: cmake --build Build/ci --target hs_tests hs_gameplay_internal_tests hs_simulation_tests --parallel
       - name: Test
-        run: ctest --test-dir Build/ci -R "^(foundation.core|foundation.task-system|architecture.gameplay-dependencies|simulation.rules|simulation.determinism-core)$" --output-on-failure
+        run: ctest --test-dir Build/ci -R "^(foundation.core|foundation.task-system|architecture.layers|simulation.internal-invariants|simulation.determinism-core)$" --output-on-failure

@@ -64,7 +64,7 @@
       "configurePreset": "msvc-core",
       "targets": [
         "hs_tests",
-        "hs_rule_tests",
+        "hs_gameplay_internal_tests",
         "hs_simulation_tests"
       ]
     },
@@ -91,7 +91,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(foundation\\.|architecture\\.layers$|simulation\\.(rules|determinism-core)$)"
+          "name": "^(foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|determinism-core)$)"
         }
       },
       "output": {
