@@ -1343,6 +1343,22 @@ void TestAttackSpeedAnimationRate()
     Check(simulation.Shutdown().Succeeded(), "attack-speed animation shutdown");
 }
 
+void TestArrowRainPulseAudioProjection()
+{
+    hs::DomainSignal signal;
+    signal.kind = hs::DomainSignalKind::ArrowRainPulse;
+    std::array<hs::PresentationEvent, 3> projected{};
+    const auto count = hs::ProjectDomainSignal(signal, projected);
+    Check(count == 3 && projected[0].kind == hs::PresentationKind::Vfx &&
+              projected[1].kind == hs::PresentationKind::Audio &&
+              projected[1].asset.value ==
+                  hs::MakeAssetId("audio.skill.arrow_rain.incoming").value &&
+              projected[2].kind == hs::PresentationKind::Audio &&
+              projected[2].asset.value ==
+                  hs::MakeAssetId("audio.skill.arrow_rain.impact").value,
+          "every arrow rain pulse projects falling and impact audio");
+}
+
 void TestEnemyDisplacementInterpolates()
 {
     auto data = QuietGameData();
@@ -3111,6 +3127,7 @@ int main(int argc, char **argv)
             TestEnemyDisplacementInterpolates();
             TestChargedShotCancelsForLevelSelection();
             TestCombatPresentationContracts();
+            TestArrowRainPulseAudioProjection();
             TestAttackSpeedAnimationRate();
             TestArrowRainTrackingProjectileMoves();
             TestProjectileAndAreaVisualTruth();

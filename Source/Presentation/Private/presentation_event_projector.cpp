@@ -86,6 +86,7 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::RadialArrowsCast: AddAudio(s,out,n,"audio.relic.radial_arrows"); break;
     case DomainSignalKind::ArrowRainCast: AddAudio(s,out,n,"audio.skill.arrow_rain.cast"); AddAudio(s,out,n,"audio.skill.arrow_rain.incoming"); break;
     case DomainSignalKind::ArrowRainImpact: AddAudio(s,out,n,"audio.skill.arrow_rain.impact"); break;
+    case DomainSignalKind::ArrowRainPulse: AddAudio(s,out,n,"audio.skill.arrow_rain.incoming"); AddAudio(s,out,n,"audio.skill.arrow_rain.impact"); break;
     case DomainSignalKind::ChargedShotStarted: AddAudio(s,out,n,"audio.player.bow_draw_heavy"); AddAudio(s,out,n,"audio.skill.charged.start"); AddAudio(s,out,n,"audio.skill.charged.loop"); break;
     case DomainSignalKind::ChargedShotEnded: AddAudio(s,out,n,"audio.skill.charged.loop",AudioEventAction::Stop); break;
     case DomainSignalKind::ChargedShotReady: AddAudio(s,out,n,"audio.skill.charged.ready"); break;
