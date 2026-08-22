@@ -123,6 +123,24 @@ def _trim(channels: list[list[float]]) -> list[list[float]]:
     return [ch[first:last + 1] for ch in channels]
 
 
+def _lowpass(channels: list[list[float]], cutoff_hz: float) -> list[list[float]]:
+    if not math.isfinite(cutoff_hz) or not 0 < cutoff_hz < TARGET_RATE / 2:
+        raise ValueError("lowpass_hz must be between zero and Nyquist")
+    alpha = 1.0 - math.exp(-2.0 * math.pi * cutoff_hz / TARGET_RATE)
+    filtered = []
+    for channel in channels:
+        values = list(channel)
+        for _ in range(2):
+            state = values[0]
+            stage = []
+            for value in values:
+                state += alpha * (value - state)
+                stage.append(state)
+            values = stage
+        filtered.append(values)
+    return filtered
+
+
 def _true_peak(channels: list[list[float]]) -> float:
     """ITU-R BS.1770 Annex 2, 48-order, four-phase true-peak estimate."""
     peak = max(abs(v) for ch in channels for v in ch)
@@ -162,7 +180,8 @@ def _pad_riff(path: Path) -> None:
         path.write_bytes(raw)
 
 
-def finalize(input_wav: Path, output_wav: Path, *, kind: str = "spatial-sfx", loop: bool = False) -> None:
+def finalize(input_wav: Path, output_wav: Path, *, kind: str = "spatial-sfx", loop: bool = False,
+             gain_db: float = 0.0, lowpass_hz: float | None = None) -> None:
     if kind not in ("spatial-sfx", "vocal-sfx", "ui", "bgm", "ambience"):
         raise ValueError(f"unknown audio kind: {kind}")
     input_path = input_wav.resolve()
@@ -180,6 +199,13 @@ def finalize(input_wav: Path, output_wav: Path, *, kind: str = "spatial-sfx", lo
     data = _channel_contract(_resample(data, rate), kind)
     if not loop and kind in ("spatial-sfx", "vocal-sfx", "ui"):
         data = _trim(data)
+    if lowpass_hz is not None:
+        data = _lowpass(data, lowpass_hz)
+    if not math.isfinite(gain_db):
+        raise ValueError("gain_db must be finite")
+    if gain_db:
+        scale = 10 ** (gain_db / 20.0)
+        data = [[v * scale for v in ch] for ch in data]
     peak = max(abs(v) for ch in data for v in ch) if kind in ("spatial-sfx", "vocal-sfx", "ui") else _true_peak(data)
     limit = 10 ** ((-3 if kind in ("spatial-sfx", "vocal-sfx", "ui") else -1) / 20)
     if peak > limit:
@@ -214,10 +240,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("kind", nargs="?", choices=("spatial-sfx", "vocal-sfx", "ui", "bgm", "ambience"), default="spatial-sfx")
     parser.add_argument("--input-wav", dest="input_flag"); parser.add_argument("--output-wav", dest="output_flag")
     parser.add_argument("--kind", dest="kind_flag", choices=("spatial-sfx", "vocal-sfx", "ui", "bgm", "ambience")); parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--gain-db", type=float, default=0.0)
+    parser.add_argument("--lowpass-hz", type=float)
     args = parser.parse_args(argv)
     source, target = args.input_flag or args.input_wav, args.output_flag or args.output_wav
     if not source or not target: parser.error("input_wav and output_wav are required")
-    finalize(Path(source), Path(target), kind=args.kind_flag or args.kind, loop=args.loop)
+    finalize(Path(source), Path(target), kind=args.kind_flag or args.kind, loop=args.loop,
+             gain_db=args.gain_db, lowpass_hz=args.lowpass_hz)
     return 0
 
 

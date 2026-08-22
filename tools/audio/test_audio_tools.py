@@ -74,6 +74,39 @@ class AudioToolsTests(unittest.TestCase):
             _, _, data = read_wav(dst)
             self.assertAlmostEqual(max(map(abs, data[0])), 0.2, delta=.002)
 
+    def test_explicit_gain_db_is_applied(self):
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = Path(d) / "in.wav", Path(d) / "out.wav"
+            samples = [0.2 * math.sin(2 * math.pi * 440 * n / SAMPLE_RATE) for n in range(4800)]
+            write_wav(src, samples)
+            finalize(src, dst, kind="ui", gain_db=-6.0)
+            from finalize import read_wav
+            _, _, data = read_wav(dst)
+            rms = math.sqrt(sum(v * v for v in data[0]) / len(data[0]))
+            source_rms = math.sqrt(sum(v * v for v in samples) / len(samples))
+            self.assertAlmostEqual(rms / source_rms, 10 ** (-6 / 20), delta=.01)
+
+    def test_explicit_lowpass_softens_high_frequency_energy(self):
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = Path(d) / "in.wav", Path(d) / "out.wav"
+            samples = [0.2 * math.sin(2 * math.pi * 8000 * n / SAMPLE_RATE) for n in range(4800)]
+            write_wav(src, samples)
+            finalize(src, dst, kind="ui", lowpass_hz=3200.0)
+            from finalize import read_wav
+            _, _, data = read_wav(dst)
+            output_rms = math.sqrt(sum(v * v for v in data[0]) / len(data[0]))
+            source_rms = math.sqrt(sum(v * v for v in samples) / len(samples))
+            self.assertLess(output_rms, source_rms * 0.25)
+
+    def test_positive_gain_is_peak_limited(self):
+        with tempfile.TemporaryDirectory() as d:
+            src, dst = Path(d) / "in.wav", Path(d) / "out.wav"
+            write_wav(src, [0.5] * 480)
+            finalize(src, dst, kind="ui", gain_db=12.0)
+            from finalize import read_wav
+            _, _, data = read_wav(dst)
+            self.assertAlmostEqual(max(map(abs, data[0])), 10 ** (-3 / 20), delta=.002)
+
     def test_bgm_true_peak_overshoot_is_limited(self):
         with tempfile.TemporaryDirectory() as d:
             src, dst = Path(d) / "in.wav", Path(d) / "out.wav"

@@ -1013,6 +1013,7 @@
       "max_simultaneous": 6,
       "minimum_retrigger_ms": 40,
       "generator": "stable-small",
+      "lowpass_hz": 3200.0,
       "base_seed": 123900,
       "seed": 123900,
       "variation_seeds": [
@@ -1023,8 +1024,8 @@
         123904,
         123905
       ],
-    "prompt": "Extremely short, light arrow zip suitable for rapid fire, with clear high-frequency detail that is not harsh. Pitch/frequency: focused around 2.8–7 kHz. Layers: thin string snap + very short arrow air. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.11 seconds.",
-    "negative_prompt": "wood click, gun, long tail, speech, words, singing, music"
+    "prompt": "Extremely short, light arrow zip suitable for rapid fire, rounded and damped rather than sharp. Pitch/frequency: focused around 1.8–3.8 kHz with a soft upper rolloff. Layers: muted string snap + very short feathered arrow air. Envelope: identifiable transient within 0–10 ms, rapid natural decay, no long reverb. Target duration: 0.11 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, metallic, gun, long tail, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.basic.impact",
@@ -1051,8 +1052,8 @@
         124004,
         124005
       ],
-    "prompt": "Small dry impact from the basic arrow's first hit. Pitch/frequency: 200~600 Hz + 2~4 kHz shaft. Layers: dry hit + tiny shaft. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.12 seconds.",
-    "negative_prompt": "gore, metal, speech, words, singing, music"
+    "prompt": "Small dry impact from a basic arrow, rounded and softly damped. Pitch/frequency: 160–450 Hz body + restrained 1.5–3.2 kHz wooden shaft tick. Layers: felted hit + tiny shaft resonance. Envelope: identifiable transient within 0–10 ms, rapid natural decay, no long reverb. Target duration: 0.12 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, gore, metal, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.piercing.release",
@@ -1154,8 +1155,8 @@
         124401,
         124402
       ],
-    "prompt": "Low tension from beginning to draw a powerful bow, plus a very subtle D/A energy tone. Pitch/frequency: D4/A3 seed + 0.7~2 kHz tension. Layers: heavy string tension onset + magical seed. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.22 seconds.",
-    "negative_prompt": "electric charge, laser, speech, words, singing, music"
+    "prompt": "Low wooden bow tension as a powerful bow begins drawing. Acoustic string creak, leather grip, and muted wood resonance; no tonal energy bed. Pitch/frequency: 180–900 Hz body with restrained 1.5–3.2 kHz friction detail. Envelope: identifiable onset within 0–10 ms, short natural decay, no reverb. Target duration: 0.22 seconds.",
+    "negative_prompt": "electronic, synth, crystal, shimmer, beep, electric charge, laser, shrill, brittle, piercing, harsh, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.charged.loop",
@@ -1178,8 +1179,8 @@
         124500,
         124501
       ],
-    "prompt": "Seamless loop for up to one second of charging, increasing perceived pitch and filter brightness more than volume. Pitch/frequency: harmonics perceptually brightening from A3 at 220 Hz to D5 at 587 Hz. Layers: string tension loop + filtered air + shimmer. Envelope: Natural attack and tail appropriate for a loop or stinger; loops must be sample-accurate and seamless. Target duration: 0.25 seconds.",
-    "negative_prompt": "engine, buzz, sub drone, speech, words, singing, music"
+    "prompt": "Sample-accurate seamless 0.25-second acoustic bow-draw loop: taut string vibration, subtle wood friction, and soft leather creak, with gently rising natural tension but stable loudness. Rounded/damped tone, mostly 180–900 Hz with restrained 1.5–3.2 kHz detail. Target duration: 0.25 seconds.",
+    "negative_prompt": "pure sine, oscillator, synth, electronic, crystal, shimmer, beep, engine, buzz, sub drone, shrill, brittle, piercing, harsh, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.charged.ready",
@@ -1203,8 +1204,8 @@
         124601,
         124602
       ],
-    "prompt": "High D6–A6 ping that immediately signals full charge, under 0.2 seconds. Pitch/frequency: D6 1175 Hz + A6 1760 Hz perfect fifth. Layers: crystal ping + tiny air stop. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.18 seconds.",
-    "negative_prompt": "shrill beep, laser, speech, words, singing, music"
+    "prompt": "Short tactile full-charge confirmation: a rounded wooden knock with a soft bow-string stop and tiny muted air release, under 0.2 seconds. Pitch/frequency: centered 500–1800 Hz with a damped upper rolloff. Envelope: identifiable transient within 0–10 ms, rapid natural decay, no reverb.",
+    "negative_prompt": "electronic, synth, crystal ping, chime, beep, shrill, brittle, piercing, harsh, laser, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.charged.release",
@@ -1228,8 +1229,8 @@
         124701,
         124702
       ],
-    "prompt": "Powerful bow-and-string crack in the first 30 ms followed by a 0.2-second hypersonic arrow streak; it is an arrow, not an explosion. Pitch/frequency: momentary 80–180 Hz weight + 0.9–6 kHz air crack. Layers: deep bow release + air shock + narrow streak. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.38 seconds.",
-    "negative_prompt": "gun, cannon, laser, speech, words, singing, music"
+    "prompt": "Powerful acoustic bow release: rounded deep string snap and wood body in the first 30 ms, followed by a short feathered arrow air streak. Pitch/frequency: 100–500 Hz body + restrained 1.5–3.8 kHz air detail. Natural impact and decay, no explosion or electronic tone. Target duration: 0.38 seconds.",
+    "negative_prompt": "electronic, synth, crystal, gun, cannon, laser, shrill, brittle, piercing, harsh, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.charged.hit",
@@ -1254,8 +1255,8 @@
         124802,
         124803
       ],
-    "prompt": "Powerful charged-arrow penetration with clearer shaft resonance than a standard heavy hit. Pitch/frequency: 80~220 Hz + 1~4 kHz deep penetration. Layers: heavy impact + shaft resonance. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.27 seconds.",
-    "negative_prompt": "explosion, gore, speech, words, singing, music"
+    "prompt": "Powerful charged-arrow penetration with a rounded padded impact and restrained wooden shaft resonance. Pitch/frequency: 80–220 Hz body + 1.2–3.5 kHz damped shaft detail. Layers: heavy felted impact + short wood resonance. Target duration: 0.27 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, explosion, gore, metal, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.explosive.release",
@@ -1384,8 +1385,8 @@
         125302,
         125303
       ],
-    "prompt": "Add a small bright ping to a standard hit. Pitch/frequency: 200~500 Hz + 1.2~4 kHz bright snap. Layers: arrow hit + tiny bright ping. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.15 seconds.",
-    "negative_prompt": "metal ricochet only, speech, words, singing, music"
+    "prompt": "Rounded wooden arrow rebound: soft shaft tap and muted bowstring flick, with gentle 1.5–3.5 kHz detail. No bright ping. Short natural transient and decay. Target duration: 0.15 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, bright ping, metal ricochet, electronic, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.ricochet.bounce",
@@ -1558,6 +1559,7 @@
       "max_simultaneous": 6,
       "minimum_retrigger_ms": 40,
       "generator": "stable-small",
+      "lowpass_hz": 3200.0,
       "base_seed": 126000,
       "seed": 126000,
       "variation_seeds": [
@@ -1566,8 +1568,8 @@
         126002,
         126003
       ],
-    "prompt": "Extremely short trigger snap at the instant an enemy enters. Pitch/frequency: 180~500 Hz snap + 1.5~4 kHz crack. Layers: tight spring snap. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.12 seconds.",
-    "negative_prompt": "comic mousetrap, speech, words, singing, music"
+    "prompt": "Extremely short muted wooden trap trigger: rounded latch click, soft rope twang, and a damped 1.5–3.5 kHz crack. Natural and grounded, not a comic spring. Target duration: 0.12 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, electronic, comic mousetrap, metal snap, speech, words, singing, music"
     },
     {
       "cue_id": "audio.skill.trap.explosion",
@@ -1688,6 +1690,8 @@
       "max_simultaneous": 5,
       "minimum_retrigger_ms": 80,
       "generator": "stable-small",
+      "gain_db": 12.0,
+      "lowpass_hz": 3200.0,
       "base_seed": 126500,
       "seed": 126500,
       "variation_seeds": [
@@ -1696,8 +1700,8 @@
         126502,
         126503
       ],
-    "prompt": "Short, dry status sound for newly applied bleeding, conveying an internal state change rather than a blade slash. Pitch/frequency: 180~600 Hz dry body + 1.5~3 kHz grit. Layers: dry status snap. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.22 seconds.",
-    "negative_prompt": "gore, sword slash, speech, words, singing, music"
+    "prompt": "Short, dry rounded status cue for newly applied bleeding, conveying an internal state change rather than a blade slash. Soft cloth-and-wood tick with restrained 1.5–3.2 kHz texture. Target duration: 0.22 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, gore, sword slash, metal, speech, words, singing, music"
     },
     {
       "cue_id": "audio.status.burn_apply",
@@ -2150,6 +2154,7 @@
       "max_simultaneous": 5,
       "minimum_retrigger_ms": 80,
       "generator": "stable-small",
+      "gain_db": 18.0,
       "base_seed": 128300,
       "seed": 128300,
       "variation_seeds": [
@@ -2158,8 +2163,8 @@
         128302,
         128303
       ],
-    "prompt": "Represent up to four linked targets as a 0.4-second composite using energy links, not metal chains. Pitch/frequency: A4-D5-F5-A5. Layers: 3~4 magical link pulses. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.4 seconds.",
-    "negative_prompt": "metal chain, lightning overload, speech, words, singing, music"
+    "prompt": "Represent up to four linked targets as a 0.4-second composite of soft wooden taps and rounded leather ties, not metal or electronic links. Four gentle pulses from 300–1600 Hz, damped and warm. Target duration: 0.4 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, metal chain, lightning, synth, electronic, speech, words, singing, music"
     },
     {
       "cue_id": "audio.enemy.melee.windup",
@@ -2184,8 +2189,8 @@
         128402,
         128403
       ],
-    "prompt": "Clear threat onset and short tension rise 0.35 seconds before an attack, without implying a specific weapon type. Pitch/frequency: 180~600 Hz tension + 1~2.5 kHz scrape. Layers: body/weapon tension rise. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.28 seconds.",
-    "negative_prompt": "specific sword clang, vocal, speech, words, singing, music"
+    "prompt": "Clear organic threat onset and short tension rise before an attack, with low body movement, leather strain, and muted wood friction. Rounded/damped 180–600 Hz body with restrained 1–2.5 kHz scrape. Target duration: 0.28 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, specific sword clang, metal, electronic, vocal, speech, words, singing, music"
     },
     {
       "cue_id": "audio.enemy.melee.hit",
@@ -2236,8 +2241,8 @@
         128602,
         128603
       ],
-    "prompt": "Low, blunt dark-projectile launch that cannot be confused with the player's bow. Pitch/frequency: 400 Hz~4 kHz dark launch. Layers: compressed air/magic launch. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.25 seconds.",
-    "negative_prompt": "bowstring, gun, laser, speech, words, singing, music"
+    "prompt": "Compact muted organic enemy projectile release: a small wooden snap, leather flick, and rounded air puff. Warm/damped 180–900 Hz body with restrained detail up to 3 kHz. Clearly grounded and unlike the player's bow; quiet and close. Target duration: 0.25 seconds.",
+    "negative_prompt": "magic, alien, electronic, synth, bowstring, gun, laser, shrill, brittle, piercing, harsh, speech, words, singing, music"
     },
     {
       "cue_id": "audio.enemy.suicide.charge",
@@ -2315,8 +2320,8 @@
         128904,
         128905
       ],
-    "prompt": "Small, dry death sound that does not accumulate during battles with hundreds of enemies, with no vocals. Pitch/frequency: 100~350 Hz collapse + 0.7~2.5 kHz breakup. Layers: short collapse + dissipate. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 0.3 seconds.",
-    "negative_prompt": "scream, loot chime, speech, words, singing, music"
+    "prompt": "Tiny charming enemy defeat: a soft rounded poof, light cloth tumble, and a very small wooden pebble bounce. Cute and playful but subtle, warm/damped 150–1200 Hz, no vocal. Target duration: 0.3 seconds.",
+    "negative_prompt": "vocal, scream, chime, loot sound, electronic, synth, shrill, brittle, piercing, harsh, speech, words, singing, music"
     },
     {
       "cue_id": "audio.boss.warning",
@@ -2618,8 +2623,8 @@
         130100,
         130101
       ],
-    "prompt": "A 1.2-second transformation at 50% HP in which the world briefly breaks, then becomes more dangerous. Pitch/frequency: D2–Ab2 tension + dissonant D4–Eb4 rise. Layers: low rupture + reverse pull + resolution. Envelope: Identifiable transient within the first 0–10 ms, followed by rapid decay within the total duration, with no long reverb. Target duration: 1.25 seconds.",
-    "negative_prompt": "scream, choir, BRAAAM, speech, words, singing, music"
+    "prompt": "A 1.2-second grounded boss transformation: rounded low wooden rupture, soft reverse cloth pull, and restrained warm resolution. Damped 80–700 Hz body with controlled detail up to 3.5 kHz; dramatic without a shrill synthetic rise. Target duration: 1.25 seconds.",
+    "negative_prompt": "shrill, brittle, piercing, harsh, electronic, synth, scream, choir, BRAAAM, speech, words, singing, music"
     },
     {
       "cue_id": "audio.boss.death",

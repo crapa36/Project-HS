@@ -18,20 +18,16 @@ def synthesize_cue(cue_id: str, *, duration: float, seed: int = 0, loop: bool = 
     if cue_id == "audio.skill.charged.loop":
         if not loop or abs(duration - .25) > 1e-9:
             raise ValueError("charged loop requires loop=true and duration=0.25")
-        count = round(.25 * SAMPLE_RATE); cents = (seed % 5 - 2) * 3
-        f220 = 220.0 * 2 ** (cents / 1200.0)
-        cycles = round(f220 * .25); shimmer = round((584.0 + (seed % 3 - 1) * 1.0) * .25)
-        tension_mix = .10 + (seed % 5) * .006
-        air_mix = .025 + (seed % 4) * .004
-        values = []
-        for i in range(count):
-            phase = i / count
-            value = .34 * math.sin(2 * math.pi * cycles * phase)
-            value += tension_mix * math.sin(2 * math.pi * cycles * 2 * phase)
-            value += .07 * math.sin(2 * math.pi * cycles * 3 * phase)
-            value += air_mix * math.sin(2 * math.pi * shimmer * phase)
-            values.append(value)
-        return values
+        count = round(.25 * SAMPLE_RATE)
+        rng = random.Random(seed)
+        noise = [rng.uniform(-1.0, 1.0) for _ in range(count)]
+        def smooth(radius: int) -> list[float]:
+            return [sum(noise[(i + offset) % count] for offset in range(-radius, radius + 1)) /
+                    (radius * 2 + 1) for i in range(count)]
+        wood = smooth(64)
+        friction = smooth(8)
+        peak = max(abs(0.82 * a + 0.18 * b) for a, b in zip(wood, friction)) or 1.0
+        return [0.16 * (0.82 * a + 0.18 * b) / peak for a, b in zip(wood, friction)]
     designs = {
         "audio.ui.hover": (1568.0, 1975.0),
         "audio.ui.tab": (1175.0, 880.0),

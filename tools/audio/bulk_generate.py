@@ -44,10 +44,11 @@ def _model_id(generator: str) -> str | None:
         return render._model_label("medium" if generator == "stable-medium" else "small-sfx")
     return generator
 
-def _wav_contract(path: Path, kind: str, loop: bool) -> tuple[float, str]:
+def _wav_contract(path: Path, kind: str, loop: bool, minimum_duration: float = 0.0) -> tuple[float, str]:
     with wave.open(str(path), "rb") as wav:
         rate, width, channels, frames = wav.getframerate(), wav.getsampwidth(), wav.getnchannels(), wav.getnframes()
     if rate != 48000 or width != 3 or channels not in (1, 2): raise ValueError("final WAV format contract invalid")
+    if frames / rate < minimum_duration: raise ValueError("final WAV is shorter than the cue contract")
     rate, channels, data = _finalize.read_wav(path); _finalize._validate(data, channels, kind, loop)
     return frames / rate, hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -55,9 +56,9 @@ def _valid(path: Path, cue: dict[str, Any], seeds: set[int], generator: str) -> 
     side = path.with_suffix(".json")
     if not path.is_file() or not side.is_file(): return False, None, None
     try:
-        data = json.loads(side.read_text(encoding="utf-8")); actual, digest = _wav_contract(path, cue.get("kind", "spatial-sfx"), bool(cue.get("loop")))
+        data = json.loads(side.read_text(encoding="utf-8")); actual, digest = _wav_contract(path, cue.get("kind", "spatial-sfx"), bool(cue.get("loop")), _duration(cue["duration"]) * .5)
     except (OSError, ValueError, TypeError, wave.Error): return False, None, None
-    valid = (set(data) == SIDECAR_FIELDS and data["cue_id"] == cue["cue_id"] and data["generator"] == ("stable-audio" if generator.startswith("stable") else generator) and data["model"] == _model_id(generator) and data["seed"] in seeds and abs(float(data["duration"]) - actual) < 1e-6)
+    valid = (set(data) == SIDECAR_FIELDS and data["cue_id"] == cue["cue_id"] and data["generator"] == ("stable-audio" if generator.startswith("stable") else generator) and data["model"] == _model_id(generator) and data["prompt"] == cue.get("prompt") and data["negative_prompt"] == cue.get("negative_prompt") and data["seed"] in seeds and abs(float(data["duration"]) - actual) < 1e-6)
     return valid, digest if valid else None, int(data["seed"]) if valid else None
 
 def _next(folder: Path, cue: dict[str, Any], seeds: set[int], generator: str) -> tuple[Path, bool, str | None, int | None]:
@@ -71,6 +72,21 @@ def _next(folder: Path, cue: dict[str, Any], seeds: set[int], generator: str) ->
 def _write_sidecar(path: Path, cue: dict[str, Any], seed: int, generator: str, duration: float) -> None:
     data = {"cue_id": cue["cue_id"], "generator": "stable-audio" if generator.startswith("stable") else generator, "model": _model_id(generator), "prompt": cue.get("prompt"), "negative_prompt": cue.get("negative_prompt"), "source_audio": None, "init_noise_level": None, "seed": seed, "duration": duration, "created_at": "bulk-generate"}
     path.with_suffix(".json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+def _ensure_plan_contract(folder: Path, cue: dict[str, Any], generator: str) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "_plan.json"
+    expected = {"generator": generator, "duration": _duration(cue["duration"]),
+                "kind": cue.get("kind", "spatial-sfx"), "loop": bool(cue.get("loop")),
+                "prompt": cue.get("prompt"), "negative_prompt": cue.get("negative_prompt"),
+                "gain_db": float(cue.get("gain_db", 0.0)), "lowpass_hz": cue.get("lowpass_hz")}
+    if path.exists():
+        if json.loads(path.read_text(encoding="utf-8")) != expected:
+            raise ValueError(f"output folder uses a different cue plan: {folder}")
+        return
+    if any(folder.glob("v*.wav")) or any(folder.glob("v*.json")):
+        raise ValueError(f"existing output folder has no cue plan contract: {folder}")
+    path.write_text(json.dumps(expected, indent=2) + "\n", encoding="utf-8")
 
 def _channels(audio: Any) -> list[list[float]]:
     if hasattr(audio, "detach"):
@@ -138,10 +154,11 @@ def _event_tag(prompt: Any) -> str:
     text = str(prompt or "groan").strip(); return text if text.startswith("[") and text.endswith("]") else f"[{text.strip('[]')}]"
 
 def run(plan: Path, output_root: Path, *, generator_filter: str | None = None, cue_filter: str | None = None, promote_root: Path | None = None) -> list[Path]:
-    entries = [cue for cue in _entries(plan) if (not generator_filter or _generator(cue) == generator_filter) and (not cue_filter or cue.get("cue_id") == cue_filter)]; output_root = output_root.resolve(); output_root.mkdir(parents=True, exist_ok=True); models: dict[str, Any] = {}; results: list[Path] = []
+    cue_ids = set(cue_filter.split(",")) if cue_filter else None
+    entries = [cue for cue in _entries(plan) if (not generator_filter or _generator(cue) == generator_filter) and (not cue_ids or cue.get("cue_id") in cue_ids)]; output_root = output_root.resolve(); output_root.mkdir(parents=True, exist_ok=True); models: dict[str, Any] = {}; results: list[Path] = []
     for cue in entries:
         if not cue.get("cue_id"): raise ValueError("cue_id is required")
-        generator = _generator(cue); folder = _safe(output_root, str(cue["cue_id"])); count, base = int(cue.get("count", 1)), int(cue.get("seed", 0)); hashes: set[str] = set()
+        generator = _generator(cue); folder = _safe(output_root, str(cue["cue_id"])); _ensure_plan_contract(folder, cue, generator); count, base = int(cue.get("count", 1)), int(cue.get("seed", 0)); hashes: set[str] = set()
         if generator not in models and generator != "micro-dsp":
             if generator.startswith("stable"):
                 try: from . import render
@@ -166,7 +183,7 @@ def run(plan: Path, output_root: Path, *, generator_filter: str | None = None, c
                         except ImportError: import vocal
                         vocal._seed(actual_seed); tag = _event_tag(cue.get("prompt")); audio = models[generator].generate(tag); rate = int(getattr(models[generator], "sr", 24000)); vocal._write_raw(raw, vocal._extract_event(vocal._audio_values(audio), rate), rate)
                     else: _micro(cue, actual_seed, raw)
-                    _finite_wav(raw); _finalize.finalize(raw, final, kind=cue.get("kind", "spatial-sfx"), loop=bool(cue.get("loop"))); actual_duration, digest = _wav_contract(final, cue.get("kind", "spatial-sfx"), bool(cue.get("loop")))
+                    _finite_wav(raw); _finalize.finalize(raw, final, kind=cue.get("kind", "spatial-sfx"), loop=bool(cue.get("loop")), gain_db=float(cue.get("gain_db", 0.0)), lowpass_hz=cue.get("lowpass_hz")); actual_duration, digest = _wav_contract(final, cue.get("kind", "spatial-sfx"), bool(cue.get("loop")), _duration(cue["duration"]) * .5)
                     if digest in hashes: raise ValueError(f"duplicate variation PCM: {final}")
                     _write_sidecar(final, cue, actual_seed, generator, actual_duration); hashes.add(digest); results.append(final); break
                 except (ValueError, RuntimeError):

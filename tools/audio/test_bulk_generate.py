@@ -18,7 +18,11 @@ class BulkTests(unittest.TestCase):
         self.assertEqual(len(set(seeds)), 379)
 
     def test_micro_cue_specs_and_charged_loop_finalize(self):
-        self.assertEqual(len(synth_micro.synthesize_cue("audio.skill.charged.loop", duration=.25, seed=2, loop=True)), 12000)
+        samples = synth_micro.synthesize_cue("audio.skill.charged.loop", duration=.25, seed=2, loop=True)
+        self.assertEqual(len(samples), 12000)
+        self.assertLess(abs(samples[0] - samples[-1]), .05)
+        self.assertLess(sum(value * value for value in samples) / len(samples), .02)
+        self.assertEqual(samples, synth_micro.synthesize_cue("audio.skill.charged.loop", duration=.25, seed=2, loop=True))
         with tempfile.TemporaryDirectory() as d:
             source, output = Path(d) / "source.wav", Path(d) / "final.wav"
             synth_micro.write_wav(source, synth_micro.synthesize_cue("audio.skill.charged.loop", duration=.25, seed=2, loop=True))
@@ -118,6 +122,28 @@ class BulkTests(unittest.TestCase):
             out.with_suffix(".json").write_text(json.dumps(metadata))
             replacement = bulk_generate.run(plan, root)[0]
             self.assertEqual(replacement, root / "audio.ui.hover" / "v02.wav")
+
+    def test_changed_plan_cannot_reuse_existing_candidates(self):
+        with tempfile.TemporaryDirectory() as d:
+            plan, root = Path(d) / "plan.json", Path(d) / "out"
+            cue = {"cue_id": "audio.ui.hover", "generator": "micro-dsp",
+                   "duration": .08, "count": 1, "seed": 1, "kind": "ui",
+                   "prompt": "soft", "gain_db": -3.0}
+            plan.write_text(json.dumps([cue]))
+            bulk_generate.run(plan, root)
+            cue["prompt"] = "sharp"
+            cue["lowpass_hz"] = 3200.0
+            plan.write_text(json.dumps([cue]))
+            with self.assertRaisesRegex(ValueError, "different cue plan"):
+                bulk_generate.run(plan, root)
+
+    def test_wav_contract_rejects_overtrimmed_candidate(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw, final = Path(d) / "raw.wav", Path(d) / "final.wav"
+            synth_micro.write_wav(raw, [0.2] * 1920)
+            finalize(raw, final, kind="spatial-sfx")
+            with self.assertRaisesRegex(ValueError, "shorter than the cue contract"):
+                bulk_generate._wav_contract(final, "spatial-sfx", False, .2)
 
     def test_retry_seed_is_resume_compatible_and_promotion_is_wav_only(self):
         with tempfile.TemporaryDirectory() as d:
