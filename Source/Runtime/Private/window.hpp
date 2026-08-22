@@ -35,6 +35,7 @@ class Window
         std::array<std::uint16_t, 4> &keys) noexcept;
     [[nodiscard]] Result SetBorderless(bool borderless);
     void SetUiClickHandler(std::function<void(Float2)> handler);
+    void SetUiHoverHandler(std::function<void(Float2)> handler);
 
   private:
     static LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam,
@@ -53,6 +54,7 @@ class Window
     std::optional<std::uint8_t> pending_rebind_slot_;
     std::optional<std::array<std::uint16_t, 4>> rebound_skill_keys_;
     std::function<void(Float2)> ui_click_handler_;
+    std::function<void(Float2)> ui_hover_handler_;
     Sequence input_sequence_{};
     bool accepting_input_{true};
     bool borderless_{};

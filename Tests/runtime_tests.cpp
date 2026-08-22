@@ -1,6 +1,7 @@
 #include <hs/runtime/experiment_spec.hpp>
 #include <hs/runtime/experiment_pipe.hpp>
 #include <hs/runtime/save_store.hpp>
+#include <hs/runtime/audio_engine.hpp>
 #include <hs/runtime/playtest_recording.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "vfx_catalog.hpp"
@@ -8,6 +9,7 @@
 #include <Windows.h>
 
 #include <array>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -345,6 +347,87 @@ void TestVfxCatalog()
                  hs::VfxPrimitive::Soft);
 }
 
+void TestAudioCatalogValidation(const std::filesystem::path &root)
+{
+    hs::SettingsData settings;
+    const auto write_catalog = [&](std::string_view name, std::string_view entry) {
+        const auto directory = root / "audio" / name;
+        std::filesystem::create_directories(directory);
+        std::ofstream(directory / "audio_cues.json") << entry;
+        return directory;
+    };
+    const auto unsafe_directory = write_catalog(
+        "unsafe",
+        R"({"entries":[{"id":"audio.test","asset_id":"audio.test","submix":"SFX","spatial":false,"preload":true,"streaming":false,"encoding":"PCM","loop":false,"priority":"Other","max_simultaneous":1,"minimum_retrigger_ms":0,"files":["../escape.wav"]}]})");
+    hs::AudioEngine unsafe_engine;
+    Check(!unsafe_engine.Initialize(settings, unsafe_directory),
+          "audio catalog rejects unsafe paths before device setup");
+
+    const auto streaming_directory = write_catalog(
+        "streaming",
+        R"({"entries":[{"id":"audio.test","asset_id":"audio.test","submix":"SFX","spatial":false,"preload":true,"streaming":true,"encoding":"PCM","loop":false,"priority":"Other","max_simultaneous":1,"minimum_retrigger_ms":0,"files":["test.wav"]}]})");
+    hs::AudioEngine streaming_engine;
+    Check(!streaming_engine.Initialize(settings, streaming_directory),
+          "audio catalog rejects unsupported streaming before device setup");
+}
+
+void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
+{
+    const auto directory = root / "audio" / "lazy";
+    std::filesystem::create_directories(directory);
+    std::ofstream wav(directory / "lazy.wav", std::ios::binary);
+    const auto write_u16 = [&](std::uint16_t value) {
+        const std::array<char, 2> bytes{static_cast<char>(value & 0xFFu),
+                                        static_cast<char>((value >> 8) & 0xFFu)};
+        wav.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    const auto write_u32 = [&](std::uint32_t value) {
+        const std::array<char, 4> bytes{static_cast<char>(value & 0xFFu),
+                                        static_cast<char>((value >> 8) & 0xFFu),
+                                        static_cast<char>((value >> 16) & 0xFFu),
+                                        static_cast<char>((value >> 24) & 0xFFu)};
+        wav.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    };
+    wav.write("RIFF", 4);
+    write_u32(40);
+    wav.write("WAVEfmt ", 8);
+    write_u32(16);
+    write_u16(1);
+    write_u16(1);
+    write_u32(48000);
+    write_u32(144000);
+    write_u16(3);
+    write_u16(24);
+    wav.write("data", 4);
+    write_u32(3);
+    const std::array<char, 3> payload{};
+    wav.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+    wav.put('\0');
+    wav.close();
+    std::ofstream(directory / "audio_cues.json")
+        << R"({"entries":[{"id":"audio.lazy","asset_id":"audio.lazy","submix":"SFX","spatial":false,"preload":false,"streaming":false,"encoding":"PCM","loop":false,"priority":"Other","max_simultaneous":1,"minimum_retrigger_ms":0,"files":["lazy.wav"]}]})";
+
+    hs::AudioEngine engine;
+    hs::SettingsData settings;
+    const auto initialized = engine.Initialize(settings, directory);
+    Check(initialized.Succeeded(), "lazy audio catalog validates WAV metadata at startup");
+    auto status = engine.Status();
+    Check(status.loaded_cues == 1 && status.loaded_files == 0,
+          "preload false leaves PCM payload unloaded");
+
+    hs::PresentationEvent event;
+    event.kind = hs::PresentationKind::Audio;
+    event.asset = hs::MakeAssetId("audio.lazy");
+    event.sequence = 1;
+    engine.Play(event);
+    status = engine.Status();
+    Check(status.loaded_files == 1 && status.skipped_load_failures == 0,
+          "first Play loads and caches a lazy PCM payload");
+    engine.Play(event);
+    Check(engine.Status().loaded_files == 1,
+          "cached PCM payload is not loaded again");
+}
+
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
 {
     const auto directory = root / "playtest";
@@ -461,6 +544,8 @@ int main()
         TestVfxCatalog();
         TestSaveRecovery(root);
         TestSettingsPersistence(root);
+        TestAudioCatalogValidation(root);
+        TestAudioPayloadLazyLoad(root);
         TestExperimentSpecRoundTrip(root);
         TestNamedPipeCommandRoundTrip();
         TestNamedPipeIdempotencyAndTargetTick();

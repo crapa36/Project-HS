@@ -45,6 +45,16 @@ void WriteText(const std::filesystem::path &path, std::string_view text)
     stream << text;
 }
 
+PresentationEvent MakeAudioEvent(std::string_view cue, Sequence sequence) noexcept
+{
+    PresentationEvent event;
+    event.sequence = sequence;
+    event.kind = PresentationKind::Audio;
+    event.asset = MakeAssetId(cue);
+    event.parameters = EncodeAudioAction(AudioEventAction::Play);
+    return event;
+}
+
 } // namespace
 
 ApplicationResult RunApplication(const ApplicationConfig &config)
@@ -115,7 +125,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {loaded};
     }
     AudioEngine audio;
-    if (auto initialized = audio.Initialize(settings); !initialized)
+    if (auto initialized = audio.Initialize(settings, executable_directory / "Cooked" / "Audio"); !initialized)
     {
         return {initialized};
     }
@@ -124,6 +134,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem task_system;
     Window window(channels, settings.skill_virtual_keys);
+    Sequence ui_audio_sequence{};
+    AssetId active_ambience{};
+    AssetId active_bgm = MakeAssetId("audio.bgm.main_menu");
+    // MainMenu is the initial phase, so it never crosses a phase transition
+    // that would otherwise trigger the normal BGM selection below.
+    audio.Play(MakeAudioEvent("audio.bgm.main_menu", ++ui_audio_sequence));
     window.SetUiClickHandler([&](Float2 cursor) {
         SessionProbe session;
         session.phase = static_cast<SessionPhase>(
@@ -141,6 +157,71 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         channels.loadout_source.store(ui.loadout_source_slot, std::memory_order_release);
         if (interaction.gameplay_action) (void)channels.ui_actions.TryPush(*interaction.gameplay_action);
         if (interaction.runtime_command) (void)channels.ui_commands.TryPush(*interaction.runtime_command);
+        std::string_view cue;
+        if (interaction.invalid)
+            cue = "audio.ui.invalid";
+        if (interaction.gameplay_action)
+        {
+            switch (interaction.gameplay_action->kind)
+            {
+            case UiActionKind::StartSession: cue = "audio.ui.confirm"; break;
+            case UiActionKind::Quit:
+            case UiActionKind::ReturnToMainMenu: cue = "audio.ui.cancel"; break;
+            case UiActionKind::Reroll: cue = "audio.ui.reroll"; break;
+            case UiActionKind::SelectCard: cue = "audio.ui.card_select"; break;
+            case UiActionKind::AssignStat: cue = "audio.ui.stat_allocate"; break;
+            case UiActionKind::Resume: cue = "audio.ui.pause_close"; break;
+            case UiActionKind::SwapLoadoutSlots: cue = "audio.ui.tab"; break;
+            }
+        }
+        if (interaction.runtime_command)
+        {
+            switch (interaction.runtime_command->kind)
+            {
+            case UiCommandKind::BeginSkillRebind: cue = "audio.ui.rebind_start"; break;
+            case UiCommandKind::CancelSkillRebind: cue = "audio.ui.cancel"; break;
+            case UiCommandKind::SetMasterVolumePercent:
+            case UiCommandKind::SetBgmVolumePercent:
+            case UiCommandKind::SetSfxVolumePercent:
+            case UiCommandKind::SetUiVolumePercent: cue = "audio.ui.slider_tick"; break;
+            default: if (cue.empty()) cue = "audio.ui.confirm"; break;
+            }
+        }
+        if (!cue.empty())
+            audio.Play(MakeAudioEvent(cue, ++ui_audio_sequence));
+    });
+    std::uint32_t hover_target = 0;
+    std::uint32_t previous_hover_target = 0;
+    window.SetUiHoverHandler([&](Float2 cursor) {
+        const auto phase = static_cast<SessionPhase>(
+            channels.session_phase.load(std::memory_order_acquire));
+        const auto page = static_cast<UiPage>(
+            channels.ui_page.load(std::memory_order_acquire));
+        const auto x = (cursor.x + 1.0f) * 960.0f;
+        const auto y = (1.0f - cursor.y) * 540.0f;
+        const auto inside = [&](float left, float top, float width, float height) {
+            return x >= left && x <= left + width && y >= top && y <= top + height;
+        };
+        if (phase == SessionPhase::MainMenu && page == UiPage::Root)
+        {
+            for (std::uint32_t i = 0; i < 4; ++i)
+                if (inside(760.0f, 270.0f + i * 150.0f, 400.0f, 92.0f)) { hover_target = i + 1; goto hover_done; }
+        }
+        if ((phase == SessionPhase::CardSelection || phase == SessionPhase::RelicSelection) &&
+            inside(760.0f, 790.0f, 400.0f, 72.0f)) { hover_target = 20; goto hover_done; }
+        if (phase == SessionPhase::Paused && page == UiPage::Root)
+        {
+            for (std::uint32_t i = 0; i < 3; ++i)
+                if (inside(760.0f, 420.0f + i * 100.0f, 400.0f, 72.0f)) { hover_target = 30 + i; goto hover_done; }
+        }
+        hover_target = 0;
+    hover_done:
+        if (hover_target != previous_hover_target)
+        {
+            previous_hover_target = hover_target;
+            if (hover_target != 0)
+                audio.Play(MakeAudioEvent("audio.ui.hover", ++ui_audio_sequence));
+        }
     });
     auto result =
         window.Create(config.width, config.height, config.visible, config.borderless);
@@ -235,6 +316,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::vector<std::string> event_lines;
         std::vector<std::string> timeline_lines;
         std::vector<std::string> gpu_lines;
+        float previous_foot_phase = -1.0f;
+        Tick previous_foot_tick{};
         event_lines.reserve(32);
         pending_particle_spawns.reserve(256);
         pending_effect_lines.reserve(64);
@@ -343,6 +426,33 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             const auto snapshots = snapshot_consumer.AcquireLatest();
             if (snapshots.has_current)
             {
+                const auto &current_snapshot = snapshots.current;
+                if (!current_snapshot.poses.empty() && !current_snapshot.instances.empty() &&
+                    current_snapshot.header.tick != previous_foot_tick)
+                {
+                    const auto &pose = current_snapshot.poses.front();
+                    const auto phase = pose.secondary_normalized_time -
+                                       std::floor(pose.secondary_normalized_time);
+                    const auto crossed = [&](float marker) {
+                        return previous_foot_phase >= 0.0f &&
+                               (previous_foot_phase < marker && phase >= marker ||
+                                previous_foot_phase > phase &&
+                                    (previous_foot_phase < marker || phase >= marker));
+                    };
+                    if (pose.secondary_weight > 0.01f &&
+                        (crossed(0.0f) || crossed(0.5f)))
+                    {
+                        const auto cue = pose.secondary_weight >= 0.5f
+                                             ? "audio.player.footstep_run"
+                                             : "audio.player.footstep_walk";
+                        auto event = MakeAudioEvent(cue, current_snapshot.header.tick);
+                        event.tick = current_snapshot.header.tick;
+                        event.position = current_snapshot.instances.front().position;
+                        (void)channels.audio_events.TryPush(event);
+                    }
+                    previous_foot_phase = phase;
+                    previous_foot_tick = current_snapshot.header.tick;
+                }
                 if (config.vfx_showcase && !vfx_showcase_injected)
                 {
                     constexpr std::array colors{
@@ -828,7 +938,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 events.reserve(simulation.PendingDomainSignals().size() * 2);
                                 for (const auto &signal : simulation.PendingDomainSignals())
                                 {
-                                    std::array<PresentationEvent, 2> projected{};
+                                    std::array<PresentationEvent, 3> projected{};
                                     const auto count = ProjectDomainSignal(signal, projected);
                                     events.insert(events.end(), projected.begin(),
                                                   projected.begin() + count);
@@ -869,7 +979,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
                 for (const auto &signal : simulation.PendingDomainSignals())
                 {
-                    std::array<PresentationEvent, 2> projected{};
+                    std::array<PresentationEvent, 3> projected{};
                     const auto count = ProjectDomainSignal(signal, projected);
                     for (const auto &presentation :
                          std::span(projected).first(count))
@@ -951,6 +1061,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     auto next_hot_reload_check = std::chrono::steady_clock::now();
 #endif
 
+    SessionPhase previous_audio_phase = SessionPhase::MainMenu;
     while (!channels.stop_requested.load(std::memory_order_acquire))
     {
         if (!window.PumpMessages())
@@ -1082,6 +1193,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::array<std::uint16_t, 4> rebound_keys;
         if (window.ConsumeReboundSkillKeys(rebound_keys))
         {
+            audio.Play(MakeAudioEvent("audio.ui.rebind_success", ++ui_audio_sequence));
             channels.pending_rebind_slot.store(0xFF, std::memory_order_release);
             settings.skill_virtual_keys = rebound_keys;
             if (!channels.presentation_settings.TryPush(settings))
@@ -1093,7 +1205,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         PresentationEvent audio_event;
         while (channels.audio_events.TryPop(audio_event))
         {
-            audio.Play(audio_event);
+            if (DecodeAudioAction(audio_event.parameters) == AudioEventAction::Stop)
+                audio.Stop(audio_event.asset);
+            else
+            {
+                if (audio_event.asset.value == MakeAssetId("audio.bgm.final_boss").value)
+                {
+                    if (active_bgm.value != 0) audio.Stop(active_bgm);
+                    active_bgm = MakeAssetId("audio.bgm.final_boss");
+                }
+                audio.Play(audio_event);
+            }
         }
         audio.UpdateListener(
             {channels.camera_target_x.load(std::memory_order_acquire), 0.0f,
@@ -1101,6 +1223,55 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             {0.0f, 0.0f, 1.0f}, {0.0f, 1.0f, 0.0f});
         const auto session_phase = static_cast<SessionPhase>(
             channels.session_phase.load(std::memory_order_acquire));
+        if (session_phase != previous_audio_phase)
+        {
+            const auto old_phase = previous_audio_phase;
+            const auto target = session_phase == SessionPhase::MainMenu
+                                    ? MakeAssetId("audio.bgm.main_menu")
+                                    : (session_phase == SessionPhase::Victory
+                                           ? MakeAssetId("audio.stinger.victory")
+                                           : (session_phase == SessionPhase::Defeat
+                                                  ? MakeAssetId("audio.stinger.defeat")
+                                                  : MakeAssetId("audio.bgm.session")));
+            if (session_phase == SessionPhase::Victory || session_phase == SessionPhase::Defeat)
+            {
+                if (active_bgm.value != 0) audio.Stop(active_bgm);
+                if (active_ambience.value != 0) audio.Stop(active_ambience);
+                active_ambience = {};
+                audio.Play(MakeAudioEvent(target.value == MakeAssetId("audio.stinger.victory").value
+                                              ? "audio.stinger.victory" : "audio.stinger.defeat",
+                                          ++ui_audio_sequence));
+                active_bgm = {};
+            }
+            else if (target.value != active_bgm.value)
+            {
+                if (active_bgm.value != 0) audio.Stop(active_bgm);
+                active_bgm = target;
+                audio.Play(MakeAudioEvent(session_phase == SessionPhase::MainMenu
+                                              ? "audio.bgm.main_menu" : "audio.bgm.session",
+                                          ++ui_audio_sequence));
+            }
+            if (session_phase == SessionPhase::Playing && active_ambience.value == 0)
+            {
+                active_ambience = MakeAssetId("audio.ambience.arena");
+                audio.Play(MakeAudioEvent("audio.ambience.arena", ++ui_audio_sequence));
+            }
+            else if (session_phase != SessionPhase::Playing && active_ambience.value != 0)
+            {
+                audio.Stop(active_ambience);
+                active_ambience = {};
+            }
+            if (session_phase == SessionPhase::Paused)
+                audio.Play(MakeAudioEvent("audio.ui.pause_open", ++ui_audio_sequence));
+            else if (old_phase == SessionPhase::Paused)
+                audio.Play(MakeAudioEvent("audio.ui.pause_close", ++ui_audio_sequence));
+            else if (session_phase == SessionPhase::CardSelection ||
+                     session_phase == SessionPhase::StatAllocation)
+                audio.Play(MakeAudioEvent("audio.ui.level_up", ++ui_audio_sequence));
+            else if (session_phase == SessionPhase::RelicSelection)
+                audio.Play(MakeAudioEvent("audio.ui.relic_select", ++ui_audio_sequence));
+            previous_audio_phase = session_phase;
+        }
         if (session_phase == SessionPhase::Paused ||
             session_phase == SessionPhase::CardSelection ||
             session_phase == SessionPhase::StatAllocation ||

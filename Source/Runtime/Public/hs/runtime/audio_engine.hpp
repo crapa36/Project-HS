@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <filesystem>
 
 namespace hs
 {
@@ -25,7 +26,7 @@ enum class AudioPriority : std::uint8_t
     Enemy,
     Player,
     BossWarning,
-    Ui = BossWarning,
+    Ui,
 };
 
 enum class AudioDeviceState : std::uint8_t
@@ -41,6 +42,11 @@ struct AudioStatus
     bool combat_paused{};
     std::uint32_t active_source_voices{};
     std::uint64_t skipped_missing_cues{};
+    std::uint64_t skipped_load_failures{};
+    std::uint64_t skipped_voice_limits{};
+    std::uint32_t loaded_cues{};
+    std::uint32_t loaded_files{};
+    std::uint64_t played_count{};
     std::uint32_t native_error{};
 };
 
@@ -56,11 +62,14 @@ class AudioEngine
     AudioEngine &operator=(const AudioEngine &) = delete;
 
     [[nodiscard]] Result Initialize(const SettingsData &settings);
+    [[nodiscard]] Result Initialize(const SettingsData &settings,
+                                    const std::filesystem::path &audio_directory);
     void Shutdown() noexcept;
     void ApplySettings(const SettingsData &settings) noexcept;
 
-    void Play(const PresentationEvent &event, AudioBus bus = AudioBus::Sfx,
-              AudioPriority priority = AudioPriority::Other) noexcept;
+    void Play(const PresentationEvent &event) noexcept;
+    void Stop(AssetId cue) noexcept;
+    void StopBus(AudioBus bus) noexcept;
     void UpdateListener(Float3 position, Float3 forward, Float3 up) noexcept;
     void PauseCombat() noexcept;
     void ResumeCombat() noexcept;

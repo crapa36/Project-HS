@@ -14,6 +14,7 @@ namespace
 
 constexpr wchar_t kWindowClass[] = L"ProjectHS.Window";
 
+
 } // namespace
 
 Window::Window(RuntimeChannels &channels,
@@ -218,6 +219,11 @@ void Window::SetUiClickHandler(std::function<void(Float2)> handler)
     ui_click_handler_ = std::move(handler);
 }
 
+void Window::SetUiHoverHandler(std::function<void(Float2)> handler)
+{
+    ui_hover_handler_ = std::move(handler);
+}
+
 bool Window::ConsumeReboundSkillKeys(std::array<std::uint16_t, 4> &keys) noexcept
 {
     if (!rebound_skill_keys_)
@@ -312,6 +318,16 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
 #endif
     switch (message)
     {
+    case WM_MOUSEMOVE:
+        if (ui_hover_handler_)
+        {
+            const auto x = static_cast<float>(static_cast<short>(LOWORD(lparam)));
+            const auto y = static_cast<float>(static_cast<short>(HIWORD(lparam)));
+            const Float2 cursor{(x / static_cast<float>(std::max(client_width_, 1u))) * 2.0f - 1.0f,
+                                1.0f - (y / static_cast<float>(std::max(client_height_, 1u))) * 2.0f};
+            ui_hover_handler_(cursor);
+        }
+        return 0;
     case WM_INPUT:
         if (accepting_input_)
         {
