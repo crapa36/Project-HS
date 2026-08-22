@@ -89,6 +89,17 @@ void GameSimulation::SimulationWorld::RecordUpgradeDisplacement(SkillKind skill,
                                                     : 0.0f)));
 }
 
+void GameSimulation::SimulationWorld::QueueEnemyDisplacement(
+    EnemyActor &enemy, Float2 displacement) noexcept
+{
+    constexpr Tick kDisplacementTicks = 8;
+    const auto remaining = Multiply(enemy.displacement_per_tick,
+                                    static_cast<float>(enemy.displacement_ticks));
+    enemy.displacement_per_tick = Multiply(Add(remaining, displacement),
+                                           1.0f / kDisplacementTicks);
+    enemy.displacement_ticks = kDisplacementTicks;
+}
+
 float GameSimulation::SimulationWorld::EffectiveMagnetRadius() const noexcept
 {
     return rules.player_magnet_radius +
@@ -182,7 +193,7 @@ ProjectileActor *GameSimulation::SimulationWorld::FireProjectile(SkillKind skill
                                  : rules.enemies[static_cast<std::size_t>(
                                        EnemyKind::Ranged)].projectile_speed);
     projectile.remaining_range = player_owned ? definition.range : 18.0f;
-    projectile.radius = player_owned ? definition.collision_radius * 2.0f : 0.25f;
+    projectile.radius = player_owned ? definition.collision_radius : 0.25f;
     projectile.damage = player_owned ? RoundDamage(EffectiveAttack() * coefficient)
                                      : RoundDamage(coefficient);
     projectile.skill = skill;
@@ -217,7 +228,8 @@ ProjectileActor *GameSimulation::SimulationWorld::FireProjectile(SkillKind skill
                         : projectiles;
     storage.push_back(projectile);
     if (player_owned && skill < SkillKind::Count &&
-        skill != SkillKind::BasicAttack)
+        skill != SkillKind::BasicAttack && skill != SkillKind::MultiShot &&
+        origin == EffectOrigin::Original)
     {
         constexpr std::array<DomainSignalKind, kCombatSkillCount> effects{
             DomainSignalKind::BasicAttackImpact, DomainSignalKind::PiercingShotCast,
@@ -700,9 +712,9 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
                             elapsed - unaccelerated);
     }
     const auto ratio = static_cast<float>(elapsed) / static_cast<float>(maximum_ticks);
-    const auto minimum = HasUpgrade(mask, 3) ? 11.5f : 5.0f;
+    const auto minimum = HasUpgrade(mask, 3) ? 23.0f : 10.0f;
     const auto maximum = HasUpgrade(mask, 1)
-                             ? 14.0f
+                             ? 28.0f
                              : rules.skills[static_cast<std::size_t>(
                                    SkillKind::ChargedShot)].damage_coefficient;
     const auto coefficient = std::lerp(minimum, maximum, ratio);
@@ -719,7 +731,7 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
             4.2f,
             rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)].range,
             ratio);
-        projectile->radius = std::lerp(0.5f, 1.1f, ratio);
+        projectile->radius = std::lerp(0.4f, 0.88f, ratio);
         if (HasUpgrade(mask, 4))
         {
             projectile->pierce_remaining += 4;
@@ -894,6 +906,10 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
         }
         else if (action.kind == ScheduledKind::Volley)
         {
+            if (action.skill == SkillKind::MultiShot &&
+                action.origin == EffectOrigin::Original)
+                EmitVfx(DomainSignalKind::MultiShotCast, action.position,
+                        action.direction, 1.0f, 1.1f);
             for (std::uint32_t index = 0; index < action.projectile_count; ++index)
             {
                 FireProjectile(action.skill, action.position,
@@ -911,11 +927,12 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                        RoundDamage(EffectiveAttack() * action.damage_coefficient),
                        action.skill, action.origin, action.cast_id, 0, false, 0.0f, 0,
                        action.source_upgrade, action.source_relic);
-            EmitVfx(action.skill == SkillKind::ExplosiveArrow &&
-                            action.source_upgrade == 0
-                        ? DomainSignalKind::ExplosiveArrowSecondary
-                        : DomainSignalKind::SmallExplosion,
-                    action.position, {}, action.radius / 3.0f, 0.15f);
+            if (action.skill == SkillKind::ExplosiveArrow && action.source_upgrade == 0)
+                EmitVfx(DomainSignalKind::ExplosiveArrowSecondary,
+                        action.position, {}, action.radius / 3.0f, 0.15f);
+            else
+                EmitVfx(DomainSignalKind::SmallExplosion,
+                        action.position, {}, action.radius, 0.15f);
         }
         else
         {
@@ -938,7 +955,9 @@ void GameSimulation::SimulationWorld::MovementPhase()
     {
         if (player.forced_move_skill == SkillKind::RetreatShot)
             EmitVfx(DomainSignalKind::RetreatLanded, player.position,
-                    player.facing, 1.0f, 0.12f);
+                    player.facing,
+                    HasUpgrade(player.retreat_upgrade_mask, 5) ? 5.0f : 1.0f,
+                    0.025f);
         if (player.forced_move_skill == SkillKind::Trap &&
             HasUpgrade(player.retreat_upgrade_mask, 2))
         {
@@ -950,7 +969,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
         else if (player.forced_move_skill == SkillKind::RetreatShot &&
                  HasUpgrade(player.retreat_upgrade_mask, 5))
         {
-            EmitVfx(DomainSignalKind::Push, player.position, {}, 1.0f, 0.12f);
+            EmitVfx(DomainSignalKind::Push, player.position, {}, 5.0f, 0.12f);
             QueueAreaDamage(player.position, 5.0f,
                         RoundDamage(EffectiveAttack() * 3.0f),
                        SkillKind::RetreatShot, EffectOrigin::Derived,
@@ -961,12 +980,11 @@ void GameSimulation::SimulationWorld::MovementPhase()
                     DistanceSquared(player.position, enemy.position) <= 25.0f)
                 {
                     const auto before = enemy.position;
-                    enemy.position = Add(
-                        enemy.position,
-                        Multiply(Normalize(Subtract(enemy.position, player.position)),
-                                 3.0f));
+                    const auto displacement = Multiply(
+                        Normalize(Subtract(enemy.position, player.position)), 3.0f);
+                    QueueEnemyDisplacement(enemy, displacement);
                     RecordUpgradeDisplacement(SkillKind::RetreatShot, 4, before,
-                                              enemy.position);
+                                              Add(before, displacement));
                 }
             }
         }
@@ -975,6 +993,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
     }
     if (player.retreat_followup_tick != 0 && tick >= player.retreat_followup_tick)
     {
+        EmitVfx(DomainSignalKind::RetreatMoved, player.position,
+                Multiply(player.retreat_followup_direction, -1.0f), 1.0f, 0.1f);
         const auto before = player.position;
         if (!config.scenario.player_stationary)
             player.position = Add(player.position,
@@ -1060,7 +1080,16 @@ void GameSimulation::SimulationWorld::MovementPhase()
             RecordUpgradeEffect(slow.source_skill, slow.source_upgrade,
                                 UpgradeEffectMetric::SlowActiveTicks);
         enemy.previous_position = enemy.position;
-        enemy.position = Add(enemy.position, Multiply(enemy.velocity, kTickSeconds));
+        if (enemy.displacement_ticks > 0)
+        {
+            enemy.velocity = Multiply(enemy.displacement_per_tick, 1.0f / kTickSeconds);
+            enemy.position = Add(enemy.position, enemy.displacement_per_tick);
+            if (--enemy.displacement_ticks == 0) enemy.displacement_per_tick = {};
+        }
+        else
+        {
+            enemy.position = Add(enemy.position, Multiply(enemy.velocity, kTickSeconds));
+        }
         enemy.position.x = std::clamp(enemy.position.x, -rules.arena_half_extent,
                                       rules.arena_half_extent);
         enemy.position.y = std::clamp(enemy.position.y, -rules.arena_half_extent,
@@ -1333,6 +1362,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     {
         enemy.status.slows.push_back({0.2f, tick + Seconds(1.0f),
                                       SkillKind::BasicAttack, 5});
+        EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
+                enemy.boss ? 1.4f : 0.75f, 0.025f);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                             UpgradeEffectMetric::SlowApplications);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
@@ -1352,10 +1383,13 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         HasUpgrade(projectile.upgrade_mask, 6) && !enemy.boss)
     {
         const auto before = enemy.position;
-        enemy.position = Add(enemy.position,
-                             Multiply(Normalize(projectile.velocity), 1.5f));
+        const auto displacement = Multiply(Normalize(projectile.velocity), 1.5f);
+        QueueEnemyDisplacement(enemy, displacement);
+        EmitVfx(DomainSignalKind::Push, before,
+                Normalize(projectile.velocity), 1.0f,
+                enemy.boss ? 1.4f : 0.75f);
         RecordUpgradeDisplacement(SkillKind::PiercingShot, 5, before,
-                                  enemy.position);
+                                  Add(before, displacement));
     }
     if (projectile.skill == SkillKind::PiercingShot &&
         HasUpgrade(projectile.upgrade_mask, 7))
@@ -1374,6 +1408,12 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         }
         else if (runtime.transfer_count < 4 && runtime.has_stored_burn)
         {
+            const auto *source = projectile.hit_ids.size() >= 2
+                                     ? FindEnemy(projectile.hit_ids[projectile.hit_ids.size() - 2])
+                                     : nullptr;
+            EmitVfxLine(DomainSignalKind::BurnTransferred,
+                        source ? source->position : projectile.previous_position,
+                        enemy.position);
             ApplyBurn(enemy, runtime.stored_burn_attack, false,
                       runtime.stored_burn_remaining, projectile.skill, 6);
             ++runtime.transfer_count;
@@ -1403,6 +1443,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         QueueAreaDamage(enemy.position, 3.5f,
                    RoundDamage(EffectiveAttack() * 2.0f), projectile.skill,
                    EffectOrigin::Derived, projectile.cast_id, 0, false, 0.0f, 0, 6);
+        EmitVfx(DomainSignalKind::LargeExplosion, enemy.position, {}, 3.5f, 0.15f);
     }
     if (projectile.skill == SkillKind::MultiShot &&
         HasUpgrade(projectile.upgrade_mask, 6) &&
@@ -1450,7 +1491,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         enemy.marked_damage_coefficient = 4.0f;
         enemy.mark_expires = tick + Seconds(8.0f);
         EmitVfx(DomainSignalKind::MarkApplied, enemy.position, {},
-                1.0f, enemy.boss ? 1.4f : 0.75f);
+                enemy.boss ? 1.4f : 0.75f, 0.025f);
         RecordUpgradeEffect(SkillKind::ExplosiveArrow, 6,
                             UpgradeEffectMetric::ExplosionsCreated);
         QueueAreaDamage(enemy.position, 2.0f,
@@ -1525,7 +1566,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         }
     }
     const auto hit_height = enemy.boss ? 1.4f : 0.75f;
-    const auto hit_scale = enemy.boss ? 1.35f : 1.0f;
+    constexpr auto hit_scale = 1.0f;
     const auto hit_direction = Normalize(projectile.velocity);
     if (projectile.skill == SkillKind::ChargedShot && projectile.full_charge)
         EmitVfx(DomainSignalKind::HeavyHit, enemy.position,
@@ -1577,8 +1618,6 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         }
         if (next)
         {
-            EmitVfxLine(DomainSignalKind::RicochetLinked, projectile.position,
-                        next->position);
             if (projectile.origin == EffectOrigin::Original &&
                 HasUpgrade(projectile.upgrade_mask, 7))
             {
@@ -1605,6 +1644,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 if (!enemy.status.burn)
                     ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
                               projectile.skill, 3);
+                EmitVfxLine(DomainSignalKind::BurnTransferred,
+                            enemy.position, next->position);
                 projectile.carried_burn_attack = enemy.status.burn->attack_snapshot;
                 projectile.carried_burn_expires = enemy.status.burn->expires;
             }
@@ -1676,19 +1717,19 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &project
         HasUpgrade(projectile.upgrade_mask, 6))
     {
         EmitVfx(DomainSignalKind::Pull, projectile.position, {},
-                projectile.explosion_radius, 0.12f);
+                2.5f, 0.12f);
         for (auto &enemy : enemies)
         {
             if (!enemy.dead && !enemy.boss &&
                 DistanceSquared(projectile.position, enemy.position) <= 6.25f)
             {
                 const auto before = enemy.position;
-                enemy.position = Add(enemy.position,
-                    Multiply(Normalize(Subtract(projectile.position, enemy.position)),
-                             std::min(2.5f, Length(Subtract(projectile.position,
-                                                            enemy.position)))));
+                const auto delta = Subtract(projectile.position, enemy.position);
+                const auto displacement = Multiply(Normalize(delta),
+                                                    std::min(2.5f, Length(delta)));
+                QueueEnemyDisplacement(enemy, displacement);
                 RecordUpgradeDisplacement(SkillKind::ExplosiveArrow, 5, before,
-                                          enemy.position);
+                                          Add(before, displacement));
             }
         }
     }
@@ -1761,7 +1802,7 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &project
                                projectile.skill, EffectOrigin::Derived,
                                projectile.cast_id, 0, false, 0.0f, 0, 4);
                     EmitVfx(DomainSignalKind::SmallExplosion, enemy.position,
-                            {}, 1.0f, 0.15f);
+                            {}, 2.0f, 0.15f);
                     RecordUpgradeEffect(SkillKind::ExplosiveArrow, 4,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     ++blood_explosions;
@@ -1769,11 +1810,13 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &project
             }
         }
     }
-    EmitVfx(projectile.skill == SkillKind::ExplosiveArrow &&
-                    projectile.origin == EffectOrigin::Original
-                ? DomainSignalKind::ExplosiveArrowMain
-                : DomainSignalKind::LargeExplosion,
-            projectile.position, {}, projectile.explosion_radius / 3.0f, 0.15f);
+    if (projectile.skill == SkillKind::ExplosiveArrow &&
+        projectile.origin == EffectOrigin::Original)
+        EmitVfx(DomainSignalKind::ExplosiveArrowMain, projectile.position, {},
+                projectile.explosion_radius / 3.0f, 0.15f);
+    else
+        EmitVfx(DomainSignalKind::LargeExplosion, projectile.position, {},
+                projectile.explosion_radius, 0.15f);
 }
 
 void GameSimulation::SimulationWorld::CollisionHitPhase()
@@ -2016,10 +2059,11 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         {
                             const auto delta = Subtract(area.position, enemy.position);
                             const auto before = enemy.position;
-                            enemy.position = Add(enemy.position, Multiply(
-                                Normalize(delta), std::min(2.0f, Length(delta))));
+                            const auto displacement = Multiply(
+                                Normalize(delta), std::min(2.0f, Length(delta)));
+                            QueueEnemyDisplacement(enemy, displacement);
                             RecordUpgradeDisplacement(SkillKind::Trap, 5, before,
-                                                      enemy.position);
+                                                      Add(before, displacement));
                         }
                     }
                 }
@@ -2029,7 +2073,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     target->marked_damage_coefficient = 4.0f;
                     target->mark_expires = tick + Seconds(8.0f);
                     EmitVfx(DomainSignalKind::MarkApplied, target->position,
-                            {}, 1.0f, target->boss ? 1.4f : 0.75f);
+                            {}, target->boss ? 1.4f : 0.75f, 0.025f);
                     RecordUpgradeEffect(SkillKind::Trap, 6,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     QueueDamage(target->id.value,
@@ -2067,7 +2111,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 {
                     area.dead = true;
                 }
-                EmitVfx(DomainSignalKind::TrapTriggered, target->position);
+                EmitVfx(DomainSignalKind::TrapTriggered, area.position, {},
+                        area.effect_radius, 0.025f);
             }
             continue;
         }
@@ -2084,7 +2129,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         {area.slow_reduction, tick + area.slow_duration,
                          area.skill, area.source_upgrade, area.source_relic});
                     EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
-                            enemy.boss ? 1.4f : 0.75f, 0.12f);
+                            enemy.boss ? 1.4f : 0.75f, 0.025f);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
                                         UpgradeEffectMetric::SlowApplications);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
@@ -2104,7 +2149,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         area.position, {}, area.radius / 4.0f, 0.12f);
                 if (area.trigger_count == 0 && HasUpgrade(area.upgrade_mask, 2))
                     EmitVfx(DomainSignalKind::Pull, area.position, {},
-                            area.radius / 4.0f, 0.12f);
+                            area.radius, 0.12f);
                 if (HasUpgrade(area.upgrade_mask, 8) && area.trigger_count >= 6)
                     RecordUpgradeEffect(area.skill, 7,
                                         UpgradeEffectMetric::DurationTicksAdded,
@@ -2122,10 +2167,11 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     {
                         const auto delta = Subtract(area.position, enemy.position);
                         const auto before = enemy.position;
-                        enemy.position = Add(enemy.position, Multiply(
-                            Normalize(delta), std::min(2.0f, Length(delta))));
+                        const auto displacement = Multiply(
+                            Normalize(delta), std::min(2.0f, Length(delta)));
+                        QueueEnemyDisplacement(enemy, displacement);
                         RecordUpgradeDisplacement(SkillKind::ArrowRain, 1, before,
-                                                  enemy.position);
+                                                  Add(before, displacement));
                     }
                     const auto hit_count = IncrementAreaHit(area.id.value,
                                                             enemy.id.value);
@@ -2481,7 +2527,7 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
                 {event.slow_reduction, tick + event.slow_duration,
                  event.skill, source_upgrade, event.source_relic});
             EmitVfx(DomainSignalKind::SlowApplied, enemy->position, {},
-                    1.0f, enemy->boss ? 1.4f : 0.75f);
+                    enemy->boss ? 1.4f : 0.75f, 0.025f);
             RecordUpgradeEffect(event.skill, source_upgrade,
                                 UpgradeEffectMetric::SlowApplications);
             RecordUpgradeEffect(event.skill, source_upgrade,
@@ -2498,7 +2544,7 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             enemy->marked_by_skill = SkillKind::Count;
             enemy->mark_expires = 0;
             EmitVfx(DomainSignalKind::MarkTriggered, enemy->position, {},
-                    1.0f, enemy->boss ? 1.4f : 0.75f);
+                    enemy->boss ? 1.4f : 0.75f, 0.025f);
             RecordUpgradeEffect(marked_skill, 6,
                                 UpgradeEffectMetric::ExplosionsCreated);
             QueueAreaDamage(enemy->position, 2.0f,
@@ -2851,16 +2897,16 @@ void GameSimulation::SimulationWorld::HandleDamageKnockback()
         if (enemy.dead || enemy.boss ||
             DistanceSquared(player.position, enemy.position) >
                 relic.radius * relic.radius) continue;
-        const auto before = enemy.position;
         const auto direction = Normalize(Subtract(enemy.position, player.position));
-        enemy.position = Add(enemy.position, Multiply(direction, relic.push_distance));
+        const auto displacement = Multiply(direction, relic.push_distance);
+        QueueEnemyDisplacement(enemy, displacement);
         enemy.status.slows.push_back(
             {relic.slow_fraction, tick + relic.slow_duration_ticks});
         RecordRelicEffect(
             RelicKind::DamageKnockback,
             UpgradeEffectMetric::DisplacementMillimetres,
             static_cast<std::uint64_t>(std::llround(
-                Length(Subtract(enemy.position, before)) * 1000.0f)));
+                Length(displacement) * 1000.0f)));
         ++affected;
     }
     RecordRelicEffect(RelicKind::DamageKnockback,

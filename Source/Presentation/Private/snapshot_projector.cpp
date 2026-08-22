@@ -118,12 +118,15 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         model.player.charging_skill == SkillKind::ChargedShot)
     {
         const auto range = model.charge_range;
+        const auto guide_length = range;
         const auto center = Add(model.player.position,
-                                Multiply(model.player.aim, range * 0.5f));
-        complete &= snapshot.AddInstance(
+                                Multiply(model.player.aim, guide_length * 0.5f));
+        complete &= snapshot.AddPersistentVfx(
             {{center.x, 0.025f, center.y},
              std::atan2(model.player.aim.x, model.player.aim.y),
-             {0.10f, 0.03f, range}, 0xFFFFFFFFu, RenderMesh::Area});
+             model.charge_radius, guide_length,
+             PersistentVfxKind::ChargeGuide,
+             kPlayerRenderId | static_cast<std::uint64_t>(SkillKind::ChargedShot)});
     }
 
     const auto arena_size = model.arena_half_extent * 2.0f;
@@ -213,19 +216,18 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             {
             case SkillKind::PiercingShot: scale = {0.28f, 0.28f, 1.25f}; color = 0xFFFFE8A0u; break;
             case SkillKind::MultiShot: scale = {0.18f, 0.18f, 0.7f}; color = 0xFFFFD878u; break;
-            case SkillKind::ChargedShot: scale = {0.38f, 0.38f, 1.45f}; color = 0xFFFFF0C0u; break;
+            case SkillKind::ChargedShot:
+                scale = {std::lerp(0.228f, 0.42f, projectile.charge_ratio),
+                         std::lerp(0.228f, 0.42f, projectile.charge_ratio),
+                         std::lerp(0.81f, 1.26f, projectile.charge_ratio)};
+                color = 0xFFFFF0C0u;
+                break;
             case SkillKind::ExplosiveArrow: scale = {0.34f, 0.34f, 1.0f}; color = 0xFF188CFFu; break;
             case SkillKind::RicochetArrow: scale = {0.25f, 0.25f, 0.85f}; color = 0xFFFFA840u; break;
             default: break;
             }
         }
-        auto render_position = projectile.position;
-        if (projectile.player_owned && projectile.skill == SkillKind::BasicAttack &&
-            projectile.spawned_tick == model.tick)
-        {
-            render_position = Add(render_position,
-                                  Multiply(Normalize(projectile.velocity), 0.85f));
-        }
+        const auto render_position = projectile.position;
         complete &= snapshot.AddInstance(
             {{render_position.x,
               projectile.player_owned && projectile.skill == SkillKind::BasicAttack
@@ -237,17 +239,60 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              projectile.player_owned ? RenderMesh::PlayerProjectile
                                       : RenderMesh::EnemyProjectile,
              kProjectileRenderId | projectile.id.value});
+        if (projectile.player_owned)
+        {
+            const auto speed = std::sqrt(LengthSquared(projectile.velocity));
+            const auto short_trail = projectile.skill == SkillKind::BasicAttack ||
+                                     projectile.skill == SkillKind::MultiShot;
+            const auto trail_length = std::clamp(speed * (short_trail ? 0.025f : 0.05f),
+                                                 0.2f, short_trail ? 0.45f : 1.0f);
+            const auto trail_direction = Normalize(projectile.velocity);
+            const auto body_half_length = scale.z * 0.5f;
+            const auto trail_position = Subtract(
+                projectile.position,
+                Multiply(trail_direction, body_half_length + trail_length * 0.5f));
+            const auto body_center_height =
+                (projectile.skill == SkillKind::BasicAttack ? 1.05f : 0.25f) +
+                scale.y * 0.5f;
+            const auto trail_radius = projectile.skill == SkillKind::ChargedShot
+                                          ? 0.035f
+                                          : short_trail
+                                                ? 0.05f
+                                                : std::min(0.06f,
+                                                           projectile.radius * 0.35f);
+            complete &= snapshot.AddPersistentVfx(
+                {{trail_position.x, body_center_height, trail_position.y},
+                 std::atan2(projectile.velocity.x, projectile.velocity.y),
+                 trail_radius,
+                 trail_length,
+                 projectile.skill == SkillKind::RicochetArrow
+                     ? PersistentVfxKind::RicochetProjectileTrail
+                     : PersistentVfxKind::ProjectileTrail,
+                 kProjectileRenderId | projectile.id.value});
+            if (projectile.skill == SkillKind::ChargedShot)
+            {
+                complete &= snapshot.AddPersistentVfx(
+                    {{trail_position.x, body_center_height, trail_position.y},
+                     std::atan2(projectile.velocity.x, projectile.velocity.y),
+                     0.075f, trail_length,
+                     PersistentVfxKind::ProjectileTrailOuter,
+                     (kProjectileRenderId | projectile.id.value) ^ (1ull << 59)});
+            }
+        }
     }
     for (const auto &area : model.areas)
     {
         if (area.dead) continue;
+        // AreaActor lifetime is authoritative for every persistent visual.  The
+        // read model can briefly retain an actor on its expiry tick, so do not
+        // let a stale AreaView render past its explicit end tick.
+        if (area.expires != 0 && model.tick >= area.expires) continue;
         if (area.kind == AreaViewKind::Trap)
         {
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.025f, area.position.y}, 0.0f, area.radius,
                  0.0f,
-                 model.tick < area.active_tick ? PersistentVfxKind::TrapPending
-                                                : PersistentVfxKind::TrapArmed,
+                 PersistentVfxKind::TrapArmed,
                  kAreaRenderId | area.id.value});
         }
         const auto fire_area = area.applies_burn ||
@@ -261,21 +306,24 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                  0.0f, PersistentVfxKind::FireArea,
                  kAreaRenderId | area.id.value});
         }
-        if (area.kind == AreaViewKind::Slow && model.tick >= area.active_tick)
+        if ((area.kind == AreaViewKind::Slow || area.applies_slow) &&
+            model.tick >= area.active_tick)
         {
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.018f, area.position.y}, 0.0f, area.radius,
                  0.0f, PersistentVfxKind::SlowArea,
                  kAreaRenderId | area.id.value});
         }
-        if (area.skill == SkillKind::ArrowRain &&
-            area.origin == EffectOrigin::Original && model.tick >= area.active_tick)
+        if (area.skill == SkillKind::ArrowRain)
         {
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.016f, area.position.y}, 0.0f, area.radius,
                  0.0f, PersistentVfxKind::ArrowRainArea,
                  kAreaRenderId | area.id.value});
         }
+        // Trap and Arrow Rain keep one persistent visual across activation.
+        // Other AreaActor visuals begin at active_tick.
+        if (model.tick < area.active_tick) continue;
         if (area.half_length > 0.0f && area.kind == AreaViewKind::Damage &&
             model.tick >= area.active_tick)
         {
@@ -449,7 +497,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         "기본 공격을 유지하면 이동을 멈추고 조준 방향으로 화살을 반복 발사합니다. 화살은 처음 맞은 적에게 피해를 줍니다.",
         "조준 방향으로 즉시 관통 화살을 발사합니다. 많은 일반 적을 뚫지만 관통할수록 피해가 감소해 무리 정리에 적합합니다.",
         "조준 방향의 넓은 부채꼴에 화살 9발을 동시에 발사합니다. 가까이 모인 적이나 넓게 퍼진 무리를 상대하기 좋습니다.",
-        "이동하며 최대 1초 충전하고 떼면 고화력 화살을 발사합니다. 오래 충전할수록 피해·사거리·크기가 증가하며 최대 10명을 추가 관통합니다.",
+        "이동하며 최대 1초 충전하고 떼면 고화력 화살을 발사합니다. 오래 충전할수록 피해·사거리·크기가 증가하며 최대 12명을 추가 관통합니다.",
         "조준 방향으로 폭발 화살을 발사합니다. 처음 맞은 적 또는 최대 사거리에서 폭발해 주변의 모든 적을 공격합니다.",
         "사거리 안의 적을 자동 추적하는 화살을 발사합니다. 적중 후 아직 맞지 않은 가까운 적에게 연속으로 도탄합니다.",
         "커서 위치에 일정 시간 화살비를 내립니다. 범위 안의 적을 반복 공격하므로 오래 머무는 적에게 효과적입니다.",
@@ -505,7 +553,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             {{"최대 충전 시간이 1.4초로 늘어나지만 완전 충전 피해가 크게 강해지고 화살 끝에서 폭발합니다.",
               "충전 속도가 빨라져 같은 위력의 화살을 더 짧게 눌러 발사할 수 있습니다.",
               "충전하지 않고 바로 발사해도 더 강한 피해를 줍니다. 오래 충전할수록 피해는 계속 증가합니다.",
-              "추가 관통 수가 4 늘어나 최대 14명의 적을 추가 관통합니다.",
+              "추가 관통 수가 4 늘어나 최대 16명의 적을 추가 관통합니다.",
               "충전 화살이 출혈을 3중첩 부여합니다. 완전 충전으로 출혈이 가득한 적을 맞히면 추가 피해를 줍니다.",
               "보스를 처음 맞히거나 일반 적 3명을 관통하면 적중 지점에서 여덟 방향으로 강한 화살이 갈라집니다.",
               "첫 적중 대상을 태우고 그 주변을 폭발시켜 모여 있는 적을 함께 공격합니다.",

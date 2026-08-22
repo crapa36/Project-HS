@@ -105,15 +105,15 @@ SimulationRules SimulationRules::Defaults() noexcept
 {
     SimulationRules data;
     data.skills = {
-        SkillDefinition{0, 1.0f, 32.0f, 18.0f, 0.18f, 0.0f, 0, 1, 0, AbilityHandlerId::BasicProjectileCadence},
-        SkillDefinition{240, 1.8f, 30.0f, 24.0f, 0.30f, 0.0f, 0, 1, 255, AbilityHandlerId::PiercingProjectile},
-        SkillDefinition{330, 1.7f, 25.0f, 16.0f, 0.18f, 0.0f, 0, 9, 1, AbilityHandlerId::UniformFanProjectiles},
-        SkillDefinition{120, 11.5f, 35.0f, 16.8f, 0.55f, 0.0f, 60, 1, 10, AbilityHandlerId::HoldReleaseLinearCharge},
-        SkillDefinition{390, 2.8f, 22.0f, 18.0f, 0.25f, 3.0f, 0, 1, 0, AbilityHandlerId::ProjectileToAreaExplosion},
-        SkillDefinition{360, 0.8f, 28.0f, 18.0f, 0.22f, 6.0f, 0, 1, 5, AbilityHandlerId::NearestUnhitTargetRicochet},
+        SkillDefinition{0, 1.0f, 32.0f, 18.0f, 0.36f, 0.0f, 0, 1, 0, AbilityHandlerId::BasicProjectileCadence},
+        SkillDefinition{240, 1.8f, 30.0f, 24.0f, 0.60f, 0.0f, 0, 1, 255, AbilityHandlerId::PiercingProjectile},
+        SkillDefinition{330, 1.7f, 25.0f, 16.0f, 0.36f, 0.0f, 0, 9, 1, AbilityHandlerId::UniformFanProjectiles},
+        SkillDefinition{240, 23.0f, 35.0f, 16.8f, 0.88f, 0.0f, 60, 1, 12, AbilityHandlerId::HoldReleaseLinearCharge},
+        SkillDefinition{390, 2.8f, 22.0f, 18.0f, 0.50f, 3.0f, 0, 1, 0, AbilityHandlerId::ProjectileToAreaExplosion},
+        SkillDefinition{360, 0.8f, 28.0f, 18.0f, 0.44f, 6.0f, 0, 1, 5, AbilityHandlerId::NearestUnhitTargetRicochet},
         SkillDefinition{540, 0.7f, 0.0f, 20.0f, 0.0f, 4.0f, 180, 1, 0, AbilityHandlerId::TargetedPeriodicArea},
         SkillDefinition{480, 1.2f, 0.0f, 12.0f, 0.0f, 3.0f, 720, 1, 0, AbilityHandlerId::ForwardRollLeaveTrap},
-        SkillDefinition{420, 3.5f, 32.0f, 16.0f, 0.22f, 0.0f, 12, 1, 3, AbilityHandlerId::ForcedRetreatAndProjectile},
+        SkillDefinition{420, 3.5f, 32.0f, 16.0f, 0.44f, 0.0f, 12, 1, 3, AbilityHandlerId::ForcedRetreatAndProjectile},
     };
     data.enemies = {
         EnemyDefinition{15, 1.445f, 10, 1.0f, 21, 72, 0.0f, 0.0f},

@@ -233,7 +233,7 @@
           "logic_id": "extended_full_charge_explosion",
           "parameters": [
             {"key": "maximum_charge_time", "value": 1.4, "unit": "seconds"},
-            {"key": "maximum_damage_multiplier", "value": 14, "unit": "multiplier"},
+            {"key": "maximum_damage_multiplier", "value": 28, "unit": "multiplier"},
             {"key": "full_charge_end_explosion_damage_multiplier", "value": 5, "unit": "multiplier"}
           ],
           "rule": "최대 충전 시간이 늘어나지만 완전 충전 피해와 끝점 폭발이 크게 강해진다."
@@ -247,14 +247,14 @@
         {
           "ordinal": 3,
           "logic_id": "increase_minimum_charge_damage",
-          "parameters": [{"key": "minimum_damage_multiplier", "value": 11.5, "unit": "multiplier"}],
+          "parameters": [{"key": "minimum_damage_multiplier", "value": 23, "unit": "multiplier"}],
           "rule": "충전하지 않고 바로 발사해도 매우 강한 피해를 주며 이후 충전 피해는 그대로 증가한다."
         },
         {
           "ordinal": 4,
           "logic_id": "additional_pierce",
           "parameters": [{"key": "additional_pierce", "value": 4, "unit": "count"}],
-          "rule": "추가 관통 수가 4 늘어나 최대 14명의 적을 추가 관통한다."
+          "rule": "추가 관통 수가 4 늘어나 최대 16명의 적을 추가 관통한다."
         },
         {
           "ordinal": 5,

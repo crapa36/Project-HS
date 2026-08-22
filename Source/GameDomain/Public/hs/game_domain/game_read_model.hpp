@@ -80,6 +80,10 @@ struct ProjectileView
     Tick spawned_tick{};
     SkillKind skill{SkillKind::BasicAttack};
     bool dead{};
+    float radius{};
+    float charge_ratio{};
+    EffectOrigin origin{EffectOrigin::Original};
+    std::uint8_t source_upgrade{0xFF};
 };
 
 struct AreaView
@@ -101,6 +105,7 @@ struct AreaView
     float safe_gap_degrees{};
     std::uint8_t safe_gap_count{};
     bool applies_burn{};
+    bool applies_slow{};
     bool dead{};
 };
 
@@ -169,6 +174,7 @@ struct GameReadModel
     float effective_magnet_radius{};
     float arena_half_extent{};
     float charge_range{};
+    float charge_radius{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};
     std::array<WaveView, 5> waves{};
     SessionSummaryView summary{};
@@ -202,6 +208,7 @@ class GameReadModelStorage
     float effective_magnet_radius{};
     float arena_half_extent{};
     float charge_range{};
+    float charge_radius{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};
     std::array<WaveView, 5> waves{};
     SessionSummaryView summary{};

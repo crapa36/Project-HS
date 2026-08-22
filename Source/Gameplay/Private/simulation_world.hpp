@@ -142,6 +142,8 @@ struct EnemyActor
     Float2 position{};
     Float2 previous_position{};
     Float2 velocity{};
+    Float2 displacement_per_tick{};
+    Tick displacement_ticks{};
     Tick spawned_tick{};
     std::int32_t health{};
     std::int32_t max_health{};
@@ -546,6 +548,7 @@ struct GameSimulation::SimulationWorld
                              std::uint64_t amount) noexcept;
     void RecordUpgradeDisplacement(SkillKind skill, std::uint8_t upgrade,
                                    Float2 before, Float2 after) noexcept;
+    void QueueEnemyDisplacement(EnemyActor &enemy, Float2 displacement) noexcept;
     float EffectiveMagnetRadius() const noexcept;
     static std::size_t EnemyTelemetryIndex(const EnemyActor &enemy) noexcept;
     Tick EffectiveCooldownTicks(SkillKind skill) const noexcept;

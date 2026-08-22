@@ -491,6 +491,13 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
                            command.SpeedConeGravityStretch.x,
                            ParticleRandom(seed + 4));
         float3 velocity = velocity_direction * speed;
+        float initial_rotation = lerp(command.RotationRange.x, command.RotationRange.y,
+                                      ParticleRandom(seed + 7));
+        uint visual_metadata = command.Modes.z;
+        uint facing = visual_metadata & 0xffu;
+        uint renderer = (visual_metadata >> 8u) & 0xffu;
+        if (renderer == 1u && facing == 1u && length(velocity.xz) > 0.0001)
+            initial_rotation = atan2(-velocity.x, velocity.z);
 
         ParticleData particle;
         particle.InitialPositionSpawnTime =
@@ -504,7 +511,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         particle.SizeRotation = float4(
             lerp(command.SizeRange.x, command.SizeRange.y, ParticleRandom(seed + 5)),
             lerp(command.SizeRange.z, command.SizeRange.w, ParticleRandom(seed + 6)),
-            lerp(command.RotationRange.x, command.RotationRange.y, ParticleRandom(seed + 7)),
+            initial_rotation,
             lerp(command.RotationRange.z, command.RotationRange.w, ParticleRandom(seed + 8)));
         particle.PhysicsMetadata = float4(command.SpeedConeGravityStretch.z,
             command.SpeedConeGravityStretch.w, asfloat(command.Modes.z),
@@ -675,7 +682,7 @@ OitOutput ParticlePS(ParticleOutput input)
         if (input.Primitive == 1)
             mask = 1.0 - smoothstep(0.82, 1.0, radius);
         else if (input.Primitive == 2)
-            mask = 1.0 - smoothstep(0.055, 0.13, abs(radius - 0.82));
+            mask = 1.0 - smoothstep(0.01375, 0.0325, abs(radius - 0.82));
         else if (input.Primitive == 3)
         {
             float angle = abs(atan2(p.x, max(p.y, 0.0001)));
@@ -690,11 +697,20 @@ OitOutput ParticlePS(ParticleOutput input)
         }
         else if (input.Primitive == 5)
         {
-            float ring = 1.0 - smoothstep(0.045, 0.11, abs(radius - 0.74));
+            float ring = 1.0 - smoothstep(0.01125, 0.0275, abs(radius - 0.74));
             float spokes = 1.0 - smoothstep(0.035, 0.09,
                 abs(sin(atan2(p.y, p.x) * 4.0)) * radius);
             mask = max(ring, spokes * smoothstep(0.2, 0.3, radius) *
                              (1.0 - smoothstep(0.65, 0.8, radius)));
+        }
+        else if (input.Primitive == 7)
+        {
+            float shaft = (1.0 - smoothstep(0.07, 0.15, abs(p.x))) *
+                          step(-0.62, p.y) * step(p.y, 0.36);
+            float head = (1.0 - smoothstep(0.04, 0.12,
+                abs(abs(p.x) - (0.42 - p.y) * 0.48))) *
+                step(0.20, p.y) * step(p.y, 0.72);
+            mask = max(shaft, head);
         }
         else
         {
@@ -708,7 +724,11 @@ OitOutput ParticlePS(ParticleOutput input)
     }
     else if (input.Renderer == 2)
     {
-        float across = 1.0 - smoothstep(0.68, 1.0, abs(input.LocalUv.x));
+        float half_width = input.Primitive == 16
+            ? lerp(0.08, 0.68, saturate(input.LocalUv.y * 0.5 + 0.5))
+            : 0.68;
+        float across = 1.0 - smoothstep(half_width, min(half_width + 0.32, 1.0),
+                                        abs(input.LocalUv.x));
         float ends = 1.0 - smoothstep(0.82, 1.0, abs(input.LocalUv.y));
         mask = across * ends;
         if (input.Primitive == 13)
@@ -718,7 +738,7 @@ OitOutput ParticlePS(ParticleOutput input)
         else if (input.Primitive == 15)
             mask *= 0.6 + 0.4 * step(0.5, frac((input.LocalUv.y * 0.5 + 0.5) * 5.0));
         else if (input.Primitive == 16)
-            mask *= 1.0 - input.Progress;
+            mask *= saturate(input.LocalUv.y * 0.5 + 0.5);
     }
     float alpha = input.Color.a * mask;
     if (input.Renderer == 3)

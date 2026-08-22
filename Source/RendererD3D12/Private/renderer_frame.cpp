@@ -1,5 +1,8 @@
 #include "renderer_impl.hpp"
 
+#include <numbers>
+#include <ranges>
+
 namespace hs
 {
 
@@ -44,6 +47,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
 
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
+    const auto now = std::chrono::steady_clock::now();
+    if (snapshot.header.tick != impl_->observed_snapshot_tick)
+    {
+        impl_->observed_snapshot_tick = snapshot.header.tick;
+        impl_->snapshot_arrival = now;
+    }
+    const auto interpolation =
+        impl_->config.interpolate && snapshots.has_previous
+            ? std::clamp(
+                  std::chrono::duration<float>(now - impl_->snapshot_arrival).count() * 60.0f,
+                  0.0f, 1.0f)
+            : 1.0f;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
                                                  snapshot.instances.end());
     std::vector<ParticleSpawnCommand> frame_particle_spawns(particle_spawns.begin(),
@@ -60,6 +75,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                         float size, Float4 color, std::uint32_t count) {
                 if ((source.status_visual_mask & static_cast<std::uint32_t>(status)) == 0)
                     return;
+                const auto cadence = status == StatusVisual::Bleed ? 6u
+                                   : status == StatusVisual::Burn ? 3u
+                                                                  : 1u;
+                if ((snapshot.header.tick + source.stable_id) % cadence != 0) return;
                 ParticleSpawnCommand command;
                 command.sequence = source.stable_id ^ snapshot.header.tick ^
                                    static_cast<std::uint32_t>(status);
@@ -81,14 +100,48 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 command.end_size_min = command.end_size_max = size;
                 command.count = count;
                 command.seed = static_cast<std::uint32_t>(command.sequence);
+                if (status == StatusVisual::Bleed)
+                {
+                    command.position.y = source.position.y + source.scale.y * 0.85f;
+                    command.shape = ParticleShape::Sphere;
+                    command.shape_extent = {source.scale.x * 0.35f,
+                                            source.scale.y * 0.35f,
+                                            source.scale.z * 0.35f};
+                    command.direction = {0.0f, -1.0f, 0.0f};
+                    command.speed_min = 0.25f;
+                    command.speed_max = 0.6f;
+                    command.lifetime_min = 0.35f;
+                    command.lifetime_max = 0.5f;
+                    command.end_color.w = 0.0f;
+                    command.end_size_min = command.end_size_max = size * 0.45f;
+                    command.gravity = -3.0f;
+                    command.stretch = 2.0f;
+                }
+                else if (status == StatusVisual::Burn)
+                {
+                    command.position.y = source.position.y + source.scale.y * 0.2f;
+                    command.shape = ParticleShape::Sphere;
+                    command.velocity_mode = ParticleVelocity::Upward;
+                    command.shape_extent = {source.scale.x * 0.4f,
+                                            source.scale.y * 0.35f,
+                                            source.scale.z * 0.4f};
+                    command.speed_min = 0.3f;
+                    command.speed_max = 0.9f;
+                    command.lifetime_min = 0.28f;
+                    command.lifetime_max = 0.45f;
+                    command.end_color.w = 0.0f;
+                    command.end_size_min = size * 0.35f;
+                    command.end_size_max = size * 0.6f;
+                    command.gravity = -0.4f;
+                }
                 frame_particle_spawns.push_back(command);
             };
             add_status(StatusVisual::Bleed, impl_->config.bleed_status_sprite,
-                       ParticleFacing::Velocity, VfxRenderer::Mesh,
+                       ParticleFacing::Velocity, VfxRenderer::Sprite,
                        VfxPrimitive::Shard, source.scale.y * 0.55f,
                        source.scale.y * 0.16f, {1.8f, 0.04f, 0.05f, 0.42f}, 1);
             add_status(StatusVisual::Burn, impl_->config.burn_status_sprite,
-                       ParticleFacing::Velocity, VfxRenderer::Mesh,
+                       ParticleFacing::Camera, VfxRenderer::Sprite,
                        VfxPrimitive::Ember, source.scale.y * 0.5f,
                        source.scale.y * 0.18f, {2.2f, 0.7f, 0.08f, 0.38f}, 1);
             add_status(StatusVisual::Slow, impl_->config.slow_status_sprite,
@@ -96,16 +149,36 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                        VfxPrimitive::Rune, 0.025f, source.scale.x * 0.72f,
                        {0.25f, 0.85f, 1.8f, 0.28f}, 1);
             add_status(StatusVisual::Mark, impl_->config.mark_status_sprite,
-                       ParticleFacing::Velocity, VfxRenderer::Mesh,
-                       VfxPrimitive::Spike, source.scale.y * 1.1f,
-                       source.scale.y * 0.22f, {2.1f, 1.0f, 0.15f, 0.5f}, 1);
+                       ParticleFacing::Ground, VfxRenderer::Ground,
+                       VfxPrimitive::Rune, 0.025f,
+                       source.scale.x * 0.42f, {2.1f, 1.0f, 0.15f, 0.26f}, 1);
         }
         for (const auto &visual : snapshot.persistent_vfx)
         {
+            auto position = visual.position;
+            auto visual_yaw = visual.yaw;
+            if (interpolation < 1.0f)
+            {
+                const auto previous = std::ranges::find_if(
+                    snapshots.previous.persistent_vfx,
+                    [&visual](const PersistentVfxVisual &candidate) {
+                        return candidate.stable_id == visual.stable_id &&
+                               candidate.kind == visual.kind;
+                    });
+                if (previous != snapshots.previous.persistent_vfx.end())
+                {
+                    position.x = std::lerp(previous->position.x, position.x, interpolation);
+                    position.y = std::lerp(previous->position.y, position.y, interpolation);
+                    position.z = std::lerp(previous->position.z, position.z, interpolation);
+                    const auto yaw_delta = std::remainder(visual_yaw - previous->yaw,
+                                                          2.0f * std::numbers::pi_v<float>);
+                    visual_yaw = previous->yaw + yaw_delta * interpolation;
+                }
+            }
             ParticleSpawnCommand command;
             command.sequence = visual.stable_id ^ snapshot.header.tick;
             command.tick = snapshot.header.tick;
-            command.position = visual.position;
+            command.position = position;
             command.shape = ParticleShape::Point;
             command.velocity_mode = ParticleVelocity::Direction;
             command.facing = ParticleFacing::Ground;
@@ -114,11 +187,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             command.lifetime_min = command.lifetime_max = 2.0f / 60.0f;
             command.start_size_min = command.start_size_max = visual.radius;
             command.end_size_min = command.end_size_max = visual.radius;
-            command.rotation_min = command.rotation_max = visual.yaw;
+            command.rotation_min = command.rotation_max = visual_yaw;
             switch (visual.kind)
             {
             case PersistentVfxKind::TrapPending:
-                command.primitive = VfxPrimitive::Ring;
+                command.primitive = VfxPrimitive::Cracks;
                 command.start_color = command.end_color = {0.45f, 0.8f, 1.3f, 0.18f};
                 break;
             case PersistentVfxKind::TrapArmed:
@@ -130,35 +203,218 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 command.start_color = command.end_color = {3.2f, 0.62f, 0.035f, 0.34f};
                 break;
             case PersistentVfxKind::SlowArea:
-                command.primitive = VfxPrimitive::Ring;
-                command.start_color = command.end_color = {0.2f, 0.75f, 1.65f, 0.2f};
+                command.primitive = VfxPrimitive::Rune;
+                command.start_color = command.end_color = {0.2f, 0.75f, 1.65f, 0.16f};
                 break;
             case PersistentVfxKind::ArrowRainArea:
                 command.primitive = VfxPrimitive::Ring;
                 command.start_color = command.end_color = {1.55f, 1.05f, 0.28f, 0.18f};
                 break;
+            case PersistentVfxKind::RangeIndicator:
+                command.primitive = VfxPrimitive::Ring;
+                command.start_color = command.end_color = {0.2f, 1.45f, 0.45f, 0.3f};
+                break;
             case PersistentVfxKind::DamageTrail:
             case PersistentVfxKind::ChargeGuide:
+            case PersistentVfxKind::ProjectileTrail:
+            case PersistentVfxKind::ProjectileTrailOuter:
+            case PersistentVfxKind::RicochetProjectileTrail:
             {
                 command.renderer = VfxRenderer::Segment;
-                command.primitive = VfxPrimitive::SolidTrail;
-                const auto direction = Float3{std::sin(visual.yaw), 0.0f,
-                                              std::cos(visual.yaw)};
+                command.primitive = visual.kind == PersistentVfxKind::ProjectileTrail
+                                        ? VfxPrimitive::DashWake
+                                        : VfxPrimitive::SolidTrail;
+                const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                              std::cos(visual_yaw)};
                 command.direction = direction;
+                // Segment orientation is carried through the particle's initial velocity.
+                command.speed_min = command.speed_max = 0.001f;
                 command.rotation_min = command.rotation_max = 0.0f;
                 command.start_size_min = command.start_size_max = visual.radius;
                 command.end_size_min = command.end_size_max = visual.radius;
                 command.stretch = visual.length / std::max(visual.radius * 2.0f, 0.001f);
-                command.start_color = command.end_color =
-                    visual.kind == PersistentVfxKind::ChargeGuide
-                        ? Float4{1.8f, 1.8f, 1.8f, 0.34f}
-                        : Float4{0.35f, 1.0f, 1.8f, 0.16f};
+                if (visual.kind == PersistentVfxKind::ChargeGuide)
+                    command.start_color = command.end_color =
+                        {0.25f, 1.2f, 2.4f, 0.28f};
+                else if (visual.kind == PersistentVfxKind::ProjectileTrail)
+                {
+                    command.start_color = {0.65f, 2.2f, 3.6f, 0.58f};
+                    command.end_color = {0.1f, 0.45f, 1.2f, 0.0f};
+                }
+                else if (visual.kind == PersistentVfxKind::ProjectileTrailOuter)
+                {
+                    command.start_color = {0.3f, 1.1f, 2.1f, 0.18f};
+                    command.end_color = {0.08f, 0.25f, 0.7f, 0.0f};
+                }
+                else if (visual.kind == PersistentVfxKind::RicochetProjectileTrail)
+                {
+                    command.start_color = {1.4f, 0.5f, 0.08f, 0.36f};
+                    command.end_color = {0.35f, 0.1f, 0.02f, 0.0f};
+                }
+                else
+                    command.start_color = command.end_color =
+                        {0.35f, 1.0f, 1.8f, 0.16f};
                 break;
             }
+            }
+            if (visual.kind == PersistentVfxKind::ChargeGuide)
+            {
+                constexpr auto border_radius = 0.035f;
+                const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                              std::cos(visual_yaw)};
+                const auto right = Float3{direction.z, 0.0f, -direction.x};
+                const auto border_offset = std::max(visual.radius - border_radius, 0.0f);
+                command.primitive = VfxPrimitive::SolidTrail;
+                command.start_size_min = command.start_size_max = border_radius;
+                command.end_size_min = command.end_size_max = border_radius;
+                command.stretch = visual.length / (border_radius * 2.0f);
+                command.start_color = command.end_color = {0.25f, 1.2f, 2.4f, 0.28f};
+                for (const auto side : {-1.0f, 1.0f})
+                {
+                    auto border = command;
+                    border.sequence ^= side < 0.0f ? 0xD1B54A32D192ED03ull
+                                                   : 0x94D049BB133111EBull;
+                    border.seed = static_cast<std::uint32_t>(border.sequence);
+                    border.position.x += right.x * border_offset * side;
+                    border.position.z += right.z * border_offset * side;
+                    border.count = 1;
+                    frame_particle_spawns.push_back(border);
+                }
+                const auto cap_length = visual.radius * 2.0f;
+                for (const auto side : {-1.0f, 1.0f})
+                {
+                    auto cap = command;
+                    cap.sequence ^= side < 0.0f ? 0x4CF5AD432745937Full
+                                                : 0x8A5CD789635D2DFFull;
+                    cap.seed = static_cast<std::uint32_t>(cap.sequence);
+                    cap.position.x += direction.x * visual.length * 0.5f * side;
+                    cap.position.z += direction.z * visual.length * 0.5f * side;
+                    cap.direction = right;
+                    cap.rotation_min = cap.rotation_max =
+                        visual_yaw + std::numbers::pi_v<float> * 0.5f;
+                    cap.stretch = cap_length / (border_radius * 2.0f);
+                    cap.count = 1;
+                    frame_particle_spawns.push_back(cap);
+                }
+                continue;
+            }
+            if (visual.kind == PersistentVfxKind::DamageTrail)
+            {
+                const auto direction = Float3{std::sin(visual_yaw), 0.0f,
+                                              std::cos(visual_yaw)};
+                const auto right = Float3{direction.z, 0.0f, -direction.x};
+                constexpr auto border_radius = 0.035f;
+                const auto border_offset = std::max(visual.radius - border_radius, 0.0f);
+                command.start_size_min = command.start_size_max = border_radius;
+                command.end_size_min = command.end_size_max = border_radius;
+                command.stretch = visual.length / (border_radius * 2.0f);
+                command.start_color = command.end_color = {0.35f, 1.0f, 1.8f, 0.24f};
+                for (const auto side : {-1.0f, 1.0f})
+                {
+                    auto border = command;
+                    border.sequence ^= side < 0.0f ? 0xD1B54A32D192ED03ull
+                                                   : 0x94D049BB133111EBull;
+                    border.seed = static_cast<std::uint32_t>(border.sequence);
+                    border.position.x += right.x * border_offset * side;
+                    border.position.z += right.z * border_offset * side;
+                    border.count = 1;
+                    frame_particle_spawns.push_back(border);
+                }
+                auto streak = command;
+                streak.sequence ^= 0x9E3779B97F4A7C15ull;
+                streak.seed = static_cast<std::uint32_t>(streak.sequence);
+                streak.primitive = VfxPrimitive::DashedRicochet;
+                streak.start_size_min = streak.start_size_max = 0.025f;
+                streak.end_size_min = streak.end_size_max = 0.025f;
+                streak.stretch = visual.length / 0.05f;
+                streak.start_color = streak.end_color = {0.2f, 0.75f, 1.5f, 0.10f};
+                streak.count = 1;
+                frame_particle_spawns.push_back(streak);
+                continue;
+            }
+            if (visual.kind == PersistentVfxKind::SlowArea)
+            {
+                command.count = 1;
+                command.seed = static_cast<std::uint32_t>(command.sequence);
+                frame_particle_spawns.push_back(command);
+                constexpr auto notch_count = 4;
+                for (auto index = 0; index < notch_count; ++index)
+                {
+                    const auto angle = static_cast<float>(index) *
+                                       (2.0f * std::numbers::pi_v<float> / notch_count);
+                    auto notch = command;
+                    notch.sequence ^= 0x9E3779B97F4A7C15ull +
+                                      static_cast<std::uint64_t>(index);
+                    notch.seed = static_cast<std::uint32_t>(notch.sequence);
+                    notch.primitive = VfxPrimitive::Chevron;
+                    notch.position.x += std::sin(angle) * visual.radius * 0.52f;
+                    notch.position.z += std::cos(angle) * visual.radius * 0.52f;
+                    notch.rotation_min = notch.rotation_max = angle + std::numbers::pi_v<float>;
+                    notch.start_size_min = notch.start_size_max = visual.radius * 0.12f;
+                    notch.end_size_min = notch.end_size_max = visual.radius * 0.12f;
+                    notch.count = 1;
+                    frame_particle_spawns.push_back(notch);
+                }
+                continue;
             }
             command.count = 1;
             command.seed = static_cast<std::uint32_t>(command.sequence);
             frame_particle_spawns.push_back(command);
+            if (visual.kind == PersistentVfxKind::ArrowRainArea)
+            {
+                constexpr std::array marks{
+                    Float2{-0.34f, -0.18f}, Float2{0.22f, -0.30f},
+                    Float2{0.0f, 0.0f}, Float2{-0.18f, 0.32f},
+                    Float2{0.36f, 0.20f}};
+                for (std::size_t index = 0; index < marks.size(); ++index)
+                {
+                    auto mark = command;
+                    mark.sequence ^= 0x9E3779B97F4A7C15ull + index;
+                    mark.seed = static_cast<std::uint32_t>(mark.sequence);
+                    mark.position.x += marks[index].x * visual.radius;
+                    mark.position.z += marks[index].y * visual.radius;
+                    mark.primitive = VfxPrimitive::Arrow;
+                    mark.start_size_min = mark.start_size_max = visual.radius * 0.11f;
+                    mark.end_size_min = mark.end_size_max = visual.radius * 0.11f;
+                    mark.start_color = mark.end_color = {1.3f, 0.85f, 0.2f, 0.09f};
+                    frame_particle_spawns.push_back(mark);
+                }
+                continue;
+            }
+            if (visual.kind == PersistentVfxKind::RangeIndicator)
+            {
+                constexpr auto mark_count = 6;
+                for (auto index = 0; index < mark_count; ++index)
+                {
+                    const auto angle = static_cast<float>(index) *
+                                       (2.0f * std::numbers::pi_v<float> / mark_count);
+                    auto mark = command;
+                    mark.sequence ^= 0xD1B54A32D192ED03ull +
+                                     static_cast<std::uint64_t>(index);
+                    mark.seed = static_cast<std::uint32_t>(mark.sequence);
+                    mark.position.x += std::sin(angle) * visual.radius * 0.58f;
+                    mark.position.z += std::cos(angle) * visual.radius * 0.58f;
+                    mark.rotation_min = mark.rotation_max = angle + std::numbers::pi_v<float>;
+                    mark.primitive = VfxPrimitive::Chevron;
+                    mark.start_size_min = mark.start_size_max = visual.radius * 0.10f;
+                    mark.end_size_min = mark.end_size_max = visual.radius * 0.10f;
+                    mark.start_color = mark.end_color = {0.18f, 0.8f, 0.35f, 0.10f};
+                    frame_particle_spawns.push_back(mark);
+                }
+                continue;
+            }
+            if (visual.kind == PersistentVfxKind::FireArea)
+            {
+                auto interior = command;
+                interior.sequence ^= 0x9E3779B97F4A7C15ull;
+                interior.seed = static_cast<std::uint32_t>(interior.sequence);
+                interior.start_size_min = interior.start_size_max = visual.radius * 0.78f;
+                interior.end_size_min = interior.end_size_max = visual.radius * 0.78f;
+                interior.primitive = VfxPrimitive::Cracks;
+                interior.start_color = interior.end_color =
+                    {2.2f, 0.42f, 0.025f, 0.11f};
+                frame_particle_spawns.push_back(interior);
+            }
         }
     }
     for (const auto &line : effect_lines)
@@ -182,6 +438,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         command.frame_rows = line.frame_rows;
         command.shape_extent = {length * 0.5f, 0.0f, 0.0f};
         command.direction = {dx / length, 0.0f, dz / length};
+        command.speed_min = command.speed_max = 0.001f;
         command.lifetime_min = command.lifetime_max = line.lifetime;
         command.start_color = command.end_color = line.color;
         command.start_size_min = command.start_size_max = line.width * 2.5f;
@@ -400,18 +657,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->particles_initialized && snapshot.header.tick > impl_->last_particle_tick
             ? snapshot.header.tick - impl_->last_particle_tick
             : 0;
-    const auto now = std::chrono::steady_clock::now();
-    if (snapshot.header.tick != impl_->observed_snapshot_tick)
-    {
-        impl_->observed_snapshot_tick = snapshot.header.tick;
-        impl_->snapshot_arrival = now;
-    }
-    const auto interpolation =
-        impl_->config.interpolate && snapshots.has_previous
-            ? std::clamp(
-                  std::chrono::duration<float>(now - impl_->snapshot_arrival).count() * 60.0f,
-                  0.0f, 1.0f)
-            : 1.0f;
     const auto target_height = impl_->config.character_preview ? 1.0f
                                                                 : snapshot.camera.target.y;
     const auto target = DirectX::XMVectorSet(snapshot.camera.target.x, target_height,

@@ -677,12 +677,32 @@ void TestAttackStopsMovementAndFacesAim()
     hs::RenderSnapshotStorage projectile_snapshot(32, 2, 2, 8);
     Check(WriteSnapshot(simulation, projectile_snapshot),
           "first basic projectile snapshot");
-    Check(std::ranges::any_of(projectile_snapshot.View().instances,
-                              [](const hs::RenderInstance &instance) {
-              return instance.mesh == hs::RenderMesh::PlayerProjectile &&
-                     std::abs(instance.scale.x - 0.24f) < 0.0001f &&
-                     std::abs(instance.scale.z - 0.825f) < 0.0001f;
-          }), "first basic arrow is visible at 75 percent visual size");
+    hs::GameReadModelStorage projectile_model;
+    simulation.WriteReadModel(projectile_model);
+    const auto projectile_radius = projectile_model.View().projectiles.front().radius;
+    Check(std::abs(projectile_radius - 0.36f) < 0.0001f,
+          "basic arrow uses the migrated final collision radius");
+    const auto projectile = std::ranges::find_if(
+        projectile_snapshot.View().instances, [](const hs::RenderInstance &instance) {
+            return instance.mesh == hs::RenderMesh::PlayerProjectile;
+        });
+    Check(projectile != projectile_snapshot.View().instances.end() &&
+              std::abs(projectile->scale.x - 0.24f) < 0.0001f &&
+              std::abs(projectile->scale.y - 0.24f) < 0.0001f &&
+              std::abs(projectile->position.x -
+                       projectile_model.View().projectiles.front().position.x) < 0.0001f &&
+              std::abs(projectile->position.z -
+                       projectile_model.View().projectiles.front().position.y) < 0.0001f,
+          "basic arrow keeps its compact visual size and collision center");
+    Check(std::ranges::any_of(
+              projectile_snapshot.View().persistent_vfx,
+              [projectile_radius](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::ProjectileTrail &&
+                         visual.radius < projectile_radius && visual.radius >= 0.05f &&
+                         visual.length <= 0.45f &&
+                         std::abs(visual.position.y - 1.17f) < 0.0001f;
+              }),
+          "basic arrow trail stays visible at the GPU arrow body's center height");
 
     held.basic_attack_held = false;
     (void)Tick(simulation, held);
@@ -904,10 +924,12 @@ void TestQwerSkills()
 {
     const auto charged = hs::SimulationRules::Defaults().skills[
         static_cast<std::size_t>(hs::SkillKind::ChargedShot)];
-    Check(charged.cooldown_ticks == 120 &&
+    Check(charged.cooldown_ticks == 240 &&
               std::abs(charged.range - 16.8f) < 0.0001f &&
-              charged.pierce_count == 10,
-          "charged shot uses the shorter cooldown, range, and doubled pierce count");
+              std::abs(charged.damage_coefficient - 23.0f) < 0.0001f &&
+              std::abs(charged.collision_radius - 0.88f) < 0.0001f &&
+              charged.pierce_count == 12,
+          "charged shot uses doubled damage and cooldown with compact collision and pierce count");
     hs::GameSimulation simulation;
     Check(simulation.Initialize({13}, QuietGameData()).Succeeded(), "QWER initialize");
     for (const auto skill : {hs::SkillKind::PiercingShot, hs::SkillKind::MultiShot,
@@ -1049,8 +1071,15 @@ void TestCombatPresentationContracts()
         snapshot.View().instances, [](const hs::RenderInstance &instance) {
             return instance.mesh == hs::RenderMesh::PlayerProjectile;
         });
-    Check(arrow != snapshot.View().instances.end() && arrow->position.x > 0.8f,
-          "basic arrow starts at the bow tip instead of the character origin");
+    hs::GameReadModelStorage release_model;
+    simulation.WriteReadModel(release_model);
+    Check(arrow != snapshot.View().instances.end() &&
+              !release_model.View().projectiles.empty() &&
+              std::abs(arrow->position.x -
+                       release_model.View().projectiles.front().position.x) < 0.0001f &&
+              std::abs(arrow->position.z -
+                       release_model.View().projectiles.front().position.y) < 0.0001f,
+          "basic arrow visual center matches its collision center on release");
 
     held.basic_attack_held = false;
     for (std::uint32_t tick = 0; tick < 26; ++tick)
@@ -1109,11 +1138,12 @@ void TestCombatPresentationContracts()
                    sequence, held);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "charge telegraph snapshot");
-    Check(std::ranges::any_of(snapshot.View().instances, [](const auto &instance) {
-              return instance.mesh == hs::RenderMesh::Area &&
-                     instance.color_rgba == 0xFFFFFFFFu &&
-                     instance.scale.z >= 4.2f && instance.scale.z < 5.0f;
-          }), "charged shot renders a white range line");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx, [](const auto &visual) {
+              return visual.kind == hs::PersistentVfxKind::ChargeGuide &&
+                     visual.length >= 4.2f && visual.length < 5.0f &&
+                     visual.stable_id ==
+                         (1ull << 60 | static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
+          }), "charged shot renders a stable white range guide");
     (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released,
                    sequence, held);
     snapshot.Clear();
@@ -1313,6 +1343,56 @@ void TestAttackSpeedAnimationRate()
     Check(simulation.Shutdown().Succeeded(), "attack-speed animation shutdown");
 }
 
+void TestEnemyDisplacementInterpolates()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1'000;
+    data.enemies[0].move_speed = 0.0f;
+    data.enemies[0].damage = 0;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({231}, data).Succeeded(),
+          "enemy displacement initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::PiercingShot), 5);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+
+    float first_moved_x{};
+    float final_x{5.0f};
+    for (std::uint32_t tick = 0; tick < 60; ++tick)
+    {
+        (void)Tick(simulation, held);
+        hs::RenderSnapshotStorage snapshot(64, 2, 2, 16);
+        Check(WriteSnapshot(simulation, snapshot), "enemy displacement snapshot");
+        const auto enemy = std::ranges::find_if(
+            snapshot.View().instances, [](const hs::RenderInstance &instance) {
+                return instance.mesh == hs::RenderMesh::Enemy;
+            });
+        if (enemy == snapshot.View().instances.end()) continue;
+        final_x = enemy->position.x;
+        if (first_moved_x == 0.0f && final_x > 5.001f) first_moved_x = final_x;
+    }
+    Check(first_moved_x > 5.0f && first_moved_x < 5.5f,
+          "push begins with a partial displacement instead of teleporting");
+    Check(std::abs(final_x - 6.5f) < 0.001f,
+          "interpolated push preserves the requested total distance");
+    Check(simulation.Shutdown().Succeeded(), "enemy displacement shutdown");
+}
+
+std::size_t CountVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind kind)
+{
+    return std::ranges::count_if(
+        simulation.PendingDomainSignals(),
+        [kind](const hs::DomainSignal &event) { return event.kind == kind; });
+}
+
 void TestArrowRainTrackingProjectileMoves()
 {
     hs::GameSimulation simulation;
@@ -1329,6 +1409,21 @@ void TestArrowRainTrackingProjectileMoves()
     hs::Sequence sequence{};
     (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
                    sequence, held);
+    hs::RenderSnapshotStorage pending(64, 2, 2, 8);
+    Check(WriteSnapshot(simulation, pending), "arrow rain pre-active area snapshot");
+    const auto pending_range = std::ranges::find_if(
+        pending.View().persistent_vfx, [](const hs::PersistentVfxVisual &visual) {
+        return visual.kind == hs::PersistentVfxKind::ArrowRainArea;
+        });
+    Check(pending_range != pending.View().persistent_vfx.end() &&
+              pending_range->radius > 0.0f && pending_range->stable_id != 0,
+          "pre-active arrow rain shows its stable persistent area");
+    const auto pending_radius = pending_range == pending.View().persistent_vfx.end()
+                                    ? 0.0f
+                                    : pending_range->radius;
+    const auto pending_stable_id = pending_range == pending.View().persistent_vfx.end()
+                                       ? 0ull
+                                       : pending_range->stable_id;
     for (std::uint32_t tick = 0;
          tick < 180 && simulation.GetObservation().player_projectile_count == 0; ++tick)
         (void)Tick(simulation, held);
@@ -1341,6 +1436,14 @@ void TestArrowRainTrackingProjectileMoves()
         });
     Check(arrow != first.View().instances.end(), "arrow rain creates tracking arrow");
     const auto first_position = arrow->position;
+    const auto active_area = std::ranges::find_if(
+        first.View().persistent_vfx, [](const hs::PersistentVfxVisual &visual) {
+            return visual.kind == hs::PersistentVfxKind::ArrowRainArea;
+        });
+    Check(active_area != first.View().persistent_vfx.end() &&
+              active_area->stable_id == pending_stable_id &&
+              std::abs(active_area->radius - pending_radius) < 0.0001f,
+          "arrow rain keeps the same persistent area through activation");
 
     (void)Tick(simulation, held);
     hs::RenderSnapshotStorage second(64, 2, 2, 8);
@@ -1353,7 +1456,227 @@ void TestArrowRainTrackingProjectileMoves()
               (std::abs(moved->position.x - first_position.x) > 0.1f ||
                std::abs(moved->position.z - first_position.z) > 0.1f),
           "arrow rain tracking arrow advances instead of standing still");
+    hs::GameReadModelStorage second_model;
+    simulation.WriteReadModel(second_model);
+    const auto current_projectile = std::ranges::find_if(
+        second_model.View().projectiles, [](const hs::ProjectileView &projectile) {
+            return projectile.player_owned;
+        });
+    Check(moved != second.View().instances.end() &&
+              current_projectile != second_model.View().projectiles.end() &&
+              std::abs(moved->yaw - std::atan2(current_projectile->velocity.x,
+                                               current_projectile->velocity.y)) < 0.0001f,
+          "tracking arrow orientation follows its current velocity");
     Check(simulation.Shutdown().Succeeded(), "arrow rain tracking shutdown");
+}
+
+void TestProjectileAndAreaVisualTruth()
+{
+    hs::GameReadModelStorage model;
+    model.tick = 30;
+    constexpr std::array projectile_skills{
+        hs::SkillKind::BasicAttack, hs::SkillKind::PiercingShot,
+        hs::SkillKind::MultiShot, hs::SkillKind::ChargedShot,
+        hs::SkillKind::ChargedShot,
+        hs::SkillKind::ExplosiveArrow, hs::SkillKind::RicochetArrow};
+    constexpr std::array collision_radii{0.12f, 0.2f, 0.09f, 0.4f,
+                                         0.88f, 0.35f, 0.16f};
+    constexpr std::array charge_ratios{0.0f, 0.0f, 0.0f, 0.0f,
+                                        1.0f, 0.0f, 0.0f};
+    for (std::size_t index = 0; index < projectile_skills.size(); ++index)
+        model.AddProjectile({hs::EntityId{101 + index}, true,
+                             {1.0f + static_cast<float>(index), 2.0f},
+                             {4.0f, 0.0f}, 30, projectile_skills[index], false,
+                             collision_radii[index], charge_ratios[index]});
+    hs::AreaView area;
+    area.id = hs::EntityId{201};
+    area.kind = hs::AreaViewKind::Damage;
+    area.position = {5.0f, 6.0f};
+    area.radius = 3.0f;
+    area.active_tick = 20;
+    area.expires = 120;
+    area.skill = hs::SkillKind::ArrowRain;
+    area.origin = hs::EffectOrigin::Derived;
+    area.applies_slow = true;
+    model.AddArea(area);
+
+    hs::RenderSnapshotStorage snapshot(32, 2, 2, 16);
+    static const hs::SettingsData settings;
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot),
+          "projectile and area truth snapshot");
+    constexpr std::array expected_sizes{
+        hs::Float3{0.24f, 0.24f, 0.825f}, hs::Float3{0.28f, 0.28f, 1.25f},
+        hs::Float3{0.18f, 0.18f, 0.7f}, hs::Float3{0.228f, 0.228f, 0.81f},
+        hs::Float3{0.42f, 0.42f, 1.26f},
+        hs::Float3{0.34f, 0.34f, 1.0f}, hs::Float3{0.25f, 0.25f, 0.85f}};
+    std::size_t projectile_count{};
+    for (std::size_t index = 0; index < expected_sizes.size(); ++index)
+    {
+        const auto stable_id = (3ull << 60u) | (101u + index);
+        const auto instance = std::ranges::find_if(
+            snapshot.View().instances, [stable_id](const hs::RenderInstance &candidate) {
+                return candidate.mesh == hs::RenderMesh::PlayerProjectile &&
+                       candidate.stable_id == stable_id;
+            });
+        Check(instance != snapshot.View().instances.end() &&
+                  std::abs(instance->scale.x - expected_sizes[index].x) < 0.0001f &&
+                  std::abs(instance->scale.y - expected_sizes[index].y) < 0.0001f &&
+                  std::abs(instance->scale.z - expected_sizes[index].z) < 0.0001f,
+              "each arrow uses its skill-specific visual size");
+        projectile_count += instance != snapshot.View().instances.end();
+    }
+    Check(projectile_count == expected_sizes.size() &&
+              std::ranges::equal(model.View().projectiles, collision_radii,
+                                 {}, &hs::ProjectileView::radius),
+          "arrow visual sizes are independent from collision radii");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx,
+                              [](const hs::PersistentVfxVisual &visual) {
+              return visual.kind == hs::PersistentVfxKind::ArrowRainArea &&
+                     std::abs(visual.radius - 3.0f) < 0.0001f;
+          }), "derived arrow rain keeps its actual three-metre boundary");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx,
+                              [](const hs::PersistentVfxVisual &visual) {
+              return visual.kind == hs::PersistentVfxKind::SlowArea &&
+                     std::abs(visual.radius - 3.0f) < 0.0001f;
+          }), "slowing arrow rain adds a shape-distinct slow motif");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx,
+                              [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::ProjectileTrailOuter &&
+                         std::abs(visual.radius - 0.075f) < 0.0001f;
+              }), "charged arrow adds a separate low-opacity outer trail");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx,
+                              [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind ==
+                         hs::PersistentVfxKind::RicochetProjectileTrail;
+              }), "ricochet arrow uses its continuous ribbon trail");
+
+    model.tick = area.expires;
+    snapshot.Clear();
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot),
+          "expired area snapshot projects successfully");
+    Check(std::ranges::none_of(
+              snapshot.View().persistent_vfx,
+              [](const hs::PersistentVfxVisual &visual) {
+                  return (visual.stable_id >> 60u) == 4u;
+              }),
+          "expired area stops rendering at its explicit expiry tick");
+
+    model.Clear();
+    snapshot.Clear();
+    model.tick = 10;
+    hs::AreaView preactive_area;
+    preactive_area.id = hs::EntityId{901};
+    preactive_area.kind = hs::AreaViewKind::EnemyDamage;
+    preactive_area.position = {2.0f, 3.0f};
+    preactive_area.radius = 2.0f;
+    preactive_area.active_tick = 20;
+    preactive_area.expires = 40;
+    model.AddArea(preactive_area);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot),
+          "pre-active area snapshot projects successfully");
+    Check(std::ranges::none_of(
+              snapshot.View().instances,
+              [](const hs::RenderInstance &instance) {
+                  return instance.stable_id == (4ull << 60u | 901ull);
+              }),
+          "ordinary area stays hidden before its active tick");
+
+    model.Clear();
+    snapshot.Clear();
+    model.tick = 30;
+    area.kind = hs::AreaViewKind::Slow;
+    area.source_upgrade = 7;
+    model.AddArea(area);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot) &&
+              std::ranges::any_of(snapshot.View().persistent_vfx,
+                                  [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::SlowArea;
+              }) &&
+              std::ranges::any_of(snapshot.View().persistent_vfx,
+                                  [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::ArrowRainArea;
+              }),
+          "finished arrow rain keeps its persistent area and slow follow-up shapes");
+
+    model.Clear();
+    snapshot.Clear();
+    model.tick = 10;
+    model.player.charging = true;
+    model.player.charging_skill = hs::SkillKind::ChargedShot;
+    model.player.charge_start = 0;
+    model.player.position = {5.0f, -3.0f};
+    constexpr hs::Float2 target{17.0f, 5.0f};
+    const auto aim_length = std::hypot(target.x - model.player.position.x,
+                                       target.y - model.player.position.y);
+    model.player.aim = {(target.x - model.player.position.x) / aim_length,
+                        (target.y - model.player.position.y) / aim_length};
+    model.charge_range = 10.0f;
+    model.charge_radius = 0.88f;
+    model.skills[static_cast<std::size_t>(hs::SkillKind::ChargedShot)]
+        .effective_range = 10.0f;
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot) &&
+              std::ranges::any_of(snapshot.View().persistent_vfx,
+                                  [&model](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::ChargeGuide &&
+                         std::abs(visual.radius - 0.88f) < 0.0001f &&
+                         std::abs(visual.length - 10.0f) < 0.0001f &&
+                         std::abs(visual.position.x -
+                                  (model.player.position.x + model.player.aim.x * 5.0f)) <
+                             0.0001f &&
+                         std::abs(visual.position.z -
+                                  (model.player.position.y + model.player.aim.y * 5.0f)) <
+                             0.0001f &&
+                         std::abs(visual.yaw -
+                                  std::atan2(model.player.aim.x, model.player.aim.y)) <
+                             0.0001f;
+              }),
+          "charge guide follows a target distinct from the player");
+
+    model.player.charging = false;
+    model.Clear();
+    snapshot.Clear();
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot) &&
+              snapshot.View().persistent_vfx.empty(),
+          "persistent area visuals disappear with their gameplay areas");
+}
+
+void TestMultiShotCastVfxIsPerFan()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0x564658u}, QuietGameData()).Succeeded(),
+          "multishot VFX initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 0);
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 3);
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    std::size_t original_fan_casts{};
+    for (std::uint32_t tick = 0; tick < 30 && original_fan_casts == 0; ++tick)
+    {
+        (void)Tick(simulation, held);
+        original_fan_casts =
+            CountVfx(simulation, hs::DomainSignalKind::MultiShotCast);
+    }
+    Check(original_fan_casts == 1,
+          "multishot emits exactly one cast for the original fan");
+    for (std::uint32_t tick = 0; tick < 30; ++tick) (void)Tick(simulation, held);
+    Check(CountVfx(simulation, hs::DomainSignalKind::MultiShotCast) == 1,
+          "derived multishot volleys do not emit a cast VFX");
+    Check(simulation.GetObservation().player_projectile_count == 17,
+          "multishot VFX deduplication does not change projectile count");
+    Check(simulation.Shutdown().Succeeded(), "multishot VFX shutdown");
 }
 
 void TestPiercingDamageTrailMatchesArrowPath()
@@ -1378,6 +1701,9 @@ void TestPiercingDamageTrailMatchesArrowPath()
     Check(simulation.GetObservation().damage_by_skill[
               static_cast<std::size_t>(hs::SkillKind::PiercingShot)] == 4,
           "one-meter trail damages only enemies on the arrow path");
+    for (std::uint32_t tick = 0;
+         tick < 30 && simulation.GetObservation().player_projectile_count == 0; ++tick)
+        (void)Tick(simulation, held);
 
     hs::RenderSnapshotStorage snapshot(64, 2, 2, 8);
     Check(WriteSnapshot(simulation, snapshot), "piercing trail snapshot");
@@ -1388,6 +1714,45 @@ void TestPiercingDamageTrailMatchesArrowPath()
                      std::abs(visual.radius - 0.5f) < 0.0001f &&
                      std::abs(visual.length - 24.0f) < 0.0001f;
           }), "piercing trail visual matches its 24 by 1 meter damage path");
+    const auto projectile_trail = std::ranges::find_if(
+        snapshot.View().persistent_vfx, [](const hs::PersistentVfxVisual &visual) {
+            return visual.kind == hs::PersistentVfxKind::ProjectileTrail;
+        });
+    const auto projectile = projectile_trail == snapshot.View().persistent_vfx.end()
+                                ? snapshot.View().instances.end()
+                                : std::ranges::find_if(
+                                      snapshot.View().instances,
+                                      [stable_id = projectile_trail->stable_id](
+                                          const hs::RenderInstance &instance) {
+                                          return instance.mesh ==
+                                                     hs::RenderMesh::PlayerProjectile &&
+                                                 instance.stable_id == stable_id;
+                                      });
+    Check(projectile_trail != snapshot.View().persistent_vfx.end() &&
+              projectile != snapshot.View().instances.end() &&
+              projectile_trail->length >= 0.35f && projectile_trail->length <= 1.0f,
+          "piercing projectile trail uses a short stable segment");
+    if (projectile != snapshot.View().instances.end() &&
+        projectile_trail != snapshot.View().persistent_vfx.end())
+    {
+        const auto direction = hs::Float2{std::sin(projectile->yaw),
+                                          std::cos(projectile->yaw)};
+        const auto offset = hs::Float2{
+            projectile_trail->position.x - projectile->position.x,
+            projectile_trail->position.z - projectile->position.z};
+        const auto trail_front = hs::Float2{
+            projectile_trail->position.x + direction.x * projectile_trail->length * 0.5f,
+            projectile_trail->position.z + direction.y * projectile_trail->length * 0.5f};
+        const auto body_rear = hs::Float2{
+            projectile->position.x - direction.x * projectile->scale.z * 0.5f,
+            projectile->position.z - direction.y * projectile->scale.z * 0.5f};
+        Check(offset.x * direction.x + offset.y * direction.y < 0.0f &&
+                  std::hypot(trail_front.x - body_rear.x,
+                             trail_front.y - body_rear.y) < 0.0001f &&
+                  std::abs(projectile_trail->position.y -
+                           (projectile->position.y + projectile->scale.y * 0.5f)) < 0.0001f,
+              "piercing projectile trail begins at the rear and matches GPU body height");
+    }
     Check(simulation.Shutdown().Succeeded(), "piercing trail shutdown");
 }
 
@@ -1676,20 +2041,29 @@ void TestTrapRollsForwardAndLeavesOriginTrap()
           "trap effect remains at the roll origin");
     hs::RenderSnapshotStorage snapshot(64, 4, 2, 64);
     Check(WriteSnapshot(simulation, snapshot), "immediate trap snapshot");
-    Check(std::ranges::any_of(
-              snapshot.View().persistent_vfx, [](const auto &visual) {
-                  return visual.kind == hs::PersistentVfxKind::TrapPending &&
-                         std::abs(visual.position.x) < 0.01f;
-              }),
-          "trap has a persistent visual on the placement tick");
+    const auto placed_trap = std::ranges::find_if(
+        snapshot.View().persistent_vfx, [](const auto &visual) {
+            return visual.kind == hs::PersistentVfxKind::TrapArmed &&
+                   std::abs(visual.position.x) < 0.01f;
+        });
+    Check(placed_trap != snapshot.View().persistent_vfx.end(),
+          "trap uses its armed persistent visual on the placement tick");
+    const auto trap_stable_id = placed_trap == snapshot.View().persistent_vfx.end()
+                                    ? 0ull
+                                    : placed_trap->stable_id;
+    const auto trap_radius = placed_trap == snapshot.View().persistent_vfx.end()
+                                 ? 0.0f
+                                 : placed_trap->radius;
     for (std::uint32_t tick = 0; tick < 40; ++tick) (void)Tick(simulation, held);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "armed trap snapshot");
     Check(std::ranges::any_of(
-              snapshot.View().persistent_vfx, [](const auto &visual) {
-                  return visual.kind == hs::PersistentVfxKind::TrapArmed;
+              snapshot.View().persistent_vfx, [trap_stable_id, trap_radius](const auto &visual) {
+                  return visual.kind == hs::PersistentVfxKind::TrapArmed &&
+                         visual.stable_id == trap_stable_id &&
+                         std::abs(visual.radius - trap_radius) < 0.0001f;
               }),
-          "trap persistent visual changes when armed");
+          "trap keeps its armed persistent visual through activation");
     Check(simulation.Shutdown().Succeeded(), "trap roll shutdown");
 }
 
@@ -2697,10 +3071,13 @@ int main(int argc, char **argv)
             TestTenMinuteBossGroundAreasStaySeparated();
             TestQwerInputBuffer();
             TestQwerSkills();
+            TestEnemyDisplacementInterpolates();
             TestChargedShotCancelsForLevelSelection();
             TestCombatPresentationContracts();
             TestAttackSpeedAnimationRate();
             TestArrowRainTrackingProjectileMoves();
+            TestProjectileAndAreaVisualTruth();
+            TestMultiShotCastVfxIsPerFan();
             TestPiercingDamageTrailMatchesArrowPath();
             TestRangedWarningAndExplosiveArea();
             TestTrapRollsForwardAndLeavesOriginTrap();

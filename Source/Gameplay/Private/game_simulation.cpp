@@ -389,10 +389,12 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
         auto elapsed = std::min(impl_->tick - impl_->player.charge_start, maximum_ticks);
         if (HasUpgrade(mask, 2))
             elapsed = std::min(maximum_ticks, static_cast<Tick>(elapsed / 0.65f));
+        const auto progress = static_cast<float>(elapsed) /
+                              static_cast<float>(maximum_ticks);
         model.charge_range = std::lerp(
             4.2f, model.skills[static_cast<std::size_t>(SkillKind::ChargedShot)]
-                      .effective_range,
-            static_cast<float>(elapsed) / static_cast<float>(maximum_ticks));
+                      .effective_range, progress);
+        model.charge_radius = std::lerp(0.4f, 0.88f, progress);
     }
     model.summary = {impl_->balance.direct_damage,
                      impl_->balance.derived_damage,
@@ -431,7 +433,9 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
         if (projectile.dead) continue;
         model.AddProjectile({projectile.id, projectile.player_owned,
                              projectile.position, projectile.velocity,
-                             projectile.spawned_tick, projectile.skill, false});
+                             projectile.spawned_tick, projectile.skill, false,
+                             projectile.radius, projectile.charge_ratio,
+                             projectile.origin, projectile.source_upgrade});
     }
     for (const auto &area : impl_->areas)
     {
@@ -453,6 +457,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                        area.safe_gap_degrees,
                        area.safe_gap_count,
                        area.applies_burn,
+                       area.slow_reduction > 0.0f,
                        false});
     }
     for (const auto &pickup : impl_->pickups)

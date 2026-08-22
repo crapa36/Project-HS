@@ -36,7 +36,7 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    constexpr hs::GameplayChecksum kGameplayOracle = 16791108035892396461ull;
+    constexpr hs::GameplayChecksum kGameplayOracle = 17845522628363618221ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");
     Check(first == kGameplayOracle,

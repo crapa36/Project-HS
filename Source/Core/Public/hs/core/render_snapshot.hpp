@@ -30,6 +30,10 @@ enum class PersistentVfxKind : std::uint8_t
     ArrowRainArea,
     DamageTrail,
     ChargeGuide,
+    RangeIndicator,
+    ProjectileTrail,
+    ProjectileTrailOuter,
+    RicochetProjectileTrail,
 };
 
 struct PersistentVfxVisual

@@ -537,6 +537,8 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         vector2(enemy.position);
         vector2(enemy.previous_position);
         vector2(enemy.velocity);
+        vector2(enemy.displacement_per_tick);
+        value(enemy.displacement_ticks);
         value(enemy.health);
         value(enemy.max_health);
         value(enemy.damage);

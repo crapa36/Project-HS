@@ -55,6 +55,7 @@ GameReadModel GameReadModelStorage::View() const noexcept
             effective_magnet_radius,
             arena_half_extent,
             charge_range,
+            charge_radius,
             skills,
             waves,
             summary};
