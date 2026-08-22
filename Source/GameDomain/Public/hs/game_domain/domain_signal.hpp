@@ -76,6 +76,22 @@ enum class DomainSignalKind : std::uint8_t
     BossSpawnWarning,
     AbilityUsed,
     ArrowReleased,
+    BasicAttackStarted,
+    ChargedShotStarted,
+    ChargedShotEnded,
+    TrapDamaged,
+    CooldownSurged,
+    TrackingArrowFired,
+    AfterimageArrowFired,
+    CooldownRefunded,
+    PlayerRevived,
+    BossDashTelegraphed,
+    BossVolleyTelegraphed,
+    BossAreaTelegraphed,
+    BossShockwaveTelegraphed,
+    BossDied,
+    ExperienceCollected,
+    SkillUnlocked,
     Count,
 };
 
@@ -91,6 +107,8 @@ struct DomainSignal
     Float3 target{};
     float scale{1.0f};
     std::uint8_t flags{};
+    // SkillKind/BossKind/other semantic source, depending on signal kind.
+    std::uint8_t context{};
 };
 
 } // namespace hs

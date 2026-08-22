@@ -22,10 +22,11 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
     if (pickup.kind == PickupKind::Experience)
     {
         player.experience += pickup.value;
+        EmitSignal(DomainSignalKind::ExperienceCollected, pickup.position);
     }
     else if (pickup.kind == PickupKind::Heal)
     {
-        Heal(RoundDamage(player.max_health * 0.08f));
+        Heal(RoundDamage(player.max_health * 0.08f), false);
     }
     else if (pickup.kind == PickupKind::Magnet)
     {
@@ -219,6 +220,8 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
         player.skill_levels[card.subject] = 1;
         const auto slot = std::ranges::find(player.loadout, SkillKind::Count);
         if (slot != player.loadout.end()) *slot = skill;
+        EmitSignal(DomainSignalKind::SkillUnlocked, player.position,
+                   static_cast<std::uint8_t>(skill));
     }
     else if (card.kind == CardKind::SkillUpgrade ||
              card.kind == CardKind::BasicUpgrade)

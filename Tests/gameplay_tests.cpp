@@ -2248,17 +2248,36 @@ void TestTimedBossEventsAndSpawnStop()
     (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 0, "5-minute pre-boundary");
     (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 0 &&
+              HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
+          "5-minute boss warning");
+    for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 0, "5-minute warning window");
+    (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 1, "5-minute boss event");
 
     Debug(simulation, hs::DebugCommandKind::SetGrowthTick, 10 * kTicksPerMinute - 2);
     (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 1, "10-minute pre-boundary");
     (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 1 &&
+              HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
+          "10-minute boss warning");
+    for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 1, "10-minute warning window");
+    (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 2, "10-minute boss event");
 
     Debug(simulation, hs::DebugCommandKind::SetGrowthTick, 15 * kTicksPerMinute - 2);
     (void)Tick(simulation);
     Check(!simulation.GetObservation().final_boss_spawned, "15-minute pre-boundary");
+    (void)Tick(simulation);
+    Check(simulation.GetObservation().final_boss_spawned &&
+              simulation.GetObservation().boss_count == 2 &&
+              HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
+          "15-minute final boss warning");
+    for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 2, "15-minute warning window");
     (void)Tick(simulation);
     const auto final_spawn = simulation.GetObservation();
     Check(final_spawn.final_boss_spawned && final_spawn.boss_count == 3,
@@ -2275,7 +2294,7 @@ void TestTimedBossEventsAndSpawnStop()
               after_final.boss_count == 3,
           "final boss stops new normal enemy spawns");
     Check(after_final.growth_ticks == 15 * kTicksPerMinute &&
-              after_final.boss_fight_ticks == 10,
+              after_final.boss_fight_ticks == 100,
           "final boss switches growth clock to boss clock");
     Check(simulation.Shutdown().Succeeded(), "timeline shutdown");
 }
@@ -2396,14 +2415,32 @@ void TestSameTickVictoryPriority()
     Check(simulation.Initialize({52}, data).Succeeded(), "victory priority initialize");
     Debug(simulation, hs::DebugCommandKind::SetGrowthTick, 15 * kTicksPerMinute - 1);
     (void)Tick(simulation);
-    Check(simulation.GetObservation().final_boss_spawned, "final boss available for priority test");
+    Check(simulation.GetObservation().final_boss_spawned &&
+              simulation.GetObservation().boss_count == 0 &&
+              HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
+          "final boss warning precedes the boss by one and a half seconds");
+    for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 0,
+          "final boss remains absent throughout the warning window");
+    (void)Tick(simulation);
+    Check(simulation.GetObservation().boss_count == 1 &&
+              std::ranges::any_of(
+                  simulation.PendingDomainSignals(), [](const hs::DomainSignal &signal) {
+                      return signal.kind == hs::DomainSignalKind::BossSpawned &&
+                             signal.context ==
+                                 static_cast<std::uint8_t>(hs::BossKind::Final);
+                  }),
+          "final boss spawns after the warning with its audio routing context");
 
     Debug(simulation, hs::DebugCommandKind::DamageFinalBoss, 1'000'000);
     Debug(simulation, hs::DebugCommandKind::DamagePlayer, 1'000'000);
     const auto result = Tick(simulation);
     Check(result.phase == hs::SessionPhase::Victory &&
               simulation.GetObservation().health <= 0,
-          "same-tick final boss and player death resolves victory");
+          std::format("same-tick final boss and player death resolves victory (phase={}, bosses={}, health={})",
+                      static_cast<int>(result.phase),
+                      simulation.GetObservation().boss_count,
+                      simulation.GetObservation().health));
     Check(simulation.Shutdown().Succeeded(), "victory priority shutdown");
 }
 

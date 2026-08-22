@@ -208,11 +208,12 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         break;
     case DebugCommandKind::SpawnBoss:
         if (command.value >= 3 ||
-            !impl_->SpawnBoss(static_cast<BossKind>(command.value)))
+            !impl_->SpawnBoss(static_cast<BossKind>(command.value), 0))
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                    "Debug boss could not be spawned.");
         }
+        impl_->CommitBossSpawns();
         break;
     case DebugCommandKind::SelectCard:
         if (!impl_->SelectCard(static_cast<std::size_t>(command.value)))

@@ -106,8 +106,16 @@ void TestSameTickFinalBossVictory()
     hs::InputFrame input{};
     input.target_tick = 1;
     (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
-    Check(simulation.GetSessionProbe().final_boss_spawned,
-          "final boss spawned");
+    Check(simulation.GetSessionProbe().final_boss_spawned &&
+              simulation.GetObservation().boss_count == 0,
+          "final boss warning starts before spawn");
+    for (hs::Tick tick = 2; tick <= 91; ++tick)
+    {
+        input.target_tick = tick;
+        (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+    }
+    Check(simulation.GetObservation().boss_count == 1,
+          "final boss spawns after the warning window");
     Check(simulation.ApplyDebugCommand(
               {hs::DebugCommandKind::DamageFinalBoss, 1'000'000})
               .Succeeded(),
@@ -116,7 +124,7 @@ void TestSameTickFinalBossVictory()
               {hs::DebugCommandKind::DamagePlayer, 1'000'000})
               .Succeeded(),
           "kill player");
-    input.target_tick = 2;
+    input.target_tick = 92;
     const auto result = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
     Check(result.phase == hs::SessionPhase::Victory,
           "same-tick final boss and player death resolves victory");

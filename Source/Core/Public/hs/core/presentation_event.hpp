@@ -19,6 +19,21 @@ enum class PresentationKind : std::uint8_t
 
 enum class VfxEventFlag : std::uint32_t { None = 0, HasTarget = 1u << 0 };
 
+enum class AudioEventAction : std::uint8_t { Play, Stop };
+
+inline std::array<std::byte, 32> EncodeAudioAction(AudioEventAction action) noexcept
+{
+    std::array<std::byte, 32> bytes{};
+    bytes[0] = static_cast<std::byte>(action);
+    return bytes;
+}
+
+[[nodiscard]] inline AudioEventAction DecodeAudioAction(
+    const std::array<std::byte, 32> &bytes) noexcept
+{
+    return static_cast<AudioEventAction>(bytes[0]);
+}
+
 struct VfxEventParameters
 {
     Float3 direction{0.0f, 0.0f, 1.0f};

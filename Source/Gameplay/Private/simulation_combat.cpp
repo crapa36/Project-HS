@@ -227,6 +227,12 @@ ProjectileActor *GameSimulation::SimulationWorld::FireProjectile(SkillKind skill
                         ? pending_projectile_spawns
                         : projectiles;
     storage.push_back(projectile);
+    if (player_owned && origin == EffectOrigin::Original &&
+        skill < SkillKind::Count && skill != SkillKind::MultiShot)
+    {
+        EmitSignal(DomainSignalKind::ArrowReleased, position,
+                   static_cast<std::uint8_t>(skill));
+    }
     if (player_owned && skill < SkillKind::Count &&
         skill != SkillKind::BasicAttack && skill != SkillKind::MultiShot &&
         origin == EffectOrigin::Original)
@@ -346,6 +352,8 @@ void GameSimulation::SimulationWorld::CastBasicAttack()
         return;
     }
     player.has_move_target = false;
+    EmitSignal(DomainSignalKind::BasicAttackStarted, player.position,
+               static_cast<std::uint8_t>(SkillKind::BasicAttack));
     const auto attack_interval = std::max<Tick>(1, static_cast<Tick>(
         std::floor(60.0f / EffectiveAttackSpeed() + 0.5f)));
     const auto animation_ticks = std::max<Tick>(
@@ -655,7 +663,8 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     DispatchAbilityRules(skill, cooldown_index);
     player.last_active = skill;
     player.last_active_tick = tick;
-    EmitSignal(DomainSignalKind::AbilityUsed, player.position);
+    EmitSignal(DomainSignalKind::AbilityUsed, player.position,
+               static_cast<std::uint8_t>(skill));
     return true;
 }
 
@@ -673,6 +682,8 @@ bool GameSimulation::SimulationWorld::TryBeginSkill(SkillKind skill)
         player.charging = true;
         player.charging_skill = skill;
         player.charge_start = tick;
+        EmitSignal(DomainSignalKind::ChargedShotStarted, player.position,
+                   static_cast<std::uint8_t>(skill));
         return true;
     }
     return CastSkill(skill);
@@ -885,7 +896,6 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 {
                     projectile->burn = true;
                 }
-                EmitSignal(DomainSignalKind::ArrowReleased, action.position);
             }
             if (projectile && action.skill == SkillKind::PiercingShot &&
                 action.source_upgrade == 0)
@@ -908,8 +918,12 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
         {
             if (action.skill == SkillKind::MultiShot &&
                 action.origin == EffectOrigin::Original)
+            {
+                EmitSignal(DomainSignalKind::ArrowReleased, action.position,
+                           static_cast<std::uint8_t>(action.skill));
                 EmitVfx(DomainSignalKind::MultiShotCast, action.position,
                         action.direction, 1.0f, 1.1f);
+            }
             for (std::uint32_t index = 0; index < action.projectile_count; ++index)
             {
                 FireProjectile(action.skill, action.position,
@@ -1579,7 +1593,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 hit_direction, hit_scale, hit_height);
     else
         EmitVfx(DomainSignalKind::ProjectileHit, enemy.position,
-                hit_direction, hit_scale, hit_height);
+                hit_direction, hit_scale, hit_height,
+                static_cast<std::uint8_t>(projectile.skill));
 
     if (projectile.skill == SkillKind::RicochetArrow && projectile.bounce_remaining > 0)
     {
@@ -2095,6 +2110,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                            HasUpgrade(area.upgrade_mask, 6) ? Seconds(2.0f)
                                                             : area.slow_duration,
                            damage_source, area.source_relic);
+                EmitSignal(DomainSignalKind::TrapDamaged, area.position,
+                           static_cast<std::uint8_t>(area.skill));
                 if (HasUpgrade(area.upgrade_mask, 5))
                 {
                     pending_areas.push_back(
@@ -2556,19 +2573,24 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
     combat.Clear();
 }
 
-std::uint64_t GameSimulation::SimulationWorld::Heal(std::int32_t amount)
+std::uint64_t GameSimulation::SimulationWorld::Heal(std::int32_t amount,
+                                                    bool emit_signal)
 {
     const auto before = player.health;
     player.health = std::min(player.max_health, player.health + amount);
     const auto applied = static_cast<std::uint64_t>(
         std::max(0, player.health - before));
     healing += applied;
-    if (applied != 0) EmitVfx(DomainSignalKind::PlayerHealed, player.position);
+    if (applied != 0 && emit_signal)
+        EmitVfx(DomainSignalKind::PlayerHealed, player.position);
     return applied;
 }
 
 void GameSimulation::SimulationWorld::CancelChargedShot() noexcept
 {
+    if (player.charging)
+        EmitSignal(DomainSignalKind::ChargedShotEnded, player.position,
+                   static_cast<std::uint8_t>(SkillKind::ChargedShot));
     player.charging = false;
     player.charging_skill = SkillKind::Count;
     player.charging_slot = 0xFF;
@@ -2589,6 +2611,9 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
 {
     EmitVfx(DomainSignalKind::EnemyDied, enemy.position,
             {0.0f, 1.0f}, enemy.boss ? 1.5f : 1.0f);
+    if (enemy.boss)
+        EmitSignal(DomainSignalKind::BossDied, enemy.position,
+                   static_cast<std::uint8_t>(*enemy.boss));
     ++kills;
     const auto enemy_index = EnemyTelemetryIndex(enemy);
     ++balance.enemy_killed[enemy_index];
@@ -2868,6 +2893,8 @@ void GameSimulation::SimulationWorld::HandleMovementEcho(Tick release_ticks, std
               relic.damage_multiplier, 0.0f, 0.0f, 1, 0,
               EffectOrigin::Derived, cast_id, kNoTelemetrySource,
               static_cast<std::uint8_t>(RelicKind::MovementEcho)});
+    EmitSignal(DomainSignalKind::AfterimageArrowFired, player.one_second_ago,
+               static_cast<std::uint8_t>(RelicKind::MovementEcho));
     player.movement_since_echo = 0.0f;
 }
 
@@ -2879,6 +2906,8 @@ void GameSimulation::SimulationWorld::HandleAlternatingSkills(SkillKind skill, s
     const auto before = player.cooldowns[cooldown_index];
     player.cooldowns[cooldown_index] -= static_cast<Tick>(
         player.cooldowns[cooldown_index] * relic.cooldown_refund_fraction);
+    EmitSignal(DomainSignalKind::CooldownRefunded, player.position,
+               static_cast<std::uint8_t>(RelicKind::AlternatingSkills));
     RecordRelicEffect(RelicKind::AlternatingSkills,
                       UpgradeEffectMetric::Activations);
     RecordRelicEffect(RelicKind::AlternatingSkills,
@@ -3017,6 +3046,8 @@ void GameSimulation::SimulationWorld::HandleDifferentSkillTracker(EnemyActor &en
         {
             arrow->homing = true;
             arrow->homing_target = enemy.id.value;
+            EmitSignal(DomainSignalKind::TrackingArrowFired, enemy.position,
+                       static_cast<std::uint8_t>(RelicKind::DifferentSkillTracker));
             RecordRelicEffect(RelicKind::DifferentSkillTracker,
                               UpgradeEffectMetric::Activations);
             RecordRelicEffect(RelicKind::DifferentSkillTracker,
@@ -3045,6 +3076,8 @@ void GameSimulation::SimulationWorld::HandleKillCooldownSurge()
                       UpgradeEffectMetric::Activations);
     RecordRelicEffect(RelicKind::KillCooldownSurge,
                       UpgradeEffectMetric::CooldownTicksSaved, saved);
+    EmitSignal(DomainSignalKind::CooldownSurged, player.position,
+               static_cast<std::uint8_t>(RelicKind::KillCooldownSurge));
 }
 
 void GameSimulation::SimulationWorld::HandleBasicKillTracker(EnemyActor &enemy, CastRuntime *runtime)
@@ -3080,6 +3113,8 @@ void GameSimulation::SimulationWorld::HandleBasicKillTracker(EnemyActor &enemy, 
     {
         arrow->homing = true;
         arrow->homing_target = target->id.value;
+        EmitSignal(DomainSignalKind::TrackingArrowFired, enemy.position,
+                   static_cast<std::uint8_t>(RelicKind::BasicKillTracker));
         ++runtime->basic_relic_triggers;
         RecordRelicEffect(RelicKind::BasicKillTracker,
                           UpgradeEffectMetric::Activations);
@@ -3159,6 +3194,8 @@ bool GameSimulation::SimulationWorld::HandleOnceRevive()
     RecordRelicEffect(RelicKind::OnceRevive, UpgradeEffectMetric::Healing,
                       static_cast<std::uint64_t>(player.health));
     EmitVfx(DomainSignalKind::PlayerHealed, player.position, {}, 1.5f, 0.5f);
+    EmitSignal(DomainSignalKind::PlayerRevived, player.position,
+               static_cast<std::uint8_t>(RelicKind::OnceRevive));
     return true;
 }
 

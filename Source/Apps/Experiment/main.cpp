@@ -590,7 +590,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                  << ecs_count << ",0\n";
         for (const auto &signal : simulation.PendingDomainSignals())
         {
-            std::array<hs::PresentationEvent, 2> projected{};
+            std::array<hs::PresentationEvent, 3> projected{};
             const auto count = hs::ProjectDomainSignal(signal, projected);
             for (const auto &event : std::span(projected).first(count))
                 events << nlohmann::json{{"sequence", event.sequence},

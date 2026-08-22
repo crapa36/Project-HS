@@ -13,6 +13,7 @@ GameSimulation::SimulationWorld::SimulationWorld()
     pending_enemy_spawns.reserve(256);
     pending_projectile_spawns.reserve(512);
     pending_area_spawns.reserve(128);
+    pending_boss_spawns.reserve(3);
     pickups.reserve(1'536);
     combat.Reserve(4'096);
     scheduled_actions.reserve(512);
@@ -53,19 +54,21 @@ bool GameSimulation::SimulationWorld::IsBoss(const EnemyActor &enemy) const noex
     return enemy.boss.has_value();
 }
 
-void GameSimulation::SimulationWorld::EmitSignal(DomainSignalKind kind, Float2 position)
+void GameSimulation::SimulationWorld::EmitSignal(DomainSignalKind kind, Float2 position,
+                                                 std::uint8_t context)
 {
     DomainSignal event;
     event.sequence = ++event_sequence;
     event.tick = tick;
     event.kind = kind;
     event.position = {position.x, 0.2f, position.y};
+    event.context = context;
     domain_signals.push_back(event);
 }
 
 void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 position,
              Float2 direction, float scale,
-             float height)
+             float height, std::uint8_t context)
 {
     const auto length = std::hypot(direction.x, direction.y);
     if (length <= 0.0001f) direction = {0.0f, 1.0f};
@@ -77,6 +80,7 @@ void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 po
     event.position = {position.x, height, position.y};
     event.direction = {direction.x, 0.0f, direction.y};
     event.scale = scale;
+    event.context = context;
     domain_signals.push_back(event);
 }
 
@@ -124,31 +128,46 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
     return true;
 }
 
-bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind)
+bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
 {
-    const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
-    EnemyActor boss;
-    boss.id = AllocateEntityId();
-    boss.random_key = next_enemy_random_key++;
-    boss.boss = kind;
-    boss.position = boss.previous_position =
-        player.position.x >= 0.0f ? Float2{-59.0f, -59.0f} : Float2{59.0f, 59.0f};
-    boss.max_health = boss.health = definition.health;
-    boss.damage = kind == BossKind::FiveMinute ? 18 : kind == BossKind::TenMinute ? 12 : 25;
-    boss.move_speed = kind == BossKind::TenMinute ? 4.8f : 2.4f;
-    boss.attack_range = 18.0f;
-    boss.spawned_tick = tick;
-    boss.pattern_ready = tick + 90;
-    boss.status.slows.reserve(8);
-    const auto position = boss.position;
-    if (pipeline_phase == SimulationPhaseId::Spawn)
-        pending_enemy_spawns.push_back(std::move(boss));
-    else
-        enemies.push_back(std::move(boss));
-    ++balance.enemy_spawned[3u + static_cast<std::size_t>(kind)];
-    EmitSignal(DomainSignalKind::BossSpawnWarning, position);
-    EmitVfx(DomainSignalKind::BossSpawned, position);
+    const auto position = player.position.x >= 0.0f ? Float2{-59.0f, -59.0f}
+                                                    : Float2{59.0f, 59.0f};
+    pending_boss_spawns.push_back({kind, position, tick + warning_ticks});
+    EmitSignal(DomainSignalKind::BossSpawnWarning, position,
+               static_cast<std::uint8_t>(kind));
     return true;
+}
+
+void GameSimulation::SimulationWorld::CommitBossSpawns()
+{
+    for (const auto &pending : pending_boss_spawns)
+    {
+        if (pending.due > tick) continue;
+        const auto kind = pending.kind;
+        const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
+        EnemyActor boss;
+        boss.id = AllocateEntityId();
+        boss.random_key = next_enemy_random_key++;
+        boss.boss = kind;
+        boss.position = boss.previous_position = pending.position;
+        boss.max_health = boss.health = definition.health;
+        boss.damage = kind == BossKind::FiveMinute ? 18
+                    : kind == BossKind::TenMinute  ? 12 : 25;
+        boss.move_speed = kind == BossKind::TenMinute ? 4.8f : 2.4f;
+        boss.attack_range = 18.0f;
+        boss.spawned_tick = tick;
+        boss.pattern_ready = tick + 90;
+        boss.status.slows.reserve(8);
+        if (pipeline_phase == SimulationPhaseId::Spawn)
+            pending_enemy_spawns.push_back(std::move(boss));
+        else
+            enemies.push_back(std::move(boss));
+        ++balance.enemy_spawned[3u + static_cast<std::size_t>(kind)];
+        EmitVfx(DomainSignalKind::BossSpawned, pending.position, {}, 1.0f, 0.3f,
+                static_cast<std::uint8_t>(kind));
+    }
+    std::erase_if(pending_boss_spawns,
+                  [this](const PendingBossSpawn &pending) { return pending.due <= tick; });
 }
 
 void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
@@ -196,6 +215,7 @@ void GameSimulation::SimulationWorld::StartSession()
     pending_enemy_spawns.clear();
     pending_projectile_spawns.clear();
     pending_area_spawns.clear();
+    pending_boss_spawns.clear();
     areas.clear();
     pickups.clear();
     combat.Clear();
@@ -793,6 +813,16 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(wave.total);
         value(wave.emitted);
     }
+    if (!pending_boss_spawns.empty())
+    {
+        count(pending_boss_spawns.size());
+        for (const auto &pending : pending_boss_spawns)
+        {
+            value(pending.kind);
+            vector2(pending.position);
+            value(pending.due);
+        }
+    }
     value(card_count);
     for (std::size_t index = 0; index < card_count; ++index)
     {
@@ -885,6 +915,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     {
         return;
     }
+    CommitBossSpawns();
     if (!final_boss_spawned)
     {
         const auto &stage = CurrentSpawnStage();
@@ -996,7 +1027,21 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         Subtract(player.position, player.previous_position), 60.0f);
     const auto cast_id = next_cast_id++;
     ++balance.enemy_attack_attempts[EnemyTelemetryIndex(boss)];
-    const auto add = [&](BossAction action) { boss_actions.push_back(action); };
+    const auto add = [&](BossAction action) {
+        boss_actions.push_back(action);
+        const auto context = static_cast<std::uint8_t>(kind);
+        const auto position = action.kind == BossActionKind::Dash ||
+                                      action.kind == BossActionKind::Volley
+                                  ? boss.position : action.position;
+        const auto signal = action.kind == BossActionKind::Dash
+                                ? DomainSignalKind::BossDashTelegraphed
+                            : action.kind == BossActionKind::Volley
+                                ? DomainSignalKind::BossVolleyTelegraphed
+                            : action.kind == BossActionKind::Area
+                                ? DomainSignalKind::BossAreaTelegraphed
+                                : DomainSignalKind::BossShockwaveTelegraphed;
+        EmitSignal(signal, position, context);
+    };
     Tick last_due{};
 
     if (kind == BossKind::FiveMinute)

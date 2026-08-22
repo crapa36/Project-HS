@@ -19,6 +19,7 @@ struct UiInteraction
 {
     std::optional<UiAction> gameplay_action;
     std::optional<UiCommand> runtime_command;
+    bool invalid{};
 };
 
 enum class UiPage : std::uint8_t

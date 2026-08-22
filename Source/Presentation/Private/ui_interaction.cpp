@@ -151,7 +151,9 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
             for (std::uint8_t skill = 0; skill < kCombatSkillCount; ++skill)
                 if (clicked(350, 240.0f + skill * 78.0f, 360, 64))
                 {
-                    if (probe.skill_levels[skill] > 0) ui.selected_character_skill = skill;
+                    if (probe.skill_levels[skill] == 0)
+                        return {std::nullopt, std::nullopt, true};
+                    ui.selected_character_skill = skill;
                     return {};
                 }
         }

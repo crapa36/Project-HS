@@ -361,6 +361,13 @@ struct ActiveWave
     std::uint16_t emitted{};
 };
 
+struct PendingBossSpawn
+{
+    BossKind kind{};
+    Float2 position{};
+    Tick due{};
+};
+
 inline float LengthSquared(Float2 value) noexcept
 {
     return value.x * value.x + value.y * value.y;
@@ -497,6 +504,7 @@ struct GameSimulation::SimulationWorld
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};
     std::vector<ActiveWave> waves;
+    std::vector<PendingBossSpawn> pending_boss_spawns;
     InputFrame current_input{};
     Tick tick{};
     Tick growth_ticks{};
@@ -558,15 +566,17 @@ struct GameSimulation::SimulationWorld
     std::uint32_t NormalEnemyCount() const noexcept;
     std::uint32_t BossCount() const noexcept;
     std::uint32_t ProjectileCount(bool player_owned) const noexcept;
-    void EmitSignal(DomainSignalKind kind, Float2 position);
+    void EmitSignal(DomainSignalKind kind, Float2 position,
+                    std::uint8_t context = 0);
     void EmitVfx(DomainSignalKind effect, Float2 position,
                  Float2 direction = {0.0f, 1.0f}, float scale = 1.0f,
-                 float height = 0.3f);
+                 float height = 0.3f, std::uint8_t context = 0);
     void EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                      float height = 0.75f);
     bool SpawnEnemy(EnemyKind kind, Float2 position,
                     std::uint64_t random_key = 0);
-    bool SpawnBoss(BossKind kind);
+    bool SpawnBoss(BossKind kind, Tick warning_ticks = Seconds(1.5f));
+    void CommitBossSpawns();
     void SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
                      bool guaranteed = false);
     ProjectileActor *FireProjectile(SkillKind skill, Float2 position, Float2 direction,
@@ -632,7 +642,7 @@ struct GameSimulation::SimulationWorld
                    std::uint8_t source_upgrade = kNoTelemetrySource,
                    std::uint8_t source_relic = kNoTelemetrySource);
     void DamageStatusPhase();
-    std::uint64_t Heal(std::int32_t amount);
+    std::uint64_t Heal(std::int32_t amount, bool emit_signal = true);
     void CancelChargedShot() noexcept;
     std::uint32_t EnemyExperience(const EnemyActor &enemy) const noexcept;
     void HandleEnemyDeath(EnemyActor &enemy);
