@@ -2,9 +2,9 @@
 
 ## Objective
 
-Generate every cue in the Project-HS AI audio guide locally, promote the final
-WAV files into authoritative content, and play them through the existing
-gameplay, presentation, content-cooking, and runtime paths.
+Retune harsh combat audio, replace charged-shot and enemy cue character, add
+per-pulse Arrow Rain audio, and restore skill-menu interaction in the Tab
+character window.
 
 ## Implemented State
 
@@ -36,19 +36,31 @@ gameplay, presentation, content-cooking, and runtime paths.
   before spawning, and final-boss context switches playback to final-boss BGM.
 - Runtime initializes audio from `Cooked/Audio`; packaging installs the cooked
   catalog and WAV files.
+- Fifty-nine combat WAV variations were regenerated with warmer prompts. The
+  charged-shot loop now uses deterministic non-tonal wood/friction noise instead
+  of an oscillator stack. Explicit per-cue gain and low-pass mastering are
+  supported without changing the default finalization path.
+- Every `ArrowRainPulse` projects both incoming-arrow and impact audio.
+- Runtime publishes the latest simulation `SessionProbe` through a synchronized
+  snapshot so Tab-window skill selection and loadout swaps use real skill levels
+  and loadout state instead of a default-empty probe.
 
 ## Verification
 
 - Asset audit: PASS, 107 cues and 379 catalog-matched WAV files; 379 unique
   SHA-256 digests; 374 mono and five stereo files.
-- Audio tool unittest discovery: PASS, 46/46 tests.
+- Audio tool unittest discovery: PASS, 51/51 tests.
 - Source routing audit: PASS, every catalog cue ID is referenced by production
   source.
-- `cmake --workflow --preset verify-core`: PASS, 5/5 tests.
-- `cmake --workflow --preset verify`: PASS, 20/20 tests, including content
-  validation/cooking, render smoke, barrier validation, deterministic gameplay,
-  runtime integration, and offscreen experiment.
-- `git diff --check`: PASS before final state documentation update.
+- Full MSVC Debug build (`msvc-debug`): PASS.
+- Debug CTest: PASS, 21/21 tests, including content validation/cooking, render
+  smoke, barrier validation, deterministic gameplay, runtime integration, and
+  offscreen experiment.
+- Retuned-cue analysis: all previously flagged sharp cues are below the audit's
+  combined high-frequency/loudness threshold; enemy ranged release is balanced
+  to approximately -28 dBFS RMS.
+- Candidate resume now rejects changed prompt/mastering plans, and finalized
+  non-loop candidates must retain at least half of their planned duration.
 
 ## Environment Notes
 
