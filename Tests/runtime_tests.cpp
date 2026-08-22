@@ -194,11 +194,15 @@ void TestVfxCatalog()
     std::vector<hs::VfxLineSpawnCommand> lines;
     Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && !full.empty(),
           "expand full-quality VFX");
-    Check(std::ranges::all_of(full, [](const auto &command) {
-              return command.renderer == hs::VfxRenderer::Mesh &&
-                     command.primitive == hs::VfxPrimitive::Shard;
-          }),
-          "hit VFX uses procedural mesh shards instead of sprites");
+    Check(std::ranges::any_of(full, [](const auto &command) {
+              return command.renderer == hs::VfxRenderer::Sprite &&
+                     command.primitive == hs::VfxPrimitive::Soft;
+          }) &&
+              std::ranges::any_of(full, [](const auto &command) {
+                  return command.renderer == hs::VfxRenderer::Mesh &&
+                         command.primitive == hs::VfxPrimitive::Ember;
+              }),
+          "hit VFX samples its slash mask and keeps a small spark secondary");
     Check(catalog.ExpandEvent(event, 50, half, lines).Succeeded() && half.size() == full.size(),
           "expand half-quality VFX");
       for (std::size_t index = 0; index < full.size(); ++index)
@@ -260,14 +264,85 @@ void TestVfxCatalog()
                   }),
               "VFX renderer and primitive survive content cook");
     };
+    const auto check_composition = [&](std::string_view id, bool needs_ring,
+                                       bool forbids_ring) {
+        event.asset = hs::MakeAssetId(id);
+        std::vector<hs::ParticleSpawnCommand> particles;
+        std::vector<hs::VfxLineSpawnCommand> ignored_lines;
+        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+              "composition VFX expands");
+        const bool has_ring = std::ranges::any_of(particles, [](const auto &command) {
+            return command.renderer == hs::VfxRenderer::Ground &&
+                   command.primitive == hs::VfxPrimitive::Ring;
+        });
+        Check((!needs_ring || has_ring) && (!forbids_ring || !has_ring),
+              "VFX primary ring hierarchy");
+    };
+    check_composition("particle.common.explosion_small", true, false);
+    check_composition("particle.common.explosion_large", true, false);
+    check_composition("particle.common.heavy_hit", false, true);
+    check_composition("particle.skill.explosive_arrow.main", true, false);
+    check_composition("particle.skill.explosive_arrow.secondary", true, false);
+    parameters.scale = 1.0f;
+    event.parameters = hs::EncodeVfxParameters(parameters);
+    const auto expanded = [&](std::string_view id) {
+        event.asset = hs::MakeAssetId(id);
+        std::vector<hs::ParticleSpawnCommand> particles;
+        std::vector<hs::VfxLineSpawnCommand> ignored_lines;
+        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+              "hierarchy VFX expands");
+        return particles;
+    };
+    const auto pull = expanded("particle.common.pull");
+    Check(std::ranges::any_of(pull, [](const auto &command) {
+              return command.primitive == hs::VfxPrimitive::Chevron &&
+                     command.shape_extent.x >= 0.85f &&
+                     command.shape_extent.x <= 1.0f &&
+                     command.shape_extent.z >= 0.85f &&
+                     command.shape_extent.z <= 1.0f &&
+                     command.start_size_max <= 0.1f;
+          }),
+          "pull chevrons stay normalized at the physical boundary");
+    const auto small_explosion = expanded("particle.common.explosion_small");
+    Check(std::ranges::any_of(small_explosion, [](const auto &command) {
+              return command.primitive == hs::VfxPrimitive::ShockShell;
+          }) &&
+              std::ranges::any_of(small_explosion, [](const auto &command) {
+                  return command.primitive == hs::VfxPrimitive::Shard;
+              }),
+          "small explosion keeps flash and limited shards");
+    const auto heavy_hit = expanded("particle.common.heavy_hit");
+    Check(std::ranges::any_of(heavy_hit, [](const auto &command) {
+              return command.renderer == hs::VfxRenderer::Sprite &&
+                     command.primitive == hs::VfxPrimitive::Soft &&
+                     command.count == 1 && command.speed_min == 0.0f;
+          }) &&
+              std::ranges::any_of(heavy_hit, [](const auto &command) {
+                  return command.primitive == hs::VfxPrimitive::Shard &&
+                         command.count >= 4 && command.count <= 7;
+              }),
+          "heavy hit keeps a central fracture and radial shards");
+    const auto large_explosion = expanded("particle.common.explosion_large");
+    Check(std::ranges::any_of(large_explosion, [](const auto &command) {
+              return command.primitive == hs::VfxPrimitive::ShockShell;
+          }) &&
+              std::ranges::any_of(large_explosion, [](const auto &command) {
+                  return command.primitive == hs::VfxPrimitive::Shard;
+              }),
+          "large explosion keeps flash and shards");
+    const auto bleed_apply = expanded("particle.status.bleed_apply");
+    const auto bleed_tick = expanded("particle.status.bleed_tick");
+    Check(bleed_apply.size() > bleed_tick.size(), "bleed apply is stronger than tick");
+    Check(expanded("particle.common.heal").size() >= 2,
+          "heal keeps cross and upward motes");
     check_visual("particle.status.slow_area", hs::VfxRenderer::Ground,
                  hs::VfxPrimitive::Rune);
     check_visual("particle.skill.explosive_arrow.main", hs::VfxRenderer::Ground,
                  hs::VfxPrimitive::Ring);
     check_visual("particle.skill.retreat_shot.move", hs::VfxRenderer::Segment,
                  hs::VfxPrimitive::DashWake);
-    check_visual("particle.status.burn_apply", hs::VfxRenderer::Mesh,
-                 hs::VfxPrimitive::Ember);
+    check_visual("particle.status.burn_apply", hs::VfxRenderer::Sprite,
+                 hs::VfxPrimitive::Soft);
 }
 
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
