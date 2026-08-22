@@ -10,9 +10,5 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-      - name: Configure
-        run: cmake -S . -B Build/ci -G Ninja -DCMAKE_BUILD_TYPE=Debug -DHS_BUILD_CONTENT_TOOLS=OFF
-      - name: Build
-        run: cmake --build Build/ci --target hs_tests hs_gameplay_internal_tests hs_simulation_tests --parallel
-      - name: Test
-        run: ctest --test-dir Build/ci -R "^(foundation.core|foundation.task-system|architecture.layers|simulation.internal-invariants|simulation.determinism-core)$" --output-on-failure
+      - name: Verify core
+        run: cmake --workflow --preset verify-core
