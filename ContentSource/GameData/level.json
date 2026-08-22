@@ -55,7 +55,7 @@
           {"source_id": "boss.mid_10m", "xp": 200},
           {"source_id": "boss.final_15m", "xp": 0}
         ],
-        "next_level_formula": "20 + floor(3.5 * (L - 1) + 0.75 * (L - 1)^2)",
+        "next_level_formula": "12 + floor(3.5 * (L - 1) + 0.75 * (L - 1)^2)",
         "level_cap": null,
         "pickup_magnet_tracking": true,
         "utility_pickup_base_chance": 0.01,

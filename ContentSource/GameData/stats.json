@@ -29,8 +29,8 @@
           "id": "stat.movement_speed",
           "display_name": "이동속도",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.3,
-          "formula": "5 * (1 + 0.3 * points)",
+          "amount_per_point": 0.4,
+          "formula": "5 * (1 + 0.4 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "movement_speed"
         },
@@ -106,7 +106,7 @@
           ],
           "rules": [
             "각 중첩은 적용 당시 공격자의 공격력을 저장한다.",
-            "5중첩 상태에서 새 출혈을 적용하면 가장 오래된 중첩을 교체한다."
+            "최대 중첩 상태에서 새 출혈을 적용하면 가장 오래된 중첩을 교체한다."
           ]
         },
         {
@@ -120,7 +120,7 @@
           ],
           "rules": [
             "새 화상의 tick 피해가 기존보다 강하면 새 화상으로 교체한다.",
-            "새 화상이 같거나 약하면 기존 세기를 유지하고 남은 시간을 4초로 갱신한다."
+            "새 화상이 같거나 약하면 기존 세기를 유지하고 남은 시간을 갱신한다."
           ]
         }
       ],
