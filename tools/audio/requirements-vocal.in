@@ -1,0 +1,8 @@
+# Project-HS Chatterbox Turbo environment (Python 3.11, Windows)
+# Source commit: resemble-ai/chatterbox @ 5de7a54aa4e5e2baadb0182dde554908b48b85c2
+# Torch channel/version: PyTorch 2.6.0 + torchaudio 2.6.0, CUDA 12.4
+# Model revision: ResembleAI/chatterbox-turbo @ 749d1c1a46eb10492095d68fbcf55691ccf137cd
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2
