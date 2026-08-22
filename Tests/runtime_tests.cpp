@@ -5,6 +5,7 @@
 #include <hs/runtime/playtest_recording.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "vfx_catalog.hpp"
+#include "runtime_channels.hpp"
 
 #include <Windows.h>
 
@@ -532,6 +533,22 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
           "playtest inputs replay exactly");
 }
 
+void TestSessionProbeUiBridge()
+{
+    hs::RuntimeChannels channels;
+    hs::SessionProbe published;
+    published.phase = hs::SessionPhase::Paused;
+    published.skill_levels[1] = 2;
+    published.skill_loadout[0] = hs::SkillKind::BasicAttack;
+    published.skill_loadout[1] = hs::SkillKind::Count;
+    channels.PublishSessionProbe(published);
+    const auto session = channels.ReadSessionProbe();
+    Check(session.skill_levels[1] == 2 &&
+              session.skill_loadout[0] == hs::SkillKind::BasicAttack &&
+              session.skill_loadout[1] == hs::SkillKind::Count,
+          "session probe bridge preserves skills and loadout");
+}
+
 } // namespace
 
 int main()
@@ -550,6 +567,7 @@ int main()
         TestNamedPipeCommandRoundTrip();
         TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
+        TestSessionProbeUiBridge();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";
         return 0;

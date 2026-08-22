@@ -141,9 +141,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     // that would otherwise trigger the normal BGM selection below.
     audio.Play(MakeAudioEvent("audio.bgm.main_menu", ++ui_audio_sequence));
     window.SetUiClickHandler([&](Float2 cursor) {
-        SessionProbe session;
-        session.phase = static_cast<SessionPhase>(
-            channels.session_phase.load(std::memory_order_acquire));
+        const auto session = channels.ReadSessionProbe();
         PresentationUiState ui{
             static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire)),
             channels.collection_skill.load(std::memory_order_acquire),
@@ -917,6 +915,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 simulation.WriteReadModel(read_model);
                 const auto model = read_model.View();
                 const auto &probe = model.session;
+                channels.PublishSessionProbe(probe);
                 if (replaying && !config.replay_compare && tick.checksum !=
                                      replay.frames[replay_frame_index].expected_checksum)
                 {
