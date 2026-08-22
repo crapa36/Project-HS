@@ -1,8 +1,12 @@
 #include "content_cooker.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <cstdint>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -10,6 +14,83 @@
 
 namespace hs::content
 {
+
+[[noreturn]] void ThrowValidationError(std::string_view, std::string_view,
+                                       std::string_view);
+const Json &RequireMember(const Json &, std::string_view, std::string_view, std::string_view);
+const Json &RequireArray(const Json &, std::string_view, std::string_view, std::string_view);
+std::string RequireString(const Json &, std::string_view, std::string_view, std::string_view);
+void RequireCount(const Json &, std::string_view, std::string_view, std::size_t);
+
+void ValidateAudioWave(const std::filesystem::path &path, bool stereo,
+                      std::string_view json_path)
+{
+    std::ifstream stream(path, std::ios::binary);
+    std::array<std::uint8_t, 44> header{};
+    if (!stream.read(reinterpret_cast<char *>(header.data()), header.size()) ||
+        std::memcmp(header.data(), "RIFF", 4) != 0 ||
+        std::memcmp(header.data() + 8, "WAVE", 4) != 0 ||
+        std::memcmp(header.data() + 12, "fmt ", 4) != 0 ||
+        std::memcmp(header.data() + 36, "data", 4) != 0)
+        ThrowValidationError("audio_cues", json_path, "file is not a RIFF PCM WAV");
+    const auto u16 = [&](std::size_t offset) {
+        return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
+    };
+    const auto u32 = [&](std::size_t offset) {
+        return static_cast<std::uint32_t>(header[offset] | (header[offset + 1] << 8) |
+                                          (header[offset + 2] << 16) | (header[offset + 3] << 24));
+    };
+    const auto file_size = std::filesystem::file_size(path);
+    const auto data_size = u32(40);
+    if (u32(4) != file_size - 8 || 44u + data_size + (data_size & 1u) != file_size ||
+        u16(20) != 1 || u32(24) != 48000 || u16(34) != 24 ||
+        u16(22) != (stereo ? 2 : 1))
+        ThrowValidationError("audio_cues", json_path,
+                             "WAV must be 48kHz 24-bit PCM with the required channel count");
+}
+
+void ValidateAudioSources(const Json &audio)
+{
+    std::set<std::string, std::less<>> files_seen;
+    const auto &entries = RequireArray(audio, "audio_cues", "$", "entries");
+    constexpr std::size_t expected_cue_count = 107;
+    constexpr std::size_t expected_file_count = 379;
+    RequireCount(entries, "audio_cues", "$/entries", expected_cue_count);
+    const auto root = std::filesystem::path(HS_AUDIO_DIRECTORY);
+    for (std::size_t i = 0; i < entries.size(); ++i)
+    {
+        const auto path = "$/entries/" + std::to_string(i);
+        const auto &entry = entries[i];
+        const auto id = RequireString(entry, "audio_cues", path, "id");
+        if (RequireString(entry, "audio_cues", path, "encoding") != "PCM")
+            ThrowValidationError("audio_cues", path + "/encoding", "only PCM encoding is supported");
+        const auto &streaming = RequireMember(entry, "audio_cues", path, "streaming");
+        if (!streaming.is_boolean() || streaming.get<bool>())
+            ThrowValidationError("audio_cues", path + "/streaming", "streaming must be false");
+        const auto files = RequireArray(entry, "audio_cues", path, "files");
+        const auto category = id.starts_with("audio.bgm.") || id.starts_with("audio.ambience.");
+        for (std::size_t j = 0; j < files.size(); ++j)
+        {
+            if (!files[j].is_string() || files[j].get<std::string>().empty())
+                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
+                                     "expected non-empty file name");
+            const auto name = files[j].get<std::string>();
+            const auto relative = std::filesystem::path(name);
+            if (relative.has_root_name() || relative.has_root_directory() ||
+                std::ranges::any_of(relative, [](const auto &part) { return part == ".."; }) ||
+                relative.extension() != ".wav" || !files_seen.emplace(name).second)
+                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
+                                     "file name must be a unique safe relative WAV path");
+            const auto full = root / relative;
+            if (!std::filesystem::is_regular_file(full))
+                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
+                                     "referenced WAV file does not exist: " + full.string());
+            ValidateAudioWave(full, category, path + "/files/" + std::to_string(j));
+        }
+    }
+    if (files_seen.size() != expected_file_count)
+        ThrowValidationError("audio_cues", "$/entries", "expected exactly 379 unique referenced WAV files");
+}
 
 [[noreturn]] void ThrowValidationError(std::string_view file, std::string_view path,
                        std::string_view message)
@@ -302,7 +383,6 @@ void ValidateDocuments(const ContentSources &sources)
     RequireCount(relic_entries, "relics", "$/entries", 12);
     RequireCount(upgrade_groups, "upgrades", "$/groups", 9);
     RequireCount(material_entries, "materials", "$/entries", 11);
-    RequireCount(audio_entries, "audio_cues", "$/entries", 8);
     RequireCount(ui_entries, "ui_strings", "$/entries", 28);
 
     const auto character_ids = CollectIds(character_entries, "characters");
@@ -344,6 +424,7 @@ void ValidateDocuments(const ContentSources &sources)
             ThrowValidationError("particles", "$/effects", std::string("required particle effect is missing: ") + id);
     const auto relic_ids = CollectIds(relic_entries, "relics");
     const auto audio_ids = CollectIds(audio_entries, "audio_cues");
+    ValidateAudioSources(audio);
     const auto ui_ids = CollectIds(ui_entries, "ui_strings");
     static_cast<void>(character_ids);
     static_cast<void>(relic_ids);

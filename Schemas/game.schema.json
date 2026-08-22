@@ -839,16 +839,20 @@
     "audio_cue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "asset_id", "submix", "spatial", "preload", "streaming", "encoding", "priority"],
+      "required": ["id", "asset_id", "submix", "spatial", "preload", "streaming", "encoding", "priority", "files", "loop", "max_simultaneous", "minimum_retrigger_ms"],
       "properties": {
         "id": {"$ref": "#/$defs/stable_id"},
         "asset_id": {"$ref": "#/$defs/asset_id"},
         "submix": {"enum": ["BGM", "SFX", "UI"]},
         "spatial": {"type": "boolean"},
         "preload": {"type": "boolean"},
-        "streaming": {"type": "boolean"},
-        "encoding": {"enum": ["PCM", "ADPCM"]},
-        "priority": {"enum": ["UI", "BossTelegraph", "Player", "Enemy", "Other"]}
+        "streaming": {"const": false},
+        "encoding": {"const": "PCM"},
+        "priority": {"enum": ["UI", "BossTelegraph", "Player", "Enemy", "Other"]},
+        "files": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+\\.wav$"}},
+        "loop": {"type": "boolean"},
+        "max_simultaneous": {"type": "integer", "minimum": 1},
+        "minimum_retrigger_ms": {"type": "integer", "minimum": 0}
       }
     },
     "ui_strings_document": {

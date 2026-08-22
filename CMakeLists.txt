@@ -411,6 +411,7 @@ target_compile_definitions(
         HS_COOKED_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/Cooked"
         HS_SHADER_DIRECTORY="${HS_SHADER_DIRECTORY}"
         HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
+        HS_AUDIO_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Audio"
         HS_VFX_TEXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX"
         HS_SCHEMA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
@@ -421,6 +422,9 @@ hs_configure_target(hs_content)
 
 file(GLOB HS_GAME_DATA_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData/*.json"
+)
+file(GLOB HS_AUDIO_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Audio/*.wav"
 )
 set(
     HS_ARCHER_ASSET_SOURCES
@@ -441,7 +445,7 @@ list(APPEND HS_ARCHER_ASSET_SOURCES ${HS_ARCHER_TEXTURE_SOURCES})
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     COMMAND "$<TARGET_FILE:hs_content>" --cook
-    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
+    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
@@ -481,6 +485,7 @@ target_compile_definitions(
     hs_content_tools
     PRIVATE
         HS_GAME_DATA_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData"
+        HS_AUDIO_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Audio"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
         HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
         HS_CONTENT_EXECUTABLE="$<TARGET_FILE:hs_content>"
@@ -674,6 +679,12 @@ install(
     DESTINATION Cooked
     COMPONENT Runtime
     FILES_MATCHING PATTERN "archer_*.dds"
+)
+install(
+    DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Cooked/Audio/"
+    DESTINATION Cooked/Audio
+    COMPONENT Runtime
+    FILES_MATCHING PATTERN "*.json" PATTERN "*.wav"
 )
 endif()
 install(FILES ThirdPartyNotices.txt DESTINATION . COMPONENT Runtime)

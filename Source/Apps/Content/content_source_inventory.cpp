@@ -6,6 +6,7 @@
 #include <fstream>
 #include <set>
 #include <stdexcept>
+#include <vector>
 
 namespace hs::content
 {
@@ -82,7 +83,7 @@ ContentSourceInventory LoadContentSourceInventory()
         sources.all_source_bytes.push_back('\0');
         sources.all_source_bytes.append(text);
         sources.all_source_bytes.push_back('\0');
-        if (name != "particles")
+        if (name != "particles" && name != "audio_cues")
         {
             sources.gameplay_source_bytes.append(name);
             sources.gameplay_source_bytes.push_back('\0');
@@ -111,6 +112,21 @@ ContentSourceInventory LoadContentSourceInventory()
     append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
     append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
     append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
+
+    std::vector<std::filesystem::path> audio_files;
+    for (const auto &entry : std::filesystem::directory_iterator(HS_AUDIO_DIRECTORY))
+        if (entry.is_regular_file() && entry.path().extension() == ".wav")
+            audio_files.push_back(entry.path());
+    std::ranges::sort(audio_files);
+    for (const auto &path : audio_files)
+    {
+        const auto bytes = ReadRequiredText(path);
+        sources.all_source_bytes.append("audio/");
+        sources.all_source_bytes.append(path.filename().string());
+        sources.all_source_bytes.push_back('\0');
+        sources.all_source_bytes.append(bytes);
+        sources.all_source_bytes.push_back('\0');
+    }
     return sources;
 }
 

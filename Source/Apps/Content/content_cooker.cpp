@@ -20,6 +20,29 @@
 namespace hs::content
 {
 
+void ClearCookedAudioDirectory(const std::filesystem::path &output)
+{
+    const auto audio_output = output / "Audio";
+    if (audio_output.filename() != "Audio" || audio_output.parent_path() != output ||
+        output.empty())
+    {
+        throw std::runtime_error("refusing to clean an unsafe Cooked/Audio path");
+    }
+
+    std::error_code filesystem_error;
+    std::filesystem::create_directories(audio_output, filesystem_error);
+    if (filesystem_error)
+        throw std::runtime_error("Cooked/Audio: " + filesystem_error.message());
+    for (const auto &entry : std::filesystem::directory_iterator(audio_output, filesystem_error))
+    {
+        if (filesystem_error)
+            throw std::runtime_error("Cooked/Audio: " + filesystem_error.message());
+        std::filesystem::remove_all(entry.path(), filesystem_error);
+        if (filesystem_error)
+            throw std::runtime_error("Cooked/Audio cleanup: " + filesystem_error.message());
+    }
+}
+
 bool AtomicWrite(const std::filesystem::path &path, std::span<const std::byte> bytes,
                  std::string &error_message)
 {
@@ -95,6 +118,27 @@ int RunContent(std::string_view mode)
         {
             throw std::runtime_error(output.string() + ": " + filesystem_error.message());
         }
+
+        const auto audio_output = output / "Audio";
+        ClearCookedAudioDirectory(output);
+        const auto audio_source = std::filesystem::path(HS_AUDIO_DIRECTORY);
+        const auto &audio_document = sources.documents.at("audio_cues");
+        const auto audio_catalog = sources.inventory.document_text[0];
+        {
+            std::ofstream stream(audio_output / "audio_cues.json", std::ios::binary | std::ios::trunc);
+            if (!stream.write(audio_catalog.data(), static_cast<std::streamsize>(audio_catalog.size())))
+                throw std::runtime_error("Cooked/Audio/audio_cues.json: write failed");
+        }
+        for (const auto &entry : audio_document.at("entries"))
+            for (const auto &file : entry.at("files"))
+            {
+                const auto name = file.get<std::string>();
+                std::filesystem::copy_file(audio_source / name, audio_output / name,
+                                           std::filesystem::copy_options::overwrite_existing,
+                                           filesystem_error);
+                if (filesystem_error)
+                    throw std::runtime_error("Cooked/Audio/" + name + ": " + filesystem_error.message());
+            }
 
         std::string error_message;
         if (!WriteCookedTable(output / "simulation_rules.hsbin", data.simulation_rules,
@@ -178,6 +222,7 @@ int RunContent(std::string_view mode)
 
         std::ofstream manifest(output / "manifest.txt", std::ios::trunc);
         manifest << "fbx_sdk=2020.3.7-vs2022\n"
+                 << "audio_catalog=Audio/audio_cues.json\n"
                  << "simulation_rules=simulation_rules.hsbin\n"
                  << "presentation_catalog=presentation_catalog.hsbin\n"
                  << "particle_effects=particle_effects.hsbin\n"
@@ -193,6 +238,9 @@ int RunContent(std::string_view mode)
         {
             manifest << "shader=" << shader << '\n';
         }
+        for (const auto &entry : audio_document.at("entries"))
+            for (const auto &file : entry.at("files"))
+                manifest << "audio=Audio/" << file.get<std::string>() << '\n';
         if (!manifest.good())
         {
             throw std::runtime_error("manifest.txt: write failed");

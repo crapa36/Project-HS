@@ -18,6 +18,10 @@
 #define HS_CHARACTER_ANIMATION_DIRECTORY "ContentSource/Animations/Characters/Archer"
 #endif
 
+#ifndef HS_AUDIO_DIRECTORY
+#define HS_AUDIO_DIRECTORY "ContentSource/Audio"
+#endif
+
 namespace hs::content
 {
 
