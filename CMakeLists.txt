@@ -563,7 +563,16 @@ if(HS_BUILD_TESTS)
     endif()
 
     if(HS_BUILD_CONTENT_TOOLS)
-    add_executable(hs_gameplay_tests Tests/gameplay_tests.cpp)
+    add_executable(
+        hs_gameplay_tests
+        Tests/gameplay_tests.cpp
+        Tests/gameplay_test_support.cpp
+        Tests/gameplay_content_tests.cpp
+        Tests/gameplay_combat_tests.cpp
+        Tests/gameplay_progression_tests.cpp
+        Tests/gameplay_presentation_tests.cpp
+        Tests/gameplay_determinism_tests.cpp
+    )
     target_link_libraries(hs_gameplay_tests PRIVATE hs_core hs_gameplay hs_presentation)
     hs_configure_target(hs_gameplay_tests)
     add_dependencies(hs_gameplay_tests hs_cooked_content)
