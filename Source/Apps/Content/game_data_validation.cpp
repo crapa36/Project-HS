@@ -196,6 +196,24 @@ void RequireCount(const Json &array, std::string_view file, std::string_view pat
     }
 }
 
+template <typename Expected>
+void RequireExactParameterKeys(const Json &entry, std::string_view file,
+                               std::string_view path, const Expected &expected)
+{
+    const auto &parameters = RequireArray(entry, file, path, "parameters");
+    std::set<std::string, std::less<>> keys;
+    for (const auto key : expected) keys.emplace(key);
+    for (std::size_t i = 0; i < parameters.size(); ++i)
+    {
+        const auto parameter_path = std::string(path) + "/parameters/" + std::to_string(i);
+        const auto key = RequireString(parameters[i], file, parameter_path, "key");
+        RequireString(parameters[i], file, parameter_path, "unit");
+        RequireMember(parameters[i], file, parameter_path, "value");
+        if (!keys.erase(key)) ThrowValidationError(file, parameter_path + "/key", "unexpected or duplicate parameter key");
+    }
+    if (!keys.empty()) ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" + *keys.begin() + "'");
+}
+
 bool IsStableId(std::string_view value)
 {
     return !value.empty() && std::ranges::all_of(value, [](const char character) {
@@ -330,7 +348,7 @@ void ValidateDocuments(const ContentSources &sources)
                      {"$schema", "schema_version", "category", "entries"});
     RequireExactKeys(enemies, "enemies",
                      {"$schema", "schema_version", "category", "spawn_scaling",
-                      "common_rules", "entries"});
+                      "common", "common_rules", "entries"});
     RequireExactKeys(level, "level",
                      {"$schema", "schema_version", "category", "entries"});
     RequireExactKeys(materials, "materials",
@@ -435,6 +453,10 @@ void ValidateDocuments(const ContentSources &sources)
         "skill.charged_shot",   "skill.explosive_arrow", "skill.ricochet_arrow",
         "skill.arrow_rain",     "skill.trap",          "skill.retreat_shot",
     };
+    constexpr std::array<std::string_view, 9> expected_skill_logics = {
+        "basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles",
+        "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet",
+        "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
     constexpr std::array<std::string_view, 3> expected_enemies = {
         "enemy.melee", "enemy.ranged", "enemy.suicide"};
     constexpr std::array<std::string_view, 3> expected_bosses = {
@@ -448,6 +470,8 @@ void ValidateDocuments(const ContentSources &sources)
             ThrowValidationError("skills", "$/entries/" + std::to_string(index) + "/id",
                  "skill order is part of cooked ABI");
         }
+        if (RequireString(skill_entries[index], "skills", "$/entries/" + std::to_string(index), "logic_id") != expected_skill_logics[index])
+            ThrowValidationError("skills", "$/entries/" + std::to_string(index) + "/logic_id", "skill logic order is part of cooked ABI");
         RequireReference(material_ids,
                          RequireString(skill_entries[index], "skills",
                                        "$/entries/" + std::to_string(index), "material_id"),
@@ -456,6 +480,17 @@ void ValidateDocuments(const ContentSources &sources)
                          RequireString(skill_entries[index], "skills",
                                        "$/entries/" + std::to_string(index), "particle_id"),
                          "skills", "$/entries/" + std::to_string(index) + "/particle_id");
+        const std::array<std::set<std::string, std::less<>>, 9> parameter_keys{{
+            {"damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "starting_level", "maximum_level", "selected_upgrades_per_session"},
+            {"cooldown", "damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "damage_decay_per_pierce", "minimum_damage_fraction", "maximum_hits_per_target"},
+            {"cooldown", "fan_angle", "projectile_count", "damage_multiplier_per_arrow", "projectile_speed", "range", "collision_radius", "pierce_per_arrow", "maximum_hits_per_target"},
+            {"maximum_charge_time", "minimum_damage_multiplier", "maximum_damage_multiplier", "minimum_range", "maximum_range", "minimum_collision_radius", "maximum_collision_radius", "projectile_speed", "pierce", "movement_speed_multiplier_while_charging", "cooldown"},
+            {"cooldown", "projectile_speed", "range", "collision_radius", "explosion_radius", "explosion_damage_multiplier"},
+            {"cooldown", "damage_multiplier", "projectile_speed", "collision_radius", "initial_range", "ricochet_search_radius", "maximum_ricochets"},
+            {"target_range", "cooldown", "activation_delay", "radius", "duration", "tick_interval", "damage_multiplier_per_tick", "total_damage_ticks"},
+            {"forward_roll_distance", "forward_roll_duration", "cooldown", "activation_delay", "active_duration", "detection_radius", "explosion_radius", "damage_multiplier", "slow_fraction", "slow_duration"},
+            {"forced_move_duration", "forced_move_distance", "damage_multiplier", "cooldown", "projectile_speed", "collision_radius", "projectile_range", "pierce"}}};
+        RequireExactParameterKeys(skill_entries[index], "skills", "$/entries/" + std::to_string(index), parameter_keys[index]);
     }
     for (std::size_t index = 0; index < expected_enemies.size(); ++index)
     {

@@ -56,7 +56,9 @@
           {"source_id": "boss.final_15m", "xp": 0}
         ],
         "next_level_formula": "12 + floor(3.5 * (L - 1) + 0.75 * (L - 1)^2)",
+        "required_xp": {"base": 12, "linear": 3.5, "quadratic": 0.75},
         "level_cap": null,
+        "pickup": {"speed_mps": 15, "collision_radius_m": 0.6},
         "pickup_magnet_tracking": true,
         "utility_pickup_base_chance": 0.01,
         "utility_pickup_miss_increment": 0.001,

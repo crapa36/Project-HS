@@ -264,12 +264,13 @@
     "enemies_document": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["$schema", "schema_version", "category", "spawn_scaling", "common_rules", "entries"],
+      "required": ["$schema", "schema_version", "category", "spawn_scaling", "common", "common_rules", "entries"],
       "properties": {
         "$schema": {"const": "../../Schemas/game.schema.json"},
         "schema_version": {"const": 1},
         "category": {"const": "enemies"},
         "spawn_scaling": {"$ref": "#/$defs/spawn_scaling"},
+        "common": {"$ref": "#/$defs/enemy_common"},
         "common_rules": {"$ref": "#/$defs/string_array"},
         "entries": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/enemy"}}
       }
@@ -286,6 +287,14 @@
         "damage_fraction_per_completed_minute": {"type": "number", "minimum": 0},
         "updates_existing_enemies": {"type": "boolean"},
         "applies_to_bosses": {"type": "boolean"}
+      }
+    },
+    "enemy_common": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collision_radius"],
+      "properties": {
+        "collision_radius": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "enemy": {
@@ -320,13 +329,17 @@
     "boss_common": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spawn_warning_seconds", "spawn_location", "preferred_pattern_weight", "other_pattern_weight", "maximum_same_pattern_repeats", "body_contact_damage", "time_scaling", "affected_by_damage", "affected_by_bleed", "affected_by_burn", "affected_by_slow", "immune_to_pull", "immune_to_push", "immune_to_alignment_move"],
+      "required": ["spawn_warning_seconds", "spawn_location", "preferred_pattern_weight", "other_pattern_weight", "maximum_same_pattern_repeats", "collision_radius", "initial_pattern_delay_seconds", "projectile_range", "projectile_collision_radius", "body_contact_damage", "time_scaling", "affected_by_damage", "affected_by_bleed", "affected_by_burn", "affected_by_slow", "immune_to_pull", "immune_to_push", "immune_to_alignment_move"],
       "properties": {
         "spawn_warning_seconds": {"type": "number", "minimum": 0},
         "spawn_location": {"type": "string"},
         "preferred_pattern_weight": {"type": "integer", "minimum": 1},
         "other_pattern_weight": {"type": "integer", "minimum": 1},
         "maximum_same_pattern_repeats": {"type": "integer", "minimum": 1},
+        "collision_radius": {"type": "number", "exclusiveMinimum": 0},
+        "initial_pattern_delay_seconds": {"type": "number", "minimum": 0},
+        "projectile_range": {"type": "number", "minimum": 0},
+        "projectile_collision_radius": {"type": "number", "exclusiveMinimum": 0},
         "body_contact_damage": {"type": "boolean"},
         "time_scaling": {"type": "boolean"},
         "affected_by_damage": {"type": "boolean"},
@@ -341,7 +354,7 @@
     "boss": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "display_name", "spawn_growth_seconds", "hp", "xp_reward", "target_kill_seconds", "mesh_asset_id", "material_id", "single_pattern_recovery_seconds", "phase2_pattern_interval_seconds", "phase2_cycle_recovery_seconds", "preference_rule", "patterns", "phase_transition", "reward"],
+      "required": ["id", "display_name", "spawn_growth_seconds", "hp", "xp_reward", "target_kill_seconds", "movement_speed_mps", "mesh_asset_id", "material_id", "single_pattern_recovery_seconds", "phase2_pattern_interval_seconds", "phase2_cycle_recovery_seconds", "preference_rule", "preference_thresholds", "patterns", "phase_transition", "reward"],
       "properties": {
         "id": {"$ref": "#/$defs/stable_id"},
         "display_name": {"type": "string", "minLength": 1},
@@ -349,12 +362,14 @@
         "hp": {"type": "integer", "minimum": 1},
         "xp_reward": {"type": "integer", "minimum": 0},
         "target_kill_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "movement_speed_mps": {"type": "number", "exclusiveMinimum": 0},
         "mesh_asset_id": {"$ref": "#/$defs/asset_id"},
         "material_id": {"$ref": "#/$defs/stable_id"},
         "single_pattern_recovery_seconds": {"type": ["number", "null"], "minimum": 0},
         "phase2_pattern_interval_seconds": {"type": ["number", "null"], "minimum": 0},
         "phase2_cycle_recovery_seconds": {"type": ["number", "null"], "minimum": 0},
         "preference_rule": {"type": "string", "minLength": 1},
+        "preference_thresholds": {"$ref": "#/$defs/boss_preference_thresholds"},
         "patterns": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/boss_pattern"}},
         "phase_transition": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/boss_phase_transition"}]},
         "reward": {"$ref": "#/$defs/boss_reward"}
@@ -515,7 +530,7 @@
     "combat_rules": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["raw_damage_formula", "final_damage_rounding", "minimum_final_damage", "cooldown_formula", "minimum_cooldown_seconds", "skill_cooldown_upgrade_multiplier", "critical_hits", "armor", "hit_invulnerability", "player_hit_knockback", "maximum_basic_attacks_per_tick"],
+      "required": ["raw_damage_formula", "final_damage_rounding", "minimum_final_damage", "cooldown_formula", "minimum_cooldown_seconds", "skill_cooldown_upgrade_multiplier", "critical_hits", "armor", "hit_invulnerability", "player_hit_knockback", "maximum_basic_attacks_per_tick", "first_tick_delay_seconds", "player_collision_radius"],
       "properties": {
         "raw_damage_formula": {"type": "string"},
         "final_damage_rounding": {"type": "string"},
@@ -527,7 +542,9 @@
         "armor": {"type": "boolean"},
         "hit_invulnerability": {"type": "boolean"},
         "player_hit_knockback": {"type": "boolean"},
-        "maximum_basic_attacks_per_tick": {"type": "integer", "minimum": 1}
+        "maximum_basic_attacks_per_tick": {"type": "integer", "minimum": 1},
+        "first_tick_delay_seconds": {"type": "number", "minimum": 0},
+        "player_collision_radius": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "status": {
@@ -635,11 +652,13 @@
     "experience": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rewards", "next_level_formula", "level_cap", "pickup_magnet_tracking", "utility_pickup_base_chance", "utility_pickup_miss_increment", "heal_pickup_chance_multiplier", "magnet_pickup_chance_multiplier", "target_level_at_15_minutes", "target_level_choices_at_15_minutes", "forced_level_correction"],
+      "required": ["rewards", "next_level_formula", "required_xp", "level_cap", "pickup", "pickup_magnet_tracking", "utility_pickup_base_chance", "utility_pickup_miss_increment", "heal_pickup_chance_multiplier", "magnet_pickup_chance_multiplier", "target_level_at_15_minutes", "target_level_choices_at_15_minutes", "forced_level_correction"],
       "properties": {
         "rewards": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/xp_reward"}},
         "next_level_formula": {"type": "string", "minLength": 1},
+        "required_xp": {"$ref": "#/$defs/required_xp"},
         "level_cap": {"type": "null"},
+        "pickup": {"$ref": "#/$defs/xp_pickup"},
         "pickup_magnet_tracking": {"type": "boolean"},
         "utility_pickup_base_chance": {"type": "number", "minimum": 0, "maximum": 1},
         "utility_pickup_miss_increment": {"type": "number", "minimum": 0, "maximum": 1},
@@ -648,6 +667,36 @@
         "target_level_at_15_minutes": {"type": "integer", "minimum": 1},
         "target_level_choices_at_15_minutes": {"type": "integer", "minimum": 0},
         "forced_level_correction": {"type": "boolean"}
+      }
+    },
+    "boss_preference_thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["near_m", "far_m", "phase_two_near_m", "phase_two_far_m"],
+      "properties": {
+        "near_m": {"type": "number", "minimum": 0},
+        "far_m": {"type": "number", "minimum": 0},
+        "phase_two_near_m": {"type": "number", "minimum": 0},
+        "phase_two_far_m": {"type": "number", "minimum": 0}
+      }
+    },
+    "required_xp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "linear", "quadratic"],
+      "properties": {
+        "base": {"type": "number", "minimum": 0},
+        "linear": {"type": "number", "minimum": 0},
+        "quadratic": {"type": "number", "minimum": 0}
+      }
+    },
+    "xp_pickup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["speed_mps", "collision_radius_m"],
+      "properties": {
+        "speed_mps": {"type": "number", "exclusiveMinimum": 0},
+        "collision_radius_m": {"type": "number", "exclusiveMinimum": 0}
       }
     },
     "xp_reward": {

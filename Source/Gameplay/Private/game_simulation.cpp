@@ -28,13 +28,7 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
     impl_->config = config;
     impl_->rules = rules;
     impl_->session_phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
-    impl_->player.health = impl_->player.max_health = rules.player_health;
-    impl_->player.attack = rules.player_attack;
-    impl_->player.attack_speed = rules.player_attack_speed;
-    impl_->player.move_speed = rules.player_move_speed;
-    impl_->player.magnet_radius = rules.player_magnet_radius;
-    impl_->player.skill_levels[0] = 1;
-    impl_->relic_rules.Rebuild(impl_->player.relic_mask);
+    impl_->InitializePlayerState();
     impl_->initialized = true;
     impl_->checksum = impl_->CalculateChecksum();
     return Result::Success();
@@ -82,7 +76,7 @@ SessionProbe GameSimulation::GetSessionProbe() const noexcept
     probe.phase = impl_->session_phase;
     probe.level = impl_->player.level;
     probe.experience = impl_->player.experience;
-    probe.experience_to_next = ExperienceForLevel(impl_->player.level);
+    probe.experience_to_next = ExperienceForLevel(impl_->rules, impl_->player.level);
     probe.health = impl_->player.health;
     probe.max_health = impl_->player.max_health;
     probe.player_position = impl_->player.position;
@@ -178,7 +172,8 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         }
         if (impl_->player.skill_levels[static_cast<std::size_t>(skill)] == 0)
         {
-            impl_->player.skill_levels[static_cast<std::size_t>(skill)] = 1;
+            impl_->player.skill_levels[static_cast<std::size_t>(skill)] =
+                impl_->rules.skills[static_cast<std::size_t>(skill)].starting_level;
             const auto slot = std::ranges::find(impl_->player.loadout, SkillKind::Count);
             if (slot != impl_->player.loadout.end()) *slot = skill;
         }
@@ -192,7 +187,8 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         }
         impl_->player.upgrades[command.value] |= 1u << command.secondary;
         impl_->player.skill_levels[command.value] = static_cast<std::uint8_t>(
-            1 + std::popcount(impl_->player.upgrades[command.value]));
+            impl_->rules.skills[command.value].starting_level +
+            std::popcount(impl_->player.upgrades[command.value]));
         break;
     case DebugCommandKind::GrantRelic:
         if (command.value >= kRelicCount)
@@ -226,7 +222,8 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
         impl_->AssignStat(static_cast<StatKind>(command.value % kStatCount));
         break;
     case DebugCommandKind::SetStat:
-        if (command.value >= kStatCount || command.secondary > 10)
+        if (command.value >= kStatCount ||
+            command.secondary > impl_->rules.stats.maximum_points_per_stat)
         {
             return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                    "Debug stat or level is invalid.");
@@ -235,8 +232,10 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
             static_cast<std::uint8_t>(command.secondary);
         if (command.value == static_cast<std::uint64_t>(StatKind::MaxHealth))
         {
+            const auto &allocation = impl_->rules.stats.allocations[command.value];
             impl_->player.max_health = RoundDamage(
-                100.0f * (1.0f + 0.08f * command.secondary));
+                impl_->rules.stats.base_maximum_hp *
+                (1.0f + allocation.amount_per_point * command.secondary));
             impl_->player.health = impl_->player.max_health;
         }
         break;
@@ -379,23 +378,33 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     }
     for (std::size_t index = 0; index < model.waves.size(); ++index)
         model.waves[index] = {
-            static_cast<Tick>(impl_->rules.waves[index].minute) * Seconds(60.0f),
+            impl_->rules.waves[index].start_tick,
             impl_->rules.waves[index].duration_ticks};
     if (impl_->player.charging &&
         impl_->player.charging_skill == SkillKind::ChargedShot)
     {
+        const auto &definition = impl_->rules.skills[
+            static_cast<std::size_t>(SkillKind::ChargedShot)];
+        const auto &upgrades = impl_->rules.upgrades.charged_shot;
         const auto mask = impl_->player.upgrades[
             static_cast<std::size_t>(SkillKind::ChargedShot)];
-        const auto maximum_ticks = HasUpgrade(mask, 1) ? Seconds(1.4f) : Seconds(1.0f);
+        const auto maximum_ticks = HasUpgrade(mask, 1)
+                                       ? upgrades.extended_full_charge_explosion
+                                             .maximum_charge_time_ticks
+                                       : definition.maximum_charge_time_ticks;
         auto elapsed = std::min(impl_->tick - impl_->player.charge_start, maximum_ticks);
         if (HasUpgrade(mask, 2))
-            elapsed = std::min(maximum_ticks, static_cast<Tick>(elapsed / 0.65f));
+            elapsed = std::min(
+                maximum_ticks,
+                static_cast<Tick>(elapsed /
+                                  upgrades.faster_charge.charge_time_multiplier));
         const auto progress = static_cast<float>(elapsed) /
                               static_cast<float>(maximum_ticks);
-        model.charge_range = std::lerp(
-            4.2f, model.skills[static_cast<std::size_t>(SkillKind::ChargedShot)]
-                      .effective_range, progress);
-        model.charge_radius = std::lerp(0.4f, 0.88f, progress);
+        model.charge_range = std::lerp(definition.minimum_range,
+                                       definition.maximum_range, progress);
+        model.charge_radius = std::lerp(definition.minimum_collision_radius,
+                                        definition.maximum_collision_radius,
+                                        progress);
     }
     model.summary = {impl_->balance.direct_damage,
                      impl_->balance.derived_damage,

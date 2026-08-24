@@ -29,8 +29,8 @@
           "id": "stat.movement_speed",
           "display_name": "이동속도",
           "operation": "base_fraction_per_point",
-          "amount_per_point": 0.4,
-          "formula": "5 * (1 + 0.4 * points)",
+          "amount_per_point": 0.1,
+          "formula": "5 * (1 + 0.1 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "movement_speed"
         },
@@ -48,7 +48,7 @@
           "display_name": "공격속도",
           "operation": "base_fraction_per_point",
           "amount_per_point": 0.2,
-          "formula": "1.2 * (1 + 0.2 * points)",
+          "formula": "0.8 * (1 + 0.2 * points)",
           "immediate_current_hp_restore_per_point": 0,
           "applies_to": "basic_attack_only"
         },
@@ -77,12 +77,14 @@
         "minimum_final_damage": 1,
         "cooldown_formula": "base_cooldown * (1 - global_reduction) * skill_multiplier",
         "minimum_cooldown_seconds": 0.25,
-        "skill_cooldown_upgrade_multiplier": 0.75,
-        "critical_hits": false,
-        "armor": false,
-        "hit_invulnerability": false,
-        "player_hit_knockback": false,
-        "maximum_basic_attacks_per_tick": 1
+      "skill_cooldown_upgrade_multiplier": 0.75,
+      "critical_hits": false,
+      "armor": false,
+      "hit_invulnerability": false,
+      "player_hit_knockback": false,
+      "maximum_basic_attacks_per_tick": 1,
+      "first_tick_delay_seconds": 0.1,
+      "player_collision_radius": 0.4
       },
       "statuses": [
         {

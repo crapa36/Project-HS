@@ -67,6 +67,9 @@
         {"key": "projectile_speed", "value": 30, "unit": "meters_per_second"},
         {"key": "range", "value": 24, "unit": "meters"},
         {"key": "collision_radius", "value": 0.6, "unit": "meters"},
+        {"key": "pierce", "value": 255, "unit": "count"},
+        {"key": "damage_decay_per_pierce", "value": 0.15, "unit": "fraction"},
+        {"key": "minimum_damage_fraction", "value": 0.55, "unit": "fraction"},
         {"key": "maximum_hits_per_target", "value": 1, "unit": "count"}
       ],
       "rules": [
@@ -90,6 +93,7 @@
         {"key": "damage_multiplier_per_arrow", "value": 1.7, "unit": "multiplier"},
         {"key": "projectile_speed", "value": 25, "unit": "meters_per_second"},
         {"key": "range", "value": 16, "unit": "meters"},
+        {"key": "collision_radius", "value": 0.36, "unit": "meters"},
         {"key": "pierce_per_arrow", "value": 1, "unit": "count"},
         {"key": "maximum_hits_per_target", "value": 2, "unit": "count"}
       ],
@@ -106,8 +110,8 @@
       "particle_id": "particle.skill.charged_shot",
       "parameters": [
         {"key": "maximum_charge_time", "value": 1, "unit": "seconds"},
-        {"key": "minimum_damage_multiplier", "value": 10, "unit": "multiplier"},
-        {"key": "maximum_damage_multiplier", "value": 23, "unit": "multiplier"},
+        {"key": "minimum_damage_multiplier", "value": 2, "unit": "multiplier"},
+        {"key": "maximum_damage_multiplier", "value": 5, "unit": "multiplier"},
         {"key": "minimum_range", "value": 4.2, "unit": "meters"},
         {"key": "maximum_range", "value": 16.8, "unit": "meters"},
         {"key": "minimum_collision_radius", "value": 0.4, "unit": "meters"},
@@ -139,6 +143,7 @@
         {"key": "cooldown", "value": 6.5, "unit": "seconds"},
         {"key": "projectile_speed", "value": 22, "unit": "meters_per_second"},
         {"key": "range", "value": 18, "unit": "meters"},
+        {"key": "collision_radius", "value": 0.5, "unit": "meters"},
         {"key": "explosion_radius", "value": 3, "unit": "meters"},
         {"key": "explosion_damage_multiplier", "value": 2.8, "unit": "multiplier"}
       ],
@@ -156,6 +161,8 @@
       "parameters": [
         {"key": "cooldown", "value": 6, "unit": "seconds"},
         {"key": "damage_multiplier", "value": 0.8, "unit": "multiplier"},
+        {"key": "projectile_speed", "value": 28, "unit": "meters_per_second"},
+        {"key": "collision_radius", "value": 0.44, "unit": "meters"},
         {"key": "initial_range", "value": 18, "unit": "meters"},
         {"key": "ricochet_search_radius", "value": 6, "unit": "meters"},
         {"key": "maximum_ricochets", "value": 5, "unit": "count"}
@@ -224,6 +231,8 @@
         {"key": "forced_move_distance", "value": 5, "unit": "meters"},
         {"key": "damage_multiplier", "value": 3.5, "unit": "multiplier"},
         {"key": "cooldown", "value": 7, "unit": "seconds"},
+        {"key": "projectile_speed", "value": 32, "unit": "meters_per_second"},
+        {"key": "collision_radius", "value": 0.44, "unit": "meters"},
         {"key": "projectile_range", "value": 16, "unit": "meters"},
         {"key": "pierce", "value": 3, "unit": "count"}
       ],

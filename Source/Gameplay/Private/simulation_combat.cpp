@@ -7,15 +7,16 @@ using namespace gameplay_detail;
 
 float GameSimulation::SimulationWorld::EffectiveAttack() const noexcept
 {
-    return rules.player_attack *
-           (1.0f + 0.06f * player.stats[static_cast<std::size_t>(StatKind::AttackPower)]);
+    const auto index = static_cast<std::size_t>(StatKind::AttackPower);
+    return rules.stats.base_attack_power *
+           (1.0f + rules.stats.allocations[index].amount_per_point * player.stats[index]);
 }
 
 float GameSimulation::SimulationWorld::EffectiveAttackSpeed() const noexcept
 {
-    return rules.player_attack_speed *
-           (1.0f + kAttackSpeedPerPoint *
-                       player.stats[static_cast<std::size_t>(StatKind::AttackSpeed)]);
+    const auto index = static_cast<std::size_t>(StatKind::AttackSpeed);
+    return rules.stats.base_basic_attack_rate_per_second *
+           (1.0f + rules.stats.allocations[index].amount_per_point * player.stats[index]);
 }
 
 void GameSimulation::SimulationWorld::RecordUpgradeEffect(SkillKind skill, std::uint8_t upgrade,
@@ -102,8 +103,9 @@ void GameSimulation::SimulationWorld::QueueEnemyDisplacement(
 
 float GameSimulation::SimulationWorld::EffectiveMagnetRadius() const noexcept
 {
-    return rules.player_magnet_radius +
-           0.4f * player.stats[static_cast<std::size_t>(StatKind::MagnetRadius)];
+    const auto index = static_cast<std::size_t>(StatKind::MagnetRadius);
+    return rules.stats.base_magnet_radius_m +
+           rules.stats.allocations[index].amount_per_point * player.stats[index];
 }
 
 std::size_t GameSimulation::SimulationWorld::EnemyTelemetryIndex(const EnemyActor &enemy) noexcept
@@ -116,16 +118,24 @@ Tick GameSimulation::SimulationWorld::EffectiveCooldownTicks(SkillKind skill) co
 {
     const auto index = static_cast<std::size_t>(skill);
     auto ticks = static_cast<float>(rules.skills[index].cooldown_ticks);
-    const auto reduction =
-        0.03f * player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
+    const auto reduction_index = static_cast<std::size_t>(StatKind::CooldownReduction);
+    const auto reduction = rules.stats.allocations[reduction_index].amount_per_point *
+                           player.stats[reduction_index];
     ticks *= 1.0f - reduction;
-    if ((skill == SkillKind::PiercingShot || skill == SkillKind::ExplosiveArrow ||
-         skill == SkillKind::RicochetArrow) &&
-        HasUpgrade(player.upgrades[index], 8))
+    if (HasUpgrade(player.upgrades[index], 8))
     {
-        ticks *= skill == SkillKind::RicochetArrow ? 0.85f : 0.75f;
+        const auto multiplier =
+            skill == SkillKind::PiercingShot
+                ? rules.upgrades.piercing_shot.cooldown_multiplier.cooldown_multiplier
+                : skill == SkillKind::ExplosiveArrow
+                      ? rules.upgrades.explosive_arrow.cooldown_multiplier.cooldown_multiplier
+                      : skill == SkillKind::RicochetArrow
+                            ? rules.upgrades.ricochet_arrow.cooldown_multiplier.cooldown_multiplier
+                            : 1.0f;
+        ticks *= multiplier;
     }
-    return std::max<Tick>(15, static_cast<Tick>(std::llround(ticks)));
+    return std::max<Tick>(rules.stats.combat.minimum_cooldown_ticks,
+                          static_cast<Tick>(std::llround(ticks)));
 }
 
 EnemyActor *GameSimulation::SimulationWorld::FindEnemy(std::uint64_t id) noexcept
@@ -192,10 +202,16 @@ ProjectileActor *GameSimulation::SimulationWorld::FireProjectile(SkillKind skill
         normalized, player_owned ? projectile_speed
                                  : rules.enemies[static_cast<std::size_t>(
                                        EnemyKind::Ranged)].projectile_speed);
-    projectile.remaining_range = player_owned ? definition.range : 18.0f;
-    projectile.radius = player_owned ? definition.collision_radius : 0.25f;
-    projectile.damage = player_owned ? RoundDamage(EffectiveAttack() * coefficient)
-                                     : RoundDamage(coefficient);
+    projectile.remaining_range = player_owned
+                                     ? definition.range
+                                     : rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)]
+                                           .projectile_range;
+    projectile.radius = player_owned
+                             ? definition.collision_radius
+                             : rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)]
+                                   .ranged_projectile_radius;
+    projectile.damage = player_owned ? RoundFinalDamage(EffectiveAttack() * coefficient, rules)
+                                     : RoundFinalDamage(coefficient, rules);
     projectile.skill = skill;
     projectile.upgrade_mask = applied_upgrade_mask;
     projectile.origin = origin;
@@ -216,11 +232,11 @@ ProjectileActor *GameSimulation::SimulationWorld::FireProjectile(SkillKind skill
     }
     if (skill == SkillKind::RicochetArrow && full_skill_effect)
     {
-        projectile.bounce_remaining = 5;
+        projectile.bounce_remaining = definition.pierce_count;
     }
     if (skill == SkillKind::ExplosiveArrow && full_skill_effect)
     {
-        projectile.explosion_radius = 3.0f;
+        projectile.explosion_radius = definition.area_radius;
         projectile.explosion_damage = projectile.damage;
     }
     auto &storage = pipeline_phase == SimulationPhaseId::CastAttack
@@ -275,7 +291,7 @@ AreaActor *GameSimulation::SimulationWorld::SpawnArea(AreaKind kind, SkillKind s
     area.position = position;
     area.radius = radius;
     area.effect_radius = effect_radius > 0.0f ? effect_radius : radius;
-    area.damage = RoundDamage(EffectiveAttack() * coefficient);
+    area.damage = RoundFinalDamage(EffectiveAttack() * coefficient, rules);
     area.active_tick = tick + Seconds(activation_delay);
     area.next_tick = area.active_tick;
     area.expires = area.active_tick + Seconds(duration);
@@ -322,7 +338,8 @@ void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int
         slow = 0.0f;
         slow_duration = 0;
     }
-    combat.Enqueue({++damage_sequence, target, std::max(1, amount), skill,
+    combat.Enqueue({++damage_sequence, target,
+                  std::max(rules.stats.combat.minimum_final_damage, amount), skill,
                  origin, proc.root_cast, source_upgrade, source_relic, source_enemy,
                  bleed, burn, slow, slow_duration});
 }
@@ -351,6 +368,8 @@ void GameSimulation::SimulationWorld::CastBasicAttack()
     {
         return;
     }
+    const auto &definition = rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)];
+    const auto &upgrades = rules.upgrades.basic_attack;
     player.has_move_target = false;
     EmitSignal(DomainSignalKind::BasicAttackStarted, player.position,
                static_cast<std::uint8_t>(SkillKind::BasicAttack));
@@ -365,7 +384,8 @@ void GameSimulation::SimulationWorld::CastBasicAttack()
     player.next_basic_attack = tick + attack_interval;
     ++balance.skill_uses[static_cast<std::size_t>(SkillKind::BasicAttack)];
     const auto base_interval = std::max<Tick>(
-        1, static_cast<Tick>(std::floor(60.0f / rules.player_attack_speed + 0.5f)));
+        1, static_cast<Tick>(std::floor(
+               60.0f / rules.stats.base_basic_attack_rate_per_second + 0.5f)));
     balance.stat_utility[static_cast<std::size_t>(StatKind::AttackSpeed)] +=
         base_interval - std::min(base_interval, attack_interval);
     player.basic_attack_animation_start = tick;
@@ -385,20 +405,26 @@ void GameSimulation::SimulationWorld::CastBasicAttack()
 
     if (HasUpgrade(mask, 8) && tick <= player.active_basic_empower_until)
     {
-        fire(player.aim, 0.7f);
-        fire(Rotate(player.aim, -15.0f), 0.7f, 7);
-        fire(Rotate(player.aim, 15.0f), 0.7f, 7);
+        const auto &post_active = upgrades.post_active_three_arrow;
+        for (std::uint32_t index = 0; index < post_active.projectile_count; ++index)
+        {
+            const auto angle = post_active.angles_degrees[index];
+            fire(Rotate(player.aim, angle), post_active.damage_multiplier_per_arrow,
+                 angle == 0.0f ? kNoTelemetrySource : 7);
+        }
         player.active_basic_empower_until = 0;
     }
     else
     {
-        fire(player.aim, 1.0f);
+        fire(player.aim, definition.damage_coefficient);
     }
-    if (HasUpgrade(mask, 1) && player.basic_sequence % 3 == 0)
+    const auto &third_attack = upgrades.third_attack_delayed;
+    if (HasUpgrade(mask, 1) &&
+        player.basic_sequence % third_attack.cadence_interval == 0)
     {
-        ScheduleAction({tick + release_ticks + 5, ScheduledKind::Projectile,
+        ScheduleAction({tick + release_ticks + third_attack.delay_ticks, ScheduledKind::Projectile,
                   SkillKind::BasicAttack,
-                  player.position, player.aim, 0.7f, 0.0f, 0.0f, 1,
+                  player.position, player.aim, third_attack.damage_multiplier, 0.0f, 0.0f, 1,
                   static_cast<std::uint8_t>(mask & ~std::uint8_t{1}),
                   EffectOrigin::Original, cast_id, 0});
     }
@@ -409,6 +435,7 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
 {
     const auto skill_index = static_cast<std::size_t>(skill);
     const auto cooldown_index = skill_index - 1;
+    const auto &definition = rules.skills[skill_index];
     if (skill_index == 0 || skill_index >= kCombatSkillCount ||
         player.cooldowns[cooldown_index] != 0 || player.charging ||
         player.active_cast_tick > tick || tick < player.retreat_until)
@@ -421,11 +448,13 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
          skill == SkillKind::RicochetArrow))
     {
         const auto stat_reduction =
-            1.0f - 0.03f * player.stats[static_cast<std::size_t>(
-                                 StatKind::CooldownReduction)];
+            1.0f - rules.stats.allocations[static_cast<std::size_t>(
+                                 StatKind::CooldownReduction)].amount_per_point *
+                       player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
         const auto without_upgrade = std::max<Tick>(
-            15, static_cast<Tick>(std::llround(
-                    rules.skills[skill_index].cooldown_ticks * stat_reduction)));
+            rules.stats.combat.minimum_cooldown_ticks,
+            static_cast<Tick>(std::llround(
+                definition.cooldown_ticks * stat_reduction)));
         RecordUpgradeEffect(
             skill, 7, UpgradeEffectMetric::CooldownTicksSaved,
             without_upgrade - std::min(without_upgrade,
@@ -433,7 +462,9 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     }
     ++balance.skill_uses[skill_index];
     const auto cooldown_reduction =
-        0.03f * player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
+        rules.stats.allocations[static_cast<std::size_t>(StatKind::CooldownReduction)]
+                .amount_per_point *
+        player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
     if (cooldown_reduction > 0.0f)
     {
         const auto without_stat = static_cast<Tick>(std::llround(
@@ -466,24 +497,28 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     case AbilityHandlerId::PiercingProjectile:
         ScheduleAction({tick + skill_release_ticks, ScheduledKind::Projectile, skill,
                   player.position, player.aim,
-                  rules.skills[skill_index].damage_coefficient,
+                  definition.damage_coefficient,
                   0.0f, 0.0f, 1, mask,
                   EffectOrigin::Original, cast_id});
         if (HasUpgrade(mask, 1))
         {
-            ScheduleAction({tick + skill_release_ticks + 5, ScheduledKind::Projectile,
+            const auto &followup = rules.upgrades.piercing_shot.delayed_followup;
+            ScheduleAction({tick + skill_release_ticks + followup.delay_ticks, ScheduledKind::Projectile,
                       skill, player.position,
-                      player.aim, 5.0f, 0.0f, 0.0f, 1, 0,
+                      player.aim, followup.damage_multiplier, 0.0f, 0.0f, 1, 0,
                       EffectOrigin::Derived, cast_id, 0});
         }
         if (HasUpgrade(mask, 4))
         {
-            const auto half_length = rules.skills[skill_index].range * 0.5f;
+            const auto &trail = rules.upgrades.piercing_shot.damaging_slow_trail;
+            const auto half_length = definition.range * 0.5f;
             auto *area = SpawnArea(
                 AreaKind::Damage, skill,
-                Add(player.position, Multiply(player.aim, half_length)), 0.5f,
-                0.4f, 2.0f, 0.0f, EffectOrigin::Derived, cast_id, 0,
-                0.2f, 1.0f);
+                Add(player.position, Multiply(player.aim, half_length)), trail.width * 0.5f,
+                trail.damage_multiplier_per_tick, static_cast<float>(trail.duration_ticks) /
+                    60.0f, 0.0f, EffectOrigin::Derived, cast_id, 0,
+                trail.slow_fraction, static_cast<float>(trail.slow_duration_ticks) / 60.0f);
+            area->interval = trail.tick_interval_ticks;
             area->direction = player.aim;
             area->half_length = half_length;
             area->source_upgrade = 3;
@@ -493,92 +528,139 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
         break;
     case AbilityHandlerId::UniformFanProjectiles:
     {
+        const auto &multishot = rules.upgrades.multishot;
         const auto miss_retarget_mask = static_cast<std::uint8_t>(
             mask & (std::uint8_t{1} << 7));
         ScheduleAction({tick + skill_release_ticks, ScheduledKind::Volley, skill,
                   player.position, player.aim,
-                  rules.skills[skill_index].damage_coefficient,
+                  definition.damage_coefficient,
                   0.0f, 0.0f, rules.skills[skill_index].projectile_count, mask,
                   EffectOrigin::Original, cast_id});
         if (HasUpgrade(mask, 1))
         {
-            ScheduleAction({tick + 15, ScheduledKind::Volley, skill, player.position,
-                      player.aim, 1.5f, 0.0f, 0.0f, 5, miss_retarget_mask,
+            const auto &second_fan = multishot.delayed_second_fan;
+            ScheduleAction({tick + second_fan.delay_ticks, ScheduledKind::Volley,
+                      skill, player.position, player.aim,
+                      second_fan.damage_multiplier_per_arrow, 0.0f, 0.0f,
+                      static_cast<std::uint8_t>(second_fan.projectile_count),
+                      miss_retarget_mask,
                       EffectOrigin::Derived, cast_id, 0});
         }
         if (HasUpgrade(mask, 4))
         {
-            for (const auto angle : {-15.0f, 0.0f, 15.0f})
+            const auto &rear_fan = multishot.rear_fan;
+            const auto count = rear_fan.projectile_count;
+            const auto step = count > 1
+                                  ? rear_fan.fan_angle_degrees /
+                                        static_cast<float>(count - 1)
+                                  : 0.0f;
+            for (std::uint32_t index = 0; index < count; ++index)
             {
+                const auto angle = -rear_fan.fan_angle_degrees * 0.5f +
+                                   step * static_cast<float>(index);
                 ScheduleAction({tick + skill_release_ticks, ScheduledKind::Projectile,
                           skill, player.position,
-                          Rotate(Multiply(player.aim, -1.0f), angle), 1.0f,
+                          Rotate(Multiply(player.aim, -1.0f), angle),
+                          rear_fan.damage_multiplier,
                           0.0f, 0.0f, 1, miss_retarget_mask,
                           EffectOrigin::Derived, cast_id, 3});
             }
         }
         if (HasUpgrade(mask, 7))
         {
-            for (const auto angle : {-31.25f, 31.25f})
+            const auto &outer = multishot.two_additional_outer_arrows;
+            for (std::uint32_t index = 0; index < outer.additional_projectiles; ++index)
+            {
+                const auto angle = outer.outer_angles_degrees[index];
                 ScheduleAction({tick + skill_release_ticks, ScheduledKind::Projectile,
-                          skill, player.position, Rotate(player.aim, angle), 1.2f,
+                          skill, player.position, Rotate(player.aim, angle),
+                          outer.damage_multiplier,
                           0.0f, 0.0f, 1, mask, EffectOrigin::Original, cast_id, 6});
+            }
         }
         break;
     }
     case AbilityHandlerId::ProjectileToAreaExplosion:
         ScheduleAction({tick + skill_release_ticks, ScheduledKind::Projectile, skill,
                   player.position, player.aim,
-                  rules.skills[skill_index].damage_coefficient,
+                  definition.damage_coefficient,
                   0.0f, 0.0f, 1, mask,
                   EffectOrigin::Original, cast_id});
         break;
     case AbilityHandlerId::NearestUnhitTargetRicochet:
         ScheduleAction({tick + skill_release_ticks, ScheduledKind::Projectile, skill,
                   player.position, player.aim,
-                  rules.skills[skill_index].damage_coefficient,
+                  definition.damage_coefficient,
                   0.0f, 0.0f, 1, mask,
                   EffectOrigin::Original, cast_id});
         break;
     case AbilityHandlerId::TargetedPeriodicArea:
-        SpawnArea(AreaKind::Damage, skill, target, 4.0f,
-                  rules.skills[skill_index].damage_coefficient,
-                  HasUpgrade(mask, 8) ? 5.0f : 3.0f, 0.4f,
+    {
+        const auto &arrow_rain = rules.upgrades.arrow_rain;
+        auto *area = SpawnArea(AreaKind::Damage, skill, target, definition.area_radius,
+                  definition.damage_coefficient,
+                  HasUpgrade(mask, 8)
+                      ? static_cast<float>(arrow_rain.extend_area_and_leave_slow.area_duration_ticks) / 60.0f
+                      : static_cast<float>(definition.duration_ticks) / 60.0f,
+                  static_cast<float>(definition.activation_delay_ticks) / 60.0f,
                   EffectOrigin::Original, cast_id, mask,
-                  HasUpgrade(mask, 6) ? 0.3f : 0.0f, 1.0f);
+                  HasUpgrade(mask, 6) ? arrow_rain.area_slow.slow_fraction : 0.0f,
+                  HasUpgrade(mask, 6)
+                      ? static_cast<float>(arrow_rain.area_slow.slow_duration_ticks) / 60.0f
+                      : 0.0f);
+        area->interval = definition.tick_interval_ticks;
         EmitVfx(DomainSignalKind::ArrowRainCast, target, player.aim, 1.0f, 0.1f);
         if (HasUpgrade(mask, 1))
         {
-            ScheduleAction({tick + 60, ScheduledKind::Area, skill,
-                      Add(target, Multiply(player.aim, 4.0f)), player.aim,
-                      0.5f, 3.0f, 2.0f, 1, 0,
+            const auto &secondary = arrow_rain.delayed_forward_secondary_area;
+            ScheduleAction({tick + secondary.delay_ticks, ScheduledKind::Area, skill,
+                      Add(target, Multiply(player.aim, secondary.forward_offset)), player.aim,
+                      secondary.damage_multiplier_per_tick, secondary.radius,
+                      static_cast<float>(secondary.duration_ticks) / 60.0f, 1, 0,
                       EffectOrigin::Derived, cast_id, 0});
         }
         break;
+    }
     case AbilityHandlerId::ForwardRollLeaveTrap:
     {
+        const auto &trap = rules.upgrades.trap;
+        const auto &trap_definition = definition;
         const auto origin = player.position;
         if (HasUpgrade(mask, 1))
         {
-            for (std::uint32_t index = 0; index < 3; ++index)
+            const auto &roll = trap.roll_path_traps;
+            for (std::uint32_t index = 0; index < roll.trap_count; ++index)
             {
                 SpawnArea(AreaKind::Trap, skill,
-                          Add(origin, Multiply(player.aim, 1.5f * index)),
-                          2.0f, 0.9f, 12.0f, 0.6f,
+                          Add(origin, Multiply(player.aim,
+                               roll.spacing * static_cast<float>(index))),
+                          trap_definition.detection_radius,
+                          roll.damage_multiplier_per_trap,
+                          static_cast<float>(trap_definition.active_duration_ticks) / 60.0f,
+                          static_cast<float>(trap_definition.activation_delay_ticks) / 60.0f,
                           EffectOrigin::Original, cast_id, mask,
-                          0.3f, 3.0f, 3.0f,
+                          trap_definition.slow_fraction,
+                          static_cast<float>(trap_definition.slow_duration_ticks) / 60.0f,
+                          trap_definition.area_radius,
                           false, 0);
             }
         }
         else
         {
-            SpawnArea(AreaKind::Trap, skill, origin, 2.0f,
-                      rules.skills[skill_index].damage_coefficient,
-                      12.0f, 0.6f,
-                      EffectOrigin::Original, cast_id, mask, 0.3f, 3.0f, 3.0f);
+            SpawnArea(AreaKind::Trap, skill, origin, trap_definition.detection_radius,
+                      definition.damage_coefficient,
+                      static_cast<float>(trap_definition.active_duration_ticks) / 60.0f,
+                      static_cast<float>(trap_definition.activation_delay_ticks) / 60.0f,
+                      EffectOrigin::Original, cast_id, mask,
+                      trap_definition.slow_fraction,
+                      static_cast<float>(trap_definition.slow_duration_ticks) / 60.0f,
+                      trap_definition.area_radius);
         }
-        player.retreat_until = tick + 15;
-        player.retreat_velocity = Multiply(player.aim, 20.0f);
+        player.retreat_until = tick + trap_definition.forward_roll_duration_ticks + 1;
+        player.retreat_velocity = Multiply(
+            player.aim, trap_definition.forward_roll_distance /
+                            (static_cast<float>(trap_definition.forward_roll_duration_ticks) *
+                             kTickSeconds));
         player.retreat_followup_cast = cast_id;
         player.retreat_upgrade_mask = mask;
         player.retreat_landing_pending = true;
@@ -588,6 +670,7 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     }
     case AbilityHandlerId::ForcedRetreatAndProjectile:
     {
+        const auto &retreat = rules.upgrades.retreat_shot;
         EmitVfx(DomainSignalKind::RetreatMoved, player.position,
                 Multiply(player.aim, -1.0f), 1.0f, 0.1f);
         const auto retreat_release_ticks = AnimationMarkerTicks(
@@ -595,8 +678,8 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
         ScheduleAction({tick + retreat_release_ticks, ScheduledKind::Projectile, skill,
                    player.position, player.aim,
                    HasUpgrade(mask, 1)
-                       ? 0.9f
-                       : rules.skills[skill_index].damage_coefficient,
+                       ? retreat.replace_with_three_arrows.damage_multiplier_per_arrow
+                       : definition.damage_coefficient,
                    0.0f, 0.0f, 1, mask,
                    EffectOrigin::Original, cast_id,
                    static_cast<std::uint8_t>(HasUpgrade(mask, 1)
@@ -604,39 +687,60 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
                                                  : kNoTelemetrySource)});
         if (HasUpgrade(mask, 1))
         {
-            for (const auto angle : {-12.0f, 12.0f})
+            const auto count = retreat.replace_with_three_arrows.projectile_count;
+            for (std::uint32_t index = 1; index < count; ++index)
+            {
+                const auto angle = retreat.replace_with_three_arrows.angles_degrees[index];
                 ScheduleAction({tick + retreat_release_ticks,
                           ScheduledKind::Projectile, skill, player.position,
-                          Rotate(player.aim, angle), 0.9f, 0.0f, 0.0f, 1,
-                          mask, EffectOrigin::Original, cast_id, 0});
+                          Rotate(player.aim, angle),
+                          retreat.replace_with_three_arrows.damage_multiplier_per_arrow,
+                          0.0f, 0.0f, 1,
+                           mask, EffectOrigin::Original, cast_id, 0});
+            }
         }
-        player.retreat_until = tick + 13;
-        player.retreat_velocity = Multiply(player.aim, -25.0f);
+        player.retreat_until = tick + definition.forced_move_duration_ticks + 1;
+        player.retreat_velocity = Multiply(
+            player.aim, -definition.forced_move_distance /
+                            (static_cast<float>(definition.forced_move_duration_ticks) *
+                             kTickSeconds));
         player.retreat_followup_cast = cast_id;
         player.retreat_upgrade_mask = mask;
         player.retreat_landing_pending = true;
         player.forced_move_skill = SkillKind::RetreatShot;
         if (HasUpgrade(mask, 2))
         {
-            SpawnArea(AreaKind::Trap, skill, player.position, 2.5f, 3.0f, 12.0f,
-                      0.6f, EffectOrigin::Derived, cast_id, 0, 0.0f, 0.0f, 0.0f,
+            const auto &small_trap = retreat.small_trap_at_start;
+            SpawnArea(AreaKind::Trap, skill, player.position,
+                      small_trap.detection_radius,
+                      small_trap.damage_multiplier,
+                       static_cast<float>(small_trap.active_duration_ticks) / 60.0f,
+                       static_cast<float>(small_trap.activation_delay_ticks) / 60.0f,
+                      EffectOrigin::Derived, cast_id, 0, 0.0f, 0.0f,
+                       small_trap.explosion_radius,
                       false, 1);
         }
         if (HasUpgrade(mask, 3))
         {
+            const auto &slow = retreat.slow_trail;
+            const auto trail_radius = slow.radius;
             SpawnArea(AreaKind::Slow, skill,
-                      Add(player.position, Multiply(player.aim, -2.5f)), 2.5f,
-                      0.0f, 2.0f, 0.0f, EffectOrigin::Derived, cast_id, 0, 0.35f,
-                      1.0f, 0.0f, false, 2);
+                       Add(player.position, Multiply(player.aim, -trail_radius)), trail_radius,
+                       0.0f, static_cast<float>(slow.duration_ticks) / 60.0f, 0.0f,
+                      EffectOrigin::Derived, cast_id, 0, slow.slow_fraction,
+                       static_cast<float>(slow.slow_duration_ticks) / 60.0f,
+                      0.0f, false, 2);
         }
         if (HasUpgrade(mask, 6))
         {
-            player.next_active_refund_until = tick + 180;
+            player.next_active_refund_until =
+                tick + retreat.next_other_active_cooldown_refund.activation_window_ticks;
             player.next_active_refund_source = skill;
         }
         if (HasUpgrade(mask, 8))
         {
-            player.retreat_followup_tick = tick + 15;
+            player.retreat_followup_tick =
+                tick + retreat.delayed_second_retreat_and_arrow.delay_after_first_move_ticks;
             player.retreat_followup_direction = player.aim;
         }
         break;
@@ -646,14 +750,17 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
         return false;
     }
 
-    player.active_basic_empower_until = tick + 180;
+    player.active_basic_empower_until =
+        tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
     if (player.next_active_refund_until >= tick &&
         player.next_active_refund_source != SkillKind::Count &&
         player.next_active_refund_source != skill)
     {
         const auto before = player.cooldowns[cooldown_index];
-        player.cooldowns[cooldown_index] -=
-            player.cooldowns[cooldown_index] * 30 / 100;
+        player.cooldowns[cooldown_index] -= static_cast<Tick>(
+            player.cooldowns[cooldown_index] *
+            rules.upgrades.retreat_shot.next_other_active_cooldown_refund
+                .cooldown_refund_fraction);
         RecordUpgradeEffect(player.next_active_refund_source, 5,
                             UpgradeEffectMetric::CooldownTicksSaved,
                             before - player.cooldowns[cooldown_index]);
@@ -712,22 +819,29 @@ void GameSimulation::SimulationWorld::ConsumeBufferedSkill()
 void GameSimulation::SimulationWorld::ReleaseChargedShot()
 {
     const auto mask = player.upgrades[static_cast<std::size_t>(SkillKind::ChargedShot)];
-    const auto maximum_ticks = HasUpgrade(mask, 1) ? Seconds(1.4f) : Seconds(1.0f);
+    const auto &definition = rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)];
+    const auto &upgrades = rules.upgrades.charged_shot;
+    const auto maximum_ticks = HasUpgrade(mask, 1)
+                                   ? upgrades.extended_full_charge_explosion.maximum_charge_time_ticks
+                                   : definition.maximum_charge_time_ticks;
     auto elapsed = std::min(tick - player.charge_start, maximum_ticks);
     if (HasUpgrade(mask, 2))
     {
         const auto unaccelerated = elapsed;
-        elapsed = std::min(maximum_ticks, static_cast<Tick>(elapsed / 0.65f));
+        elapsed = std::min(
+            maximum_ticks,
+            static_cast<Tick>(elapsed / upgrades.faster_charge.charge_time_multiplier));
         RecordUpgradeEffect(SkillKind::ChargedShot, 1,
                             UpgradeEffectMetric::ChargeTicksSaved,
                             elapsed - unaccelerated);
     }
     const auto ratio = static_cast<float>(elapsed) / static_cast<float>(maximum_ticks);
-    const auto minimum = HasUpgrade(mask, 3) ? 23.0f : 10.0f;
+    const auto minimum = HasUpgrade(mask, 3)
+                             ? upgrades.increase_minimum_charge_damage.minimum_damage_multiplier
+                             : definition.minimum_damage_multiplier;
     const auto maximum = HasUpgrade(mask, 1)
-                             ? 28.0f
-                             : rules.skills[static_cast<std::size_t>(
-                                   SkillKind::ChargedShot)].damage_coefficient;
+                             ? upgrades.extended_full_charge_explosion.maximum_damage_multiplier
+                             : definition.maximum_damage_multiplier;
     const auto coefficient = std::lerp(minimum, maximum, ratio);
     const auto cast_id = next_cast_id++;
     player.facing = player.aim;
@@ -739,22 +853,27 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
                                           EffectOrigin::Original, cast_id, mask))
     {
         projectile->remaining_range = std::lerp(
-            4.2f,
-            rules.skills[static_cast<std::size_t>(SkillKind::ChargedShot)].range,
+            definition.minimum_range, definition.maximum_range,
             ratio);
-        projectile->radius = std::lerp(0.4f, 0.88f, ratio);
+        projectile->radius = std::lerp(definition.minimum_collision_radius,
+                                       definition.maximum_collision_radius, ratio);
         if (HasUpgrade(mask, 4))
         {
-            projectile->pierce_remaining += 4;
+            projectile->pierce_remaining +=
+                static_cast<std::uint16_t>(upgrades.additional_pierce.additional_pierce);
         }
         if (HasUpgrade(mask, 5))
         {
-            projectile->bleed_stacks = 3;
+            projectile->bleed_stacks = static_cast<std::uint8_t>(
+                upgrades.charge_bleed_full_charge_rupture.bleed_stacks);
         }
         if (HasUpgrade(mask, 1) && ratio >= 0.999f)
         {
-            projectile->explosion_radius = 2.0f;
-            projectile->explosion_damage = RoundDamage(EffectiveAttack() * 5.0f);
+            projectile->explosion_radius = upgrades.extended_full_charge_explosion.explosion_radius;
+            projectile->explosion_damage = RoundFinalDamage(
+                EffectiveAttack() *
+                upgrades.extended_full_charge_explosion
+                    .full_charge_end_explosion_damage_multiplier, rules);
             projectile->explosion_source_upgrade = 0;
         }
         projectile->full_charge = ratio >= 0.999f;
@@ -764,7 +883,9 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
         EffectiveCooldownTicks(SkillKind::ChargedShot) + 1;
     ++balance.skill_uses[static_cast<std::size_t>(SkillKind::ChargedShot)];
     const auto cooldown_reduction =
-        0.03f * player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
+        rules.stats.allocations[static_cast<std::size_t>(StatKind::CooldownReduction)]
+                .amount_per_point *
+        player.stats[static_cast<std::size_t>(StatKind::CooldownReduction)];
     if (cooldown_reduction > 0.0f)
     {
         const auto cooldown =
@@ -779,7 +900,8 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
     player.active_cast_tick = tick + 9;
     player.active_animation_until = player.active_cast_tick + kAnimationBlendOutTicks;
     CancelChargedShot();
-    player.active_basic_empower_until = tick + 180;
+    player.active_basic_empower_until =
+        tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
 }
 
 void GameSimulation::SimulationWorld::CastAttackPhase()
@@ -825,7 +947,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                          static_cast<std::uint8_t>(EnemyTelemetryIndex(*boss))))
                 {
                     shot->velocity = Multiply(Normalize(shot->velocity), action.speed);
-                    shot->remaining_range = 24.0f;
+                    shot->remaining_range = rules.boss_common.projectile_range;
                 }
             }
         }
@@ -857,9 +979,10 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 static_cast<std::uint8_t>(EnemyTelemetryIndex(*boss)));
             area->ring_inner_radius = action.distance;
             area->ring_outer_radius = action.radius;
-            area->safe_gap_count = 4;
-            area->safe_gap_degrees = 25.0f;
-            area->interval = 1;
+            area->ring_half_width = action.half_width;
+            area->safe_gap_count = action.safe_gap_count;
+            area->safe_gap_degrees = action.safe_gap_degrees;
+            area->interval = std::max<Tick>(1, action.interval);
         }
     }
     boss_actions.erase(boss_actions.begin(),
@@ -887,12 +1010,17 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 }
                 ++player.basic_arrow_sequence;
                 if (HasUpgrade(action.upgrade_mask, 4) &&
-                    player.basic_arrow_sequence % 3 == 0)
+                    player.basic_arrow_sequence %
+                            rules.upgrades.basic_attack.direct_arrow_bleed.direct_arrow_interval ==
+                        0)
                 {
-                    projectile->bleed_stacks = 1;
+                    projectile->bleed_stacks = static_cast<std::uint8_t>(
+                        rules.upgrades.basic_attack.direct_arrow_bleed.bleed_stacks);
                 }
                 if (HasUpgrade(action.upgrade_mask, 5) &&
-                    player.basic_arrow_sequence % 4 == 0)
+                    player.basic_arrow_sequence %
+                            rules.upgrades.basic_attack.direct_arrow_burn.direct_arrow_interval ==
+                        0)
                 {
                     projectile->burn = true;
                 }
@@ -900,7 +1028,9 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
             if (projectile && action.skill == SkillKind::PiercingShot &&
                 action.source_upgrade == 0)
             {
-                if (const auto *target = NearestEnemy(action.position, 24.0f))
+                if (const auto *target = NearestEnemy(
+                        action.position,
+                        rules.skills[static_cast<std::size_t>(SkillKind::PiercingShot)].range))
                 {
                     projectile->homing = true;
                     projectile->homing_target = target->id.value;
@@ -910,7 +1040,9 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 action.origin == EffectOrigin::Original)
             {
                 projectile->homing = true;
-                if (const auto *target = NearestEnemy(action.position, 18.0f))
+                if (const auto *target = NearestEnemy(
+                        action.position,
+                        rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].initial_range))
                     projectile->homing_target = target->id.value;
             }
         }
@@ -924,10 +1056,19 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 EmitVfx(DomainSignalKind::MultiShotCast, action.position,
                         action.direction, 1.0f, 1.1f);
             }
+            const auto fan_angle = action.skill == SkillKind::MultiShot
+                                       ? rules.skills[static_cast<std::size_t>(
+                                             SkillKind::MultiShot)].fan_angle_degrees
+                                       : 0.0f;
+            const auto fan_step = action.projectile_count > 1
+                                      ? fan_angle /
+                                            static_cast<float>(action.projectile_count - 1)
+                                      : 0.0f;
             for (std::uint32_t index = 0; index < action.projectile_count; ++index)
             {
                 FireProjectile(action.skill, action.position,
-                               Rotate(action.direction, -25.0f + index * 12.5f),
+                               Rotate(action.direction,
+                                      -fan_angle * 0.5f + fan_step * index),
                                action.damage_coefficient, action.origin, action.cast_id,
                                action.upgrade_mask, true, action.source_upgrade,
                                action.source_relic);
@@ -938,7 +1079,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
             RecordUpgradeEffect(action.skill, action.source_upgrade,
                                 UpgradeEffectMetric::ExplosionsCreated);
             QueueAreaDamage(action.position, action.radius,
-                       RoundDamage(EffectiveAttack() * action.damage_coefficient),
+                       RoundFinalDamage(EffectiveAttack() * action.damage_coefficient, rules),
                        action.skill, action.origin, action.cast_id, 0, false, 0.0f, 0,
                        action.source_upgrade, action.source_relic);
             if (action.skill == SkillKind::ExplosiveArrow && action.source_upgrade == 0)
@@ -950,11 +1091,22 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
         }
         else
         {
-            SpawnArea(AreaKind::Damage, action.skill, action.position, action.radius,
-                       action.damage_coefficient, action.duration, 0.0f,
-                       action.origin, action.cast_id, action.upgrade_mask,
-                       0.0f, 0.0f, 0.0f, false,
-                       action.source_upgrade, action.source_relic);
+            auto *area = SpawnArea(AreaKind::Damage, action.skill, action.position,
+                                   action.radius, action.damage_coefficient,
+                                   action.duration, 0.0f, action.origin,
+                                   action.cast_id, action.upgrade_mask,
+                                   0.0f, 0.0f, 0.0f, false,
+                                   action.source_upgrade, action.source_relic);
+            if (action.skill == SkillKind::ArrowRain)
+                area->interval = rules.skills[static_cast<std::size_t>(
+                    SkillKind::ArrowRain)].tick_interval_ticks;
+            else if (action.skill == SkillKind::ExplosiveArrow &&
+                     action.source_upgrade == 3)
+                area->interval = rules.upgrades.explosive_arrow
+                                     .explosion_leaves_burning_area.tick_interval_ticks;
+            else if (action.skill == SkillKind::Trap && action.source_upgrade == 4)
+                area->interval = rules.upgrades.trap.trigger_burn_and_fire_area
+                                     .tick_interval_ticks;
         }
     }
     scheduled_actions.erase(scheduled_actions.begin(), scheduled_actions.begin() + executed);
@@ -975,27 +1127,34 @@ void GameSimulation::SimulationWorld::MovementPhase()
         if (player.forced_move_skill == SkillKind::Trap &&
             HasUpgrade(player.retreat_upgrade_mask, 2))
         {
-            SpawnArea(AreaKind::Slow, SkillKind::Trap, player.position, 3.0f,
-                      0.0f, 3.0f, 0.0f, EffectOrigin::Derived,
-                      player.retreat_followup_cast, 0, 0.45f, 3.0f, 0.0f,
+            const auto &landing = rules.upgrades.trap.landing_slow_area;
+            SpawnArea(AreaKind::Slow, SkillKind::Trap, player.position,
+                      landing.radius, 0.0f,
+                      static_cast<float>(landing.duration_ticks) / 60.0f, 0.0f,
+                      EffectOrigin::Derived,
+                      player.retreat_followup_cast, 0, landing.slow_fraction,
+                      static_cast<float>(landing.duration_ticks) / 60.0f, 0.0f,
                       false, 1);
         }
         else if (player.forced_move_skill == SkillKind::RetreatShot &&
                  HasUpgrade(player.retreat_upgrade_mask, 5))
         {
+            const auto &landing = rules.upgrades.retreat_shot.landing_damage_and_push;
             EmitVfx(DomainSignalKind::Push, player.position, {}, 5.0f, 0.12f);
-            QueueAreaDamage(player.position, 5.0f,
-                        RoundDamage(EffectiveAttack() * 3.0f),
-                       SkillKind::RetreatShot, EffectOrigin::Derived,
-                       player.retreat_followup_cast, 0, false, 0.0f, 0, 4);
+            QueueAreaDamage(player.position, landing.radius,
+                         RoundFinalDamage(EffectiveAttack() * landing.damage_multiplier, rules),
+                        SkillKind::RetreatShot, EffectOrigin::Derived,
+                        player.retreat_followup_cast, 0, false, 0.0f, 0, 4);
             for (auto &enemy : enemies)
             {
                 if (!enemy.dead && !enemy.boss &&
-                    DistanceSquared(player.position, enemy.position) <= 25.0f)
+                    DistanceSquared(player.position, enemy.position) <=
+                        landing.radius * landing.radius)
                 {
                     const auto before = enemy.position;
                     const auto displacement = Multiply(
-                        Normalize(Subtract(enemy.position, player.position)), 3.0f);
+                        Normalize(Subtract(enemy.position, player.position)),
+                        landing.push_distance);
                     QueueEnemyDisplacement(enemy, displacement);
                     RecordUpgradeDisplacement(SkillKind::RetreatShot, 4, before,
                                               Add(before, displacement));
@@ -1012,7 +1171,10 @@ void GameSimulation::SimulationWorld::MovementPhase()
         const auto before = player.position;
         if (!config.scenario.player_stationary)
             player.position = Add(player.position,
-                                  Multiply(player.retreat_followup_direction, -2.5f));
+                                  Multiply(player.retreat_followup_direction,
+                                           -rules.upgrades.retreat_shot
+                                                .delayed_second_retreat_and_arrow
+                                                .additional_move_distance));
         RecordUpgradeDisplacement(SkillKind::RetreatShot, 7, before,
                                   player.position);
         auto direction = player.retreat_followup_direction;
@@ -1022,7 +1184,9 @@ void GameSimulation::SimulationWorld::MovementPhase()
         if (target)
             direction = Normalize(Subtract(target->position, player.position));
         if (auto *arrow = FireProjectile(
-                SkillKind::RetreatShot, player.position, direction, 2.0f,
+                SkillKind::RetreatShot, player.position, direction,
+                rules.upgrades.retreat_shot.delayed_second_retreat_and_arrow
+                    .damage_multiplier,
                 EffectOrigin::Derived, player.retreat_followup_cast, 0, true, 7);
             arrow && target)
         {
@@ -1038,7 +1202,11 @@ void GameSimulation::SimulationWorld::MovementPhase()
     else if (player.has_move_target && !stationary_attack)
     {
         const auto delta = Subtract(player.move_target, player.position);
-        const auto charge_multiplier = player.charging ? 0.7f : 1.0f;
+        const auto charge_multiplier = player.charging
+                                           ? rules.skills[static_cast<std::size_t>(
+                                                 SkillKind::ChargedShot)]
+                                                 .movement_speed_multiplier_while_charging
+                                           : 1.0f;
         const auto step = EffectiveMoveSpeed() * charge_multiplier * kTickSeconds;
         if (LengthSquared(delta) > step * step)
         {
@@ -1066,7 +1234,11 @@ void GameSimulation::SimulationWorld::MovementPhase()
     const auto move_points = player.stats[static_cast<std::size_t>(StatKind::MoveSpeed)];
     if (move_points != 0 && moved > 0.0f && tick >= player.retreat_until)
     {
-        const auto extra = moved * (1.0f - 1.0f / (1.0f + 0.03f * move_points));
+        const auto extra = moved *
+                           (1.0f - 1.0f /
+                                         (1.0f + rules.stats.allocations[
+                                             static_cast<std::size_t>(StatKind::MoveSpeed)]
+                                             .amount_per_point * move_points));
         balance.stat_utility[static_cast<std::size_t>(StatKind::MoveSpeed)] +=
             static_cast<std::uint64_t>(std::llround(extra * 1000.0f));
     }
@@ -1110,7 +1282,9 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                       rules.arena_half_extent);
         if (enemy.boss && tick < enemy.dash_until && !enemy.dash_hit &&
             SegmentCircle(enemy.previous_position, enemy.position,
-                          player.position, 1.5f))
+                          player.position,
+                          rules.boss_common.collision_radius +
+                              rules.stats.player_collision_radius))
         {
             QueueDamage(0, enemy.dash_damage, SkillKind::Count,
                        EffectOrigin::Original, enemy.attack_cast_id, 0, false,
@@ -1120,7 +1294,10 @@ void GameSimulation::SimulationWorld::MovementPhase()
         }
         if (enemy.boss && enemy.attacking && tick >= enemy.attack_resolve)
         {
-            if (DistanceSquared(enemy.position, player.position) <= 2.25f)
+            const auto contact_radius =
+                rules.boss_common.collision_radius + rules.stats.player_collision_radius;
+            if (DistanceSquared(enemy.position, player.position) <=
+                contact_radius * contact_radius)
             {
                 QueueDamage(0, enemy.damage, SkillKind::Count,
                            EffectOrigin::Original, enemy.attack_cast_id, 0, false,
@@ -1279,9 +1456,13 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     auto damage = projectile.damage;
     if (projectile.skill == SkillKind::PiercingShot)
     {
-        const auto multiplier = std::max(0.55f, 1.0f - 0.15f *
-                                                       (projectile.hit_count - 1));
-        damage = RoundDamage(projectile.damage * multiplier);
+        const auto &piercing = rules.skills[static_cast<std::size_t>(
+            SkillKind::PiercingShot)];
+        const auto multiplier = std::max(
+            piercing.minimum_damage_fraction,
+            1.0f - piercing.pierce_damage_decay_fraction *
+                       (projectile.hit_count - 1));
+        damage = RoundFinalDamage(projectile.damage * multiplier, rules);
     }
     auto bleed = projectile.bleed_stacks;
     auto burn = projectile.burn;
@@ -1335,9 +1516,13 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         }
         if (projectile.skill == SkillKind::ChargedShot && projectile.full_charge &&
             HasUpgrade(projectile.upgrade_mask, 5) &&
-            enemy.status.bleed_count == 5)
+            enemy.status.bleed_count >=
+                rules.statuses.bleed.maximum_stacks)
         {
-            QueueDamage(enemy.id.value, RoundDamage(EffectiveAttack() * 1.5f),
+            QueueDamage(enemy.id.value,
+                       RoundFinalDamage(EffectiveAttack() * rules.upgrades.charged_shot
+                                       .charge_bleed_full_charge_rupture.rupture_damage_multiplier,
+                                       rules),
                        projectile.skill, EffectOrigin::Derived,
                        projectile.cast_id, 0, false, 0.0f, 0, 4);
         }
@@ -1347,10 +1532,12 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             QueueDamage(enemy.id.value, damage, projectile.skill, projectile.origin,
                        projectile.cast_id, bleed, burn, slow, slow_duration,
                        damage_upgrade, projectile.source_relic);
-            if (projectile.skill == SkillKind::ChargedShot &&
-                projectile.charge_ratio > 0.0f)
+            if (projectile.skill == SkillKind::ChargedShot)
             {
                 auto &event = combat.commands.back();
+                const auto &charged = rules.skills[static_cast<std::size_t>(
+                    SkillKind::ChargedShot)];
+                const auto &charge_upgrades = rules.upgrades.charged_shot;
                 const auto add_amplifier = [&](std::uint8_t upgrade,
                                                float coefficient) {
                     if (coefficient <= 0.0f ||
@@ -1359,14 +1546,21 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                     const auto index = event.amplified_count++;
                     event.amplified_upgrades[index] = upgrade;
                     event.amplified_damage[index] =
-                        RoundDamage(EffectiveAttack() * coefficient);
+                        RoundFinalDamage(EffectiveAttack() * coefficient, rules);
                 };
                 const auto decay = 1.0f;
                 if (HasUpgrade(projectile.upgrade_mask, 1))
-                    add_amplifier(0, 3.0f * projectile.charge_ratio * decay);
+                    add_amplifier(
+                        0, (charge_upgrades.extended_full_charge_explosion
+                                .maximum_damage_multiplier -
+                            charged.maximum_damage_multiplier) *
+                               projectile.charge_ratio * decay);
                 if (HasUpgrade(projectile.upgrade_mask, 3))
                     add_amplifier(2,
-                                  7.0f * (1.0f - projectile.charge_ratio) * decay);
+                                   (charge_upgrades.increase_minimum_charge_damage
+                                        .minimum_damage_multiplier -
+                                    charged.minimum_damage_multiplier) *
+                                      (1.0f - projectile.charge_ratio) * decay);
             }
         }
     }
@@ -1374,7 +1568,9 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     if (projectile.skill == SkillKind::BasicAttack &&
         HasUpgrade(projectile.upgrade_mask, 6) && projectile.hit_count == 1)
     {
-        enemy.status.slows.push_back({0.2f, tick + Seconds(1.0f),
+        const auto &slow_rule = rules.upgrades.basic_attack.first_hit_slow_and_cooldown;
+        enemy.status.slows.push_back({slow_rule.slow_fraction,
+                                      tick + slow_rule.slow_duration_ticks,
                                       SkillKind::BasicAttack, 5});
         EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
@@ -1382,12 +1578,14 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                             UpgradeEffectMetric::SlowApplications);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                             UpgradeEffectMetric::SlowTargetTicks,
-                            Seconds(1.0f));
+                             slow_rule.slow_duration_ticks);
         const auto longest = std::ranges::max_element(player.cooldowns);
         if (longest != player.cooldowns.end())
         {
             const auto before = *longest;
-            *longest = *longest > 12 ? *longest - 12 : 0;
+            *longest = *longest > slow_rule.cooldown_reduction_ticks
+                           ? *longest - slow_rule.cooldown_reduction_ticks
+                           : 0;
             RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                                 UpgradeEffectMetric::CooldownTicksSaved,
                                 before - *longest);
@@ -1396,8 +1594,10 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     if (projectile.skill == SkillKind::PiercingShot &&
         HasUpgrade(projectile.upgrade_mask, 6) && !enemy.boss)
     {
+        const auto &align = rules.upgrades.piercing_shot.align_hit_normal_enemy;
         const auto before = enemy.position;
-        const auto displacement = Multiply(Normalize(projectile.velocity), 1.5f);
+        const auto displacement = Multiply(Normalize(projectile.velocity),
+                                           align.move_distance);
         QueueEnemyDisplacement(enemy, displacement);
         EmitVfx(DomainSignalKind::Push, before,
                 Normalize(projectile.velocity), 1.0f,
@@ -1411,7 +1611,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         if (runtime.transfer_count == 0)
         {
             if (!enemy.status.burn)
-                ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
+                ApplyBurn(enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks,
                           projectile.skill, 6);
             runtime.has_stored_burn = true;
             runtime.stored_burn_attack = enemy.status.burn->attack_snapshot;
@@ -1420,7 +1620,10 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 : 1;
             runtime.transfer_count = 1;
         }
-        else if (runtime.transfer_count < 4 && runtime.has_stored_burn)
+        else if (runtime.transfer_count <
+                     1 + rules.upgrades.piercing_shot.apply_and_transfer_burn
+                             .maximum_transfer_targets &&
+                 runtime.has_stored_burn)
         {
             const auto *source = projectile.hit_ids.size() >= 2
                                      ? FindEnemy(projectile.hit_ids[projectile.hit_ids.size() - 2])
@@ -1439,32 +1642,37 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     {
         runtime.triggered = true;
         const auto direction = Normalize(projectile.velocity);
-        for (const auto angle : {-35.0f, -25.0f, -15.0f, -5.0f,
-                                 5.0f, 15.0f, 25.0f, 35.0f})
+        const auto &split = rules.upgrades.charged_shot.boss_or_fifth_pierce_split;
+        for (std::uint32_t index = 0; index < split.projectile_count; ++index)
             FireProjectile(projectile.skill, projectile.position,
-                           Rotate(direction, angle), 3.5f,
+                           Rotate(direction, split.angles_degrees[index]),
+                           split.damage_multiplier,
                            EffectOrigin::Derived, projectile.cast_id, 0, true, 5);
     }
     if (projectile.skill == SkillKind::ChargedShot &&
         HasUpgrade(projectile.upgrade_mask, 7) && runtime.transfer_count == 0)
     {
         if (!enemy.status.burn)
-            ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
+            ApplyBurn(enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks,
                        projectile.skill, 6);
         runtime.transfer_count = 1;
         RecordUpgradeEffect(SkillKind::ChargedShot, 6,
                             UpgradeEffectMetric::ExplosionsCreated);
-        QueueAreaDamage(enemy.position, 3.5f,
-                   RoundDamage(EffectiveAttack() * 2.0f), projectile.skill,
+        const auto &burn_explosion = rules.upgrades.charged_shot.first_hit_burn_explosion;
+        QueueAreaDamage(enemy.position, burn_explosion.radius,
+                   RoundFinalDamage(EffectiveAttack() * burn_explosion.damage_multiplier, rules), projectile.skill,
                    EffectOrigin::Derived, projectile.cast_id, 0, false, 0.0f, 0, 6);
-        EmitVfx(DomainSignalKind::LargeExplosion, enemy.position, {}, 3.5f, 0.15f);
+        EmitVfx(DomainSignalKind::LargeExplosion, enemy.position, {},
+                burn_explosion.radius, 0.15f);
     }
     if (projectile.skill == SkillKind::MultiShot &&
         HasUpgrade(projectile.upgrade_mask, 6) &&
-        projectile.origin == EffectOrigin::Original && runtime.transfer_count < 3)
+        projectile.origin == EffectOrigin::Original &&
+        runtime.transfer_count < rules.upgrades.multishot.apply_burn_and_transfer_arrow
+                                  .maximum_transfers_per_cast)
     {
         if (!enemy.status.burn)
-            ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
+            ApplyBurn(enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks,
                        projectile.skill, 5);
         EnemyActor *target{};
         auto best = std::numeric_limits<float>::max();
@@ -1484,7 +1692,9 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         {
             if (auto *arrow = FireProjectile(
                     projectile.skill, enemy.position,
-                    Normalize(Subtract(target->position, enemy.position)), 0.7f,
+                    Normalize(Subtract(target->position, enemy.position)),
+                    rules.upgrades.multishot.apply_burn_and_transfer_arrow
+                        .damage_multiplier,
                     EffectOrigin::Derived, projectile.cast_id,
                     static_cast<std::uint8_t>(projectile.upgrade_mask &
                                               (std::uint8_t{1} << 7)),
@@ -1501,30 +1711,40 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         projectile.origin == EffectOrigin::Original &&
         HasUpgrade(projectile.upgrade_mask, 7))
     {
+        const auto &mark = rules.upgrades.explosive_arrow.direct_hit_mark_other_active_explosion;
         enemy.marked_by_skill = projectile.skill;
-        enemy.marked_damage_coefficient = 4.0f;
-        enemy.mark_expires = tick + Seconds(8.0f);
+        enemy.marked_damage_coefficient = mark.mark_explosion_damage_multiplier;
+        enemy.mark_expires = tick + mark.mark_duration_ticks;
         EmitVfx(DomainSignalKind::MarkApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
         RecordUpgradeEffect(SkillKind::ExplosiveArrow, 6,
                             UpgradeEffectMetric::ExplosionsCreated);
-        QueueAreaDamage(enemy.position, 2.0f,
-                   RoundDamage(EffectiveAttack() * 3.0f), projectile.skill,
+        QueueAreaDamage(enemy.position,
+                   rules.skills[static_cast<std::size_t>(SkillKind::ExplosiveArrow)]
+                       .area_radius,
+                    RoundFinalDamage(EffectiveAttack() * mark.immediate_explosion_damage_multiplier, rules),
+                   projectile.skill,
                    EffectOrigin::Derived, projectile.cast_id, 0, false,
                    0.0f, 0, 6);
         RecordUpgradeEffect(SkillKind::ExplosiveArrow, 6,
                             UpgradeEffectMetric::MarksApplied);
     }
     if (projectile.skill == SkillKind::RetreatShot &&
-        HasUpgrade(projectile.upgrade_mask, 4) && runtime.spawn_count < 3)
+        HasUpgrade(projectile.upgrade_mask, 4) &&
+        runtime.spawn_count < rules.upgrades.retreat_shot.apply_bleed_and_tracking_arrow
+                                  .maximum_triggers_per_cast)
     {
+        const auto &tracking = rules.upgrades.retreat_shot.apply_bleed_and_tracking_arrow;
         if (enemy.status.bleed_count == 0)
             ApplyBleed(enemy, EffectiveAttack(), 1, projectile.skill, 3);
-        if (auto *target = NearestEnemy(enemy.position, 8.0f,
+        if (auto *target = NearestEnemy(
+                enemy.position,
+                rules.skills[static_cast<std::size_t>(SkillKind::RetreatShot)].projectile_range,
                 std::span(projectile.hit_ids)))
         {
             if (auto *arrow = FireProjectile(projectile.skill, enemy.position,
-                    Normalize(Subtract(target->position, enemy.position)), 1.5f,
+                    Normalize(Subtract(target->position, enemy.position)),
+                    tracking.damage_multiplier,
                     EffectOrigin::Derived, projectile.cast_id, 0, true, 3))
             {
                 arrow->homing = true;
@@ -1535,14 +1755,17 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     }
     if (projectile.skill == SkillKind::RetreatShot &&
         HasUpgrade(projectile.upgrade_mask, 7) && !runtime.triggered &&
-        (enemy.boss || runtime.normal_hits >= 3))
+        (enemy.boss || runtime.normal_hits >=
+             rules.upgrades.retreat_shot.boss_or_three_normal_hits_heal
+                 .minimum_normal_enemy_hits))
     {
         runtime.triggered = true;
         RecordUpgradeEffect(
             SkillKind::RetreatShot, 6, UpgradeEffectMetric::Activations);
         RecordUpgradeEffect(
             SkillKind::RetreatShot, 6, UpgradeEffectMetric::Healing,
-            Heal(RoundDamage(player.max_health * 0.05f)));
+            Heal(RoundDamage(player.max_health * rules.upgrades.retreat_shot
+                                 .boss_or_three_normal_hits_heal.maximum_hp_heal_fraction)));
     }
 
     if (projectile.origin == EffectOrigin::Original)
@@ -1551,32 +1774,39 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         if (projectile.skill == SkillKind::BasicAttack &&
             HasUpgrade(projectile.upgrade_mask, 3) && projectile.hit_count == 1)
         {
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, -30.0f),
-                           0.5f, EffectOrigin::Derived, projectile.cast_id, 0, true, 2);
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, 30.0f),
-                           0.5f, EffectOrigin::Derived, projectile.cast_id, 0, true, 2);
+            const auto &split = rules.upgrades.basic_attack.first_hit_split;
+            for (std::uint32_t index = 0; index < split.projectile_count; ++index)
+                FireProjectile(projectile.skill, projectile.position,
+                               Rotate(direction, split.angles_degrees[index]),
+                               split.damage_multiplier, EffectOrigin::Derived,
+                               projectile.cast_id, 0, true, 2);
         }
         if (projectile.skill == SkillKind::MultiShot &&
             HasUpgrade(projectile.upgrade_mask, 2) && projectile.hit_count == 1)
         {
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, -25.0f),
-                           0.35f, EffectOrigin::Derived, projectile.cast_id,
-                           static_cast<std::uint8_t>(projectile.upgrade_mask &
-                                                     (std::uint8_t{1} << 7)),
-                           true, 1);
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, 25.0f),
-                           0.35f, EffectOrigin::Derived, projectile.cast_id,
-                           static_cast<std::uint8_t>(projectile.upgrade_mask &
-                                                     (std::uint8_t{1} << 7)),
-                           true, 1);
+            const auto &split = rules.upgrades.multishot.original_arrow_first_hit_split;
+            for (std::uint32_t index = 0; index < split.projectile_count_per_original; ++index)
+                FireProjectile(projectile.skill, projectile.position,
+                               Rotate(direction, split.angles_degrees[index]),
+                               split.damage_multiplier, EffectOrigin::Derived, projectile.cast_id,
+                               static_cast<std::uint8_t>(projectile.upgrade_mask &
+                                                         (std::uint8_t{1} << 7)),
+                               true, 1);
         }
         if (projectile.skill == SkillKind::PiercingShot &&
-            HasUpgrade(projectile.upgrade_mask, 5) && projectile.hit_count % 3 == 0)
+            HasUpgrade(projectile.upgrade_mask, 5) &&
+            projectile.hit_count % rules.upgrades.piercing_shot
+                                      .per_three_pierces_perpendicular.normal_enemy_pierce_interval == 0)
         {
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, -90.0f),
-                           2.0f, EffectOrigin::Derived, projectile.cast_id, 0, true, 4);
-            FireProjectile(projectile.skill, projectile.position, Rotate(direction, 90.0f),
-                           2.0f, EffectOrigin::Derived, projectile.cast_id, 0, true, 4);
+            const auto &split = rules.upgrades.piercing_shot.per_three_pierces_perpendicular;
+            for (std::uint32_t index = 0; index < split.projectile_count; ++index)
+            {
+                const auto angle = index == 0 ? -split.angle_from_direction
+                                              : split.angle_from_direction;
+                FireProjectile(projectile.skill, projectile.position, Rotate(direction, angle),
+                               split.damage_multiplier, EffectOrigin::Derived, projectile.cast_id,
+                               0, true, 4);
+            }
         }
     }
     const auto hit_height = enemy.boss ? 1.4f : 0.75f;
@@ -1603,17 +1833,26 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             if (enemy.status.bleed_count == 0)
                 ApplyBleed(enemy, EffectiveAttack(), 1, projectile.skill, 2);
         }
-        if (HasUpgrade(projectile.upgrade_mask, 3) && runtime.transfer_count < 3)
+        const auto &ricochet_upgrades = rules.upgrades.ricochet_arrow;
+        if (HasUpgrade(projectile.upgrade_mask, 3) &&
+            runtime.transfer_count < ricochet_upgrades.apply_bleed_and_extend_ricochets
+                                      .maximum_additional_ricochets)
         {
-            ++projectile.bounce_remaining;
-            ++runtime.transfer_count;
+            projectile.bounce_remaining = static_cast<std::uint8_t>(
+                projectile.bounce_remaining + ricochet_upgrades.apply_bleed_and_extend_ricochets
+                                                   .additional_ricochets_per_bleeding_hit);
+            runtime.transfer_count = static_cast<std::uint8_t>(
+                runtime.transfer_count + ricochet_upgrades.apply_bleed_and_extend_ricochets
+                                             .additional_ricochets_per_bleeding_hit);
             RecordUpgradeEffect(SkillKind::RicochetArrow, 2,
                                 UpgradeEffectMetric::ExtraBounces);
         }
         --projectile.bounce_remaining;
         EnemyActor *next{};
         auto best_bleed = false;
-        auto best_distance = 36.0f;
+        const auto search_radius = rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)]
+                                       .ricochet_search_radius;
+        auto best_distance = search_radius * search_radius;
         const auto excluded = std::span(projectile.hit_ids);
         for (auto &candidate : enemies)
         {
@@ -1621,7 +1860,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 std::ranges::find(excluded, candidate.id.value) != excluded.end())
                 continue;
             const auto distance = DistanceSquared(projectile.position, candidate.position);
-            if (distance > 36.0f) continue;
+            if (distance > search_radius * search_radius) continue;
             const auto bleeding = candidate.status.bleed_count > 0;
             if (!next || (bleeding && !best_bleed) ||
                 (bleeding == best_bleed && distance < best_distance))
@@ -1648,16 +1887,21 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 if (longest)
                 {
                     const auto before = *longest;
-                    *longest = before > 12 ? before - 12 : 0;
+                    const auto reduction = std::min(
+                        ricochet_upgrades.ricochet_cooldown_reduction
+                            .cooldown_reduction_per_ricochet_ticks,
+                        ricochet_upgrades.ricochet_cooldown_reduction.maximum_reduction_ticks);
+                    *longest = before > reduction ? before - reduction : 0;
                     RecordUpgradeEffect(SkillKind::RicochetArrow, 6,
                                         UpgradeEffectMetric::CooldownTicksSaved,
                                         before - *longest);
                 }
             }
-            if (HasUpgrade(projectile.upgrade_mask, 4))
+            if (HasUpgrade(projectile.upgrade_mask, 4) &&
+                ricochet_upgrades.apply_and_copy_burn_to_next_target.enabled)
             {
                 if (!enemy.status.burn)
-                    ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
+                    ApplyBurn(enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks,
                               projectile.skill, 3);
                 EmitVfxLine(DomainSignalKind::BurnTransferred,
                             enemy.position, next->position);
@@ -1669,20 +1913,23 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             {
                 if (auto *branch = FireProjectile(
                         projectile.skill, projectile.position,
-                        Normalize(Subtract(next->position, projectile.position)), 1.0f,
+                         Normalize(Subtract(next->position, projectile.position)),
+                         ricochet_upgrades.first_ricochet_branch_chain.damage_multiplier,
                         EffectOrigin::Derived, projectile.cast_id, 0, true, 1))
                 {
                     branch->homing = true;
                     branch->homing_target = next->id.value;
-                    branch->bounce_remaining = 2;
+                    branch->bounce_remaining = static_cast<std::uint8_t>(
+                        ricochet_upgrades.first_ricochet_branch_chain.maximum_targets - 1);
                 }
             }
             projectile.homing = true;
             projectile.homing_target = next->id.value;
             projectile.velocity = Multiply(Normalize(Subtract(next->position,
                                                               projectile.position)),
-                                           rules.skills[5].projectile_speed);
-            projectile.remaining_range = 6.0f;
+                                            rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)]
+                                                .projectile_speed);
+            projectile.remaining_range = search_radius;
             return;
         }
         if (projectile.origin == EffectOrigin::Original)
@@ -1693,19 +1940,23 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     if (projectile.skill == SkillKind::RicochetArrow &&
         HasUpgrade(projectile.upgrade_mask, 1) && !projectile.returning)
     {
+        const auto &ricochet_upgrades = rules.upgrades.ricochet_arrow;
         projectile.returning = true;
         projectile.source_upgrade = 0;
         projectile.homing = false;
         projectile.homing_target = 0;
         projectile.hit_count = 0;
         projectile.hit_ids.clear();
-        projectile.pierce_remaining = 5;
-        projectile.damage = RoundDamage(EffectiveAttack() * 0.8f);
+        projectile.pierce_remaining = static_cast<std::uint8_t>(
+            ricochet_upgrades.return_to_player_rehit.maximum_rehit_targets);
+        projectile.damage = RoundFinalDamage(EffectiveAttack() *
+                                             ricochet_upgrades.return_to_player_rehit.damage_multiplier,
+                                             rules);
         projectile.remaining_range = std::max(0.1f,
             Length(Subtract(player.position, projectile.position)));
         projectile.velocity = Multiply(
             Normalize(Subtract(player.position, projectile.position)),
-            rules.skills[5].projectile_speed);
+            rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed);
         return;
     }
     if (projectile.pierce_remaining > 0 && (!enemy.boss || projectile.pierce_remaining != 255))
@@ -1731,17 +1982,19 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &project
         projectile.skill == SkillKind::ExplosiveArrow &&
         HasUpgrade(projectile.upgrade_mask, 6))
     {
+        const auto &pull = rules.upgrades.explosive_arrow.pre_explosion_pull;
         EmitVfx(DomainSignalKind::Pull, projectile.position, {},
-                2.5f, 0.12f);
+                pull.pull_radius, 0.12f);
         for (auto &enemy : enemies)
         {
             if (!enemy.dead && !enemy.boss &&
-                DistanceSquared(projectile.position, enemy.position) <= 6.25f)
+                DistanceSquared(projectile.position, enemy.position) <=
+                    pull.pull_radius * pull.pull_radius)
             {
                 const auto before = enemy.position;
                 const auto delta = Subtract(projectile.position, enemy.position);
                 const auto displacement = Multiply(Normalize(delta),
-                                                    std::min(2.5f, Length(delta)));
+                                                    std::min(pull.pull_radius, Length(delta)));
                 QueueEnemyDisplacement(enemy, displacement);
                 RecordUpgradeDisplacement(SkillKind::ExplosiveArrow, 5, before,
                                           Add(before, displacement));
@@ -1765,59 +2018,71 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &project
     {
         if (HasUpgrade(projectile.upgrade_mask, 1))
         {
-            ScheduleAction({tick + 18, ScheduledKind::Explosion, projectile.skill,
-                      projectile.position, {}, 3.0f, 4.5f, 0.0f, 1,
+            const auto &reexplosion = rules.upgrades.explosive_arrow.delayed_reexplosion;
+            ScheduleAction({tick + reexplosion.delay_ticks, ScheduledKind::Explosion,
+                      projectile.skill, projectile.position, {}, reexplosion.damage_multiplier,
+                      reexplosion.radius, 0.0f, 1,
                       0, EffectOrigin::Derived,
                       projectile.cast_id, 0});
         }
         if (HasUpgrade(projectile.upgrade_mask, 2))
         {
-            for (std::uint32_t index = 0; index < 3; ++index)
+            const auto &satellite = rules.upgrades.explosive_arrow.three_delayed_satellite_bombs;
+            for (std::uint32_t index = 0; index < satellite.bomb_count; ++index)
             {
-                ScheduleAction({tick + 9, ScheduledKind::Explosion, projectile.skill,
+                ScheduleAction({tick + satellite.delay_ticks, ScheduledKind::Explosion, projectile.skill,
                           Add(projectile.position, Multiply(
-                              Rotate({0.0f, 1.0f}, index * 120.0f), 1.5f)),
-                          {}, 1.5f, 4.5f, 0.0f, 1, 0,
+                              Rotate({0.0f, 1.0f}, index * satellite.angular_spacing),
+                              satellite.placement_radius)),
+                          {}, satellite.damage_multiplier, satellite.explosion_radius, 0.0f, 1, 0,
                           EffectOrigin::Derived, projectile.cast_id, 1});
             }
         }
         if (HasUpgrade(projectile.upgrade_mask, 3))
         {
-            for (std::uint32_t index = 0; index < 8; ++index)
+            const auto &fragments = rules.upgrades.explosive_arrow.eight_direction_fragments;
+            const auto step = 360.0f / static_cast<float>(fragments.direction_count);
+            for (std::uint32_t index = 0; index < fragments.direction_count; ++index)
             {
                 if (auto *fragment = FireProjectile(
                         projectile.skill, projectile.position,
-                        Rotate({0.0f, 1.0f}, index * 45.0f), 0.7f,
+                        Rotate({0.0f, 1.0f}, index * step), fragments.damage_multiplier,
                         EffectOrigin::Derived, projectile.cast_id, 0, true, 2))
                 {
-                    fragment->radius *= 2.5f;
-                    fragment->pierce_remaining = 1;
+                    fragment->radius *= fragments.collision_radius_multiplier;
+                    fragment->pierce_remaining = static_cast<std::uint8_t>(fragments.pierce);
                 }
             }
         }
         if (HasUpgrade(projectile.upgrade_mask, 4))
         {
+            const auto &fire = rules.upgrades.explosive_arrow.explosion_leaves_burning_area;
             SpawnArea(AreaKind::Damage, projectile.skill, projectile.position,
-                      3.0f, 0.35f, 4.0f, 0.0f, EffectOrigin::Derived,
+                      fire.radius, fire.damage_multiplier_per_tick,
+                      static_cast<float>(fire.duration_ticks) / 60.0f, 0.0f,
+                      EffectOrigin::Derived,
                       projectile.cast_id, 0, 0.0f, 0.0f, 0.0f, true, 3);
         }
         if (HasUpgrade(projectile.upgrade_mask, 5))
         {
+            const auto &blood = rules.upgrades.explosive_arrow.apply_bleed_and_blood_explosions;
             std::uint8_t blood_explosions{};
             for (auto &enemy : enemies)
             {
-                if (blood_explosions == 8) break;
+                if (blood_explosions >= blood.maximum_explosions_per_cast) break;
                 if (!enemy.dead &&
-                    DistanceSquared(projectile.position, enemy.position) <= 9.0f)
+                    DistanceSquared(projectile.position, enemy.position) <=
+                        blood.radius * blood.radius)
                 {
                     if (enemy.status.bleed_count == 0)
-                        ApplyBleed(enemy, EffectiveAttack(), 1, projectile.skill, 4);
-                    QueueAreaDamage(enemy.position, 2.0f,
-                               RoundDamage(EffectiveAttack() * 1.2f),
+                        ApplyBleed(enemy, EffectiveAttack(), static_cast<std::uint8_t>(blood.bleed_stacks),
+                                   projectile.skill, 4);
+                    QueueAreaDamage(enemy.position, blood.radius,
+                                RoundFinalDamage(EffectiveAttack() * blood.damage_multiplier, rules),
                                projectile.skill, EffectOrigin::Derived,
                                projectile.cast_id, 0, false, 0.0f, 0, 4);
                     EmitVfx(DomainSignalKind::SmallExplosion, enemy.position,
-                            {}, 2.0f, 0.15f);
+                            {}, blood.radius, 0.15f);
                     RecordUpgradeEffect(SkillKind::ExplosiveArrow, 4,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     ++blood_explosions;
@@ -1850,8 +2115,12 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                                       kGridCellSize)),
                                   0, kGridDimension - 1);
             };
-            constexpr float kLargestEnemyRadius = 1.1f;
-            const auto margin = projectile.radius + kLargestEnemyRadius;
+            const auto largest_enemy_radius = std::max(
+                rules.boss_common.collision_radius,
+                std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Melee)].collision_radius,
+                         std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)].collision_radius,
+                                  rules.enemies[static_cast<std::size_t>(EnemyKind::Suicide)].collision_radius)));
+            const auto margin = projectile.radius + largest_enemy_radius;
             const auto minimum_x = coordinate(std::min(projectile.previous_position.x,
                                                         projectile.position.x) - margin);
             const auto maximum_x = coordinate(std::max(projectile.previous_position.x,
@@ -1893,7 +2162,11 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
             {
                 auto &enemy = enemies[enemy_index];
                 if (enemy.dead || AlreadyHit(projectile, enemy.id.value)) continue;
-                const auto combined = projectile.radius + (enemy.boss ? 1.1f : 0.45f);
+                const auto enemy_radius = enemy.boss
+                                              ? rules.boss_common.collision_radius
+                                              : rules.enemies[static_cast<std::size_t>(enemy.kind)]
+                                                    .collision_radius;
+                const auto combined = projectile.radius + enemy_radius;
                 if (SegmentCircle(projectile.previous_position, projectile.position,
                                   enemy.position, combined))
                 {
@@ -1907,7 +2180,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
             }
         }
         else if (SegmentCircle(projectile.previous_position, projectile.position,
-                               player.position, projectile.radius + 0.4f))
+                               player.position,
+                               projectile.radius + rules.stats.player_collision_radius))
         {
             QueueDamage(0, projectile.damage, SkillKind::Count,
                        EffectOrigin::Original, projectile.cast_id, 0, false, 0.0f, 0,
@@ -1922,16 +2196,18 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 HasUpgrade(projectile.upgrade_mask, 2))
             {
                 const auto direction = Normalize(projectile.velocity);
-                for (const auto angle : {-20.0f, 20.0f})
+                const auto &split = rules.upgrades.piercing_shot.range_end_split;
+                for (std::uint32_t index = 0; index < split.projectile_count; ++index)
                 {
+                    const auto angle = split.angles_degrees[index];
                     auto child_direction = Rotate(direction, angle);
-                    const auto *target = NearestEnemy(projectile.position, 12.0f);
+                    const auto *target = NearestEnemy(projectile.position, split.search_radius);
                     if (target)
                         child_direction = Normalize(Subtract(target->position,
                                                              projectile.position));
                     if (auto *branch = FireProjectile(
                             projectile.skill, projectile.position, child_direction,
-                            0.9f, EffectOrigin::Derived, projectile.cast_id, 0,
+                             split.damage_multiplier, EffectOrigin::Derived, projectile.cast_id, 0,
                             true, 1); branch && target)
                     {
                         branch->homing = true;
@@ -1944,13 +2220,14 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                      HasUpgrade(projectile.upgrade_mask, 8) &&
                      projectile.hit_count == 0)
             {
-                if (auto *target = NearestEnemy(projectile.position, 12.0f))
+                const auto &retarget = rules.upgrades.multishot.missed_arrow_retarget;
+                if (auto *target = NearestEnemy(projectile.position, retarget.search_radius))
                 {
                     if (auto *arrow = FireProjectile(
                             projectile.skill, projectile.position,
                             Normalize(Subtract(target->position,
                                                projectile.position)),
-                            0.55f, EffectOrigin::Derived,
+                             retarget.damage_multiplier, EffectOrigin::Derived,
                             projectile.cast_id, 0, true, 7))
                     {
                         arrow->homing = true;
@@ -1967,13 +2244,15 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 projectile.source_upgrade = 0;
                 projectile.hit_count = 0;
                 projectile.hit_ids.clear();
-                projectile.pierce_remaining = 5;
+                projectile.pierce_remaining = static_cast<std::uint8_t>(
+                    rules.upgrades.ricochet_arrow.return_to_player_rehit.maximum_rehit_targets);
                 projectile.remaining_range = std::max(
                     0.1f, Length(Subtract(player.position, projectile.position)));
                 projectile.velocity = Multiply(
                     Normalize(Subtract(player.position, projectile.position)),
-                    rules.skills[5].projectile_speed);
-                projectile.damage = RoundDamage(EffectiveAttack() * 2.5f);
+                    rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed);
+                projectile.damage = RoundFinalDamage(EffectiveAttack() *
+                    rules.upgrades.ricochet_arrow.return_to_player_rehit.damage_multiplier, rules);
                 projectile.source_upgrade = 0;
             }
             else if (projectile.skill == SkillKind::RicochetArrow &&
@@ -1986,15 +2265,16 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 projectile.hit_count == 0)
             {
                 if (auto *target = NearestEnemy(projectile.position,
-                                                rules.skills[0].range))
+                                                rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].range))
                 {
                     projectile.returning = true;
                     projectile.source_upgrade = 6;
-                    projectile.damage = RoundDamage(EffectiveAttack() * 1.75f);
-                    projectile.remaining_range = rules.skills[0].range;
+                    projectile.damage = RoundFinalDamage(EffectiveAttack() *
+                        rules.upgrades.basic_attack.missed_arrow_reacquire.damage_multiplier, rules);
+                    projectile.remaining_range = rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].range;
                     projectile.velocity = Multiply(
                         Normalize(Subtract(target->position, projectile.position)),
-                        rules.skills[0].projectile_speed);
+                        rules.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed);
                     projectile.radius *= 2.0f;
                     projectile.homing = true;
                     projectile.homing_target = target->id.value;
@@ -2023,7 +2303,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     area.radius / 2.0f, 0.12f);
         if (area.kind == AreaKind::EnemyDamage)
         {
-            if (area.ring_outer_radius > 0.0f)
+            if (area.ring_outer_radius > 0.0f && area.safe_gap_count != 0)
             {
                 const auto duration = std::max<Tick>(area.expires - area.active_tick, 1);
                 const auto progress = std::clamp(
@@ -2040,7 +2320,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 auto nearest_gap = std::fmod(angle - offset + spacing * 0.5f + 360.0f,
                                              spacing) - spacing * 0.5f;
                 const auto safe = std::abs(nearest_gap) <= area.safe_gap_degrees * 0.5f;
-                if (!safe && std::abs(Length(delta) - radius) <= 0.75f &&
+                if (!safe &&
+                    std::abs(Length(delta) - radius) <= area.ring_half_width &&
                     IncrementAreaHit(area.id.value, 0) == 1)
                 {
                     QueueDamage(0, area.damage, SkillKind::Count,
@@ -2075,7 +2356,9 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                             const auto delta = Subtract(area.position, enemy.position);
                             const auto before = enemy.position;
                             const auto displacement = Multiply(
-                                Normalize(delta), std::min(2.0f, Length(delta)));
+                             Normalize(delta), std::min(
+                                 rules.upgrades.trap.pre_explosion_pull_and_slow.pull_radius,
+                                 Length(delta)));
                             QueueEnemyDisplacement(enemy, displacement);
                             RecordUpgradeDisplacement(SkillKind::Trap, 5, before,
                                                       Add(before, displacement));
@@ -2085,14 +2368,17 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 if (HasUpgrade(area.upgrade_mask, 7))
                 {
                     target->marked_by_skill = SkillKind::Trap;
-                    target->marked_damage_coefficient = 4.0f;
-                    target->mark_expires = tick + Seconds(8.0f);
+                    const auto &mark = rules.upgrades.trap.trigger_mark_other_active_damage;
+                    target->marked_damage_coefficient = mark.mark_explosion_damage_multiplier;
+                    target->mark_expires = tick + mark.mark_duration_ticks;
                     EmitVfx(DomainSignalKind::MarkApplied, target->position,
                             {}, target->boss ? 1.4f : 0.75f, 0.025f);
                     RecordUpgradeEffect(SkillKind::Trap, 6,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     QueueDamage(target->id.value,
-                               RoundDamage(EffectiveAttack() * 3.0f),
+                        RoundFinalDamage(EffectiveAttack() * rules.upgrades.trap
+                                            .trigger_mark_other_active_damage.immediate_damage_multiplier,
+                                         rules),
                                SkillKind::Trap, EffectOrigin::Derived,
                                area.cast_id, 0, false, 0.0f, 0, 6);
                     RecordUpgradeEffect(SkillKind::Trap, 6,
@@ -2106,9 +2392,9 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                            area.origin, area.cast_id,
                            HasUpgrade(area.upgrade_mask, 4) ? 3 : 0,
                            HasUpgrade(area.upgrade_mask, 5),
-                           HasUpgrade(area.upgrade_mask, 6) ? 0.6f : area.slow_reduction,
-                           HasUpgrade(area.upgrade_mask, 6) ? Seconds(2.0f)
-                                                            : area.slow_duration,
+                           HasUpgrade(area.upgrade_mask, 6) ? rules.upgrades.trap.pre_explosion_pull_and_slow.slow_fraction : area.slow_reduction,
+                           HasUpgrade(area.upgrade_mask, 6) ? rules.upgrades.trap.pre_explosion_pull_and_slow.slow_duration_ticks
+                                                             : area.slow_duration,
                            damage_source, area.source_relic);
                 EmitSignal(DomainSignalKind::TrapDamaged, area.position,
                            static_cast<std::uint8_t>(area.skill));
@@ -2116,13 +2402,16 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 {
                     pending_areas.push_back(
                         {tick, ScheduledKind::Area, area.skill, target->position, {},
-                         0.7f, 1.5f, 2.0f, 1, 0,
+                          rules.upgrades.trap.trigger_burn_and_fire_area.damage_multiplier_per_tick,
+                          rules.upgrades.trap.trigger_burn_and_fire_area.area_radius,
+                          static_cast<float>(rules.upgrades.trap.trigger_burn_and_fire_area.area_duration_ticks) / 60.0f,
+                          1, 0,
                          EffectOrigin::Derived, area.cast_id, 4});
                 }
                 ++area.trigger_count;
                 if (HasUpgrade(area.upgrade_mask, 3) && area.trigger_count == 1)
                 {
-                    area.next_tick = tick + 120;
+                    area.next_tick = tick + rules.upgrades.trap.single_reactivation.reactivation_delay_ticks;
                 }
                 else
                 {
@@ -2185,7 +2474,9 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         const auto delta = Subtract(area.position, enemy.position);
                         const auto before = enemy.position;
                         const auto displacement = Multiply(
-                            Normalize(delta), std::min(2.0f, Length(delta)));
+                            Normalize(delta), std::min(
+                                rules.upgrades.arrow_rain.first_damage_tick_pull.pull_radius,
+                                Length(delta)));
                         QueueEnemyDisplacement(enemy, displacement);
                         RecordUpgradeDisplacement(SkillKind::ArrowRain, 1, before,
                                                   Add(before, displacement));
@@ -2193,7 +2484,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     const auto hit_count = IncrementAreaHit(area.id.value,
                                                             enemy.id.value);
                     if (HasUpgrade(area.upgrade_mask, 4) && !enemy.status.burn)
-                        ApplyBurn(enemy, EffectiveAttack(), false, Seconds(4.0f),
+                        ApplyBurn(enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks,
                                   area.skill, 3);
                     const auto damage_source = HasUpgrade(area.upgrade_mask, 8) &&
                                                        area.trigger_count >= 6
@@ -2205,23 +2496,28 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                                false, area.slow_reduction, area.slow_duration,
                                damage_source, area.source_relic);
                     if (HasUpgrade(area.upgrade_mask, 4) && enemy.status.burn &&
-                        runtime.spawn_count < 4)
+                         runtime.spawn_count < rules.upgrades.arrow_rain
+                                               .apply_burn_and_create_fire_areas.maximum_areas_per_cast)
                     {
                         pending_areas.push_back(
                             {tick, ScheduledKind::Area, area.skill, enemy.position, {},
-                              0.3f, 1.5f, 2.0f, 1, 0,
+                              rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.damage_multiplier_per_tick,
+                              rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.radius,
+                              static_cast<float>(rules.upgrades.arrow_rain.apply_burn_and_create_fire_areas.duration_ticks) / 60.0f,
+                              1, 0,
                               EffectOrigin::Derived, area.cast_id, 3});
                         ++runtime.spawn_count;
                     }
                 }
                 if (HasUpgrade(area.upgrade_mask, 5))
                 {
-                    if (auto *target = NearestEnemy(area.position, 7.0f))
+                    const auto &tracking = rules.upgrades.arrow_rain.tracking_arrow_each_damage_tick;
+                    if (auto *target = NearestEnemy(area.position, tracking.search_radius))
                     {
                         if (auto *arrow = FireProjectile(
                                 area.skill, area.position,
                                 Normalize(Subtract(target->position, area.position)),
-                                4.0f, EffectOrigin::Derived, area.cast_id, 0, true, 4))
+                                tracking.damage_multiplier, EffectOrigin::Derived, area.cast_id, 0, true, 4))
                         {
                             arrow->homing = true;
                             arrow->homing_target = target->id.value;
@@ -2253,7 +2549,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     for (const auto &enemy : enemies)
                     {
                         if (enemy.dead) continue;
-                        const auto enemy_radius = enemy.boss ? 1.1f : 0.45f;
+                        const auto enemy_radius = enemy.boss
+                                                      ? rules.boss_common.collision_radius
+                                                      : rules.enemies[static_cast<std::size_t>(enemy.kind)]
+                                                            .collision_radius;
                         if (SegmentCircle(from, to, enemy.position,
                                           area.radius + enemy_radius))
                         {
@@ -2283,9 +2582,13 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 area.origin == EffectOrigin::Original &&
                 HasUpgrade(area.upgrade_mask, 8))
             {
+                const auto &slow = rules.upgrades.arrow_rain.extend_area_and_leave_slow;
                 SpawnArea(AreaKind::Slow, area.skill, area.position, area.radius,
-                          0.0f, 3.0f, 0.0f, EffectOrigin::Derived,
-                          area.cast_id, 0, 0.4f, 1.0f, 0.0f, false, 7);
+                          0.0f, static_cast<float>(slow.post_area_duration_ticks) / 60.0f,
+                          0.0f, EffectOrigin::Derived,
+                          area.cast_id, 0, slow.post_area_slow_fraction,
+                          static_cast<float>(slow.post_area_slow_duration_ticks) / 60.0f,
+                          0.0f, false, 7);
             }
         }
     }
@@ -2309,10 +2612,13 @@ void GameSimulation::SimulationWorld::ApplyBleed(EnemyActor &enemy, float attack
                         UpgradeEffectMetric::BleedStacksApplied, stacks);
     for (std::uint8_t stack = 0; stack < stacks; ++stack)
     {
-        BleedEffect effect{attack, tick + rules.bleed_duration + 1,
-                           tick + Seconds(0.1f), source_skill,
+        BleedEffect effect{attack, tick + rules.statuses.bleed.duration_ticks + 1,
+                           tick + rules.statuses.first_tick_delay_ticks, source_skill,
                            source_upgrade, source_relic};
-        if (enemy.status.bleed_count < enemy.status.bleeds.size())
+        const auto maximum_stacks = std::min<std::size_t>(
+            rules.statuses.bleed.maximum_stacks, enemy.status.bleeds.size());
+        if (maximum_stacks == 0) break;
+        if (enemy.status.bleed_count < maximum_stacks)
         {
             enemy.status.bleeds[enemy.status.bleed_count++] = effect;
         }
@@ -2331,10 +2637,12 @@ void GameSimulation::SimulationWorld::ApplyBurn(EnemyActor &enemy, float attack,
                std::uint8_t source_upgrade,
                std::uint8_t source_relic)
 {
+    if (rules.statuses.burn.maximum_instances == 0) return;
     EmitVfx(DomainSignalKind::BurnApplied, enemy.position);
     RecordUpgradeEffect(source_skill, source_upgrade,
                         UpgradeEffectMetric::BurnApplications);
-    const BurnEffect incoming{attack, tick + duration + 1, tick + Seconds(0.1f),
+    const BurnEffect incoming{attack, tick + duration + 1,
+                              tick + rules.statuses.first_tick_delay_ticks,
                               source_skill, propagated, source_upgrade, source_relic};
     if (!enemy.status.burn || incoming.attack_snapshot > enemy.status.burn->attack_snapshot)
     {
@@ -2366,12 +2674,13 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             {
                 EmitVfx(DomainSignalKind::BleedTicked, enemy.position);
                 QueueDamage(enemy.id.value,
-                           RoundDamage(bleed.attack_snapshot *
-                                       rules.bleed_tick_coefficient),
+                           RoundFinalDamage(bleed.attack_snapshot *
+                                            rules.statuses.bleed.attack_power_multiplier_per_tick,
+                                            rules),
                            bleed.source_skill, EffectOrigin::DamageOverTime, 0,
                            0, false, 0.0f, 0,
                            bleed.source_upgrade, bleed.source_relic);
-                bleed.next_tick += rules.status_tick_interval;
+                bleed.next_tick += rules.statuses.bleed.tick_interval_ticks;
             }
             ++index;
         }
@@ -2385,13 +2694,14 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             {
                 EmitVfx(DomainSignalKind::BurnTicked, enemy.position);
                 QueueDamage(enemy.id.value,
-                           RoundDamage(enemy.status.burn->attack_snapshot *
-                                       rules.burn_tick_coefficient),
+                           RoundFinalDamage(enemy.status.burn->attack_snapshot *
+                                            rules.statuses.burn.attack_power_multiplier_per_tick,
+                                            rules),
                            enemy.status.burn->source_skill,
                            EffectOrigin::DamageOverTime, 0, 0, false, 0.0f, 0,
                            enemy.status.burn->source_upgrade,
                            enemy.status.burn->source_relic);
-                enemy.status.burn->next_tick += rules.status_tick_interval;
+                enemy.status.burn->next_tick += rules.statuses.burn.tick_interval_ticks;
             }
             if (enemy.status.burn)
                 RecordUpgradeEffect(enemy.status.burn->source_skill,
@@ -2530,7 +2840,7 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             else if (event.skill == SkillKind::ExplosiveArrow) source_upgrade = 3;
             else if (event.skill == SkillKind::Trap) source_upgrade = 4;
             else if (event.skill == SkillKind::ArrowRain) source_upgrade = 3;
-            ApplyBurn(*enemy, EffectiveAttack(), false, rules.burn_duration, event.skill,
+            ApplyBurn(*enemy, EffectiveAttack(), false, rules.statuses.burn.duration_ticks, event.skill,
                       source_upgrade, event.source_relic);
             if (had_bleed && event.origin == EffectOrigin::Original)
                 DispatchStatusAppliedRules(*enemy, event, source_upgrade);
@@ -2564,8 +2874,8 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
                     enemy->boss ? 1.4f : 0.75f, 0.025f);
             RecordUpgradeEffect(marked_skill, 6,
                                 UpgradeEffectMetric::ExplosionsCreated);
-            QueueAreaDamage(enemy->position, 2.0f,
-                       RoundDamage(EffectiveAttack() * coefficient), marked_skill,
+             QueueAreaDamage(enemy->position, rules.skills[static_cast<std::size_t>(marked_skill)].area_radius,
+                        RoundFinalDamage(EffectiveAttack() * coefficient, rules), marked_skill,
                        EffectOrigin::Derived, event.cast_id, 0, false, 0.0f, 0,
                        6);
         }
@@ -2600,11 +2910,9 @@ std::uint32_t GameSimulation::SimulationWorld::EnemyExperience(const EnemyActor 
 {
     if (enemy.boss)
     {
-        if (*enemy.boss == BossKind::FiveMinute) return 100;
-        if (*enemy.boss == BossKind::TenMinute) return 200;
-        return 0;
+        return rules.progression.boss_xp[static_cast<std::size_t>(*enemy.boss)];
     }
-    return enemy.kind == EnemyKind::Melee ? 1u : 2u;
+    return rules.progression.enemy_xp[static_cast<std::size_t>(enemy.kind)];
 }
 
 void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
@@ -2643,8 +2951,10 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
         {
             ++balance.pickup_drop_attempts[
                 static_cast<std::size_t>(PickupKind::RelicChest)];
-            SpawnPickup(PickupKind::RelicChest, enemy.position, 1, true);
-            Heal(RoundDamage(player.max_health * 0.25f));
+            SpawnPickup(PickupKind::RelicChest, enemy.position,
+                        rules.relic_drop.guaranteed_boxes_per_mid_boss, true);
+            Heal(RoundDamage(player.max_health * rules.relic_drop
+                                           .mid_boss_maximum_hp_heal_fraction));
         }
     }
     else
@@ -2654,12 +2964,15 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             ++runtime->kills;
             if (runtime->skill == SkillKind::ChargedShot && runtime->full_charge &&
                 HasUpgrade(runtime->upgrade_mask, 8) &&
-                runtime->kills >= 3 && !runtime->refund_triggered)
+                runtime->kills >= rules.upgrades.charged_shot.full_charge_multi_kill_cooldown_refund
+                                   .minimum_normal_enemy_kills && !runtime->refund_triggered)
             {
                 auto &cooldown = player.cooldowns[
                     static_cast<std::size_t>(SkillKind::ChargedShot) - 1];
                 const auto before = cooldown;
-                cooldown -= cooldown * 40 / 100;
+                cooldown -= static_cast<Tick>(cooldown * rules.upgrades.charged_shot
+                                                   .full_charge_multi_kill_cooldown_refund
+                                                   .current_cooldown_refund_fraction);
                 RecordUpgradeEffect(SkillKind::ChargedShot, 7,
                                     UpgradeEffectMetric::CooldownTicksSaved,
                                     before - cooldown);
@@ -2668,20 +2981,22 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             if (runtime->skill == SkillKind::RicochetArrow &&
                 HasUpgrade(runtime->upgrade_mask, 5) &&
                 enemy.last_damage_origin == EffectOrigin::Original &&
-                runtime->spawn_count < 9)
+                runtime->spawn_count < rules.upgrades.ricochet_arrow.kill_small_arrows
+                                             .maximum_arrows_per_cast)
             {
                 std::array<std::uint64_t, 4> excluded{enemy.id.value};
-                for (std::size_t index = 0; index < 3; ++index)
+                const auto &small = rules.upgrades.ricochet_arrow.kill_small_arrows;
+                for (std::size_t index = 0; index < small.arrows_per_kill; ++index)
                 {
-                    if (runtime->spawn_count == 9) break;
+                    if (runtime->spawn_count >= small.maximum_arrows_per_cast) break;
                     auto *target = NearestEnemy(
-                        enemy.position, 12.0f,
+                        enemy.position, small.search_radius,
                         std::span(excluded.data(), index + 1));
                     if (!target) break;
                     if (auto *arrow = FireProjectile(
                             SkillKind::RicochetArrow, enemy.position,
                             Normalize(Subtract(target->position, enemy.position)),
-                            1.0f, EffectOrigin::Derived, runtime->cast_id, 0,
+                             small.damage_multiplier, EffectOrigin::Derived, runtime->cast_id, 0,
                             true, 4))
                     {
                         arrow->homing = true;
@@ -2696,16 +3011,17 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
                 HasUpgrade(runtime->upgrade_mask, 6) &&
                 !runtime->refund_triggered)
             {
-                if (auto *target = NearestEnemy(enemy.position, 12.0f))
+                const auto &chain = rules.upgrades.ricochet_arrow.original_ricochet_kill_new_chain;
+                if (auto *target = NearestEnemy(enemy.position, chain.search_radius))
                 {
                     if (auto *arrow = FireProjectile(
                             SkillKind::RicochetArrow, enemy.position,
                              Normalize(Subtract(target->position, enemy.position)),
-                              2.4f, EffectOrigin::Derived, runtime->cast_id, 0, true, 5))
+                               chain.damage_multiplier, EffectOrigin::Derived, runtime->cast_id, 0, true, 5))
                     {
                         arrow->homing = true;
                         arrow->homing_target = target->id.value;
-                        arrow->bounce_remaining = 2;
+                        arrow->bounce_remaining = static_cast<std::uint8_t>(chain.new_chain_targets - 1);
                         runtime->refund_triggered = true;
                     }
                 }
@@ -2713,7 +3029,8 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             if (runtime->skill == SkillKind::ArrowRain &&
                 HasUpgrade(runtime->upgrade_mask, 7) &&
                 enemy.last_damage_origin == EffectOrigin::Original &&
-                runtime->transfer_count < 6)
+                runtime->transfer_count < rules.upgrades.arrow_rain.area_kill_arrow_outside
+                                             .maximum_triggers_per_cast)
             {
                 const auto source = std::ranges::find_if(areas, [&](const AreaActor &area) {
                     return !area.dead && area.cast_id == runtime->cast_id &&
@@ -2745,7 +3062,8 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
                         if (auto *arrow = FireProjectile(
                                 SkillKind::ArrowRain, enemy.position,
                                  Normalize(Subtract(target->position, enemy.position)),
-                                  2.0f, EffectOrigin::Derived, runtime->cast_id, 0, true, 6))
+                                   rules.upgrades.arrow_rain.area_kill_arrow_outside.damage_multiplier,
+                                   EffectOrigin::Derived, runtime->cast_id, 0, true, 6))
                         {
                             arrow->homing = true;
                             arrow->homing_target = target->id.value;
@@ -2757,14 +3075,19 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             if (runtime->skill == SkillKind::Trap &&
                 HasUpgrade(runtime->upgrade_mask, 8) &&
                 enemy.last_damage_origin == EffectOrigin::Original &&
-                runtime->spawn_count < 3)
+                runtime->spawn_count < rules.upgrades.trap.trap_kill_small_trap
+                                             .maximum_small_traps_per_cast)
             {
-                if (auto *target = NearestEnemy(enemy.position, 120.0f))
+                const auto &small = rules.upgrades.trap.trap_kill_small_trap;
+                if (auto *target = NearestEnemy(
+                        enemy.position, std::numeric_limits<float>::max()))
                 {
                     SpawnArea(AreaKind::Trap, SkillKind::Trap, target->position,
-                              1.5f, 5.0f, 12.0f, 0.6f,
+                              small.detection_radius, small.damage_multiplier,
+                              static_cast<float>(small.active_duration_ticks) / 60.0f,
+                              static_cast<float>(small.activation_delay_ticks) / 60.0f,
                               EffectOrigin::Derived, runtime->cast_id, 0,
-                              0.3f, 3.0f, 2.0f, false, 7);
+                              0.0f, 0.0f, small.explosion_radius, false, 7);
                     ++runtime->spawn_count;
                 }
             }
@@ -2776,31 +3099,38 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
                                       std::uint64_t purpose,
                                       float chance_multiplier) {
             const auto chance = std::min(
-                1.0f, (rules.utility_pickup_base_chance +
-                       rules.utility_pickup_miss_increment * misses) *
+                1.0f, (rules.growth.utility_pickup_base_chance +
+                       rules.growth.utility_pickup_miss_increment * misses) *
                           chance_multiplier);
             const auto dropped = RandomUnit(enemy.random_key, purpose) < chance;
             misses = dropped ? 0 : misses + 1;
             return dropped;
         };
-        if (utility_drop(heal_pickup_misses, 0x4845414Cull,
-                         rules.heal_pickup_chance_multiplier))
+        if (RandomUnit(enemy.random_key, 0x4845414Cull) <
+            rules.relic_drop.healing_pickup_probability)
         {
-            SpawnPickup(PickupKind::Heal, enemy.position, 8);
+            heal_pickup_misses = 0;
+            SpawnPickup(PickupKind::Heal, enemy.position,
+                        RoundDamage(player.max_health * rules.relic_drop
+                                                       .healing_pickup_maximum_hp_heal_fraction));
         }
+        else
+            ++heal_pickup_misses;
         if (utility_drop(magnet_pickup_misses, 0x4D41474E4554ull,
-                         rules.magnet_pickup_chance_multiplier))
+                         rules.growth.magnet_pickup_chance_multiplier))
         {
             SpawnPickup(PickupKind::Magnet, enemy.position, 1);
         }
         if (config.scenario.progression_enabled &&
-            player.relic_mask != 0x0FFFu)
+            (!rules.relic_drop.stop_normal_box_rolls_after_all_acquired ||
+             player.relic_mask != ((std::uint16_t{1} << kRelicCount) - 1)))
         {
             ++balance.pickup_drop_attempts[
                 static_cast<std::size_t>(PickupKind::RelicChest)];
             const auto chance = std::min(
-                1.0f, rules.relic_chest_base_chance +
-                          rules.relic_chest_miss_increment * normal_chest_kills);
+                rules.relic_drop.normal_enemy_probability_cap,
+                rules.relic_drop.normal_enemy_base_probability +
+                          rules.relic_drop.normal_enemy_probability_increment_per_kill * normal_chest_kills);
             if (RandomUnit(enemy.random_key, 0x4348455354ull) < chance)
             {
                 SpawnPickup(PickupKind::RelicChest, enemy.position, 1);
@@ -2823,22 +3153,28 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
             final_dead |= enemy.boss && *enemy.boss == BossKind::Final;
         }
         if (enemy.boss && *enemy.boss == BossKind::Final && enemy.final_phase == 1 &&
-            enemy.health > 0 && enemy.health * 2 <= enemy.max_health)
+            enemy.health > 0 &&
+            enemy.health <= enemy.max_health * rules.bosses[static_cast<std::size_t>(
+                BossKind::Final)].phase_transition.hp_fraction)
         {
+            const auto &transition = rules.bosses[static_cast<std::size_t>(
+                BossKind::Final)].phase_transition;
             enemy.final_phase = 2;
-            enemy.invulnerable_until = tick + 90;
+            enemy.invulnerable_until = tick + transition.invulnerability_ticks;
             enemy.pattern_ready = enemy.invulnerable_until;
             enemy.dash_until = 0;
             enemy.velocity = {};
             std::erase_if(boss_actions, [&](const BossAction &action) {
                 return action.boss_id == enemy.id.value;
             });
-            std::erase_if(projectiles, [](const ProjectileActor &projectile) {
-                return !projectile.player_owned;
-            });
-            std::erase_if(areas, [](const AreaActor &area) {
-                return area.kind == AreaKind::EnemyDamage;
-            });
+            if (transition.remove_enemy_projectiles)
+                std::erase_if(projectiles, [](const ProjectileActor &projectile) {
+                    return !projectile.player_owned;
+                });
+            if (transition.remove_enemy_areas)
+                std::erase_if(areas, [](const AreaActor &area) {
+                    return area.kind == AreaKind::EnemyDamage;
+                });
             EmitVfx(DomainSignalKind::BossPhaseChanged, enemy.position,
                     {}, 1.0f, 1.25f);
         }
@@ -2980,7 +3316,7 @@ void GameSimulation::SimulationWorld::HandleCombatHitChain(const DamageCommand &
         if (!target) break;
         selected.push_back(target->id.value);
         QueueDamage(target->id.value,
-                   RoundDamage(EffectiveAttack() * relic.damage_multiplier),
+                   RoundFinalDamage(EffectiveAttack() * relic.damage_multiplier, rules),
                    SkillKind::Count, EffectOrigin::Derived, event.cast_id, 0,
                    false, 0.0f, 0, kNoTelemetrySource,
                    static_cast<std::uint8_t>(RelicKind::CombatHitChain));
@@ -2999,7 +3335,7 @@ void GameSimulation::SimulationWorld::HandleBleedBurnExplosion(EnemyActor &enemy
     const auto &relic = rules.relics.bleed_burn_explosion;
     enemy.bleed_burn_ready = tick + relic.per_target_cooldown_ticks;
     QueueAreaDamage(enemy.position, relic.radius,
-               RoundDamage(EffectiveAttack() * relic.damage_multiplier),
+                RoundFinalDamage(EffectiveAttack() * relic.damage_multiplier, rules),
                event.skill, EffectOrigin::Derived, event.cast_id, 0,
                false, 0.0f, 0, source_upgrade,
                static_cast<std::uint8_t>(RelicKind::BleedBurnExplosion));

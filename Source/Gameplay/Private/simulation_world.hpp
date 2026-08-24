@@ -44,7 +44,6 @@ constexpr Tick kAnimationBlendOutTicks = 6;
 constexpr float kBasicAttackRate = 60.0f /
                                    static_cast<float>(kRecoilClipTicks +
                                                       kAnimationBlendOutTicks);
-constexpr float kAttackSpeedPerPoint = 0.07625f;
 
 constexpr Tick AnimationMarkerTicks(Tick source_marker, Tick playback_ticks) noexcept
 {
@@ -254,6 +253,7 @@ struct AreaActor
     std::uint8_t trigger_count{};
     float ring_inner_radius{};
     float ring_outer_radius{};
+    float ring_half_width{};
     float safe_gap_degrees{};
     std::uint8_t safe_gap_count{};
     bool applies_burn{};
@@ -322,7 +322,11 @@ struct BossAction
     float angle_offset{};
     float radius{};
     float duration{};
+    Tick interval{};
+    std::uint8_t safe_gap_count{};
+    float safe_gap_degrees{};
     std::uint64_t cast_id{};
+    float half_width{};
 };
 
 struct CastHitRecord
@@ -432,11 +436,25 @@ inline std::int32_t RoundDamage(float value) noexcept
     return std::max(1, static_cast<std::int32_t>(std::floor(value + 0.5f)));
 }
 
-inline std::uint32_t ExperienceForLevel(std::uint32_t level) noexcept
+inline std::int32_t RoundFinalDamage(float value, const SimulationRules &rules) noexcept
 {
-    const auto offset = level - 1u;
-    return 20u + static_cast<std::uint32_t>(
-                     std::floor(3.5 * offset + 0.75 * offset * offset));
+    return std::max(rules.stats.combat.minimum_final_damage,
+                    static_cast<std::int32_t>(std::floor(value + 0.5f)));
+}
+
+inline std::uint32_t ExperienceForLevel(const SimulationRules &rules,
+                                        std::uint32_t level) noexcept
+{
+    const auto offset = level > 0 ? static_cast<double>(level - 1u) : 0.0;
+    const auto required = static_cast<double>(rules.progression.required_xp_base) +
+                          std::floor(static_cast<double>(rules.progression.required_xp_linear) * offset +
+                                     static_cast<double>(rules.progression.required_xp_quadratic) *
+                                         offset * offset);
+    return required <= 0.0
+               ? 0u
+               : required >= static_cast<double>((std::numeric_limits<std::uint32_t>::max)())
+                     ? (std::numeric_limits<std::uint32_t>::max)()
+                     : static_cast<std::uint32_t>(required);
 }
 
 inline std::uint64_t Mix(std::uint64_t value) noexcept
@@ -537,6 +555,7 @@ struct GameSimulation::SimulationWorld
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
     SimulationWorld();
+    void InitializePlayerState();
     std::uint64_t Random(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     float RandomUnit(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     EntityId AllocateEntityId() noexcept;
@@ -575,7 +594,7 @@ struct GameSimulation::SimulationWorld
                      float height = 0.75f);
     bool SpawnEnemy(EnemyKind kind, Float2 position,
                     std::uint64_t random_key = 0);
-    bool SpawnBoss(BossKind kind, Tick warning_ticks = Seconds(1.5f));
+    bool SpawnBoss(BossKind kind, Tick warning_ticks);
     void CommitBossSpawns();
     void SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
                      bool guaranteed = false);

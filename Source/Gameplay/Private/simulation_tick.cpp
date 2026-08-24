@@ -27,6 +27,48 @@ GameSimulation::SimulationWorld::SimulationWorld()
     collision_candidates.reserve(128);
 }
 
+void GameSimulation::SimulationWorld::InitializePlayerState()
+{
+    player = {};
+    const auto &stats = rules.stats;
+    player.max_health = RoundDamage(stats.base_maximum_hp);
+    player.health = std::min(player.max_health, RoundDamage(stats.base_current_hp));
+    player.attack = stats.base_attack_power;
+    player.attack_speed = stats.base_basic_attack_rate_per_second;
+    player.move_speed = stats.base_movement_speed_mps;
+    player.magnet_radius = stats.base_magnet_radius_m;
+
+    const auto &initial = rules.character_initial;
+    player.level = initial.starting_level;
+    player.pending_stat_points = initial.starting_unspent_stat_points;
+    player.level_rerolls = rules.progression.level_initial_rerolls;
+    player.relic_rerolls = rules.progression.relic_initial_rerolls;
+    player.skill_levels[static_cast<std::size_t>(SkillKind::BasicAttack)] =
+        initial.starting_basic_attack_level;
+
+    const auto active_count = std::min<std::size_t>(
+        {initial.starting_active_skill_count, rules.progression.active_slot_count,
+         player.loadout.size()});
+    for (std::size_t slot = 0; slot < active_count; ++slot)
+    {
+        const auto skill = initial.starting_active_skill_ids[slot];
+        if (skill <= SkillKind::BasicAttack || skill >= SkillKind::Count) continue;
+        player.loadout[slot] = skill;
+        const auto skill_index = static_cast<std::size_t>(skill);
+        player.skill_levels[skill_index] = rules.skills[skill_index].starting_level;
+    }
+
+    const auto relic_count = std::min<std::size_t>(
+        initial.starting_relic_count, initial.starting_relic_ids.size());
+    for (std::size_t index = 0; index < relic_count; ++index)
+    {
+        const auto relic = initial.starting_relic_ids[index];
+        if (relic < RelicKind::Count)
+            player.relic_mask |= static_cast<std::uint16_t>(1u << static_cast<unsigned>(relic));
+    }
+    relic_rules.Rebuild(player.relic_mask);
+}
+
 std::uint64_t GameSimulation::SimulationWorld::Random(std::uint64_t entity, std::uint64_t purpose) const noexcept
 {
     return Mix(config.seed ^ Mix(tick) ^ Mix(entity) ^ Mix(purpose));
@@ -45,8 +87,9 @@ EntityId GameSimulation::SimulationWorld::AllocateEntityId() noexcept
 
 float GameSimulation::SimulationWorld::EffectiveMoveSpeed() const noexcept
 {
-    return rules.player_move_speed *
-           (1.0f + 0.03f * player.stats[static_cast<std::size_t>(StatKind::MoveSpeed)]);
+    const auto index = static_cast<std::size_t>(StatKind::MoveSpeed);
+    return rules.stats.base_movement_speed_mps *
+           (1.0f + rules.stats.allocations[index].amount_per_point * player.stats[index]);
 }
 
 bool GameSimulation::SimulationWorld::IsBoss(const EnemyActor &enemy) const noexcept
@@ -100,22 +143,27 @@ void GameSimulation::SimulationWorld::EmitVfxLine(DomainSignalKind effect, Float
 bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position,
                 std::uint64_t random_key)
 {
-    const auto minute = static_cast<std::uint32_t>(growth_ticks / Seconds(60.0f));
+    const auto completed_minutes = static_cast<std::uint32_t>(growth_ticks / Seconds(60.0f));
     const auto &definition = rules.enemies[static_cast<std::size_t>(kind)];
+    const auto &scaling = rules.enemy_scaling;
     EnemyActor enemy;
     enemy.id = AllocateEntityId();
     enemy.random_key = random_key != 0 ? random_key : next_enemy_random_key++;
     enemy.kind = kind;
     enemy.position = enemy.previous_position = position;
     enemy.max_health = enemy.health = RoundDamage(
-        static_cast<float>(definition.health) * (1.0f + 0.15f * minute));
+        static_cast<float>(definition.health) *
+        (1.0f + scaling.hp_fraction_per_completed_minute * completed_minutes));
     enemy.damage = RoundDamage(
-        static_cast<float>(definition.damage) * (1.0f + 0.05f * minute));
+        static_cast<float>(definition.damage) *
+        (1.0f + scaling.damage_fraction_per_completed_minute * completed_minutes));
     enemy.move_speed = definition.move_speed;
     enemy.attack_range = definition.attack_range;
     enemy.warning_extent = kind == EnemyKind::Ranged
                                ? definition.projectile_range
-                               : kind == EnemyKind::Suicide ? 3.0f : 0.0f;
+                               : kind == EnemyKind::Suicide ? definition.suicide_explosion_radius : 0.0f;
+    if (kind == EnemyKind::Suicide)
+        enemy.attack_range = definition.suicide_stop_distance;
     enemy.warning_ticks = definition.warning_ticks;
     enemy.attack_cooldown_ticks = definition.attack_cooldown_ticks;
     enemy.spawned_tick = tick;
@@ -130,8 +178,9 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
 
 bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
 {
-    const auto position = player.position.x >= 0.0f ? Float2{-59.0f, -59.0f}
-                                                    : Float2{59.0f, 59.0f};
+    const auto edge = rules.arena_half_extent - 1.0f;
+    const auto position = player.position.x >= 0.0f ? Float2{-edge, -edge}
+                                                    : Float2{edge, edge};
     pending_boss_spawns.push_back({kind, position, tick + warning_ticks});
     EmitSignal(DomainSignalKind::BossSpawnWarning, position,
                static_cast<std::uint8_t>(kind));
@@ -151,12 +200,11 @@ void GameSimulation::SimulationWorld::CommitBossSpawns()
         boss.boss = kind;
         boss.position = boss.previous_position = pending.position;
         boss.max_health = boss.health = definition.health;
-        boss.damage = kind == BossKind::FiveMinute ? 18
-                    : kind == BossKind::TenMinute  ? 12 : 25;
-        boss.move_speed = kind == BossKind::TenMinute ? 4.8f : 2.4f;
-        boss.attack_range = 18.0f;
+        boss.damage = 0;
+        boss.move_speed = definition.movement_speed;
+        boss.attack_range = definition.projectile_range;
         boss.spawned_tick = tick;
-        boss.pattern_ready = tick + 90;
+        boss.pattern_ready = tick + rules.boss_common.initial_pattern_delay_ticks;
         boss.status.slows.reserve(8);
         if (pipeline_phase == SimulationPhaseId::Spawn)
             pending_enemy_spawns.push_back(std::move(boss));
@@ -187,16 +235,7 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
 void GameSimulation::SimulationWorld::StartSession()
 {
     session_phase = SessionPhase::Playing;
-    player = {};
-    relic_rules.Rebuild(player.relic_mask);
-    player.health = player.max_health = rules.player_health;
-    player.attack = rules.player_attack;
-    player.attack_speed = rules.player_attack_speed;
-    player.move_speed = rules.player_move_speed;
-    player.magnet_radius = rules.player_magnet_radius;
-    player.skill_levels[0] = 1;
-    player.level_rerolls = 3;
-    player.relic_rerolls = 3;
+    InitializePlayerState();
     growth_ticks = boss_fight_ticks = tick = 0;
     final_boss_spawned = false;
     spawn_accumulator = 0;
@@ -771,6 +810,9 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(action.angle_offset);
         value(action.radius);
         value(action.duration);
+        value(action.interval);
+        value(action.safe_gap_count);
+        value(action.safe_gap_degrees);
         value(action.cast_id);
     }
     count(cast_hits.size());
@@ -839,7 +881,7 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
     {
         return;
     }
-    if (!final_boss_spawned)
+    if (!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss)
     {
         ++growth_ticks;
     }
@@ -857,14 +899,19 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
                 player.aim, 1.0f, 1.1f);
     if (player.charging)
     {
+        const auto &definition = rules.skills[
+            static_cast<std::size_t>(SkillKind::ChargedShot)];
+        const auto &upgrades = rules.upgrades.charged_shot;
         const auto mask = player.upgrades[
             static_cast<std::size_t>(SkillKind::ChargedShot)];
         const auto maximum_ticks = HasUpgrade(mask, 1)
-                                       ? Seconds(1.4f)
-                                       : Seconds(1.0f);
+                                       ? upgrades.extended_full_charge_explosion
+                                             .maximum_charge_time_ticks
+                                       : definition.maximum_charge_time_ticks;
         const auto ready_ticks = HasUpgrade(mask, 2)
                                      ? static_cast<Tick>(std::ceil(
-                                           maximum_ticks * 0.65f))
+                                           maximum_ticks * upgrades.faster_charge
+                                                               .charge_time_multiplier))
                                      : maximum_ticks;
         if (tick - player.charge_start == ready_ticks)
             EmitVfx(DomainSignalKind::ChargedShotReady,
@@ -875,11 +922,10 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
 
 const SpawnStage &GameSimulation::SimulationWorld::CurrentSpawnStage() const noexcept
 {
-    const auto minute = growth_ticks / Seconds(60.0f);
     const SpawnStage *selected = &rules.spawn_stages.front();
     for (const auto &stage : rules.spawn_stages)
     {
-        if (stage.start_minute <= minute)
+        if (stage.start_tick <= growth_ticks)
         {
             selected = &stage;
         }
@@ -890,7 +936,11 @@ const SpawnStage &GameSimulation::SimulationWorld::CurrentSpawnStage() const noe
 Float2 GameSimulation::SimulationWorld::SpawnPosition(std::uint64_t salt) const noexcept
 {
     const auto angle = RandomUnit(salt, 0x535041574Eull) * 2.0f * kPi;
-    const auto distance = 20.0f + RandomUnit(salt, 0x44495354ull) * 10.0f;
+    const auto &placement = rules.spawn_placement;
+    const auto distance = placement.minimum_player_distance_m +
+                          RandomUnit(salt, 0x44495354ull) *
+                              (placement.maximum_player_distance_m -
+                               placement.minimum_player_distance_m);
     auto position = Add(
         player.position,
         {std::cos(angle) * distance, std::sin(angle) * distance});
@@ -929,7 +979,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     }
     for (const auto &wave : rules.waves)
     {
-        if (growth_ticks == static_cast<Tick>(wave.minute) * Seconds(60.0f))
+        if (growth_ticks == wave.start_tick)
         {
             waves.push_back({growth_ticks, wave.duration_ticks, wave.count, 0});
         }
@@ -941,27 +991,29 @@ void GameSimulation::SimulationWorld::SpawnPhase()
             std::min<std::uint64_t>(wave.total,
                 (static_cast<std::uint64_t>(elapsed + 1) * wave.total +
                  wave.duration - 1) / wave.duration));
-        while (wave.emitted < desired && !final_boss_spawned)
+        while (wave.emitted < desired &&
+               (!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss))
         {
             const auto salt = next_enemy_random_key++;
             SpawnEnemy(ChooseEnemyKind(salt), SpawnPosition(salt), salt);
             ++wave.emitted;
         }
     }
-    if (growth_ticks == Seconds(300.0f))
+    if (growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::FiveMinute)])
     {
-        SpawnBoss(BossKind::FiveMinute);
+        SpawnBoss(BossKind::FiveMinute, rules.boss_common.spawn_warning_ticks);
     }
-    if (growth_ticks == Seconds(600.0f))
+    if (growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::TenMinute)])
     {
-        SpawnBoss(BossKind::TenMinute);
+        SpawnBoss(BossKind::TenMinute, rules.boss_common.spawn_warning_ticks);
     }
-    if (!final_boss_spawned && growth_ticks == Seconds(900.0f))
+    if (!final_boss_spawned &&
+        growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::Final)])
     {
         final_boss_spawned = true;
         spawn_accumulator = 0;
         waves.clear();
-        SpawnBoss(BossKind::Final);
+        SpawnBoss(BossKind::Final, rules.boss_common.spawn_warning_ticks);
     }
 }
 
@@ -993,6 +1045,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         boss.dash_until = 0;
     }
     const auto kind = *boss.boss;
+    const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
     const auto to_player = Subtract(player.position, boss.position);
     const auto distance = Length(to_player);
     const auto direction = Normalize(to_player);
@@ -1001,24 +1054,53 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         boss.velocity = {};
         return;
     }
-    if (kind == BossKind::TenMinute && distance > 18.0f)
+    const auto phase = boss.final_phase;
+    const auto preferred_near = phase == 2
+                                    ? definition.phase_two_preferred_distance_near
+                                    : definition.preferred_distance_near;
+    const auto preferred_far = phase == 2
+                                   ? definition.phase_two_preferred_distance_far
+                                   : definition.preferred_distance_far;
+    if (kind == BossKind::TenMinute && distance > preferred_far)
     {
         boss.velocity = Multiply(direction, boss.move_speed * SlowMultiplier(boss));
         return;
     }
 
+    std::array<const BossPatternDefinition *, 3> phase_patterns{};
+    std::size_t phase_pattern_count{};
+    for (std::size_t index = 0;
+         index < std::min<std::size_t>(definition.pattern_count, definition.patterns.size());
+         ++index)
+    {
+        if (definition.patterns[index].phase == phase &&
+            phase_pattern_count < phase_patterns.size())
+            phase_patterns[phase_pattern_count++] = &definition.patterns[index];
+    }
+    if (phase_pattern_count == 0)
+    {
+        boss.velocity = {};
+        return;
+    }
+
     const auto preferred = kind == BossKind::TenMinute
-                               ? static_cast<std::uint8_t>(distance <= 12.0f ? 1 : 0)
-                               : kind == BossKind::Final
-                                     ? static_cast<std::uint8_t>(distance <= 7.0f ? 2 :
-                                                                    distance <= 14.0f ? 1 : 0)
-                                     : static_cast<std::uint8_t>(distance <= 7.0f ? 1 : 0);
-    const auto pattern_count = kind == BossKind::Final ? 3u : 2u;
-    auto pattern = Random(boss.random_key, 0x424F5353504154ull) % 4 < 3
-                       ? preferred
-                       : static_cast<std::uint8_t>((preferred + 1) % pattern_count);
-    if (pattern == boss.last_pattern && boss.repeat_count >= 2)
-        pattern = static_cast<std::uint8_t>((pattern + 1) % pattern_count);
+                               ? static_cast<std::uint8_t>(distance <= preferred_near ? 1 : 0)
+                               : static_cast<std::uint8_t>(
+                                     distance <= preferred_near ? 2
+                                     : distance <= preferred_far ? 1 : 0);
+    const auto preferred_pattern = static_cast<std::uint8_t>(
+        std::min<std::size_t>(preferred, phase_pattern_count - 1));
+    const auto total_pattern_weight = rules.boss_common.preferred_pattern_weight +
+                                      rules.boss_common.other_pattern_weight;
+    const auto preferred_roll = total_pattern_weight != 0 &&
+        Random(boss.random_key, 0x424F5353504154ull) % total_pattern_weight <
+            rules.boss_common.preferred_pattern_weight;
+    auto pattern = preferred_roll
+                       ? preferred_pattern
+                       : static_cast<std::uint8_t>((preferred_pattern + 1) % phase_pattern_count);
+    if (pattern == boss.last_pattern &&
+        boss.repeat_count >= rules.boss_common.maximum_same_pattern_repeats)
+        pattern = static_cast<std::uint8_t>((pattern + 1) % phase_pattern_count);
     boss.repeat_count = pattern == boss.last_pattern ? boss.repeat_count + 1 : 1;
     boss.last_pattern = pattern;
     boss.velocity = {};
@@ -1043,99 +1125,145 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         EmitSignal(signal, position, context);
     };
     Tick last_due{};
+    const auto &selected = *phase_patterns[pattern];
+    const auto add_dash = [&](Tick due, Float2 dash_direction,
+                              const BossPatternDefinition &source) {
+        BossAction action{};
+        action.due = due;
+        action.kind = BossActionKind::Dash;
+        action.boss_id = boss.id.value;
+        action.direction = dash_direction;
+        action.speed = source.speed;
+        action.distance = source.distance;
+        action.damage = source.damage;
+        action.cast_id = cast_id;
+        add(action);
+    };
+    const auto add_volley = [&](Tick due, Float2 volley_direction, float angle_offset,
+                                const BossPatternDefinition &source) {
+        BossAction action{};
+        action.due = due;
+        action.kind = BossActionKind::Volley;
+        action.boss_id = boss.id.value;
+        action.direction = volley_direction;
+        action.speed = source.projectile_speed;
+        action.damage = source.damage;
+        action.projectile_count = source.projectile_count != 0
+                                      ? source.projectile_count
+                                      : source.projectiles_per_volley;
+        action.arc_degrees = source.fan_angle_degrees;
+        action.angle_offset = angle_offset;
+        action.cast_id = cast_id;
+        add(action);
+    };
+    const auto add_area = [&](Tick due, Float2 position,
+                              const BossPatternDefinition &source) {
+        BossAction action{};
+        action.due = due;
+        action.kind = BossActionKind::Area;
+        action.boss_id = boss.id.value;
+        action.position = position;
+        action.damage = source.damage_per_tick != 0 ? source.damage_per_tick : source.damage;
+        action.radius = source.radius;
+        action.duration = static_cast<float>(source.duration_ticks) * kTickSeconds;
+        action.interval = source.tick_interval_ticks;
+        action.cast_id = cast_id;
+        add(action);
+    };
+    const auto add_shockwave = [&](Tick due, const BossPatternDefinition &source) {
+        BossAction action{};
+        action.due = due;
+        action.kind = BossActionKind::Shockwave;
+        action.boss_id = boss.id.value;
+        action.position = boss.position;
+        action.distance = source.start_radius;
+        action.radius = source.end_radius;
+        action.damage = source.damage;
+        action.duration = static_cast<float>(source.shockwave_duration_ticks) * kTickSeconds;
+        action.interval = source.tick_interval_ticks;
+        action.half_width = std::max(0.0f, source.shockwave_half_width);
+        action.safe_gap_count = source.safe_gap_count;
+        action.safe_gap_degrees = source.safe_gap_angle_degrees;
+        action.cast_id = cast_id;
+        add(action);
+    };
 
-    if (kind == BossKind::FiveMinute)
+    last_due = tick + selected.telegraph_duration_ticks;
+    switch (selected.logic)
     {
-        if (pattern == 0)
+    case BossPatternLogic::LineCharge:
+        add_dash(last_due, direction, selected);
+        break;
+    case BossPatternLogic::ExpandingShockwaveWithSafeGaps:
+        add_shockwave(last_due, selected);
+        break;
+    case BossPatternLogic::FanProjectiles:
+        add_volley(last_due, direction, 0.0f, selected);
+        break;
+    case BossPatternLogic::PredictedPositionGroundAreas:
+    {
+        const auto center = Add(
+            player.position,
+            Multiply(player_velocity,
+                     static_cast<float>(selected.prediction_lead_ticks) * kTickSeconds));
+        const auto safe_extent = rules.arena_half_extent - selected.radius * 2.0f;
+        const Float2 clamped_center{
+            std::clamp(center.x, -safe_extent, safe_extent),
+            std::clamp(center.y, -safe_extent, safe_extent)};
+        const auto area_count = std::max<std::uint8_t>(1, selected.area_count);
+        const auto angle_offset = RandomUnit(
+            boss.random_key, cast_id ^ 0x47524F554E44ull) * 360.0f;
+        for (std::uint32_t index = 0; index < area_count; ++index)
         {
-            last_due = tick + Seconds(0.9f);
-            add({last_due, BossActionKind::Dash, boss.id.value, {}, direction, 12.0f,
-                 18.0f, 18, 0, 0, 0, 0, 0, cast_id});
+            const auto position = Add(
+                clamped_center,
+                Multiply(Rotate({0.0f, 1.0f}, angle_offset +
+                                 360.0f * index / static_cast<float>(area_count)),
+                         selected.ground_placement_radius));
+            add_area(last_due, position, selected);
         }
-        else
-        {
-            last_due = tick + Seconds(1.35f);
-            add({last_due, BossActionKind::Shockwave, boss.id.value, boss.position, {},
-                 0, 3.0f, 15, 0, 0, 0, 9.75f, 0.75f, cast_id});
-        }
+        break;
     }
-    else if (kind == BossKind::TenMinute)
-    {
-        last_due = tick + Seconds(pattern == 0 ? 0.6f : 1.0f);
-        if (pattern == 0)
-            add({last_due, BossActionKind::Volley, boss.id.value, {}, direction, 4.5f,
-                 0, 12, 7, 70.0f, 0, 0, 0, cast_id});
-        else
+    case BossPatternLogic::DoubleRetargetedCharge:
+        for (std::uint32_t index = 0;
+             index < std::max<std::uint8_t>(1, selected.charge_count); ++index)
         {
-            constexpr float kAreaRadius = 2.2f;
-            const auto center = Add(player.position, Multiply(player_velocity, 0.75f));
-            const auto safe_extent = rules.arena_half_extent - kAreaRadius * 2.0f;
-            const Float2 clamped_center{
-                std::clamp(center.x, -safe_extent, safe_extent),
-                std::clamp(center.y, -safe_extent, safe_extent)};
-            const auto angle_offset = RandomUnit(
-                boss.random_key, cast_id ^ 0x47524F554E44ull) * 360.0f;
-            for (std::uint32_t index = 0; index < 3; ++index)
+            if (index != 0)
             {
-                const auto position = Add(
-                    clamped_center,
-                    Multiply(Rotate({0.0f, 1.0f}, angle_offset + 120.0f * index),
-                             kAreaRadius));
-                add({last_due, BossActionKind::Area, boss.id.value, position, {}, 0, 0,
-                     6, 0, 0, 0, kAreaRadius, 3.0f, cast_id});
+                // The authored interval starts after the preceding dash has
+                // travelled its configured distance.  Keeping this delay in
+                // the scheduling phase preserves the original sequential
+                // double-charge pattern.
+                const auto travel_ticks = selected.speed > 0.0f
+                                               ? Seconds(selected.distance / selected.speed)
+                                               : Tick{};
+                last_due += travel_ticks + selected.interval_ticks;
             }
+            add_dash(last_due, index == 0 ? direction : Float2{}, selected);
         }
+        break;
+    case BossPatternLogic::DoubleOffsetFanProjectiles:
+        for (std::uint32_t index = 0;
+             index < std::max<std::uint8_t>(1, selected.volley_count); ++index)
+        {
+            if (index != 0) last_due += selected.interval_ticks;
+            add_volley(last_due, direction,
+                       index == 0 ? 0.0f : selected.second_volley_angle_offset_degrees,
+                       selected);
+        }
+        break;
     }
-    else if (boss.final_phase == 1)
+    if (selected.logic == BossPatternLogic::DoubleRetargetedCharge ||
+        selected.logic == BossPatternLogic::DoubleOffsetFanProjectiles)
     {
-        last_due = tick + Seconds(pattern == 1 ? 0.6f : 0.9f);
-        if (pattern == 0)
-            add({last_due, BossActionKind::Dash, boss.id.value, {}, direction, 14.0f,
-                 20.0f, 25, 0, 0, 0, 0, 0, cast_id});
-        else if (pattern == 1)
-            add({last_due, BossActionKind::Volley, boss.id.value, {}, direction, 5.0f,
-                 0, 14, 9, 90.0f, 0, 0, 0, cast_id});
-        else
-            add({last_due, BossActionKind::Shockwave, boss.id.value, boss.position, {},
-                 0, 4.0f, 20, 0, 0, 0, 14.0f, 0.75f, cast_id});
-    }
-    else
-    {
-        last_due = tick + Seconds(pattern == 1 ? 0.35f : pattern == 2 ? 0.8f : 0.4f);
-        if (pattern == 0)
-        {
-            add({last_due, BossActionKind::Dash, boss.id.value, {}, {}, 14.0f, 20.0f,
-                 25, 0, 0, 0, 0, 0, cast_id});
-            last_due += Seconds(20.0f / 14.0f + 0.4f);
-            add({last_due, BossActionKind::Dash, boss.id.value, {}, {}, 14.0f, 20.0f,
-                 25, 0, 0, 0, 0, 0, cast_id});
-        }
-        else if (pattern == 1)
-        {
-            add({last_due, BossActionKind::Volley, boss.id.value, {}, direction, 5.0f,
-                 0, 14, 11, 90.0f, 0, 0, 0, cast_id});
-            last_due += Seconds(0.35f);
-            add({last_due, BossActionKind::Volley, boss.id.value, {}, direction, 5.0f,
-                 0, 14, 11, 90.0f, 8.0f, 0, 0, cast_id});
-        }
-        else
-        {
-            const auto predicted = Add(player.position, Multiply(player_velocity, 0.8f));
-            for (std::uint32_t index = 0; index < 5; ++index)
-            {
-                const auto angle = 72.0f * index +
-                                   static_cast<float>(Random(boss.random_key, cast_id) % 72);
-                add({last_due, BossActionKind::Area, boss.id.value,
-                     Add(predicted, Multiply(Rotate({0, 1}, angle), 3.0f)), {}, 0, 0,
-                     10, 0, 0, 0, 2.5f, 4.0f, cast_id});
-            }
-        }
         ++boss.phase_pattern_count;
     }
 
     const auto recovery = kind == BossKind::Final && boss.final_phase == 2
-                              ? Seconds(boss.phase_pattern_count % 3 == 0 ? 2.0f : 1.2f)
-                              : rules.bosses[static_cast<std::size_t>(kind)].recovery_ticks;
+                              ? (boss.phase_pattern_count % 3 == 0
+                                     ? definition.phase2_cycle_recovery_ticks
+                                     : definition.phase2_pattern_interval_ticks)
+                              : definition.recovery_ticks;
     boss.pattern_ready = last_due + recovery;
 }
 
@@ -1162,7 +1290,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                 const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.kind)];
                 if (enemy.kind == EnemyKind::Melee)
                 {
-                    if (distance <= 1.0f)
+                    if (distance <= definition.attack_range)
                     {
                         EmitVfx(DomainSignalKind::MeleeEnemyHit, player.position,
                                 enemy.locked_aim, 1.0f, 0.1f);
@@ -1192,7 +1320,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                         shot->remaining_range = definition.projectile_range;
                     }
                 }
-                else if (distance <= 3.0f)
+                else if (distance <= definition.suicide_explosion_radius)
                 {
                     EmitVfx(DomainSignalKind::SuicideEnemyExploded,
                             enemy.position, {}, 1.0f, 0.15f);
@@ -1209,9 +1337,9 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
             continue;
         }
         if (tick >= enemy.next_attack &&
-            ((enemy.kind == EnemyKind::Melee && distance <= 1.0f) ||
+            ((enemy.kind == EnemyKind::Melee && distance <= enemy.attack_range) ||
              (enemy.kind == EnemyKind::Ranged && distance <= enemy.attack_range) ||
-             (enemy.kind == EnemyKind::Suicide && distance <= 2.2f)))
+             (enemy.kind == EnemyKind::Suicide && distance <= enemy.attack_range)))
         {
             ++balance.enemy_attack_attempts[EnemyTelemetryIndex(enemy)];
             enemy.attack_cast_id = next_enemy_attack_id++;

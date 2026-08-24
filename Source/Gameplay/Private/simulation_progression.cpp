@@ -26,7 +26,8 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
     }
     else if (pickup.kind == PickupKind::Heal)
     {
-        Heal(RoundDamage(player.max_health * 0.08f), false);
+        Heal(RoundDamage(player.max_health *
+                         rules.relic_drop.healing_pickup_maximum_hp_heal_fraction), false);
     }
     else if (pickup.kind == PickupKind::Magnet)
     {
@@ -95,7 +96,10 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     std::vector<CardView> candidates;
     for (std::size_t index = 1; index < kCombatSkillCount; ++index)
     {
-        if (player.skill_levels[index] == 0 && player.loadout.back() == SkillKind::Count)
+        const auto active_count = static_cast<std::size_t>(std::ranges::count_if(
+            player.loadout, [](SkillKind value) { return value != SkillKind::Count; }));
+        if (player.skill_levels[index] == 0 &&
+            active_count < rules.progression.active_slot_count)
         {
             candidates.push_back({CardKind::LearnSkill,
                                   static_cast<std::uint8_t>(index), 0});
@@ -103,7 +107,11 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     }
     for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
     {
-        if (player.skill_levels[skill] == 0 || std::popcount(player.upgrades[skill]) >= 4)
+        const auto &definition = rules.skills[skill];
+        const auto selected_upgrades = std::popcount(player.upgrades[skill]);
+        if (player.skill_levels[skill] == 0 ||
+            selected_upgrades >= rules.progression.upgrades_selected_per_skill ||
+            player.skill_levels[skill] >= definition.maximum_level)
         {
             continue;
         }
@@ -117,7 +125,7 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
             }
         }
     }
-    if (exclude_current && candidates.size() > cards.size())
+    if (exclude_current && candidates.size() > rules.progression.card_candidate_count)
     {
         std::erase_if(candidates, [&](const CardView &candidate) {
             return std::ranges::any_of(
@@ -134,7 +142,9 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     });
     WeightedShuffle(candidates, level_reroll_sequence, 0x43415244ull);
     card_count = 0;
-    if (player.loadout.back() == SkillKind::Count)
+    const auto active_count = static_cast<std::size_t>(std::ranges::count_if(
+        player.loadout, [](SkillKind value) { return value != SkillKind::Count; }));
+    if (active_count < rules.progression.active_slot_count)
     {
         const auto guaranteed = std::ranges::find(candidates, CardKind::LearnSkill,
                                                    &CardView::kind);
@@ -146,11 +156,14 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     }
     for (const auto candidate : candidates)
     {
-        if (card_count == cards.size()) break;
+        if (card_count == std::min<std::size_t>(
+                rules.progression.card_candidate_count, cards.size())) break;
         cards[card_count++] = candidate;
     }
-    while (card_count < cards.size())
+    while (card_count < std::min<std::size_t>(
+               rules.progression.card_candidate_count, cards.size()))
     {
+        if (!rules.progression.fallback_stat_point_cards) break;
         cards[card_count++] = {CardKind::BonusStatPoint, 0, 0};
     }
 }
@@ -183,7 +196,7 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
             if ((player.relic_mask & (1u << relic)) == 0)
                 candidates.push_back({CardKind::Relic, relic, 0});
     }
-    if (exclude_current && candidates.size() > cards.size())
+    if (exclude_current && candidates.size() > rules.progression.card_candidate_count)
     {
         std::erase_if(candidates, [&](const CardView &candidate) {
             return std::ranges::any_of(
@@ -200,7 +213,9 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
                                  0x52454C4943ull + index) % index;
         std::swap(candidates[index - 1], candidates[swap]);
     }
-    card_count = static_cast<std::uint8_t>(std::min<std::size_t>(3, candidates.size()));
+    card_count = static_cast<std::uint8_t>(std::min<std::size_t>(
+        {rules.progression.card_candidate_count, rules.relic_drop.maximum_choices_per_box,
+         candidates.size()}));
     for (std::size_t index = 0; index < card_count; ++index)
     {
         cards[index] = candidates[index];
@@ -217,7 +232,7 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     if (card.kind == CardKind::LearnSkill)
     {
         const auto skill = static_cast<SkillKind>(card.subject);
-        player.skill_levels[card.subject] = 1;
+        player.skill_levels[card.subject] = rules.skills[card.subject].starting_level;
         const auto slot = std::ranges::find(player.loadout, SkillKind::Count);
         if (slot != player.loadout.end()) *slot = skill;
         EmitSignal(DomainSignalKind::SkillUnlocked, player.position,
@@ -228,11 +243,12 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     {
         player.upgrades[card.subject] |= 1u << card.upgrade;
         player.skill_levels[card.subject] = static_cast<std::uint8_t>(
-            1 + std::popcount(player.upgrades[card.subject]));
+            rules.skills[card.subject].starting_level +
+            std::popcount(player.upgrades[card.subject]));
     }
     else if (card.kind == CardKind::BonusStatPoint)
     {
-        ++player.pending_stat_points;
+        player.pending_stat_points += rules.progression.fallback_extra_stat_points;
     }
     else
     {
@@ -242,7 +258,7 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
         session_phase = SessionPhase::Playing;
         return true;
     }
-    ++player.pending_stat_points;
+    player.pending_stat_points += rules.progression.base_stat_points_per_level;
     card_count = 0;
     session_phase = SessionPhase::StatAllocation;
     GuardSelectionInput();
@@ -256,7 +272,8 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
 void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
 {
     const auto index = static_cast<std::size_t>(stat);
-    if (player.pending_stat_points == 0 || player.stats[index] >= 10)
+    if (player.pending_stat_points == 0 ||
+        player.stats[index] >= rules.stats.maximum_points_per_stat)
     {
         return;
     }
@@ -264,9 +281,13 @@ void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
     --player.pending_stat_points;
     if (stat == StatKind::MaxHealth)
     {
-        player.max_health = RoundDamage(100.0f * (1.0f + 0.08f * player.stats[index]));
-        balance.stat_utility[index] += 8;
-        Heal(8);
+        const auto &allocation = rules.stats.allocations[index];
+        player.max_health = RoundDamage(
+            rules.stats.base_maximum_hp *
+            (1.0f + allocation.amount_per_point * player.stats[index]));
+        const auto restored = RoundDamage(allocation.immediate_current_hp_restore_per_point);
+        balance.stat_utility[index] += static_cast<std::uint64_t>(restored);
+        Heal(restored);
     }
     if (player.pending_stat_points == 0)
     {
@@ -293,7 +314,7 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
         for (std::size_t offset = 0; offset < kStatCount; ++offset)
         {
             const auto index = (player.level + offset) % kStatCount;
-            if (player.stats[index] < 10)
+            if (player.stats[index] < rules.stats.maximum_points_per_stat)
             {
                 AssignStat(static_cast<StatKind>(index));
                 assigned = true;
@@ -310,7 +331,6 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
 
 void GameSimulation::SimulationWorld::XpCardPhase()
 {
-    constexpr float kPickupAttractSpeed = 15.0f;
     for (auto &pickup : pickups)
     {
         if (pickup.dead) continue;
@@ -329,22 +349,25 @@ void GameSimulation::SimulationWorld::XpCardPhase()
         if (LengthSquared(delta) <= radius * radius)
         {
             if (!global_experience_magnet &&
-                LengthSquared(delta) > rules.player_magnet_radius *
-                                               rules.player_magnet_radius)
+                LengthSquared(delta) > rules.stats.base_magnet_radius_m *
+                                               rules.stats.base_magnet_radius_m)
                 pickup.attracted_by_magnet_stat = true;
             pickup.position = Add(pickup.position,
                                   Multiply(Normalize(delta),
-                                           kPickupAttractSpeed * kTickSeconds));
+                                           rules.growth.experience_pickup_speed *
+                                               kTickSeconds));
         }
-        if (DistanceSquared(pickup.position, player.position) <= 0.36f)
+        if (DistanceSquared(pickup.position, player.position) <=
+            rules.growth.experience_pickup_radius *
+                rules.growth.experience_pickup_radius)
         {
             CollectPickup(pickup);
         }
     }
     while (config.scenario.progression_enabled &&
-           player.experience >= ExperienceForLevel(player.level))
+           player.experience >= ExperienceForLevel(rules, player.level))
     {
-        player.experience -= ExperienceForLevel(player.level);
+        player.experience -= ExperienceForLevel(rules, player.level);
         ++player.level;
         ++player.pending_levels;
     }

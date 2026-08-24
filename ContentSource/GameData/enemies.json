@@ -4,13 +4,14 @@
   "category": "enemies",
   "spawn_scaling": {
     "completed_minutes_formula": "floor(GrowthTime / 60)",
-    "hp_formula": "round(base_hp * (1 + 0.25 * completed_minutes))",
+    "hp_formula": "round(base_hp * (1 + 0.15 * completed_minutes))",
     "damage_formula": "round(base_damage * (1 + 0.05 * completed_minutes))",
     "hp_fraction_per_completed_minute": 0.15,
     "damage_fraction_per_completed_minute": 0.05,
     "updates_existing_enemies": false,
     "applies_to_bosses": false
   },
+  "common": {"collision_radius": 0.45},
   "common_rules": [
     "적 몸체 접촉에는 피해가 없다.",
     "플레이어와 적은 서로 통과할 수 있다.",
@@ -53,6 +54,7 @@
         {"key": "base_damage", "value": 8, "unit": "damage"},
         {"key": "projectile_speed", "value": 6.875, "unit": "meters_per_second"},
         {"key": "projectile_range", "value": 18, "unit": "meters"},
+        {"key": "projectile_collision_radius", "value": 0.25, "unit": "meters"},
         {"key": "reattack_interval", "value": 2.444444, "unit": "seconds"}
       ],
       "rules": [

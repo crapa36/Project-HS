@@ -62,7 +62,8 @@
           "logic_id": "missed_arrow_reacquire",
           "parameters": [
             {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
-            {"key": "maximum_retargets", "value": 1, "unit": "count"}
+            {"key": "maximum_retargets", "value": 1, "unit": "count"},
+            {"key": "collision_radius_multiplier", "value": 2, "unit": "multiplier"}
           ],
           "rule": "적에게 적중하지 않은 화살이 최대 사거리 지점에서 가까운 적을 찾아 추적한다."
         },
@@ -97,7 +98,8 @@
           "parameters": [
             {"key": "angles", "value": [-20, 20], "unit": "degrees"},
             {"key": "projectile_count", "value": 2, "unit": "count"},
-            {"key": "damage_multiplier", "value": 0.9, "unit": "multiplier"}
+            {"key": "damage_multiplier", "value": 0.9, "unit": "multiplier"},
+            {"key": "search_radius", "value": 12, "unit": "meters"}
           ],
           "rule": "최대 사거리에서 90% 화살 2발을 분기하며, 주변 적이 있으면 추적한다."
         },
@@ -186,7 +188,8 @@
           "logic_id": "rear_fan",
           "parameters": [
             {"key": "projectile_count", "value": 3, "unit": "count"},
-            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"}
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+            {"key": "fan_angle", "value": 30, "unit": "degrees"}
           ],
           "rule": "시전 방향 반대쪽으로 기본 위력 화살 3발을 발사한다."
         },
@@ -210,7 +213,8 @@
           "logic_id": "two_additional_outer_arrows",
           "parameters": [
             {"key": "additional_projectiles", "value": 2, "unit": "count"},
-            {"key": "outer_angles", "value": [-31.25, 31.25], "unit": "degrees"}
+            {"key": "outer_angles", "value": [-31.25, 31.25], "unit": "degrees"},
+            {"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"}
           ],
           "rule": "부채꼴 바깥쪽에 기본 위력의 화살 2발을 추가해 한 번에 11발을 발사한다."
         },
@@ -219,7 +223,8 @@
           "logic_id": "missed_arrow_retarget",
           "parameters": [
             {"key": "damage_multiplier", "value": 0.55, "unit": "multiplier"},
-            {"key": "maximum_retargets", "value": 1, "unit": "count"}
+            {"key": "maximum_retargets", "value": 1, "unit": "count"},
+            {"key": "search_radius", "value": 12, "unit": "meters"}
           ],
           "rule": "원본과 강화로 생성된 다중 사격 화살이 빗나가면 끝점 근처의 적에게 약한 위력으로 1회 재추적한다."
         }
@@ -233,8 +238,9 @@
           "logic_id": "extended_full_charge_explosion",
           "parameters": [
             {"key": "maximum_charge_time", "value": 1.4, "unit": "seconds"},
-            {"key": "maximum_damage_multiplier", "value": 28, "unit": "multiplier"},
-            {"key": "full_charge_end_explosion_damage_multiplier", "value": 5, "unit": "multiplier"}
+            {"key": "maximum_damage_multiplier", "value": 6, "unit": "multiplier"},
+            {"key": "full_charge_end_explosion_damage_multiplier", "value": 5, "unit": "multiplier"},
+            {"key": "explosion_radius", "value": 2, "unit": "meters"}
           ],
           "rule": "최대 충전 시간이 늘어나지만 완전 충전 피해와 끝점 폭발이 크게 강해진다."
         },
@@ -247,8 +253,8 @@
         {
           "ordinal": 3,
           "logic_id": "increase_minimum_charge_damage",
-          "parameters": [{"key": "minimum_damage_multiplier", "value": 23, "unit": "multiplier"}],
-          "rule": "충전하지 않고 바로 발사해도 매우 강한 피해를 주며 이후 충전 피해는 그대로 증가한다."
+          "parameters": [{"key": "minimum_damage_multiplier", "value": 5, "unit": "multiplier"}],
+          "rule": "충전하지 않고 발사해도 500% 피해를 주며 이후 충전 피해는 그대로 증가한다."
         },
         {
           "ordinal": 4,
@@ -328,7 +334,9 @@
           "logic_id": "eight_direction_fragments",
           "parameters": [
             {"key": "direction_count", "value": 8, "unit": "count"},
-            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"}
+            {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
+            {"key": "collision_radius_multiplier", "value": 2.5, "unit": "multiplier"},
+            {"key": "pierce", "value": 1, "unit": "count"}
           ],
           "rule": "주 폭발에서 넓은 판정의 70% 관통 파편을 8방향으로 발사한다."
         },
@@ -349,7 +357,8 @@
           "parameters": [
             {"key": "radius", "value": 2, "unit": "meters"},
             {"key": "damage_multiplier", "value": 1.2, "unit": "multiplier"},
-            {"key": "maximum_explosions_per_cast", "value": 8, "unit": "count"}
+            {"key": "maximum_explosions_per_cast", "value": 8, "unit": "count"},
+            {"key": "bleed_stacks", "value": 1, "unit": "count"}
           ],
           "rule": "폭발에 맞은 적에게 출혈을 부여하고 각 대상 위치에 120% 혈폭을 일으킨다. 시전당 최대 8회다."
         },
@@ -367,7 +376,9 @@
           "logic_id": "direct_hit_mark_other_active_explosion",
           "parameters": [
             {"key": "immediate_explosion_damage_multiplier", "value": 3, "unit": "multiplier"},
-            {"key": "mark_explosion_damage_multiplier", "value": 4, "unit": "multiplier"}
+            {"key": "mark_explosion_damage_multiplier", "value": 4, "unit": "multiplier"},
+            {"key": "mark_duration", "value": 4, "unit": "seconds"},
+            {"key": "mark_explosion_radius", "value": 2, "unit": "meters"}
           ],
           "rule": "직접 적중 시 즉시 추가 폭발을 일으키고 표식을 남긴다. 살아남은 대상은 다음 다른 원본 공격 적중 시 다시 폭발한다."
         },
@@ -421,14 +432,19 @@
           "parameters": [
             {"key": "damage_multiplier", "value": 1, "unit": "multiplier"},
             {"key": "arrows_per_kill", "value": 3, "unit": "count"},
-            {"key": "maximum_arrows_per_cast", "value": 9, "unit": "count"}
+            {"key": "maximum_arrows_per_cast", "value": 9, "unit": "count"},
+            {"key": "search_radius", "value": 12, "unit": "meters"}
           ],
           "rule": "원본 도탄으로 적을 처치하면 주변의 서로 다른 적을 향해 기본 위력 추적 화살을 최대 3발 발사한다."
         },
         {
           "ordinal": 6,
           "logic_id": "original_ricochet_kill_new_chain",
-          "parameters": [{"key": "new_chain_targets", "value": 3, "unit": "count"}],
+          "parameters": [
+            {"key": "new_chain_targets", "value": 3, "unit": "count"},
+            {"key": "damage_multiplier", "value": 2.4, "unit": "multiplier"},
+            {"key": "search_radius", "value": 12, "unit": "meters"}
+          ],
           "rule": "원본 도탄 화살로 적을 처치하면 새 화살이 최대 3명에게 다시 도탄한다."
         },
         {
@@ -484,6 +500,7 @@
           "parameters": [
             {"key": "radius", "value": 1.5, "unit": "meters"},
             {"key": "duration", "value": 2, "unit": "seconds"},
+            {"key": "tick_interval", "value": 0.5, "unit": "seconds"},
             {"key": "damage_multiplier_per_tick", "value": 0.3, "unit": "multiplier"},
             {"key": "maximum_areas_per_cast", "value": 4, "unit": "count"}
           ],
@@ -523,7 +540,8 @@
             {"key": "area_duration", "value": 5, "unit": "seconds"},
             {"key": "additional_damage_ticks", "value": 4, "unit": "count"},
             {"key": "post_area_duration", "value": 3, "unit": "seconds"},
-            {"key": "post_area_slow_fraction", "value": 0.4, "unit": "fraction"}
+            {"key": "post_area_slow_fraction", "value": 0.4, "unit": "fraction"},
+            {"key": "post_area_slow_duration", "value": 1, "unit": "seconds"}
           ],
           "rule": "지대 지속시간을 늘려 더 오래 공격하고 종료 뒤 같은 범위에 강한 둔화 지대를 남긴다."
         }
@@ -537,7 +555,8 @@
           "logic_id": "roll_path_traps",
           "parameters": [
             {"key": "trap_count", "value": 3, "unit": "count"},
-            {"key": "damage_multiplier_per_trap", "value": 0.9, "unit": "multiplier"}
+            {"key": "damage_multiplier_per_trap", "value": 0.9, "unit": "multiplier"},
+            {"key": "spacing", "value": 1.5, "unit": "meters"}
           ],
           "rule": "구르는 경로에 덫 3개를 남긴다. 각 덫은 90% 피해를 준다."
         },
@@ -592,7 +611,9 @@
           "logic_id": "trigger_mark_other_active_damage",
           "parameters": [
             {"key": "immediate_damage_multiplier", "value": 3, "unit": "multiplier"},
-            {"key": "mark_explosion_damage_multiplier", "value": 4, "unit": "multiplier"}
+            {"key": "mark_explosion_damage_multiplier", "value": 4, "unit": "multiplier"},
+            {"key": "mark_duration", "value": 4, "unit": "seconds"},
+            {"key": "mark_explosion_radius", "value": 2, "unit": "meters"}
           ],
           "rule": "발동 대상에게 즉시 추가 피해를 주고 표식을 남긴다. 살아남은 대상은 다음 다른 원본 공격 적중 시 폭발한다."
         },
@@ -619,14 +640,21 @@
           "logic_id": "replace_with_three_arrows",
           "parameters": [
             {"key": "projectile_count", "value": 3, "unit": "count"},
-            {"key": "damage_multiplier_per_arrow", "value": 0.9, "unit": "multiplier"}
+            {"key": "damage_multiplier_per_arrow", "value": 0.9, "unit": "multiplier"},
+            {"key": "angles", "value": [-12, 0, 12], "unit": "degrees"}
           ],
           "rule": "한 발을 90% 화살 3발로 변경한다."
         },
         {
           "ordinal": 2,
           "logic_id": "small_trap_at_start",
-          "parameters": [{"key": "damage_multiplier", "value": 3, "unit": "multiplier"}],
+          "parameters": [
+            {"key": "damage_multiplier", "value": 3, "unit": "multiplier"},
+            {"key": "detection_radius", "value": 2.5, "unit": "meters"},
+            {"key": "explosion_radius", "value": 2.5, "unit": "meters"},
+            {"key": "activation_delay", "value": 0.6, "unit": "seconds"},
+            {"key": "active_duration", "value": 12, "unit": "seconds"}
+          ],
           "rule": "이동 시작점에 강한 소형 덫을 남긴다."
         },
         {
@@ -634,7 +662,9 @@
           "logic_id": "slow_trail",
           "parameters": [
             {"key": "duration", "value": 2, "unit": "seconds"},
-            {"key": "slow_fraction", "value": 0.35, "unit": "fraction"}
+            {"key": "slow_fraction", "value": 0.35, "unit": "fraction"},
+            {"key": "radius", "value": 2.5, "unit": "meters"},
+            {"key": "slow_duration", "value": 1, "unit": "seconds"}
           ],
           "rule": "이동 궤적에 2초 동안 35% 둔화 지대를 남긴다."
         },
@@ -643,7 +673,9 @@
           "logic_id": "apply_bleed_and_tracking_arrow",
           "parameters": [
             {"key": "damage_multiplier", "value": 1.5, "unit": "multiplier"},
-            {"key": "maximum_triggers_per_cast", "value": 3, "unit": "count"}
+            {"key": "maximum_triggers_per_cast", "value": 3, "unit": "count"},
+            {"key": "search_radius", "value": 8, "unit": "meters"},
+            {"key": "bleed_stacks", "value": 1, "unit": "count"}
           ],
           "rule": "적중 대상에게 출혈을 부여하고 근처 적에게 강한 추적 화살을 발사한다. 시전당 최대 3회다."
         },
