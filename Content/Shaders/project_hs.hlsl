@@ -8,6 +8,8 @@ cbuffer FrameConstants : register(b0)
     float4 CameraForwardSoftness;
     float4x4 ShadowViewProjection[3];
     row_major float4x4 ArcherBones[128];
+    uint4 MonsterAssetMeta[6];
+    uint4 MonsterClipMeta[6][5];
     float4 RenderOptions;
     uint4 ParticleOptions;
 };
@@ -57,6 +59,7 @@ StructuredBuffer<ParticleData> Particles : register(t1);
 StructuredBuffer<ParticleSpawnCommandGpu> ParticleSpawnCommands : register(t12);
 StructuredBuffer<uint> DrawAliveIndices : register(t13);
 StructuredBuffer<uint> ParticleSpawnOwners : register(t17);
+StructuredBuffer<row_major float4x4> MonsterSkinMatrices : register(t18);
 RWStructuredBuffer<ParticleData> WritableParticles : register(u0);
 RWByteAddressBuffer IndirectArguments : register(u1);
 RWStructuredBuffer<uint> AliveInput : register(u2);
@@ -76,6 +79,9 @@ Texture2D<float4> UiTexture : register(t11);
 Texture2DArray<float4> ArcherDiffuse : register(t14);
 Texture2DArray<float4> ArcherNormal : register(t15);
 Texture2DArray<float> VfxMasks : register(t16);
+Texture2D<float4> MonsterBasecolor : register(t0, space1);
+Texture2D<float4> MonsterEmissive : register(t1, space1);
+Texture2D<float4> MonsterRam : register(t2, space1);
 SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
 SamplerState MaterialSampler : register(s2);
@@ -124,6 +130,27 @@ void SkinArcher(inout float3 position, inout float3 normal, inout float3 tangent
         ArcherBones[input.BoneIndices.y] * input.BoneWeights.y +
         ArcherBones[input.BoneIndices.z] * input.BoneWeights.z +
         ArcherBones[input.BoneIndices.w] * input.BoneWeights.w;
+    position = mul(skin, float4(position, 1.0)).xyz;
+    normal = normalize(mul((float3x3)skin, normal));
+    tangent = normalize(mul((float3x3)skin, tangent));
+}
+
+void SkinMonster(inout float3 position, inout float3 normal, inout float3 tangent,
+                 SceneInput input, InstanceData instance, uint mesh)
+{
+    if (mesh < 10 || mesh > 15) return;
+    const uint asset = mesh - 10;
+    const uint clip = min((instance.Mesh >> 8) & 0xff, 4);
+    const uint4 clip_meta = MonsterClipMeta[asset][clip];
+    const uint frame = min((uint)(saturate(instance.Padding) * (clip_meta.y - 1)),
+                           clip_meta.y - 1);
+    const uint matrix_base = MonsterAssetMeta[asset].x + clip_meta.x +
+                             frame * clip_meta.w;
+    const float4x4 skin =
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.x] * input.BoneWeights.x +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.y] * input.BoneWeights.y +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.z] * input.BoneWeights.z +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.w] * input.BoneWeights.w;
     position = mul(skin, float4(position, 1.0)).xyz;
     normal = normalize(mul((float3x3)skin, normal));
     tangent = normalize(mul((float3x3)skin, tangent));
@@ -179,10 +206,12 @@ float3 InstanceWorldPosition(InstanceData instance, float3 position)
 SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
 {
     InstanceData instance = Instances[instance_id];
+    const uint mesh = instance.Mesh & 0xff;
     float3 local_position = input.Position;
     float3 local_normal = input.Normal;
     float3 local_tangent = input.Tangent.xyz;
-    SkinArcher(local_position, local_normal, local_tangent, input, instance.Mesh);
+    SkinArcher(local_position, local_normal, local_tangent, input, mesh);
+    SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
@@ -202,7 +231,7 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
     output.WorldNormal = normal;
     output.WorldPosition = world;
     output.Color = UnpackColor(instance.Color);
-    output.Mesh = instance.Mesh;
+    output.Mesh = mesh;
     output.Uv = input.Uv;
     output.WorldTangent = float4(tangent, input.Tangent.w);
     output.Material = input.Material;
@@ -212,10 +241,12 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
 float4 ShadowVS(SceneInput input, uint instance_id : SV_InstanceID) : SV_Position
 {
     InstanceData instance = Instances[instance_id];
+    const uint mesh = instance.Mesh & 0xff;
     float3 local_position = input.Position;
     float3 local_normal = input.Normal;
     float3 local_tangent = input.Tangent.xyz;
-    SkinArcher(local_position, local_normal, local_tangent, input, instance.Mesh);
+    SkinArcher(local_position, local_normal, local_tangent, input, mesh);
+    SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
     float3 world = InstanceWorldPosition(instance, local_position);
     return mul(float4(world, 1.0), ShadowViewProjection[PassValue]);
 }
@@ -239,6 +270,18 @@ float3 SampleArcherNormal(uint material, float2 uv)
     return ArcherNormal.SampleLevel(MaterialSampler, float3(uv, slice), 0).xyz;
 }
 
+float3 SampleMonsterPbr(float2 uv)
+{
+    const float3 basecolor = MonsterBasecolor.SampleLevel(MaterialSampler, uv, 0).rgb;
+    const float3 emissive = MonsterEmissive.SampleLevel(MaterialSampler, uv, 0).rgb;
+    const float3 ram = MonsterRam.SampleLevel(MaterialSampler, uv, 0).rgb;
+    const float roughness = ram.r;
+    const float metallic = ram.b;
+    const float3 lit_base = basecolor * lerp(0.75, 1.0, roughness);
+    const float3 metal_tint = lerp(float3(1.0, 1.0, 1.0), basecolor, metallic);
+    return lit_base * metal_tint + emissive * 80.0;
+}
+
 GBufferOutput ScenePS(SceneOutput input)
 {
     GBufferOutput output;
@@ -258,6 +301,10 @@ GBufferOutput ScenePS(SceneOutput input)
         world_normal = normalize(tangent * tangent_normal.x +
                                  bitangent * tangent_normal.y +
                                  world_normal * tangent_normal.z);
+    }
+    if (input.Mesh >= 10 && input.Mesh <= 15)
+    {
+        output.BaseColor = float4(SampleMonsterPbr(input.Uv), 1.0);
     }
     if (input.Mesh == 9)
     {
@@ -546,6 +593,7 @@ struct ParticleOutput
     float3 Normal : TEXCOORD7;
     nointerpolation uint Renderer : TEXCOORD8;
     nointerpolation uint Primitive : TEXCOORD9;
+    nointerpolation float2 SegmentMetadata : TEXCOORD10;
 };
 
 static const float3 OctahedronVertices[6] = {
@@ -574,7 +622,8 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
         saturate(1.0 - particle.PositionLife.w / max(particle.InitialVelocityMaxLife.w, 0.0001));
     float size = lerp(particle.SizeRotation.x, particle.SizeRotation.y, progress);
     float elapsed = particle.InitialVelocityMaxLife.w - particle.PositionLife.w;
-    float rotation = particle.SizeRotation.z + particle.SizeRotation.w * elapsed;
+    // Segment SizeRotation.zw carries authored UV repeat/scroll metadata, not rotation.
+    float rotation = renderer == 2u ? 0.0 : particle.SizeRotation.z + particle.SizeRotation.w * elapsed;
     float sine;
     float cosine;
     sincos(rotation, sine, cosine);
@@ -650,6 +699,7 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
     output.Normal = normal;
     output.Renderer = renderer;
     output.Primitive = primitive;
+    output.SegmentMetadata = particle.SizeRotation.zw;
     return output;
 }
 
@@ -659,25 +709,94 @@ struct OitOutput
     float4 Revealage : SV_Target1;
 };
 
+float FlameHash(float2 p)
+{
+    return frac(sin(dot(p, float2(127.1, 311.7))) * 43758.5453);
+}
+
+float FlameNoise(float2 p)
+{
+    float2 cell = floor(p);
+    float2 f = smoothstep(0.0, 1.0, frac(p));
+    float a = FlameHash(cell);
+    float b = FlameHash(cell + float2(1, 0));
+    float c = FlameHash(cell + float2(0, 1));
+    float d = FlameHash(cell + float2(1, 1));
+    return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float FlameFbm(float2 p)
+{
+    float value = 0.0;
+    float amplitude = 0.55;
+    [unroll] for (uint octave = 0; octave < 4; ++octave)
+    {
+        value += FlameNoise(p) * amplitude;
+        p = p * 2.03 + float2(17.0, 9.0);
+        amplitude *= 0.5;
+    }
+    return value / 0.9125;
+}
+
+float FlameDensity(float2 uv, float progress, bool ground)
+{
+    float2 p = uv;
+    float t = CameraTime.w * (ground ? 1.6 : 2.4) + progress * 4.0;
+    float warp = FlameFbm(p * (ground ? 3.0 : 2.8) + float2(t * 0.18, -t * 0.12));
+    p += (warp - 0.5) * (ground ? 0.18 : 0.24);
+    float density;
+    if (ground)
+    {
+        float radius = length(p);
+        float bed = 1.0 - smoothstep(0.72, 0.98, radius);
+        float tongues = smoothstep(0.18, 0.62, FlameFbm(p * 4.5 + float2(t, -t * 0.7)));
+        density = bed * tongues;
+    }
+    else
+    {
+        float height = saturate(p.y * 0.5 + 0.5);
+        float taper = lerp(1.0, 0.22, height);
+        float width = abs(p.x) / max(taper, 0.08);
+        float body = 1.0 - smoothstep(0.45, 1.0, width);
+        float tip = 1.0 - smoothstep(0.72, 1.0, height);
+        density = body * tip * smoothstep(0.15, 0.72, FlameFbm(p * 3.4 + float2(t * 0.3, -t)));
+    }
+    float aa = max(fwidth(density), 0.002);
+    return smoothstep(0.15 - aa, 0.62 + aa, density);
+}
+
 OitOutput ParticlePS(ParticleOutput input)
 {
     float mask = 1.0;
     if (input.Renderer == 0)
     {
-        float2 mask_uv = input.Uv;
-        uint frame_count = input.FrameGrid.x * input.FrameGrid.y;
-        if (frame_count > 1)
+        if (input.Primitive == 17)
         {
-            uint frame = min((uint)(input.Progress * frame_count), frame_count - 1u);
-            mask_uv = (mask_uv + float2(frame % input.FrameGrid.x,
-                                        frame / input.FrameGrid.x)) /
-                      float2(input.FrameGrid);
+            mask = FlameDensity(input.LocalUv, input.Progress, false);
         }
-        mask = VfxMasks.Sample(MaterialSampler, float3(mask_uv, input.Sprite));
+        else
+        {
+            float2 mask_uv = input.Uv;
+            uint frame_count = input.FrameGrid.x * input.FrameGrid.y;
+            if (frame_count > 1)
+            {
+                uint frame = min((uint)(input.Progress * frame_count), frame_count - 1u);
+                mask_uv = (mask_uv + float2(frame % input.FrameGrid.x,
+                                            frame / input.FrameGrid.x)) /
+                          float2(input.FrameGrid);
+            }
+            mask = VfxMasks.Sample(MaterialSampler, float3(mask_uv, input.Sprite));
+        }
     }
     else if (input.Renderer == 1)
     {
         float2 p = input.LocalUv;
+        if (input.Primitive == 17)
+        {
+            mask = FlameDensity(p, input.Progress, true);
+        }
+        else
+        {
         float radius = length(p);
         if (input.Primitive == 1)
             mask = 1.0 - smoothstep(0.82, 1.0, radius);
@@ -721,6 +840,7 @@ OitOutput ParticlePS(ParticleOutput input)
                    smoothstep(0.12, 0.25, radius) *
                    (1.0 - smoothstep(0.82, 1.0, radius));
         }
+        }
     }
     else if (input.Renderer == 2)
     {
@@ -731,6 +851,20 @@ OitOutput ParticlePS(ParticleOutput input)
                                         abs(input.LocalUv.x));
         float ends = 1.0 - smoothstep(0.82, 1.0, abs(input.LocalUv.y));
         mask = across * ends;
+        float repeat = max(input.SegmentMetadata.x, 0.01);
+        float scroll = input.SegmentMetadata.y;
+        float2 ribbon_uv = float2(input.LocalUv.x * 0.5 + 0.5,
+                                  (input.LocalUv.y * 0.5 + 0.5) * repeat + CameraTime.w * scroll);
+        uint frame_count = input.FrameGrid.x * input.FrameGrid.y;
+        if (frame_count > 1)
+        {
+            uint frame = min((uint)(input.Progress * frame_count), frame_count - 1u);
+            ribbon_uv = (ribbon_uv + float2(frame % input.FrameGrid.x,
+                                            frame / input.FrameGrid.x)) /
+                        float2(input.FrameGrid);
+        }
+        mask *= VfxMasks.Sample(MaterialSampler, float3(ribbon_uv, input.Sprite));
+        mask *= 1.0 - smoothstep(0.86, 1.0, abs(input.LocalUv.y));
         if (input.Primitive == 13)
             mask *= step(0.42, frac((input.LocalUv.y * 0.5 + 0.5) * 7.0 + CameraTime.w * 5.0));
         else if (input.Primitive == 14)
@@ -739,6 +873,11 @@ OitOutput ParticlePS(ParticleOutput input)
             mask *= 0.6 + 0.4 * step(0.5, frac((input.LocalUv.y * 0.5 + 0.5) * 5.0));
         else if (input.Primitive == 16)
             mask *= saturate(input.LocalUv.y * 0.5 + 0.5);
+    }
+    if (input.Primitive == 17)
+    {
+        float core = saturate(1.0 - abs(input.LocalUv.x) * 1.7) * saturate(input.LocalUv.y * 0.5 + 0.5);
+        input.Color.rgb = lerp(float3(4.2, 0.12, 0.01), float3(7.0, 2.2, 0.18), core);
     }
     float alpha = input.Color.a * mask;
     if (input.Renderer == 3)

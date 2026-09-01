@@ -119,6 +119,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     {
         return {loaded};
     }
+    if (config.mute_audio)
+        settings.master_volume = 0.0f;
     ProfileData profile;
     if (auto loaded = save_store.LoadProfile(profile); !loaded)
     {
@@ -133,7 +135,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     RuntimeChannels channels;
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem task_system;
-    Window window(channels, settings.skill_virtual_keys);
+    Window window(channels, settings.skill_virtual_keys, presentation_catalog.camera);
     Sequence ui_audio_sequence{};
     AssetId active_ambience{};
     AssetId active_bgm = MakeAssetId("audio.bgm.main_menu");
@@ -263,6 +265,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.outline = config.outline;
         renderer_config.interpolate = !config.smoke;
         renderer_config.character_preview = config.character_preview;
+        renderer_config.monster_preview_asset = config.monster_preview_asset;
+        renderer_config.monster_preview_clip = config.monster_preview_clip;
+        renderer_config.monster_preview_time = config.monster_preview_time;
+        renderer_config.preview_camera_override = config.preview_camera_override;
+        renderer_config.preview_camera_yaw = config.preview_camera_yaw;
+        renderer_config.preview_camera_pitch = config.preview_camera_pitch;
+        renderer_config.preview_camera_distance = config.preview_camera_distance;
         renderer_config.devtools_visible = config.skill_vfx_capture >= kCombatSkillCount;
         renderer_config.render_scale_percent = config.render_scale_percent;
         renderer_config.shadow_resolution = config.shadow_resolution;
@@ -751,6 +760,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
             }
         }
+        if (config.monster_preview_asset < 6)
+        {
+            const auto boss = config.monster_preview_asset >= 3;
+            if (auto spawned = simulation.ApplyDebugCommand(
+                    {boss ? DebugCommandKind::SpawnBoss : DebugCommandKind::SpawnEnemy,
+                     boss ? config.monster_preview_asset - 3 : config.monster_preview_asset,
+                     0, {0.0f, 0.0f}});
+                !spawned)
+            {
+                record_thread_failure(spawned);
+                channels.simulation_done.store(true, std::memory_order_release);
+                return;
+            }
+        }
 
         FixedStepClock clock;
         auto now = FixedStepClock::Clock::now();
@@ -989,7 +1012,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 simulation.ClearDomainSignals();
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
-                    slot->storage->camera.distance = 28.0f *
+                    slot->storage->camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
+                    slot->storage->camera.pitch_degrees = presentation_catalog.camera.pitch_degrees;
+                    slot->storage->camera.vertical_fov_degrees =
+                        presentation_catalog.camera.vertical_fov_degrees;
+                    slot->storage->camera.distance = presentation_catalog.camera.distance_m *
                         static_cast<float>(channels.camera_zoom_percent.load(
                             std::memory_order_acquire)) / 100.0f;
                     if (ProjectRenderSnapshot(read_model.View(), presentation_catalog,

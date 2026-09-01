@@ -25,7 +25,7 @@
       "base_hp": 10,
       "movement_speed_mps": 1.5,
       "xp_reward": 1,
-      "mesh_asset_id": "procedural.mesh.enemy.melee",
+      "mesh_asset_id": "monster.mesh.slime",
       "material_id": "material.enemy.melee",
       "logic_id": "straight_chase_melee",
       "parameters": [
@@ -45,7 +45,7 @@
       "base_hp": 5,
       "movement_speed_mps": 1.2,
       "xp_reward": 2,
-      "mesh_asset_id": "procedural.mesh.enemy.ranged",
+      "mesh_asset_id": "monster.mesh.cactus",
       "material_id": "material.enemy.ranged",
       "logic_id": "approach_and_shoot_projectile",
       "parameters": [
@@ -68,7 +68,7 @@
       "base_hp": 10,
       "movement_speed_mps": 3.8,
       "xp_reward": 2,
-      "mesh_asset_id": "procedural.mesh.enemy.suicide",
+      "mesh_asset_id": "monster.mesh.swarm09",
       "material_id": "material.enemy.suicide",
       "logic_id": "straight_chase_self_destruct",
       "parameters": [

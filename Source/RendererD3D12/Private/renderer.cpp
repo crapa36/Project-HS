@@ -244,8 +244,14 @@ Result D3D12Renderer::Shutdown()
     impl_->shadow.Reset();
     impl_->vertices.Reset();
     impl_->archer_vertices.Reset();
+    for (auto &asset : impl_->monster_assets)
+        asset.vertices.Reset();
+    impl_->monster_skin_matrices.Reset();
     impl_->archer_diffuse.Reset();
     impl_->archer_normal.Reset();
+    impl_->monster_basecolor.Reset();
+    impl_->monster_emissive.Reset();
+    impl_->monster_ram.Reset();
     impl_->vfx_masks.Reset();
     impl_->particles.Reset();
     for (auto &alive : impl_->particle_alive)

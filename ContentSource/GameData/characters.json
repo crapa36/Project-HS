@@ -36,6 +36,7 @@
         "yaw_degrees": 45,
         "pitch_degrees": 55,
         "vertical_fov_degrees": 45,
+        "distance_m": 28,
         "rotation_enabled": false,
         "minimum_distance_percent": 80,
         "maximum_distance_percent": 120,

@@ -102,6 +102,14 @@ ContentSourceInventory LoadContentSourceInventory()
         sources.all_source_bytes.append(name);
         sources.all_source_bytes.push_back('\0');
         sources.all_source_bytes.append(text);
+                             sources.all_source_bytes.push_back('\0');
+    };
+    const auto append_presentation_asset = [&](const std::string_view name,
+                                               const std::filesystem::path &path) {
+        const auto bytes = ReadRequiredText(path);
+        sources.all_source_bytes.append(name);
+        sources.all_source_bytes.push_back('\0');
+        sources.all_source_bytes.append(bytes);
         sources.all_source_bytes.push_back('\0');
     };
     const auto animation_root =
@@ -112,6 +120,38 @@ ContentSourceInventory LoadContentSourceInventory()
     append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
     append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
     append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
+
+    const auto monster_models = std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY);
+    const auto monster_animations = std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY);
+    const auto append_monster = [&](std::string_view id, std::string_view model,
+                                    std::initializer_list<std::string_view> clips) {
+        append_presentation_asset(std::string(id) + "/model", monster_models / model);
+        for (const auto clip : clips)
+            append_presentation_asset(
+                std::string(id) + "/" + std::string(clip),
+                monster_animations / std::string(id.substr(id.find('/') + 1)) /
+                    std::string(clip));
+    };
+    append_monster("enemy/melee", "Slime_SK.fbx",
+                   {"IdleBattle.fbx", "RunFWD.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
+    append_monster("enemy/ranged", "Cactus_SK.fbx",
+                   {"IdleBattle.fbx", "RunFWD.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
+    append_monster("enemy/suicide", "Swarm09_SK.fbx",
+                   {"Idle.fbx", "MoveFWD.fbx", "Attack.fbx", "Die.fbx"});
+    append_monster("boss/5m", "TurtleShell_SK.fbx",
+                   {"IdleBattle.fbx", "Run.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
+    append_monster("boss/10m", "ChestMonster_SK.fbx",
+                   {"IdleBattle.fbx", "Run.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
+    append_monster("boss/final", "Beholder_SK.fbx",
+                   {"IdleBattle.fbx", "Run.fbx", "Attack01.fbx", "Attack03.fbx", "Die.fbx"});
+
+    const auto monster_textures = std::filesystem::path(HS_MONSTER_TEXTURE_DIRECTORY);
+    append_presentation_asset("texture/monster/basecolor",
+                              monster_textures / "BasecolorDefault_TEX.png");
+    append_presentation_asset("texture/monster/emissive",
+                              monster_textures / "Emissive_TEX.png");
+    append_presentation_asset("texture/monster/ram",
+                              monster_textures / "RAM_TEX.png");
 
     std::vector<std::filesystem::path> audio_files;
     for (const auto &entry : std::filesystem::directory_iterator(HS_AUDIO_DIRECTORY))

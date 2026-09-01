@@ -193,11 +193,75 @@ int RunContent(std::string_view mode)
             throw std::runtime_error("presentation_catalog.hsbin self-check mismatch");
         }
 
-        CharacterCookResult character;
-        if (!CookCharacterAsset(output, character, error_message))
+        const auto character_sources = std::array<CharacterAssetSource, 7>{
+            CharacterAssetSource{
+                HS_CHARACTER_MODEL,
+                {std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "Idle.fbx",
+                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "RunForward.fbx",
+                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DrawArrow.fbx",
+                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "AimRecoil.fbx",
+                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DeathBackward.fbx"},
+                "archer", "Archer", false},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "Slime_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "melee/IdleBattle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "melee/RunFWD.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "melee/Attack01.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "melee/Attack02.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "melee/Die.fbx"},
+                "enemy_melee", "EnemyMeleeSlime", true, true},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "Cactus_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "ranged/IdleBattle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "ranged/RunFWD.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "ranged/Attack01.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "ranged/Attack02.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "ranged/Die.fbx"},
+                "enemy_ranged", "EnemyRangedCactus", true},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "Swarm09_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "suicide/Idle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "suicide/MoveFWD.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "suicide/Attack.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "suicide/Attack.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "suicide/Die.fbx"},
+                "enemy_suicide", "EnemySuicideSwarm09", true},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "TurtleShell_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/IdleBattle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Run.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Attack01.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Attack02.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Die.fbx"},
+                "boss_5m", "Boss5mTurtleShell", true},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "ChestMonster_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/IdleBattle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Run.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Attack01.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Attack02.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Die.fbx"},
+                "boss_10m", "Boss10mChestMonster", true},
+            CharacterAssetSource{
+                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "Beholder_SK.fbx",
+                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/IdleBattle.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Run.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Attack01.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Attack03.fbx",
+                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Die.fbx"},
+                 "boss_final", "BossFinalBeholder", true},
+        };
+        std::size_t archer_material_count{};
+        for (const auto &source : character_sources)
         {
-            throw std::runtime_error(error_message);
+            CharacterCookResult character;
+            if (!CookCharacterAsset(output, character, error_message, source))
+                throw std::runtime_error(error_message);
+            if (source.output_name == "archer")
+                archer_material_count = character.materials.size();
         }
+        if (!CookMonsterMaterialTextures(output, error_message))
+            throw std::runtime_error(error_message);
 
         constexpr std::string_view shaders[] = {
             "scene_vs.dxil",      "scene_ps.dxil",    "shadow_vs.dxil",
@@ -228,12 +292,19 @@ int RunContent(std::string_view mode)
                  << "particle_effects=particle_effects.hsbin\n"
                  << "vfx_masks=vfx_masks.dds\n"
                  << "source_hash=" << source_hash << '\n'
-                 << "mesh=archer.meshbin\n";
-        for (std::size_t index = 0; index < character.materials.size(); ++index)
-        {
-            manifest << "texture=archer_diffuse_" << index << ".dds\n"
-                     << "texture=archer_normal_" << index << ".dds\n";
-        }
+                 << "mesh=archer.meshbin\n"
+                 << "mesh=enemy_melee.meshbin\n"
+                 << "mesh=enemy_ranged.meshbin\n"
+                 << "mesh=enemy_suicide.meshbin\n"
+                 << "mesh=boss_5m.meshbin\n"
+                 << "mesh=boss_10m.meshbin\n"
+                 << "mesh=boss_final.meshbin\n";
+        for (std::size_t index = 0; index < archer_material_count; ++index)
+             manifest << "texture=archer_diffuse_" << index << ".dds\n"
+                      << "texture=archer_normal_" << index << ".dds\n";
+        manifest << "texture=monster_basecolor.dds\n"
+                 << "texture=monster_emissive.dds\n"
+                 << "texture=monster_ram.dds\n";
         for (const auto shader : shaders)
         {
             manifest << "shader=" << shader << '\n';
@@ -246,10 +317,7 @@ int RunContent(std::string_view mode)
             throw std::runtime_error("manifest.txt: write failed");
         }
         std::cout << "content.cooked documents=" << kDocumentNames.size()
-                  << " meshes=" << character.mesh_count
-                  << " vertices=" << character.vertices.size()
-                  << " bones=" << character.bone_count
-                  << " clips=" << character.clips.size()
+                  << " character_assets=7"
                   << " source_hash=" << source_hash
                   << '\n';
         return 0;

@@ -35,7 +35,7 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
     stream.read(reinterpret_cast<char *>(&header), sizeof(header));
     const char magic[8]{'H', 'S', 'P', 'F', 'X', '\0', '\0', '\0'};
     if (std::memcmp(header.magic, magic, sizeof(magic)) != 0 ||
-        header.format_version != 3 || header.sprite_count == 0 ||
+        header.format_version != 4 || header.sprite_count == 0 ||
         header.schema_hash != kParticleEffectsSchemaHash)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog header is incompatible.");
     const auto payload_size = static_cast<std::uint64_t>(header.effect_count) * sizeof(CookedVfxDefinition) +
@@ -70,7 +70,8 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
         if ((definition.kind == VfxDefinitionKind::Particles) != (definition.emitter_count != 0))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition kind is invalid.");
         if (definition.kind == VfxDefinitionKind::Line &&
-            definition.line_primitive < VfxPrimitive::SolidTrail)
+            (definition.line_primitive < VfxPrimitive::SolidTrail ||
+             definition.line_primitive > VfxPrimitive::DashWake))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX line primitive is invalid.");
         if (definition.line_sprite >= header.sprite_count || definition.line_frame_columns == 0 ||
             definition.line_frame_rows == 0)
@@ -80,11 +81,13 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
     for (const auto &emitter : loaded.emitters_)
     {
         const auto valid_primitive =
-            (emitter.renderer == VfxRenderer::Sprite && emitter.primitive == VfxPrimitive::Soft) ||
-            (emitter.renderer == VfxRenderer::Ground && emitter.primitive >= VfxPrimitive::Disc &&
-             emitter.primitive <= VfxPrimitive::Cracks) ||
+            (emitter.renderer == VfxRenderer::Sprite &&
+             (emitter.primitive == VfxPrimitive::Soft || emitter.primitive == VfxPrimitive::Flame)) ||
+            (emitter.renderer == VfxRenderer::Ground &&
+             ((emitter.primitive >= VfxPrimitive::Disc && emitter.primitive <= VfxPrimitive::Cracks) ||
+              emitter.primitive == VfxPrimitive::Flame)) ||
             (emitter.renderer == VfxRenderer::Segment &&
-             emitter.primitive >= VfxPrimitive::SolidTrail) ||
+             emitter.primitive >= VfxPrimitive::SolidTrail && emitter.primitive <= VfxPrimitive::DashWake) ||
             (emitter.renderer == VfxRenderer::Mesh && emitter.primitive >= VfxPrimitive::Arrow &&
              emitter.primitive <= VfxPrimitive::ShockShell);
         if (emitter.sprite >= header.sprite_count || emitter.frame_columns == 0 ||
@@ -190,6 +193,8 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
         command.angular_velocity_min = emitter.angular_velocity_min;
         command.angular_velocity_max = emitter.angular_velocity_max;
         command.stretch = emitter.stretch;
+        command.uv_repeat = 1.0f;
+        command.scroll_speed = 0.0f;
         command.count = quality_percent <= 50 ? (emitter.count + 1) / 2 : emitter.count;
         command.seed = SpawnSeed(event.sequence, index);
         particles.push_back(command);

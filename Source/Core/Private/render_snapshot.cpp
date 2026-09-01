@@ -55,6 +55,11 @@ bool RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
     return true;
 }
 
+std::size_t RenderSnapshotStorage::InstanceCount() const noexcept
+{
+    return instances_.size();
+}
+
 RenderSnapshot RenderSnapshotStorage::View() const noexcept
 {
     return {header, instances_, poses_, lights_, ui_, persistent_vfx_, camera};

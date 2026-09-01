@@ -21,17 +21,30 @@ void AddAudio(const DomainSignal &s, std::span<PresentationEvent> out, std::size
     if (n >= out.size()) return;
     auto &e = out[n++]; e.sequence = s.sequence; e.tick = s.tick; e.kind = PresentationKind::Audio; e.position = s.position; e.asset = Cue(cue); e.parameters = EncodeAudioAction(action);
 }
+void AddVfx(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t &n, std::string_view asset) noexcept
+{
+    if (n >= out.size()) return;
+    auto &e = out[n++]; e.sequence = s.sequence; e.tick = s.tick; e.kind = PresentationKind::Vfx;
+    e.position = s.position; e.asset = Cue(asset);
+    const auto target = (s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0;
+    e.parameters = EncodeVfxParameters({s.direction, s.scale, s.target,
+        target ? static_cast<std::uint32_t>(VfxEventFlag::HasTarget) : 0u});
+}
 }
 
 std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEvent> out) noexcept
 {
     if (out.empty()) return 0;
     std::size_t n = 0;
-    if (s.kind == DomainSignalKind::BossSpawnWarning)
+    if (s.kind == DomainSignalKind::BossSpawnWarning || s.kind == DomainSignalKind::EnemySpawnWarning)
     {
-        auto &e = out[n++]; e.sequence = s.sequence; e.tick = s.tick; e.kind = PresentationKind::Ui; e.position = s.position; e.asset = Cue("ui.boss_spawn_warning");
-        AddAudio(s, out, n, "audio.boss.warning");
-        AddAudio(s, out, n, "audio.stinger.boss_warning"); return n;
+        AddVfx(s, out, n, s.kind == DomainSignalKind::BossSpawnWarning ? "particle.boss.spawn" : "particle.enemy.spawn_warning");
+        if (s.kind == DomainSignalKind::BossSpawnWarning)
+        {
+            AddAudio(s, out, n, "audio.boss.warning");
+            AddAudio(s, out, n, "audio.stinger.boss_warning");
+        }
+        return n;
     }
     const auto index = static_cast<std::size_t>(s.kind);
     if (index < kVfxAssets.size())
@@ -79,7 +92,7 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::HealCollected: AddAudio(s,out,n,"audio.pickup.heal"); break;
     case DomainSignalKind::MagnetCollected: AddAudio(s,out,n,"audio.pickup.magnet"); break;
     case DomainSignalKind::RelicCollected: AddAudio(s,out,n,"audio.pickup.relic_chest"); break;
-    case DomainSignalKind::ExperienceCollected: AddAudio(s,out,n,"audio.pickup.xp_collect"); break;
+    case DomainSignalKind::ExperienceCollected: AddVfx(s,out,n,"particle.pickup.xp_collect"); AddAudio(s,out,n,"audio.pickup.xp_collect"); break;
     case DomainSignalKind::BleedBurnExploded: AddAudio(s,out,n,"audio.relic.bleed_burn_explosion"); break;
     case DomainSignalKind::CombatChainHit: AddAudio(s,out,n,"audio.relic.combat_chain"); break;
     case DomainSignalKind::DamagePush: AddAudio(s,out,n,"audio.relic.damage_push"); break;
@@ -115,16 +128,16 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
                               : "audio.player.arrow_release_light"); break;
     case DomainSignalKind::BasicAttackStarted: AddAudio(s,out,n,"audio.player.bow_draw_short"); break;
     case DomainSignalKind::TrapDamaged: AddAudio(s,out,n,"audio.skill.trap.explosion"); break;
-    case DomainSignalKind::CooldownSurged: AddAudio(s,out,n,"audio.relic.cooldown_surge"); break;
-    case DomainSignalKind::TrackingArrowFired: AddAudio(s,out,n,"audio.relic.tracking_arrow"); break;
-    case DomainSignalKind::AfterimageArrowFired: AddAudio(s,out,n,"audio.relic.afterimage_arrow"); break;
-    case DomainSignalKind::CooldownRefunded: AddAudio(s,out,n,"audio.relic.cooldown_refund"); break;
-    case DomainSignalKind::PlayerRevived: AddAudio(s,out,n,"audio.relic.revive"); break;
+    case DomainSignalKind::CooldownSurged: AddVfx(s,out,n,"particle.relic.cooldown_surge"); AddAudio(s,out,n,"audio.relic.cooldown_surge"); break;
+    case DomainSignalKind::TrackingArrowFired: AddVfx(s,out,n,"particle.relic.tracking_arrow"); AddAudio(s,out,n,"audio.relic.tracking_arrow"); break;
+    case DomainSignalKind::AfterimageArrowFired: AddVfx(s,out,n,"particle.relic.afterimage_arrow"); AddAudio(s,out,n,"audio.relic.afterimage_arrow"); break;
+    case DomainSignalKind::CooldownRefunded: AddVfx(s,out,n,"particle.relic.cooldown_refund"); AddAudio(s,out,n,"audio.relic.cooldown_refund"); break;
+    case DomainSignalKind::PlayerRevived: AddVfx(s,out,n,"particle.relic.revive"); AddAudio(s,out,n,"audio.relic.revive"); break;
     case DomainSignalKind::BossDashTelegraphed: AddAudio(s,out,n,"audio.boss.dash.telegraph"); break;
     case DomainSignalKind::BossVolleyTelegraphed: AddAudio(s,out,n,"audio.boss.volley.telegraph"); break;
     case DomainSignalKind::BossAreaTelegraphed: AddAudio(s,out,n,"audio.boss.area.telegraph"); break;
     case DomainSignalKind::BossShockwaveTelegraphed: AddAudio(s,out,n,"audio.boss.shockwave.telegraph"); break;
-    case DomainSignalKind::BossDied: AddAudio(s,out,n,"audio.boss.death"); break;
+    case DomainSignalKind::BossDied: AddVfx(s,out,n,"particle.boss.death"); AddAudio(s,out,n,"audio.boss.death"); break;
     case DomainSignalKind::SkillUnlocked: AddAudio(s,out,n,"audio.ui.unlock"); break;
     default: break;
     }

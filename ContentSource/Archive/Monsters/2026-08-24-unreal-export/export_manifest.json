@@ -1,0 +1,1065 @@
+{
+  "root": "/Game/MonsterForSurvivalGame",
+  "output": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame",
+  "engine": "5.8.1-56057345+++UE5+Release-5.8",
+  "scope": "PBR only",
+  "total": 148,
+  "succeeded": 148,
+  "failed": 0,
+  "skeletal_meshes": {
+    "total": 8,
+    "succeeded": 8,
+    "failed": 0,
+    "result_file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\mesh_export_results.json"
+  },
+  "animations": {
+    "total": 140,
+    "succeeded": 140,
+    "failed": 0,
+    "result_file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\animation_export_results.json"
+  },
+  "textures": {
+    "total": 3,
+    "succeeded": 3,
+    "failed": 0,
+    "mapping_file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Material\\PBR\\material_mapping.json"
+  },
+  "results": [
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Attack01_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Attack01_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Attack02RPT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Attack02RPT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Attack02ST_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Attack02ST_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Attack03_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Attack03_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Die_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Die_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Dizzy_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Dizzy_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_GetHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_GetHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_IdleBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_IdleBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_IdleNormal_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_IdleNormal_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Run_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Run_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_SenseSomethingRPT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_SenseSomethingRPT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_SenseSomethingST_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_SenseSomethingST_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Taunting_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Taunting_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_Victory_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_Victory_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_WalkBWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_WalkBWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_WalkFWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_WalkFWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_WalkLeft_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_WalkLeft_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Beholder/Beholder_WalkRight_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Beholder/Beholder_WalkRight_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Attack01_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Attack01_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Attack02_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Attack02_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Die_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Die_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Dizzy_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Dizzy_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_GetHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_GetHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_IdleBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_IdleBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_IdleNormal_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_IdleNormal_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_IdlePlantToBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_IdlePlantToBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_IdlePlant_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_IdlePlant_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_RunFWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_RunFWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_SenseSomethingMaint_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_SenseSomethingMaint_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_SenseSomethingStart_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_SenseSomethingStart_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Taunting_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Taunting_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_Victory_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_Victory_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_WalkBWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_WalkBWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_WalkFWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_WalkFWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_WalkLFT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_WalkLFT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Cactus/Cactus_WalkRGT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Cactus/Cactus_WalkRGT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Attack01_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Attack01_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Attack02_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Attack02_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Die_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Die_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Dizzy_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Dizzy_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_GetHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_GetHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_IdleBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_IdleBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_IdleChest_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_IdleChest_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_IdleNormal_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_IdleNormal_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Run_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Run_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_SenseSomethingRPT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_SenseSomethingRPT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_SenseSomethingST_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_SenseSomethingST_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Taunting_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Taunting_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_Victory_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_Victory_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_WalkBWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_WalkBWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_WalkFWD_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_WalkFWD_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_WalkLeft_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_WalkLeft_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/ChestMonster/ChestMonster_WalkRight_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/ChestMonster/ChestMonster_WalkRight_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack01Angry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack01Angry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack02Angry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack02Angry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack03Angry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_Attack03Angry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_DieAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_DieAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_DizzyAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_DizzyAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_GetHitAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_GetHitAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_IdleBattleAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_IdleBattleAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_IdleNormalAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_IdleNormalAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_IdlePlantToBattleAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_IdlePlantToBattleAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_SenseSomethingMaintainAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_SenseSomethingMaintainAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_SenseSomethingStartAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_SenseSomethingStartAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_TauntingAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_TauntingAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_VictoryAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_VictoryAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_runFWDAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_runFWDAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_walkBWDAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_walkBWDAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_walkFWDAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_walkFWDAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_walkLFTAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_walkLFTAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/AngryVersion/Mushroom_walkRGTAngry_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/AngryVersion/Mushroom_walkRGTAngry_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/Mushroom_IdlePlant_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/Mushroom_IdlePlant_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack01Smile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack01Smile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack02Smile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack02Smile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack03Smile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_Attack03Smile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_DieSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_DieSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_DizzySmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_DizzySmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_GetHitSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_GetHitSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_IdleBattleSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_IdleBattleSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_IdleNormalSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_IdleNormalSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_IdlePlantToBattleSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_IdlePlantToBattleSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_SenseSomethingMaintainSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_SenseSomethingMaintainSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_SenseSomethingStartSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_SenseSomethingStartSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_TauntingSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_TauntingSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_VictorySmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_VictorySmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_runFWDSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_runFWDSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_walkBWDSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_walkBWDSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_walkFWDSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_walkFWDSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_walkLFTSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_walkLFTSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Mushroom/SmileVersion/Mushroom_walkRGTSmile_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Mushroom/SmileVersion/Mushroom_walkRGTSmile_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Attack01_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Attack01_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Attack02_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Attack02_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Die_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Die_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Dizzy_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Dizzy_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_GetHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_GetHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_IdleBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_IdleBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_IdleNormal_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_IdleNormal_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Run_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Run_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_SenseSomethingRoutine_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_SenseSomethingRoutine_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_SenseSomethingStart_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_SenseSomethingStart_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Taunt_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Taunt_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Victory_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Victory_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_WalkBack_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_WalkBack_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_WalkLeft_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_WalkLeft_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_WalkRight_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_WalkRight_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Slime/Slime_Walk_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Slime/Slime_Walk_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_Attack_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_Attack_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_Die_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_Die_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_GetHit_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_GetHit_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_Idle_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_Idle_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_MoveBWD_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_MoveBWD_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_MoveFWD_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_MoveFWD_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_MoveLFT_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_MoveLFT_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm08/Swarm08_MoveRGT_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm08/Swarm08_MoveRGT_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_Attack_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_Attack_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_Die_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_Die_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_GetHit_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_GetHit_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_Idle_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_Idle_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_MoveBWD_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_MoveBWD_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_MoveFWD_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_MoveFWD_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_MoveLFT_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_MoveLFT_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/Swarm09/Swarm09_MoveRGT_Anim",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/Swarm09/Swarm09_MoveRGT_Anim.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Attack01_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Attack01_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Attack02_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Attack02_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_DefendHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_DefendHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Defend_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Defend_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Die_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Die_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Dizzy_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Dizzy_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_GetHit_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_GetHit_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_IdleBattle_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_IdleBattle_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_IdleNormal_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_IdleNormal_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Run_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Run_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_SenseSomethingRT_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_SenseSomethingRT_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_SenseSomethingStart_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_SenseSomethingStart_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Taunt_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Taunt_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Victory_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Victory_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_WalkBack_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_WalkBack_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_WalkLeft_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_WalkLeft_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_WalkRight_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_WalkRight_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Animation/PBR/TurtleShell/TurtleShell_Walk_ANIM",
+      "class": "AnimSequence",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Animation/PBR/TurtleShell/TurtleShell_Walk_ANIM.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Beholder_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Beholder_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Cactus_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Cactus_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/ChestMonster_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/ChestMonster_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Mushroom_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Mushroom_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Slime_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Slime_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Swarm08_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Swarm08_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Swarm09_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Swarm09_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/TurtleShell_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/TurtleShell_SK.fbx",
+      "success": true,
+      "errors": []
+    }
+  ]
+}

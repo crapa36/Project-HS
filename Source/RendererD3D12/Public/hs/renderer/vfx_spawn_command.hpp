@@ -40,6 +40,8 @@ struct ParticleSpawnCommand
     float angular_velocity_min{};
     float angular_velocity_max{};
     float stretch{1.0f};
+    float uv_repeat{1.0f};
+    float scroll_speed{};
     std::uint32_t count{1};
     std::uint32_t seed{};
 };

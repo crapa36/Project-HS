@@ -56,7 +56,7 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
          {std::string_view{"ground"}, hs::VfxRenderer::Ground},
          {std::string_view{"segment"}, hs::VfxRenderer::Segment},
          {std::string_view{"mesh"}, hs::VfxRenderer::Mesh}}};
-    constexpr std::array<std::pair<std::string_view, hs::VfxPrimitive>, 17> primitives{
+    constexpr std::array<std::pair<std::string_view, hs::VfxPrimitive>, 18> primitives{
         {std::pair{std::string_view{"soft"}, hs::VfxPrimitive::Soft},
          {std::string_view{"disc"}, hs::VfxPrimitive::Disc},
          {std::string_view{"ring"}, hs::VfxPrimitive::Ring},
@@ -73,7 +73,8 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
          {std::string_view{"dashed_ricochet"}, hs::VfxPrimitive::DashedRicochet},
          {std::string_view{"fire_transfer"}, hs::VfxPrimitive::FireTransfer},
          {std::string_view{"relic_chain"}, hs::VfxPrimitive::RelicChain},
-         {std::string_view{"dash_wake"}, hs::VfxPrimitive::DashWake}}};
+          {std::string_view{"dash_wake"}, hs::VfxPrimitive::DashWake},
+          {std::string_view{"flame"}, hs::VfxPrimitive::Flame}}};
     const auto read_values = [](const Json &object, std::string_view key, std::size_t count, std::string_view path) {
         const auto &array = RequireArray(object, "particles", path, key);
         if (array.size() != count)
@@ -157,7 +158,8 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
                 static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "scroll_speed"));
             definition.line_primitive = ParseEnum(RequireString(effects[effect_index], "particles", base, "primitive"),
                                                   primitives, base + "/primitive");
-            if (definition.line_primitive < hs::VfxPrimitive::SolidTrail)
+            if (definition.line_primitive < hs::VfxPrimitive::SolidTrail ||
+                definition.line_primitive > hs::VfxPrimitive::DashWake)
                 ThrowValidationError("particles", base + "/primitive", "line requires a segment primitive");
             if (definition.line_width <= 0 || definition.line_lifetime <= 0 || definition.line_uv_repeat <= 0)
                 ThrowValidationError("particles", base, "line range invalid");
@@ -258,11 +260,14 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
                       emitter.velocity == hs::ParticleVelocity::Cone) &&
                      direction_length <= 0.0001f) ||
                     (emitter.velocity == hs::ParticleVelocity::Inward && emitter.shape == hs::ParticleShape::Point) ||
-                    (emitter.renderer == hs::VfxRenderer::Sprite && emitter.primitive != hs::VfxPrimitive::Soft) ||
+                    (emitter.renderer == hs::VfxRenderer::Sprite &&
+                     emitter.primitive != hs::VfxPrimitive::Soft && emitter.primitive != hs::VfxPrimitive::Flame) ||
                     (emitter.renderer == hs::VfxRenderer::Ground &&
-                     (emitter.primitive < hs::VfxPrimitive::Disc || emitter.primitive > hs::VfxPrimitive::Cracks)) ||
+                     ((emitter.primitive < hs::VfxPrimitive::Disc || emitter.primitive > hs::VfxPrimitive::Cracks) &&
+                      emitter.primitive != hs::VfxPrimitive::Flame)) ||
                     (emitter.renderer == hs::VfxRenderer::Segment &&
-                     emitter.primitive < hs::VfxPrimitive::SolidTrail) ||
+                     (emitter.primitive < hs::VfxPrimitive::SolidTrail ||
+                      emitter.primitive > hs::VfxPrimitive::DashWake)) ||
                     (emitter.renderer == hs::VfxRenderer::Mesh &&
                      (emitter.primitive < hs::VfxPrimitive::Arrow || emitter.primitive > hs::VfxPrimitive::ShockShell)))
                     ThrowValidationError("particles", emitter_path, "emitter contract violation");

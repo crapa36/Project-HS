@@ -19,8 +19,16 @@ Result D3D12Renderer::Impl::CreatePipeline()
     character_range.BaseShaderRegister = 14;
     character_range.RegisterSpace = 0;
     character_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
+    D3D12_DESCRIPTOR_RANGE1 monster_pbr_range{};
+    monster_pbr_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    monster_pbr_range.NumDescriptors = kMonsterPbrDescriptorCount;
+    monster_pbr_range.BaseShaderRegister = 0;
+    monster_pbr_range.RegisterSpace = 1;
+    monster_pbr_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
+    monster_pbr_range.OffsetInDescriptorsFromTableStart = kCharacterDescriptorCount;
+    const std::array ranges{character_range, monster_pbr_range};
 
-    std::array<D3D12_ROOT_PARAMETER1, 15> parameters{};
+    std::array<D3D12_ROOT_PARAMETER1, 16> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     parameters[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
@@ -58,12 +66,16 @@ Result D3D12Renderer::Impl::CreatePipeline()
                                  D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[12].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
     parameters[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[13].DescriptorTable = {1, &character_range};
+    parameters[13].DescriptorTable = {static_cast<UINT>(ranges.size()), ranges.data()};
     parameters[13].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     parameters[14].Descriptor = {17, 0,
                                  D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[14].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    parameters[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[15].Descriptor = {18, 0,
+                                 D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
+    parameters[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;

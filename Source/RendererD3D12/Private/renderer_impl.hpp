@@ -68,9 +68,10 @@ constexpr std::uint32_t kUiWidth = 1'920;
 constexpr std::uint32_t kUiHeight = 1'080;
 constexpr std::uint32_t kPostTextureDescriptorCount = 10;
 constexpr std::uint32_t kCharacterDescriptorCount = 3;
+constexpr std::uint32_t kMonsterPbrDescriptorCount = 3;
 constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kTextureDescriptorCount =
-    kPostTextureDescriptorCount + kCharacterDescriptorCount;
+    kPostTextureDescriptorCount + kCharacterDescriptorCount + kMonsterPbrDescriptorCount;
 constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kRenderPassCount * 2);
@@ -99,9 +100,11 @@ constexpr std::array<std::array<const char *, 8>, 8> kDebugUpgradeNames{{
     {{"세 갈래 사격", "출발점 덫", "둔화 궤적", "출혈 추적 화살",
       "착지 충격", "다음 스킬 쿨타임 회수", "다중 적중 회복", "추가 후퇴"}}
 }};
-constexpr std::array<const char *, 12> kDebugRelicNames{
-    "피의 회복", "번지는 불꽃", "한기 폭발", "피와 불", "팔방 사격", "추격 본능",
-    "잔상 사격", "연계 숙련", "교차 사격", "충격 반격", "위기 회복", "경험의 파동"};
+constexpr std::array<const char *, 20> kDebugRelicNames{
+     "피의 회복", "번지는 불꽃", "한기 폭발", "피와 불", "팔방 사격", "추격 본능",
+     "잔상 사격", "연계 숙련", "교차 사격", "충격 반격", "위기 회복", "경험의 파동",
+     "Projectile Cadence", "Pre-Damage Guard", "Slow Synergy", "Area Resonance",
+     "Boss Pressure", "Hit Streak", "Pickup Reward", "Low-Health Survival"};
 constexpr std::array<const char *, 6> kDebugStatNames{
     "최대 체력", "이동속도", "공격력", "공격속도", "쿨타임 감소", "자석 반경"};
 #endif
@@ -120,6 +123,18 @@ struct GpuInstance
 
 static_assert(sizeof(GpuInstance) == 48);
 
+struct MonsterAsset
+{
+    AllocationResource vertices;
+    D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+    std::uint32_t vertex_count{};
+    std::uint32_t bone_count{};
+    std::uint32_t material_count{};
+    float ground_offset{};
+    std::uint32_t skin_offset{};
+    std::array<DirectX::XMUINT4, static_cast<std::size_t>(CharacterAnimationClip::Count)> clip_meta{};
+};
+
 struct FrameConstants
 {
     DirectX::XMFLOAT4X4 view_projection;
@@ -130,6 +145,8 @@ struct FrameConstants
     DirectX::XMFLOAT4 camera_forward_softness;
     DirectX::XMFLOAT4X4 shadow_view_projection[3];
     DirectX::XMFLOAT4X4 archer_bones[kMaxCharacterBones];
+    DirectX::XMUINT4 monster_asset_meta[6];
+    DirectX::XMUINT4 monster_clip_meta[6][static_cast<std::size_t>(CharacterAnimationClip::Count)];
     DirectX::XMFLOAT4 render_options;
     DirectX::XMUINT4 particle_options;
 };
@@ -323,7 +340,8 @@ struct DdsHeaderDx10
     std::vector<std::array<float, 16>> &inverse_bind_matrices,
     std::vector<float> &upper_body_weights,
     std::vector<CharacterLocalTransform> &transforms, std::uint32_t &bone_count,
-    float &ground_offset, std::uint32_t &material_count)
+    float &ground_offset, std::uint32_t &material_count,
+    bool validate_upper_body_mask = true)
 {
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read)
@@ -376,6 +394,26 @@ struct DdsHeaderDx10
     vertices.resize(header.vertex_count);
     std::memcpy(vertices.data(), bytes.data() + header.vertices_offset,
                 vertices.size() * sizeof(vertices.front()));
+    for (const auto &vertex : vertices)
+    {
+        float weight_sum{};
+        for (std::size_t influence = 0; influence < vertex.bone_indices.size(); ++influence)
+        {
+            if (vertex.bone_indices[influence] >= header.bone_count ||
+                !std::isfinite(vertex.bone_weights[influence]) ||
+                vertex.bone_weights[influence] < 0.0f)
+            {
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                       "Character vertex skin influence is invalid.");
+            }
+            weight_sum += vertex.bone_weights[influence];
+        }
+        if (!std::isfinite(weight_sum) || std::abs(weight_sum - 1.0f) > 0.001f)
+        {
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Character vertex skin weights are not normalized.");
+        }
+    }
     clips.resize(header.clip_count);
     std::memcpy(clips.data(), bytes.data() + header.clips_offset,
                 clips.size() * sizeof(clips.front()));
@@ -402,11 +440,12 @@ struct DdsHeaderDx10
     upper_body_weights.resize(header.bone_count);
     std::memcpy(upper_body_weights.data(), bytes.data() + header.upper_body_weights_offset,
                 upper_body_weights.size() * sizeof(float));
-    if (!std::ranges::any_of(upper_body_weights, [](float value) { return value > 0.0f; }) ||
-        !std::ranges::any_of(upper_body_weights, [](float value) { return value == 0.0f; }) ||
-        !std::ranges::all_of(upper_body_weights, [](float value) {
+    if (!std::ranges::all_of(upper_body_weights, [](float value) {
             return std::isfinite(value) && value >= 0.0f && value <= 1.0f;
-        }))
+        }) ||
+        (validate_upper_body_mask &&
+         (!std::ranges::any_of(upper_body_weights, [](float value) { return value > 0.0f; }) ||
+          !std::ranges::any_of(upper_body_weights, [](float value) { return value == 0.0f; }))))
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Character upper-body mask is invalid.");
@@ -557,8 +596,13 @@ struct D3D12Renderer::Impl
     AllocationResource shadow;
     AllocationResource vertices;
     AllocationResource archer_vertices;
+    std::array<MonsterAsset, 6> monster_assets;
+    AllocationResource monster_skin_matrices;
     AllocationResource archer_diffuse;
     AllocationResource archer_normal;
+    AllocationResource monster_basecolor;
+    AllocationResource monster_emissive;
+    AllocationResource monster_ram;
     AllocationResource vfx_masks;
     std::uint32_t vfx_sprite_count{};
     Tick last_status_visual_tick{std::numeric_limits<Tick>::max()};

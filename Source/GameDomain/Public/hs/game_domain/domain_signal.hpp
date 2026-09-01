@@ -74,6 +74,7 @@ enum class DomainSignalKind : std::uint8_t
     SlowApplied,
     SlowArea,
     BossSpawnWarning,
+    EnemySpawnWarning,
     AbilityUsed,
     ArrowReleased,
     BasicAttackStarted,

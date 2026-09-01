@@ -58,6 +58,12 @@ enum class RenderMesh : std::uint8_t
     Area,
     Pickup,
     Ground,
+    MonsterMelee,
+    MonsterRanged,
+    MonsterSuicide,
+    BossFiveMinute,
+    BossTenMinute,
+    BossFinal,
 };
 
 struct RenderInstance
@@ -152,6 +158,7 @@ class RenderSnapshotStorage
     [[nodiscard]] bool AddLight(const LightView &light);
     [[nodiscard]] bool AddUi(const UiModel &ui);
     [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
+    [[nodiscard]] std::size_t InstanceCount() const noexcept;
     [[nodiscard]] RenderSnapshot View() const noexcept;
 
     RenderSnapshotHeader header{};

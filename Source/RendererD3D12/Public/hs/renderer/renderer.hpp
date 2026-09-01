@@ -43,6 +43,13 @@ struct RendererConfig
     bool outline{true};
     bool interpolate{true};
     bool character_preview{};
+    std::uint32_t monster_preview_asset{0xFFFFFFFFu};
+    std::uint32_t monster_preview_clip{};
+    float monster_preview_time{0.5f};
+    bool preview_camera_override{};
+    float preview_camera_yaw{180.0f};
+    float preview_camera_pitch{10.0f};
+    float preview_camera_distance{8.0f};
     bool devtools_visible{true};
     std::uint32_t render_scale_percent{100};
     std::uint32_t shadow_resolution{1024};

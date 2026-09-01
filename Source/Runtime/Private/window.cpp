@@ -18,8 +18,9 @@ constexpr wchar_t kWindowClass[] = L"ProjectHS.Window";
 } // namespace
 
 Window::Window(RuntimeChannels &channels,
-               std::array<std::uint16_t, 4> skill_virtual_keys) noexcept
-    : channels_(&channels), skill_virtual_keys_(skill_virtual_keys)
+               std::array<std::uint16_t, 4> skill_virtual_keys,
+               PresentationCamera camera) noexcept
+    : channels_(&channels), skill_virtual_keys_(skill_virtual_keys), camera_(camera)
 {
 }
 
@@ -146,12 +147,13 @@ bool Window::PumpMessages()
                               output_aspect + 0.5f;
             ui_cursor_normalized_ = {reference_u * 2.0f - 1.0f,
                                      1.0f - reference_v * 2.0f};
-            constexpr float yaw = 45.0f * 3.14159265358979323846f / 180.0f;
-            constexpr float pitch = 55.0f * 3.14159265358979323846f / 180.0f;
-            constexpr float vertical_fov = 45.0f * 3.14159265358979323846f / 180.0f;
+            const auto yaw = camera_.yaw_degrees * 3.14159265358979323846f / 180.0f;
+            const auto pitch = camera_.pitch_degrees * 3.14159265358979323846f / 180.0f;
+            const auto vertical_fov = camera_.vertical_fov_degrees *
+                                      3.14159265358979323846f / 180.0f;
             const auto target_x = channels_->camera_target_x.load(std::memory_order_acquire);
             const auto target_z = channels_->camera_target_z.load(std::memory_order_acquire);
-            const auto distance = 28.0f *
+            const auto distance = camera_.distance_m *
                 static_cast<float>(channels_->camera_zoom_percent.load(
                     std::memory_order_acquire)) / 100.0f;
             const auto forward_x = std::cos(pitch) * std::sin(yaw);
@@ -439,8 +441,12 @@ void Window::HandleRawInput(HRAWINPUT input)
         {
             const auto delta = static_cast<SHORT>(raw.data.mouse.usButtonData);
             auto zoom = channels_->camera_zoom_percent.load(std::memory_order_relaxed);
-            zoom = delta > 0 ? (zoom > 80 ? zoom - 10 : 80)
-                             : (zoom < 120 ? zoom + 10 : 120);
+            const auto step = delta > 0 ? -10 : 10;
+            const auto next = static_cast<std::int64_t>(zoom) + step;
+            zoom = static_cast<std::uint32_t>(std::clamp(
+                next,
+                static_cast<std::int64_t>(camera_.minimum_distance_percent),
+                static_cast<std::int64_t>(camera_.maximum_distance_percent)));
             channels_->camera_zoom_percent.store(zoom, std::memory_order_release);
         }
         UpdateHeldInput();

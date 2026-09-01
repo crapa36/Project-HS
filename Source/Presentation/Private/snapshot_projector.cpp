@@ -15,7 +15,7 @@ constexpr Tick kRecoilClipTicks=41, kAnimationBlendOutTicks=6;
 constexpr float kPi=std::numbers::pi_v<float>;
 constexpr std::uint64_t kPlayerRenderId=1ull<<60,kEnemyRenderId=2ull<<60,kProjectileRenderId=3ull<<60,kAreaRenderId=4ull<<60,kPickupRenderId=5ull<<60;
 bool HasUpgrade(std::uint8_t m,std::uint8_t o) noexcept{return o&&(m&(1u<<(o-1)));}
-bool HasRelic(std::uint16_t m,RelicKind r) noexcept{return m&(1u<<static_cast<unsigned>(r));}
+bool HasRelic(RelicMask m,RelicKind r) noexcept{return m&(RelicMask{1}<<static_cast<unsigned>(r));}
 Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtract(Float2 a,Float2 b) noexcept{return {a.x-b.x,a.y-b.y};} Float2 Multiply(Float2 v,float s) noexcept{return {v.x*s,v.y*s};}
 float LengthSquared(Float2 v) noexcept{return v.x*v.x+v.y*v.y;} Float2 Normalize(Float2 v) noexcept{auto l=std::sqrt(LengthSquared(v));return l>.0001f?Multiply(v,1/l):Float2{0,1};} Float2 Rotate(Float2 v,float r) noexcept{auto c=std::cos(r),s=std::sin(r);return {v.x*c-v.y*s,v.x*s+v.y*c};}
 } // namespace
@@ -164,10 +164,18 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                            enemy.boss == BossKind::FiveMinute ? 0xFFE86040u :
                            enemy.kind == EnemyKind::Ranged ? 0xFF40B060u :
                            enemy.kind == EnemyKind::Suicide ? 0xFF40D8E8u : 0xFF5D66E8u;
-        const auto scale = enemy.boss ? Float3{2.0f, 2.4f, 2.0f}
-                                      : enemy.kind == EnemyKind::Suicide
-                                            ? Float3{0.6f, 0.8f, 0.6f}
-                                            : Float3{0.75f, 1.1f, 0.75f};
+        const auto mesh = enemy.boss == BossKind::Final ? RenderMesh::BossFinal :
+                          enemy.boss == BossKind::TenMinute ? RenderMesh::BossTenMinute :
+                          enemy.boss == BossKind::FiveMinute ? RenderMesh::BossFiveMinute :
+                          enemy.kind == EnemyKind::Ranged ? RenderMesh::MonsterRanged :
+                          enemy.kind == EnemyKind::Suicide ? RenderMesh::MonsterSuicide
+                                                           : RenderMesh::MonsterMelee;
+        const auto uniform_scale = enemy.boss == BossKind::Final ? 3.51f :
+                                   enemy.boss == BossKind::TenMinute ? 4.71f :
+                                   enemy.boss == BossKind::FiveMinute ? 4.23f :
+                                    enemy.kind == EnemyKind::Ranged ? 2.00f :
+                                    enemy.kind == EnemyKind::Suicide ? 2.40f : 1.50f;
+        const Float3 scale{uniform_scale, uniform_scale, uniform_scale};
         std::uint32_t status_visual_mask{};
         if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Bleed))
             status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Bleed);
@@ -177,15 +185,58 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Slow);
         if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Mark))
             status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Mark);
+        const auto instance_index = snapshot.InstanceCount();
+        const auto facing = enemy.attacking && LengthSquared(enemy.locked_aim) > 0.0001f
+                                ? enemy.locked_aim : enemy.velocity;
         complete &= snapshot.AddInstance(
             {{enemy.position.x, 0.0f, enemy.position.y},
-             std::atan2(enemy.velocity.x, enemy.velocity.y), scale, color,
-             enemy.boss ? RenderMesh::Boss : enemy.kind == EnemyKind::Ranged
-                                                    ? RenderMesh::EnemyRanged
-                                                    : enemy.kind == EnemyKind::Suicide
-                                                          ? RenderMesh::EnemySuicide
-                                                          : RenderMesh::Enemy,
+             std::atan2(facing.x, facing.y), scale, color, mesh,
              kEnemyRenderId | enemy.id.value, status_visual_mask});
+        AnimationPoseRef enemy_pose;
+        enemy_pose.instance_index = static_cast<std::uint32_t>(instance_index);
+        const auto boss_action = std::ranges::find_if(
+            model.boss_actions, [&](const BossActionView &action) {
+                return action.boss_id == enemy.id.value;
+            });
+        const auto boss_release_frame = enemy.boss_action_until == model.tick &&
+                                        enemy.boss_action_until > enemy.boss_action_started;
+        if (enemy.attacking || boss_action != model.boss_actions.end() || boss_release_frame)
+        {
+            const auto active_boss_action = boss_action != model.boss_actions.end();
+            const auto recoil = boss_release_frame
+                                    ? enemy.boss_action_recoil
+                                : active_boss_action
+                                    ? boss_action->kind == BossActionViewKind::Area ||
+                                          boss_action->kind == BossActionViewKind::Shockwave
+                                    : enemy.boss_action_recoil;
+            enemy_pose.clip = recoil ? CharacterAnimationClip::Recoil
+                                     : CharacterAnimationClip::Draw;
+            const auto start = boss_release_frame ? enemy.boss_action_started
+                               : active_boss_action ? boss_action->animation_started
+                                                    : enemy.attack_started;
+            const auto until = boss_release_frame ? enemy.boss_action_until
+                               : active_boss_action ? boss_action->execute_tick
+                                                    : enemy.attack_resolve;
+            enemy_pose.normalized_time = until > start
+                                             ? std::clamp(
+                                                   static_cast<float>(model.tick - start) /
+                                                       static_cast<float>(until - start),
+                                                   0.0f, 1.0f)
+                                             : 0.0f;
+        }
+        else if (LengthSquared(enemy.velocity) > 0.0001f)
+        {
+            enemy_pose.clip = CharacterAnimationClip::Run;
+            enemy_pose.normalized_time =
+                static_cast<float>((model.tick + enemy.id.value * 17) % 45) / 45.0f;
+        }
+        else
+        {
+            enemy_pose.clip = CharacterAnimationClip::Idle;
+            enemy_pose.normalized_time =
+                static_cast<float>((model.tick + enemy.id.value * 17) % 120) / 120.0f;
+        }
+        complete &= snapshot.AddPose(enemy_pose);
         if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking)
         {
             const auto range = enemy.warning_extent;
@@ -289,11 +340,14 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         if (area.expires != 0 && model.tick >= area.expires) continue;
         if (area.kind == AreaViewKind::Trap)
         {
+            const auto pending_kind = model.tick < area.active_tick
+                                        ? PersistentVfxKind::TrapPending
+                                        : PersistentVfxKind::TrapArmed;
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.025f, area.position.y}, 0.0f, area.radius,
                  0.0f,
-                 PersistentVfxKind::TrapArmed,
-                 kAreaRenderId | area.id.value});
+                  pending_kind,
+                  kAreaRenderId | area.id.value});
         }
         const auto fire_area = area.applies_burn ||
             (area.skill == SkillKind::ExplosiveArrow && area.source_upgrade == 3) ||
@@ -307,6 +361,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                  kAreaRenderId | area.id.value});
         }
         if ((area.kind == AreaViewKind::Slow || area.applies_slow) &&
+            area.half_length <= 0.0f &&
             model.tick >= area.active_tick)
         {
             complete &= snapshot.AddPersistentVfx(
@@ -319,6 +374,15 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             complete &= snapshot.AddPersistentVfx(
                 {{area.position.x, 0.016f, area.position.y}, 0.0f, area.radius,
                  0.0f, PersistentVfxKind::ArrowRainArea,
+                 kAreaRenderId | area.id.value});
+        }
+        if (area.kind == AreaViewKind::Slow && area.half_length > 0.0f &&
+            model.tick >= area.active_tick)
+        {
+            complete &= snapshot.AddPersistentVfx(
+                {{area.position.x, 0.014f, area.position.y},
+                 std::atan2(area.direction.x, area.direction.y), area.radius,
+                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail,
                  kAreaRenderId | area.id.value});
         }
         // Trap and Arrow Rain keep one persistent visual across activation.
@@ -761,7 +825,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                    {180, 92}, 0xFF31425Au, text, 1.0f, 20);
         }
         add_ui(UiModel::Kind::Text, {1'520, 32}, {360, 50}, 0xFFFFFFFFu,
-               std::format("유물 {:03X}", probe.relic_mask));
+               std::format("유물 {:05X}", probe.relic_mask));
 
         for (const auto &wave : model.waves)
         {
@@ -1049,16 +1113,16 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 for (std::size_t relic = 0; relic < kRelicCount; ++relic)
                 {
                     if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
-                    const auto column = relic_count / 6;
-                    const auto row = relic_count % 6;
+                    const auto column = relic_count / 5;
+                    const auto row = relic_count % 5;
                     add_ui(UiModel::Kind::Button,
-                           {350.0f + static_cast<float>(column) * 640.0f,
-                            235.0f + static_cast<float>(row) * 122.0f},
-                           {580, 108}, 0xFF2D4058u,
+                           {80.0f + static_cast<float>(column) * 460.0f,
+                            235.0f + static_cast<float>(row) * 140.0f},
+                           {420, 125}, 0xFF2D4058u,
                            std::format("{}\n{}",
                                        presentation.relic_names[relic].data(),
                                        presentation.relic_rules[relic].data()),
-                           1.0f, 18);
+                           1.0f, 15);
                     ++relic_count;
                 }
                 if (relic_count == 0)
@@ -1100,7 +1164,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                            probe.upgrade_masks[2], probe.upgrade_masks[3],
                            probe.upgrade_masks[4]), 1.0f, 26);
         add_ui(UiModel::Kind::Text, {550, 630}, {820, 60}, 0xFFFFFFFFu,
-               std::format("강화 5~8: {:02X}/{:02X}/{:02X}/{:02X}  유물 {:03X}",
+               std::format("강화 5~8: {:02X}/{:02X}/{:02X}/{:02X}  유물 {:05X}",
                            probe.upgrade_masks[5], probe.upgrade_masks[6],
                            probe.upgrade_masks[7], probe.upgrade_masks[8],
                            probe.relic_mask), 1.0f, 26);

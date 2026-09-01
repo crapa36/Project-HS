@@ -64,6 +64,11 @@ struct EnemyView
     Float2 locked_aim{};
     float warning_extent{};
     Tick spawned_tick{};
+    Tick attack_started{};
+    Tick attack_resolve{};
+    Tick boss_action_started{};
+    Tick boss_action_until{};
+    bool boss_action_recoil{};
     std::int32_t health{};
     std::int32_t max_health{};
     std::uint8_t status_flags{};
@@ -121,6 +126,8 @@ struct BossActionView
 {
     BossActionViewKind kind{BossActionViewKind::Dash};
     std::uint64_t boss_id{};
+    Tick animation_started{};
+    Tick execute_tick{};
     Float2 position{};
     Float2 direction{};
     float distance{};

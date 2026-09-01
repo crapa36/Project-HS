@@ -2,6 +2,7 @@
 
 #include <numbers>
 #include <ranges>
+#include <unordered_map>
 
 namespace hs
 {
@@ -47,6 +48,19 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
 
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
+    std::unordered_map<std::uint64_t, const RenderInstance *> previous_by_id;
+    previous_by_id.reserve(snapshots.has_previous ? snapshots.previous.instances.size() : 0);
+    if (snapshots.has_previous)
+        for (const auto &instance : snapshots.previous.instances)
+            if (instance.stable_id != 0) previous_by_id.emplace(instance.stable_id, &instance);
+    std::unordered_map<std::uint64_t, const AnimationPoseRef *> pose_by_id;
+    pose_by_id.reserve(snapshot.poses.size());
+    for (const auto &pose : snapshot.poses)
+        if (pose.instance_index < snapshot.instances.size())
+        {
+            const auto stable_id = snapshot.instances[pose.instance_index].stable_id;
+            if (stable_id != 0) pose_by_id.emplace(stable_id, &pose);
+        }
     const auto now = std::chrono::steady_clock::now();
     if (snapshot.header.tick != impl_->observed_snapshot_tick)
     {
@@ -61,6 +75,60 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             : 1.0f;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
                                                  snapshot.instances.end());
+    const auto is_monster = [](RenderMesh mesh) {
+        return mesh >= RenderMesh::MonsterMelee && mesh <= RenderMesh::BossFinal;
+    };
+    if (impl_->config.monster_preview_asset < 6)
+    {
+        const auto preview_mesh = static_cast<RenderMesh>(
+            static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
+            impl_->config.monster_preview_asset);
+        const auto found = std::ranges::find_if(
+            render_instances, [&](const auto &source) { return source.mesh == preview_mesh; });
+        if (found != render_instances.end())
+        {
+            auto preview = *found;
+            preview.position = {};
+            preview.yaw = 0.0f;
+            render_instances.assign(1, preview);
+        }
+        else
+        {
+            render_instances.clear();
+        }
+    }
+    std::vector<RenderInstance> ordered_instances;
+    ordered_instances.reserve(render_instances.size());
+    for (const auto &source : render_instances)
+        if (source.mesh == RenderMesh::Archer) ordered_instances.push_back(source);
+    for (std::uint32_t asset = 0; asset < 6; ++asset)
+        for (const auto &source : render_instances)
+            if (is_monster(source.mesh) &&
+                static_cast<std::uint32_t>(source.mesh) -
+                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee) == asset)
+                ordered_instances.push_back(source);
+    for (const auto &source : render_instances)
+        if (source.mesh != RenderMesh::Archer && !is_monster(source.mesh))
+            ordered_instances.push_back(source);
+    render_instances = std::move(ordered_instances);
+    std::array<std::pair<std::size_t, std::size_t>, 6> monster_ranges{};
+    for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+    {
+        const auto first = std::ranges::find_if(render_instances, [&](const auto &source) {
+            return is_monster(source.mesh) &&
+                   static_cast<std::size_t>(static_cast<std::uint32_t>(source.mesh) -
+                                             static_cast<std::uint32_t>(RenderMesh::MonsterMelee)) == asset;
+        });
+        if (first == render_instances.end()) continue;
+        const auto begin = static_cast<std::size_t>(first - render_instances.begin());
+        auto last = first;
+        while (last != render_instances.end() &&
+               is_monster(last->mesh) &&
+               static_cast<std::size_t>(static_cast<std::uint32_t>(last->mesh) -
+                                         static_cast<std::uint32_t>(RenderMesh::MonsterMelee)) == asset)
+            ++last;
+        monster_ranges[asset] = {begin, static_cast<std::size_t>(last - first)};
+    }
     std::vector<ParticleSpawnCommand> frame_particle_spawns(particle_spawns.begin(),
                                                              particle_spawns.end());
     if (snapshot.header.tick != impl_->last_status_visual_tick)
@@ -142,7 +210,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                        source.scale.y * 0.16f, {1.8f, 0.04f, 0.05f, 0.42f}, 1);
             add_status(StatusVisual::Burn, impl_->config.burn_status_sprite,
                        ParticleFacing::Camera, VfxRenderer::Sprite,
-                       VfxPrimitive::Ember, source.scale.y * 0.5f,
+                       VfxPrimitive::Flame, source.scale.y * 0.5f,
                        source.scale.y * 0.18f, {2.2f, 0.7f, 0.08f, 0.38f}, 1);
             add_status(StatusVisual::Slow, impl_->config.slow_status_sprite,
                        ParticleFacing::Ground, VfxRenderer::Ground,
@@ -410,7 +478,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 interior.seed = static_cast<std::uint32_t>(interior.sequence);
                 interior.start_size_min = interior.start_size_max = visual.radius * 0.78f;
                 interior.end_size_min = interior.end_size_max = visual.radius * 0.78f;
-                interior.primitive = VfxPrimitive::Cracks;
+                interior.primitive = VfxPrimitive::Flame;
                 interior.start_color = interior.end_color =
                     {2.2f, 0.42f, 0.025f, 0.11f};
                 frame_particle_spawns.push_back(interior);
@@ -445,11 +513,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         command.end_size_min = command.end_size_max = line.width * 2.5f;
         command.stretch = length / std::max(line.width * 5.0f, 0.001f);
         command.rotation_min = command.rotation_max = 0.0f;
+        command.uv_repeat = line.uv_repeat;
+        command.scroll_speed = line.scroll_speed;
         command.count = 1;
         command.seed = static_cast<std::uint32_t>(line.sequence);
         frame_particle_spawns.push_back(command);
     }
-    const auto original_instance_count = snapshot.instances.size();
     const auto particle_spawn_data_offset =
         (kInstanceDataOffset + sizeof(GpuInstance) * render_instances.size() + 255u) &
         ~std::size_t{255u};
@@ -634,9 +703,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                   source.end_color.z, source.end_color.w};
         target_spawn.size_range = {source.start_size_min, source.start_size_max,
                                    source.end_size_min, source.end_size_max};
-        target_spawn.rotation_range = {source.rotation_min, source.rotation_max,
-                                       source.angular_velocity_min,
-                                       source.angular_velocity_max};
+        target_spawn.rotation_range = source.renderer == VfxRenderer::Segment
+            ? DirectX::XMFLOAT4{source.uv_repeat, source.uv_repeat,
+                                source.scroll_speed, source.scroll_speed}
+            : DirectX::XMFLOAT4{source.rotation_min, source.rotation_max,
+                                source.angular_velocity_min,
+                                source.angular_velocity_max};
         const auto sprite_metadata = static_cast<std::uint32_t>(source.sprite) |
                                      (static_cast<std::uint32_t>(source.frame_columns) << 16u) |
                                      (static_cast<std::uint32_t>(source.frame_rows) << 24u);
@@ -657,17 +729,27 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->particles_initialized && snapshot.header.tick > impl_->last_particle_tick
             ? snapshot.header.tick - impl_->last_particle_tick
             : 0;
-    const auto target_height = impl_->config.character_preview ? 1.0f
+    const auto monster_preview = impl_->config.monster_preview_asset < 6;
+    const auto target_height = monster_preview
+                                   ? (impl_->config.monster_preview_asset >= 3 ? 3.0f : 1.0f)
+                               : impl_->config.character_preview ? 1.0f
                                                                 : snapshot.camera.target.y;
     const auto target = DirectX::XMVectorSet(snapshot.camera.target.x, target_height,
                                              snapshot.camera.target.z, 1.0f);
 #if defined(HS_DEVELOPMENT_TOOLS)
-    const auto camera_yaw = impl_->config.character_preview ? impl_->preview_yaw
-                                                             : snapshot.camera.yaw_degrees;
-    const auto camera_pitch = impl_->config.character_preview ? impl_->preview_pitch
-                                                               : snapshot.camera.pitch_degrees;
-    const auto camera_distance = impl_->config.character_preview
-                                     ? impl_->preview_distance
+    const auto camera_yaw = impl_->config.preview_camera_override
+                                ? impl_->config.preview_camera_yaw
+                            : impl_->config.character_preview ? impl_->preview_yaw
+                                                              : snapshot.camera.yaw_degrees;
+    const auto camera_pitch = impl_->config.preview_camera_override
+                                  ? impl_->config.preview_camera_pitch
+                              : impl_->config.character_preview ? impl_->preview_pitch
+                                                                : snapshot.camera.pitch_degrees;
+    const auto camera_distance = impl_->config.preview_camera_override
+                                     ? impl_->config.preview_camera_distance
+                                 : monster_preview
+                                     ? (impl_->config.monster_preview_asset >= 3 ? 18.0f : 8.0f)
+                                 : impl_->config.character_preview ? impl_->preview_distance
                                      : snapshot.camera.distance;
 #else
     const auto camera_yaw = snapshot.camera.yaw_degrees;
@@ -742,6 +824,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         DirectX::XMStoreFloat4x4(
             &bone, DirectX::XMMatrixTranspose(DirectX::XMMatrixIdentity()));
+    }
+    for (std::size_t asset = 0; asset < impl_->monster_assets.size(); ++asset)
+    {
+        const auto &monster = impl_->monster_assets[asset];
+        constants->monster_asset_meta[asset] = {monster.skin_offset, monster.bone_count, 0, 0};
+        for (std::size_t clip = 0; clip < monster.clip_meta.size(); ++clip)
+            constants->monster_clip_meta[asset][clip] = monster.clip_meta[clip];
     }
     auto pose = snapshot.poses.empty() ? AnimationPoseRef{} : snapshot.poses.front();
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -877,30 +966,50 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto &source = render_instances[index];
         auto position = source.position;
         auto yaw_value = source.yaw;
-        if (snapshots.has_previous &&
-            index < original_instance_count &&
-            snapshots.previous.instances.size() == original_instance_count &&
-            source.stable_id != 0 &&
-            snapshots.previous.instances[index].stable_id == source.stable_id)
+        if (snapshots.has_previous && source.stable_id != 0)
         {
-            const auto &previous = snapshots.previous.instances[index];
-            position.x = std::lerp(previous.position.x, source.position.x, interpolation);
-            position.y = std::lerp(previous.position.y, source.position.y, interpolation);
-            position.z = std::lerp(previous.position.z, source.position.z, interpolation);
-            const auto yaw_delta = std::remainder(
-                source.yaw - previous.yaw,
-                2.0f * DirectX::XM_PI);
-            yaw_value = previous.yaw + yaw_delta * interpolation;
+            const auto previous_it = previous_by_id.find(source.stable_id);
+            if (previous_it != previous_by_id.end())
+            {
+                const auto &previous = *previous_it->second;
+                position.x = std::lerp(previous.position.x, source.position.x, interpolation);
+                position.y = std::lerp(previous.position.y, source.position.y, interpolation);
+                position.z = std::lerp(previous.position.z, source.position.z, interpolation);
+                const auto yaw_delta = std::remainder(source.yaw - previous.yaw,
+                                                      2.0f * DirectX::XM_PI);
+                yaw_value = previous.yaw + yaw_delta * interpolation;
+            }
         }
         const auto vertical_offset = source.mesh == RenderMesh::Archer
                                          ? impl_->archer_ground_offset
-                                         : source.scale.y * 0.5f;
+                                         : is_monster(source.mesh)
+                                             ? impl_->monster_assets[static_cast<std::size_t>(
+                                                   static_cast<std::uint32_t>(source.mesh) -
+                                                   static_cast<std::uint32_t>(RenderMesh::MonsterMelee))]
+                                                   .ground_offset * source.scale.y
+                                             : source.scale.y * 0.5f;
+        auto mesh = static_cast<std::uint32_t>(source.mesh);
+        float animation_time{};
+        if (is_monster(source.mesh))
+        {
+            if (impl_->config.monster_preview_asset < 6)
+            {
+                mesh |= impl_->config.monster_preview_clip << 8u;
+                animation_time = impl_->config.monster_preview_time;
+            }
+            else if (const auto pose_it = pose_by_id.find(source.stable_id);
+                     pose_it != pose_by_id.end())
+            {
+                mesh |= static_cast<std::uint32_t>(pose_it->second->clip) << 8u;
+                animation_time = pose_it->second->normalized_time;
+            }
+        }
         instances[index] = {{position.x, position.y + vertical_offset, position.z, 1.0f},
                             {source.scale.x, source.scale.y, source.scale.z, 0.0f},
                             source.color_rgba,
-                            static_cast<std::uint32_t>(source.mesh),
+                            mesh,
                             yaw_value,
-                            0.0f};
+                            animation_time};
     }
 
     auto result = frame.allocator->Reset();
@@ -978,6 +1087,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     character_table.ptr += static_cast<UINT64>(kPostTextureDescriptorCount) *
                            impl_->srv_stride;
     impl_->command_list->SetGraphicsRootDescriptorTable(13, character_table);
+    impl_->command_list->SetGraphicsRootShaderResourceView(
+        15, impl_->monster_skin_matrices.resource->GetGPUVirtualAddress());
     const auto draw_fullscreen =
         [&](ID3D12PipelineState *pipeline, D3D12_CPU_DESCRIPTOR_HANDLE target) {
             impl_->command_list->OMSetRenderTargets(1, &target, FALSE, nullptr);
@@ -1093,6 +1204,42 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         context.UavBarrier(indirect_arguments);
     });
 
+    const auto draw_character_instances = [&] {
+        const auto base = frame.upload.resource->GetGPUVirtualAddress() + kInstanceDataOffset;
+        if (instance_count != 0 && render_instances.front().mesh == RenderMesh::Archer)
+        {
+            impl_->command_list->SetGraphicsRootShaderResourceView(1, base);
+            impl_->command_list->IASetVertexBuffers(0, 1, &impl_->archer_vertex_view);
+            impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
+        }
+        for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
+        {
+            const auto [begin, count] = monster_ranges[asset];
+            if (count == 0) continue;
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                1, base + begin * sizeof(GpuInstance));
+            impl_->command_list->IASetVertexBuffers(
+                0, 1, &impl_->monster_assets[asset].vertex_view);
+            impl_->command_list->DrawInstanced(impl_->monster_assets[asset].vertex_count,
+                                               static_cast<UINT>(count), 0, 0);
+        }
+        const auto procedural_begin = std::ranges::find_if(
+            render_instances, [](const auto &source) {
+                return source.mesh != RenderMesh::Archer &&
+                       !(source.mesh >= RenderMesh::MonsterMelee &&
+                         source.mesh <= RenderMesh::BossFinal);
+            });
+        if (procedural_begin != render_instances.end())
+        {
+            const auto begin = static_cast<std::size_t>(procedural_begin - render_instances.begin());
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                1, base + begin * sizeof(GpuInstance));
+            impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
+            impl_->command_list->DrawInstanced(
+                static_cast<UINT>(kCubeVertices.size()),
+                static_cast<UINT>(render_instances.size() - begin), 0, 0);
+        }
+    };
     auto shadow_pass = impl_->graph.AddPass(kRenderPassNames[1], QueueHint::Direct);
     shadow_pass.Write(shadow, Access::DepthWrite);
     shadow_pass.SetExecute([&](RenderPassContext &) {
@@ -1113,25 +1260,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                                         0, nullptr);
             impl_->command_list->OMSetRenderTargets(0, nullptr, FALSE, &handle);
             impl_->command_list->SetGraphicsRoot32BitConstant(6, cascade, 0);
-            if (instance_count != 0)
-            {
-                impl_->command_list->SetGraphicsRootShaderResourceView(
-                    1, frame.upload.resource->GetGPUVirtualAddress() +
-                           kInstanceDataOffset);
-                impl_->command_list->IASetVertexBuffers(
-                    0, 1, &impl_->archer_vertex_view);
-                impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
-            }
-            if (instance_count > 1)
-            {
-                impl_->command_list->SetGraphicsRootShaderResourceView(
-                    1, frame.upload.resource->GetGPUVirtualAddress() +
-                           kInstanceDataOffset + sizeof(GpuInstance));
-                impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
-                impl_->command_list->DrawInstanced(
-                    static_cast<UINT>(kCubeVertices.size()),
-                    static_cast<UINT>(instance_count - 1), 0, 0);
-            }
+            draw_character_instances();
             handle.ptr += impl_->dsv_stride;
         }
         impl_->command_list->RSSetViewports(1, &viewport);
@@ -1158,25 +1287,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->OMSetRenderTargets(3, targets, FALSE, &dsv);
         impl_->command_list->SetPipelineState(impl_->scene_pipeline.Get());
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        if (instance_count != 0)
-        {
-            impl_->command_list->SetGraphicsRootShaderResourceView(
-                1, frame.upload.resource->GetGPUVirtualAddress() +
-                       kInstanceDataOffset);
-            impl_->command_list->IASetVertexBuffers(0, 1,
-                                                    &impl_->archer_vertex_view);
-            impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
-        }
-        if (instance_count > 1)
-        {
-            impl_->command_list->SetGraphicsRootShaderResourceView(
-                1, frame.upload.resource->GetGPUVirtualAddress() +
-                       kInstanceDataOffset + sizeof(GpuInstance));
-            impl_->command_list->IASetVertexBuffers(0, 1, &impl_->vertex_view);
-            impl_->command_list->DrawInstanced(
-                static_cast<UINT>(kCubeVertices.size()),
-                static_cast<UINT>(instance_count - 1), 0, 0);
-        }
+        draw_character_instances();
     });
 
     auto lighting_pass = impl_->graph.AddPass(kRenderPassNames[3], QueueHint::Direct);

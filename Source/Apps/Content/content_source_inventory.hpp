@@ -18,8 +18,20 @@
 #define HS_CHARACTER_ANIMATION_DIRECTORY "ContentSource/Animations/Characters/Archer"
 #endif
 
+#ifndef HS_MONSTER_MODEL_DIRECTORY
+#define HS_MONSTER_MODEL_DIRECTORY "ContentSource/Models/Monsters"
+#endif
+
+#ifndef HS_MONSTER_ANIMATION_DIRECTORY
+#define HS_MONSTER_ANIMATION_DIRECTORY "ContentSource/Animations/Monsters"
+#endif
+
 #ifndef HS_AUDIO_DIRECTORY
 #define HS_AUDIO_DIRECTORY "ContentSource/Audio"
+#endif
+
+#ifndef HS_MONSTER_TEXTURE_DIRECTORY
+#define HS_MONSTER_TEXTURE_DIRECTORY "ContentSource/Textures/Monsters/PBR"
 #endif
 
 namespace hs::content

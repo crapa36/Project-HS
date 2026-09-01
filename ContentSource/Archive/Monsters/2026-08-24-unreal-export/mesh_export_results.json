@@ -1,0 +1,65 @@
+{
+  "engine": "5.8.1-56057345+++UE5+Release-5.8",
+  "kind": "Mesh",
+  "total": 8,
+  "succeeded": 8,
+  "failed": 0,
+  "results": [
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Beholder_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Beholder_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Cactus_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Cactus_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/ChestMonster_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/ChestMonster_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Mushroom_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Mushroom_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Slime_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Slime_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Swarm08_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Swarm08_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/Swarm09_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/Swarm09_SK.fbx",
+      "success": true,
+      "errors": []
+    },
+    {
+      "asset": "/Game/MonsterForSurvivalGame/Mesh/PBR/TurtleShell_SK",
+      "class": "SkeletalMesh",
+      "file": "C:\\Users\\crapa\\Documents\\Unreal Projects\\MyProject\\ExportedFBX\\MonsterForSurvivalGame\\Mesh/PBR/TurtleShell_SK.fbx",
+      "success": true,
+      "errors": []
+    }
+  ]
+}

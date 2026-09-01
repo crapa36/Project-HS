@@ -10,7 +10,7 @@ namespace hs
 
 std::uint64_t PresentationCatalogSchemaHash() noexcept
 {
-    return Fnv1a64("project_hs_presentation_catalog_v1");
+    return Fnv1a64("project_hs_presentation_catalog_v2");
 }
 
 Result LoadPresentationCatalog(const std::filesystem::path &path,

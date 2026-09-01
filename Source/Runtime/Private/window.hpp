@@ -3,6 +3,7 @@
 #include "runtime_channels.hpp"
 
 #include <hs/core/result.hpp>
+#include <hs/presentation/presentation_catalog.hpp>
 
 #include <Windows.h>
 
@@ -18,7 +19,8 @@ class Window
 {
   public:
     Window(RuntimeChannels &channels,
-           std::array<std::uint16_t, 4> skill_virtual_keys) noexcept;
+           std::array<std::uint16_t, 4> skill_virtual_keys,
+           PresentationCamera camera) noexcept;
     ~Window();
 
     Window(const Window &) = delete;
@@ -51,6 +53,7 @@ class Window
     HeldInputState held_{};
     Float2 ui_cursor_normalized_{};
     std::array<std::uint16_t, 4> skill_virtual_keys_{};
+    PresentationCamera camera_{};
     std::optional<std::uint8_t> pending_rebind_slot_;
     std::optional<std::array<std::uint16_t, 4>> rebound_skill_keys_;
     std::function<void(Float2)> ui_click_handler_;

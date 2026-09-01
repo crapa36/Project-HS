@@ -20,6 +20,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -100,7 +101,9 @@ struct BoneSource
 };
 
 std::filesystem::path MaterialTexture(FbxSurfaceMaterial &material,
-                                      const char *property_name)
+                                      const char *property_name,
+                                      const std::filesystem::path &model_path,
+                                      bool allow_missing)
 {
     const auto property = material.FindProperty(property_name);
     if (!property.IsValid())
@@ -113,23 +116,30 @@ std::filesystem::path MaterialTexture(FbxSurfaceMaterial &material,
         return {};
     }
     const auto filename = std::filesystem::path(texture->GetFileName()).filename();
-    const auto path = std::filesystem::path(HS_CHARACTER_MODEL).parent_path() /
-                      "ErikaArcher.fbm" / filename;
+    const auto path = model_path.parent_path() /
+                      (model_path.stem().string() + ".fbm") / filename;
     if (!std::filesystem::is_regular_file(path))
     {
-        throw std::runtime_error("Archer material texture is missing: " + path.string());
+        if (allow_missing)
+            return {};
+        throw std::runtime_error("Character material texture is missing: " + path.string());
     }
     return path;
 }
 
 std::uint16_t GatherMaterial(FbxSurfaceMaterial &material,
-                             CharacterCookResult &output)
+                             CharacterCookResult &output,
+                             const std::filesystem::path &model_path,
+                             bool allow_missing)
 {
-    auto diffuse = MaterialTexture(material, FbxSurfaceMaterial::sDiffuse);
-    auto normal = MaterialTexture(material, FbxSurfaceMaterial::sNormalMap);
+    auto diffuse = MaterialTexture(material, FbxSurfaceMaterial::sDiffuse,
+                                   model_path, allow_missing);
+    auto normal = MaterialTexture(material, FbxSurfaceMaterial::sNormalMap,
+                                  model_path, allow_missing);
     if (normal.empty())
     {
-        normal = MaterialTexture(material, FbxSurfaceMaterial::sBump);
+        normal = MaterialTexture(material, FbxSurfaceMaterial::sBump,
+                                 model_path, allow_missing);
     }
     const auto name = std::string(material.GetName());
     const auto existing = std::ranges::find_if(
@@ -169,7 +179,9 @@ std::uint16_t PolygonMaterial(FbxMesh &mesh, int polygon,
 }
 
 void GatherModel(FbxScene &scene, CharacterCookResult &output,
-                 std::vector<BoneSource> &bones)
+                 std::vector<BoneSource> &bones,
+                 const std::filesystem::path &model_path,
+                 bool allow_missing_material_textures)
 {
     FbxGeometryConverter converter(scene.GetFbxManager());
     if (!converter.Triangulate(&scene, true, false))
@@ -226,6 +238,7 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
         throw std::runtime_error("Archer skeleton bone count must be 1..128");
     }
     std::unordered_map<FbxNode *, std::uint16_t> bone_indices;
+    std::unordered_set<std::string> bone_names;
     for (std::size_t index = 0; index < bones.size(); ++index)
     {
         if (!bone_indices.emplace(bones[index].node,
@@ -233,6 +246,8 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
         {
             throw std::runtime_error("Archer skeleton contains a duplicate bone");
         }
+        if (!bone_names.emplace(bones[index].name).second)
+            throw std::runtime_error("Character skeleton contains a duplicate bone name");
     }
     for (auto &bone : bones)
     {
@@ -281,7 +296,8 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
             {
                 throw std::runtime_error("Archer node has an empty material slot");
             }
-            node_materials.push_back(GatherMaterial(*material, output));
+            node_materials.push_back(GatherMaterial(
+                *material, output, model_path, allow_missing_material_textures));
         }
         if (node_materials.empty())
         {
@@ -316,13 +332,25 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
                      weight_index < cluster->GetControlPointIndicesCount(); ++weight_index)
                 {
                     const auto control_point = control_points[weight_index];
-                    if (control_point < 0 || control_point >= mesh->GetControlPointsCount() ||
-                        control_weights[weight_index] <= 0.0)
+                    if (control_point < 0 || control_point >= mesh->GetControlPointsCount())
+                    {
+                        throw std::runtime_error(
+                            model_path.string() + ": node " + node->GetNameOnly().Buffer() +
+                            " has an invalid skin control point index");
+                    }
+                    const auto weight = control_weights[weight_index];
+                    if (!std::isfinite(weight) || weight < 0.0)
+                    {
+                        throw std::runtime_error(
+                            model_path.string() + ": node " + node->GetNameOnly().Buffer() +
+                            " has a non-finite or negative skin weight");
+                    }
+                    if (weight == 0.0)
                     {
                         continue;
                     }
                     weights[static_cast<std::size_t>(control_point)].push_back(
-                        {bone, static_cast<float>(control_weights[weight_index])});
+                        {bone, static_cast<float>(weight)});
                 }
             }
         }
@@ -372,12 +400,30 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
                 }
                 if (influences.empty())
                 {
-                    influences.push_back({0, 1.0f});
+                    throw std::runtime_error(
+                        model_path.string() + ": node " + node->GetNameOnly().Buffer() +
+                        " has an unweighted skin control point " +
+                        std::to_string(control_point));
                 }
                 float total{};
                 for (const auto &influence : influences)
                 {
+                    if (influence.first >= bones.size() ||
+                        !std::isfinite(influence.second) || influence.second <= 0.0f)
+                    {
+                        throw std::runtime_error(
+                            model_path.string() + ": node " + node->GetNameOnly().Buffer() +
+                            " has an invalid selected skin influence at control point " +
+                            std::to_string(control_point));
+                    }
                     total += influence.second;
+                }
+                if (!std::isfinite(total) || total <= 0.0f)
+                {
+                    throw std::runtime_error(
+                        model_path.string() + ": node " + node->GetNameOnly().Buffer() +
+                        " has an invalid skin influence total at control point " +
+                        std::to_string(control_point));
                 }
                 for (std::size_t index = 0; index < influences.size(); ++index)
                 {
@@ -396,14 +442,35 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
                 vertex.material_index =
                     PolygonMaterial(*mesh, polygon, node_materials);
             }
-            const auto edge1 = FbxVector4(
+            // FBX exports can flip triangle winding when converted to the
+            // DirectX axis system.  Keep the authored normal and rasterizer
+            // convention consistent so back-face culling does not make a
+            // valid skinned surface appear perforated.
+            auto edge1 = FbxVector4(
                 triangle[1].position[0] - triangle[0].position[0],
                 triangle[1].position[1] - triangle[0].position[1],
                 triangle[1].position[2] - triangle[0].position[2]);
-            const auto edge2 = FbxVector4(
+            auto edge2 = FbxVector4(
                 triangle[2].position[0] - triangle[0].position[0],
                 triangle[2].position[1] - triangle[0].position[1],
                 triangle[2].position[2] - triangle[0].position[2]);
+            const auto geometric_normal = edge1.CrossProduct(edge2);
+            const auto authored_normal = FbxVector4(
+                triangle[0].normal[0] + triangle[1].normal[0] + triangle[2].normal[0],
+                triangle[0].normal[1] + triangle[1].normal[1] + triangle[2].normal[1],
+                triangle[0].normal[2] + triangle[1].normal[2] + triangle[2].normal[2]);
+            if (geometric_normal.DotProduct(authored_normal) < 0.0)
+            {
+                std::swap(triangle[1], triangle[2]);
+                edge1 = FbxVector4(
+                    triangle[1].position[0] - triangle[0].position[0],
+                    triangle[1].position[1] - triangle[0].position[1],
+                    triangle[1].position[2] - triangle[0].position[2]);
+                edge2 = FbxVector4(
+                    triangle[2].position[0] - triangle[0].position[0],
+                    triangle[2].position[1] - triangle[0].position[1],
+                    triangle[2].position[2] - triangle[0].position[2]);
+            }
             const auto duv1 = FbxVector2(triangle[1].uv[0] - triangle[0].uv[0],
                                          triangle[1].uv[1] - triangle[0].uv[1]);
             const auto duv2 = FbxVector2(triangle[2].uv[0] - triangle[0].uv[0],
@@ -439,6 +506,147 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
     }
     output.mesh_count = static_cast<std::uint32_t>(mesh_nodes.size());
     output.bone_count = static_cast<std::uint32_t>(bones.size());
+}
+
+void SealSlimeEyeSocket(CharacterCookResult &asset)
+{
+    using Position = std::array<float, 3>;
+    using Edge = std::pair<std::size_t, std::size_t>;
+    struct EdgeUse
+    {
+        std::size_t count{};
+        std::size_t from{};
+        std::size_t to{};
+    };
+
+    if (asset.vertices.size() % 3 != 0)
+        throw std::runtime_error("Slime mesh is not a triangle list");
+
+    std::map<Position, std::size_t> position_ids;
+    std::vector<hs::SkinnedVertex> representatives;
+    std::vector<std::size_t> vertex_ids;
+    vertex_ids.reserve(asset.vertices.size());
+    for (const auto &vertex : asset.vertices)
+    {
+        const Position position{vertex.position[0], vertex.position[1],
+                                vertex.position[2]};
+        const auto [found, inserted] = position_ids.try_emplace(
+            position, representatives.size());
+        if (inserted) representatives.push_back(vertex);
+        vertex_ids.push_back(found->second);
+    }
+
+    std::map<Edge, EdgeUse> edges;
+    for (std::size_t triangle = 0; triangle < vertex_ids.size(); triangle += 3)
+    {
+        for (std::size_t corner = 0; corner < 3; ++corner)
+        {
+            const auto from = vertex_ids[triangle + corner];
+            const auto to = vertex_ids[triangle + (corner + 1) % 3];
+            const Edge key{std::min(from, to), std::max(from, to)};
+            auto &[count, first_from, first_to] = edges[key];
+            if (count == 0)
+            {
+                first_from = from;
+                first_to = to;
+            }
+            ++count;
+        }
+    }
+
+    std::vector<std::vector<std::size_t>> adjacency(representatives.size());
+    for (const auto &[edge, use] : edges)
+    {
+        if (use.count != 1) continue;
+        adjacency[edge.first].push_back(edge.second);
+        adjacency[edge.second].push_back(edge.first);
+    }
+
+    std::vector<bool> visited(representatives.size());
+    std::vector<std::vector<std::size_t>> candidates;
+    for (std::size_t vertex = 0; vertex < adjacency.size(); ++vertex)
+    {
+        if (visited[vertex] || adjacency[vertex].empty()) continue;
+        std::vector<std::size_t> component;
+        std::vector<std::size_t> pending{vertex};
+        visited[vertex] = true;
+        while (!pending.empty())
+        {
+            const auto current = pending.back();
+            pending.pop_back();
+            component.push_back(current);
+            for (const auto neighbor : adjacency[current])
+            {
+                if (!visited[neighbor])
+                {
+                    visited[neighbor] = true;
+                    pending.push_back(neighbor);
+                }
+            }
+        }
+        if (component.size() == 10 &&
+            std::ranges::all_of(component, [&](const auto index) {
+                return adjacency[index].size() == 2;
+            }))
+            candidates.push_back(std::move(component));
+    }
+    if (candidates.size() != 1)
+        throw std::runtime_error("Slime mesh must contain exactly one 10-edge eye socket");
+
+    const auto start = *std::ranges::min_element(candidates.front());
+    std::vector<std::size_t> loop;
+    loop.reserve(10);
+    auto previous = std::numeric_limits<std::size_t>::max();
+    auto current = start;
+    do
+    {
+        loop.push_back(current);
+        const auto &neighbors = adjacency[current];
+        const auto next = neighbors[0] == previous ? neighbors[1] : neighbors[0];
+        previous = current;
+        current = next;
+    } while (current != start && loop.size() <= 10);
+    if (loop.size() != 10 || current != start)
+        throw std::runtime_error("Slime eye socket boundary is not one closed loop");
+
+    const Edge first_key{std::min(loop[0], loop[1]), std::max(loop[0], loop[1])};
+    const auto &first_use = edges.at(first_key);
+    if (first_use.from == loop[0] && first_use.to == loop[1])
+        std::reverse(loop.begin() + 1, loop.end());
+
+    const auto before = asset.vertices.size();
+    for (std::size_t index = 1; index + 1 < loop.size(); ++index)
+    {
+        std::array triangle{representatives[loop[0]],
+                            representatives[loop[index]],
+                            representatives[loop[index + 1]]};
+        const auto edge1 = FbxVector4(
+            triangle[1].position[0] - triangle[0].position[0],
+            triangle[1].position[1] - triangle[0].position[1],
+            triangle[1].position[2] - triangle[0].position[2]);
+        const auto edge2 = FbxVector4(
+            triangle[2].position[0] - triangle[0].position[0],
+            triangle[2].position[1] - triangle[0].position[1],
+            triangle[2].position[2] - triangle[0].position[2]);
+        auto normal = edge1.CrossProduct(edge2);
+        if (normal.Length() <= 1e-8)
+            throw std::runtime_error("Slime eye socket repair produced a degenerate triangle");
+        normal.Normalize();
+        auto tangent = edge1 - normal * normal.DotProduct(edge1);
+        tangent.Normalize();
+        for (auto &vertex : triangle)
+        {
+            vertex.normal = {static_cast<float>(normal[0]),
+                             static_cast<float>(normal[1]),
+                             static_cast<float>(normal[2])};
+            vertex.tangent = {static_cast<float>(tangent[0]),
+                              static_cast<float>(tangent[1]),
+                              static_cast<float>(tangent[2]), 1.0f};
+            asset.vertices.push_back(vertex);
+        }
+    }
+    if (asset.vertices.size() != before + 24)
+        throw std::runtime_error("Slime eye socket repair did not add eight triangles");
 }
 
 FbxNode *FindBone(FbxScene &scene, std::string_view name)
@@ -484,17 +692,51 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
     std::vector<FbxAMatrix> animation_global_bind;
     animation_bones.reserve(model_bones.size());
     animation_global_bind.reserve(model_bones.size());
+    std::unordered_set<std::string> required_names;
     for (const auto &bone : model_bones)
     {
-        auto *animation_bone = FindBone(scene, bone.name);
+        FbxNode *animation_bone{};
+        std::size_t matches{};
+        VisitNodes(scene.GetRootNode(), [&](FbxNode *node) {
+            if (BoneName(*node) == bone.name)
+            {
+                animation_bone = node;
+                ++matches;
+            }
+        });
         if (!animation_bone)
         {
             throw std::runtime_error("Animation skeleton is missing bone: " + bone.name);
         }
+        if (matches != 1)
+            throw std::runtime_error("Animation skeleton contains a duplicate bone name: " +
+                                     bone.name);
         animation_bones.push_back(animation_bone);
         animation_global_bind.push_back(
             animation_bone->EvaluateGlobalTransform(
                 FBXSDK_TIME_INFINITE, FbxNode::eSourcePivot, false, true));
+        required_names.insert(bone.name);
+    }
+    for (std::size_t index = 0; index < model_bones.size(); ++index)
+    {
+        std::string nearest_parent;
+        for (auto *parent = animation_bones[index]->GetParent(); parent;
+             parent = parent->GetParent())
+        {
+            if (required_names.contains(BoneName(*parent)))
+            {
+                nearest_parent = BoneName(*parent);
+                break;
+            }
+        }
+        const auto expected_parent = model_bones[index].parent ==
+                                             std::numeric_limits<std::size_t>::max()
+                                         ? std::string{}
+                                         : model_bones[model_bones[index].parent].name;
+        if (nearest_parent != expected_parent)
+            throw std::runtime_error("Animation skeleton parent hierarchy mismatch for bone: " +
+                                     model_bones[index].name);
+
     }
 
     const auto frame_count =
@@ -555,9 +797,8 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
                     ? target_local
                     : target_globals[parent] * target_local;
         }
-        const auto corrected_root = target_globals.front();
-        const auto root_delta =
-            corrected_root.GetT() - model_bones.front().global_bind.GetT();
+        const auto root_delta = target_globals.front().GetT() -
+                                model_bones.front().global_bind.GetT();
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
         {
             corrected_globals[bone_index] = target_globals[bone_index];
@@ -573,15 +814,37 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
                                    ? corrected_globals[bone_index]
                                    : corrected_globals[parent].Inverse() *
                                          corrected_globals[bone_index];
-            const auto translation = local.GetT();
-            const auto rotation = local.GetQ();
-            const auto scale = local.GetS();
+            FbxVector4 translation;
+            FbxQuaternion rotation;
+            FbxVector4 shearing;
+            FbxVector4 scale;
+            double determinant_sign{};
+            FbxMatrix(local).GetElements(translation, rotation, shearing, scale,
+                                         determinant_sign);
+            scale *= determinant_sign;
+            FbxAMatrix reconstructed;
+            reconstructed.SetT(translation);
+            reconstructed.SetQ(rotation);
+            reconstructed.SetS(scale);
+            for (int row = 0; row < 4; ++row)
+            {
+                for (int column = 0; column < 4; ++column)
+                {
+                    if (std::abs(reconstructed.Get(row, column) -
+                                 local.Get(row, column)) > 1e-5)
+                    {
+                        throw std::runtime_error(
+                            "Animation local transform cannot preserve handedness");
+                    }
+                }
+            }
             hs::CharacterLocalTransform transform;
             for (std::size_t axis = 0; axis < 3; ++axis)
             {
-                transform.translation[axis] = static_cast<float>(translation[axis]);
-                transform.rotation[axis] = static_cast<float>(rotation[axis]);
-                transform.scale[axis] = static_cast<float>(scale[axis]);
+                const auto component = static_cast<int>(axis);
+                transform.translation[axis] = static_cast<float>(translation[component]);
+                transform.rotation[axis] = static_cast<float>(rotation[component]);
+                transform.scale[axis] = static_cast<float>(scale[component]);
             }
             transform.rotation[3] = static_cast<float>(rotation[3]);
             const auto rotation_length = std::sqrt(
@@ -728,7 +991,8 @@ bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
 
 bool CookCharacterAsset(const std::filesystem::path &output,
                         CharacterCookResult &character,
-                        std::string &error_message)
+                        std::string &error_message,
+                        const CharacterAssetSource &source)
 {
     auto *manager = FbxManager::Create();
     if (!manager)
@@ -739,9 +1003,12 @@ bool CookCharacterAsset(const std::filesystem::path &output,
     manager->SetIOSettings(FbxIOSettings::Create(manager, IOSROOT));
     try
     {
-        auto *model = LoadFbx(*manager, HS_CHARACTER_MODEL, "ArcherModel");
+        auto *model = LoadFbx(*manager, source.model, source.diagnostic_name);
         std::vector<BoneSource> bones;
-        GatherModel(*model, character, bones);
+        GatherModel(*model, character, bones, source.model,
+                    source.allow_missing_material_textures);
+        if (source.seal_eye_socket)
+            SealSlimeEyeSocket(character);
         character.upper_body_weights.resize(bones.size());
         for (std::size_t bone_index = 0; bone_index < bones.size(); ++bone_index)
         {
@@ -765,21 +1032,20 @@ bool CookCharacterAsset(const std::filesystem::path &output,
         }
         model->Destroy();
 
-        const auto animation_root = std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY);
-        for (const auto &[filename, clip, looping] :
+        for (const auto &[animation_path, clip, looping] :
              std::array{
-                 std::tuple{"Idle.fbx", hs::CharacterAnimationClip::Idle, true},
-                 std::tuple{"RunForward.fbx", hs::CharacterAnimationClip::Run, true},
-                 std::tuple{"DrawArrow.fbx", hs::CharacterAnimationClip::Draw, false},
-                 std::tuple{"AimRecoil.fbx", hs::CharacterAnimationClip::Recoil, false},
-                 std::tuple{"DeathBackward.fbx", hs::CharacterAnimationClip::Death, false},
+                 std::tuple{source.animations[0], hs::CharacterAnimationClip::Idle, true},
+                 std::tuple{source.animations[1], hs::CharacterAnimationClip::Run, true},
+                 std::tuple{source.animations[2], hs::CharacterAnimationClip::Draw, false},
+                 std::tuple{source.animations[3], hs::CharacterAnimationClip::Recoil, false},
+                 std::tuple{source.animations[4], hs::CharacterAnimationClip::Death, false},
              })
         {
-            auto *animation = LoadFbx(*manager, animation_root / filename, filename);
+            auto *animation = LoadFbx(*manager, animation_path, source.diagnostic_name);
             GatherAnimation(*animation, bones, clip, looping, character);
             animation->Destroy();
         }
-        if (!WriteCharacterAsset(output / "archer.meshbin", character,
+        if (!WriteCharacterAsset(output / (source.output_name + ".meshbin"), character,
                                  error_message))
         {
             manager->Destroy();
@@ -805,9 +1071,9 @@ bool CookCharacterAsset(const std::filesystem::path &output,
     {
         const auto suffix = std::to_string(index) + ".dds";
         const auto &material = character.materials[index];
-        if (!WriteDds(*factory.Get(), output / ("archer_diffuse_" + suffix),
+        if (!WriteDds(*factory.Get(), output / (source.output_name + "_diffuse_" + suffix),
                       material.diffuse, {255, 255, 255, 255}, error_message) ||
-            !WriteDds(*factory.Get(), output / ("archer_normal_" + suffix),
+            !WriteDds(*factory.Get(), output / (source.output_name + "_normal_" + suffix),
                       material.normal, {128, 128, 255, 255}, error_message))
         {
             return false;
@@ -820,6 +1086,41 @@ bool CookCharacterAsset(const std::filesystem::path &output,
                   << '\n';
     }
     return true;
+}
+
+bool CookMonsterMaterialTextures(const std::filesystem::path &output,
+                                 std::string &error_message)
+{
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))))
+    {
+        error_message = "WIC factory creation failed";
+        return false;
+    }
+    const auto source = std::filesystem::path(HS_MONSTER_TEXTURE_DIRECTORY);
+    return WriteDds(*factory.Get(), output / "monster_basecolor.dds",
+                    source / "BasecolorDefault_TEX.png", {255, 255, 255, 255},
+                    error_message) &&
+           WriteDds(*factory.Get(), output / "monster_emissive.dds",
+                    source / "Emissive_TEX.png", {0, 0, 0, 255}, error_message) &&
+           WriteDds(*factory.Get(), output / "monster_ram.dds",
+                    source / "RAM_TEX.png", {255, 0, 0, 255}, error_message);
+}
+
+bool CookCharacterAsset(const std::filesystem::path &output,
+                        CharacterCookResult &character,
+                        std::string &error_message)
+{
+    const CharacterAssetSource archer{
+        HS_CHARACTER_MODEL,
+        {std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "Idle.fbx",
+         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "RunForward.fbx",
+         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DrawArrow.fbx",
+         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "AimRecoil.fbx",
+         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DeathBackward.fbx"},
+        "archer", "Archer", false};
+    return CookCharacterAsset(output, character, error_message, archer);
 }
 
 } // namespace hs::content

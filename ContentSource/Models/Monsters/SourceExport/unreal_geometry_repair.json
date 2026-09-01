@@ -1,0 +1,68 @@
+[
+  {
+    "source": "/Game/MonsterForSurvivalGame/Mesh/PBR/Beholder_SK",
+    "temporary_asset": "/Game/__CodexMonsterExportTemp/Beholder_SK",
+    "success": true,
+    "before": {
+      "open_border_loops": 9,
+      "open_border_edges": 71,
+      "ambiguous_topology": false
+    },
+    "repair": {
+      "filled_loops": 9,
+      "failed_loops": 0
+    },
+    "after": {
+      "open_border_loops": 0,
+      "open_border_edges": 0,
+      "ambiguous_topology": false
+    },
+    "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Mesh\\PBR\\Beholder_SK.fbx",
+    "bytes": 172928,
+    "sha256": "c97105eef103d7aa8d13cc7f99e46285c018aa68ad60859afa3614f8a19a2a24"
+  },
+  {
+    "source": "/Game/MonsterForSurvivalGame/Mesh/PBR/Cactus_SK",
+    "temporary_asset": "/Game/__CodexMonsterExportTemp/Cactus_SK",
+    "success": true,
+    "before": {
+      "open_border_loops": 57,
+      "open_border_edges": 594,
+      "ambiguous_topology": false
+    },
+    "repair": {
+      "filled_loops": 57,
+      "failed_loops": 0
+    },
+    "after": {
+      "open_border_loops": 0,
+      "open_border_edges": 0,
+      "ambiguous_topology": false
+    },
+    "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Mesh\\PBR\\Cactus_SK.fbx",
+    "bytes": 151168,
+    "sha256": "2682c738b1e9586cf180be56e8d358eec1fc9ca89fbea2e16b9b892d62a839ec"
+  },
+  {
+    "source": "/Game/MonsterForSurvivalGame/Mesh/PBR/TurtleShell_SK",
+    "temporary_asset": "/Game/__CodexMonsterExportTemp/TurtleShell_SK",
+    "success": true,
+    "before": {
+      "open_border_loops": 13,
+      "open_border_edges": 151,
+      "ambiguous_topology": false
+    },
+    "repair": {
+      "filled_loops": 13,
+      "failed_loops": 0
+    },
+    "after": {
+      "open_border_loops": 0,
+      "open_border_edges": 0,
+      "ambiguous_topology": false
+    },
+    "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Mesh\\PBR\\TurtleShell_SK.fbx",
+    "bytes": 108160,
+    "sha256": "4d706220cb052f28621f3706fdab2712959bbef7da92d514a0706b69e3345d58"
+  }
+]

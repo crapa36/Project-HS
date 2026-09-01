@@ -32,6 +32,7 @@ enum class VfxPrimitive : std::uint8_t
     FireTransfer,
     RelicChain,
     DashWake,
+    Flame,
 };
 using ParticleSprite = std::uint16_t;
 enum class VfxDefinitionKind : std::uint8_t { Particles, Line };
@@ -39,7 +40,7 @@ enum class VfxDefinitionKind : std::uint8_t { Particles, Line };
 struct CookedParticleEffectsHeader
 {
     char magic[8]{'H', 'S', 'P', 'F', 'X', '\0', '\0', '\0'};
-    std::uint32_t format_version{3};
+    std::uint32_t format_version{4};
     std::uint32_t effect_count{};
     std::uint32_t emitter_count{};
     std::uint32_t sprite_count{};
@@ -106,6 +107,6 @@ struct CookedVfxDefinition
     VfxPrimitive line_primitive{VfxPrimitive::SolidTrail};
 };
 
-inline constexpr std::uint64_t kParticleEffectsSchemaHash = 0x4853504658563033ull;
+inline constexpr std::uint64_t kParticleEffectsSchemaHash = 0x4853504658563034ull;
 
 } // namespace hs

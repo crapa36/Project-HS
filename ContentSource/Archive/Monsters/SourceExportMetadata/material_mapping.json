@@ -1,0 +1,228 @@
+{
+  "asset": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT",
+  "two_sided": false,
+  "blend_mode": "<BlendMode.BLEND_OPAQUE: 0>",
+  "shading_model": "<MaterialShadingModel.MSM_DEFAULT_LIT: 1>",
+  "material_domain": "<MaterialDomain.MD_SURFACE: 0>",
+  "opacity_mask_clip_value": 0.33329999446868896,
+  "property_inputs": {
+    "BaseColor": {
+      "node": "MaterialExpressionTextureSample_0",
+      "class": "MaterialExpressionTextureSample"
+    },
+    "Metallic": {
+      "node": "MaterialExpressionTextureSample_2",
+      "class": "MaterialExpressionTextureSample"
+    },
+    "Specular": null,
+    "Roughness": {
+      "node": "MaterialExpressionTextureSample_2",
+      "class": "MaterialExpressionTextureSample"
+    },
+    "EmissiveColor": {
+      "node": "MaterialExpressionMultiply_0",
+      "class": "MaterialExpressionMultiply"
+    },
+    "Opacity": null,
+    "OpacityMask": null,
+    "Normal": null,
+    "AmbientOcclusion": null
+  },
+  "reconstruction": {
+    "BaseColor": "BasecolorDefault_TEX RGB",
+    "EmissiveColor": "Emissive_TEX RGB * 80.0",
+    "Roughness": "RAM_TEX R",
+    "Metallic": "RAM_TEX B",
+    "AmbientOcclusion": "unconnected"
+  },
+  "mesh_material_slots": {
+    "Beholder_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Cactus_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "ChestMonster_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Mushroom_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Slime_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Swarm08_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Swarm09_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "TurtleShell_SK": [
+      {
+        "source_slot": "lambert1",
+        "slot": "lambert1",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ]
+  },
+  "textures": {
+    "BaseColor": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/BasecolorDefault_TEX.BasecolorDefault_TEX",
+      "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Texture\\PBR\\BasecolorDefault_TEX.png",
+      "success": true,
+      "errors": [],
+      "bytes": 7271,
+      "sha256": "9ecabf14cf28660acfc7230ea370d82f5f46a63cbc45a1b4f1764920dd582e7e",
+      "srgb": true,
+      "compression_settings": "<TextureCompressionSettings.TC_DEFAULT: 0>"
+    },
+    "Emissive": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/Emissive_TEX.Emissive_TEX",
+      "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Texture\\PBR\\Emissive_TEX.png",
+      "success": true,
+      "errors": [],
+      "bytes": 6269,
+      "sha256": "f3ee363eaae05707d60f8a7e3d071d0128813e703140751324ac8c6aef2c46b2",
+      "srgb": true,
+      "compression_settings": "<TextureCompressionSettings.TC_DEFAULT: 0>"
+    },
+    "RAM": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX.RAM_TEX",
+      "file": "C:/Users/crapa/Documents/Unreal Projects/MyProject/ExportedFBX\\MonsterForSurvivalGame\\UnrealNativePBR\\Texture\\PBR\\RAM_TEX.png",
+      "success": true,
+      "errors": [],
+      "bytes": 153944,
+      "sha256": "9218d3089e8e6507cb2af65f317ed0156b44023bd50b9b716430266126575646",
+      "srgb": false,
+      "compression_settings": "<TextureCompressionSettings.TC_DEFAULT: 0>"
+    }
+  },
+  "verified_graph": {
+    "BaseColor": {
+      "output": "RGB",
+      "graph": {
+        "node": "MaterialExpressionTextureSample_0",
+        "class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/BasecolorDefault_TEX.BasecolorDefault_TEX",
+        "input_names": [
+          "UVs",
+          "Tex",
+          "Apply View MipBias"
+        ],
+        "connected_inputs": [
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "Metallic": {
+      "output": "B",
+      "graph": {
+        "node": "MaterialExpressionTextureSample_2",
+        "class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX.RAM_TEX",
+        "input_names": [
+          "UVs",
+          "Tex",
+          "Apply View MipBias"
+        ],
+        "connected_inputs": [
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "Roughness": {
+      "output": "R",
+      "graph": {
+        "node": "MaterialExpressionTextureSample_2",
+        "class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX.RAM_TEX",
+        "input_names": [
+          "UVs",
+          "Tex",
+          "Apply View MipBias"
+        ],
+        "connected_inputs": [
+          null,
+          null,
+          null
+        ]
+      }
+    },
+    "EmissiveColor": {
+      "output": "",
+      "graph": {
+        "node": "MaterialExpressionMultiply_0",
+        "class": "MaterialExpressionMultiply",
+        "input_names": [
+          "A",
+          "B"
+        ],
+        "connected_inputs": [
+          {
+            "node": "MaterialExpressionTextureSample_1",
+            "class": "MaterialExpressionTextureSample",
+            "texture": "/Game/MonsterForSurvivalGame/Texture/Emissive_TEX.Emissive_TEX",
+            "input_names": [
+              "UVs",
+              "Tex",
+              "Apply View MipBias"
+            ],
+            "connected_inputs": [
+              null,
+              null,
+              null
+            ]
+          },
+          {
+            "node": "MaterialExpressionConstant_0",
+            "class": "MaterialExpressionConstant",
+            "value": 80.0,
+            "input_names": [],
+            "connected_inputs": []
+          }
+        ]
+      }
+    },
+    "AmbientOcclusion": {
+      "output": "",
+      "graph": null
+    }
+  },
+  "graph_verification": {
+    "engine": "5.8.1-56057345+++UE5+Release-5.8",
+    "method": "Unreal MaterialEditingLibrary",
+    "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+  }
+}

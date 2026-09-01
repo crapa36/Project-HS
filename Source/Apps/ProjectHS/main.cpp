@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <string_view>
@@ -73,6 +74,72 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         else if (argument == "--character-preview")
         {
             config.character_preview = true;
+        }
+        else if (argument == "--mute")
+        {
+            config.mute_audio = true;
+        }
+        else if (argument.starts_with("--monster-preview="))
+        {
+            const auto value = argument.substr(18);
+            const auto first = value.find(',');
+            const auto second = first == std::string_view::npos
+                                    ? first : value.find(',', first + 1);
+            if (first != std::string_view::npos && second != std::string_view::npos)
+            {
+                std::uint32_t asset{}, clip{};
+                float time{};
+                const auto asset_result = std::from_chars(
+                    value.data(), value.data() + first, asset);
+                const auto clip_result = std::from_chars(
+                    value.data() + first + 1, value.data() + second, clip);
+                const auto time_result = std::from_chars(
+                    value.data() + second + 1, value.data() + value.size(), time);
+                if (asset_result.ec == std::errc{} && asset_result.ptr == value.data() + first &&
+                    clip_result.ec == std::errc{} && clip_result.ptr == value.data() + second &&
+                    time_result.ec == std::errc{} && time_result.ptr == value.data() + value.size() &&
+                    asset < 6 && clip < 5 && time >= 0.0f && time <= 1.0f)
+                {
+                    config.monster_preview_asset = asset;
+                    config.monster_preview_clip = clip;
+                    config.monster_preview_time = time;
+                    config.character_preview = true;
+                    config.mute_audio = true;
+                    config.smoke = true;
+                    config.visible = false;
+                    config.vsync = false;
+                    config.frame_cap = 0;
+                }
+            }
+        }
+        else if (argument.starts_with("--preview-camera="))
+        {
+            const auto value = argument.substr(17);
+            const auto first = value.find(',');
+            const auto second = first == std::string_view::npos
+                                    ? first : value.find(',', first + 1);
+            if (first != std::string_view::npos && second != std::string_view::npos)
+            {
+                float yaw{}, pitch{}, distance{};
+                const auto yaw_result = std::from_chars(value.data(), value.data() + first, yaw);
+                const auto pitch_result = std::from_chars(value.data() + first + 1,
+                                                          value.data() + second, pitch);
+                const auto distance_result = std::from_chars(value.data() + second + 1,
+                                                             value.data() + value.size(), distance);
+                if (yaw_result.ec == std::errc{} && yaw_result.ptr == value.data() + first &&
+                    pitch_result.ec == std::errc{} && pitch_result.ptr == value.data() + second &&
+                    distance_result.ec == std::errc{} &&
+                    distance_result.ptr == value.data() + value.size() &&
+                    std::isfinite(yaw) && std::isfinite(pitch) && std::isfinite(distance) &&
+                    yaw >= -360.0f && yaw <= 720.0f && pitch >= -80.0f && pitch <= 80.0f &&
+                    distance >= 1.0f && distance <= 100.0f)
+                {
+                    config.preview_camera_override = true;
+                    config.preview_camera_yaw = yaw;
+                    config.preview_camera_pitch = pitch;
+                    config.preview_camera_distance = distance;
+                }
+            }
         }
         else if (argument == "--vfx-showcase")
         {

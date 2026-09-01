@@ -32,6 +32,14 @@ struct ApplicationConfig
     bool resize_test{};
     bool borderless{};
     bool character_preview{};
+    bool mute_audio{};
+    std::uint32_t monster_preview_asset{0xFFFFFFFFu};
+    std::uint32_t monster_preview_clip{};
+    float monster_preview_time{0.5f};
+    bool preview_camera_override{};
+    float preview_camera_yaw{180.0f};
+    float preview_camera_pitch{10.0f};
+    float preview_camera_distance{8.0f};
     bool vfx_showcase{};
     std::uint32_t skill_vfx_capture{0xFFFFFFFFu};
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};

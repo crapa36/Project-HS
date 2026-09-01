@@ -30,6 +30,10 @@
 #define HS_VFX_TEXTURE_DIRECTORY "ContentSource/Textures/VFX"
 #endif
 
+#ifndef HS_MONSTER_TEXTURE_DIRECTORY
+#define HS_MONSTER_TEXTURE_DIRECTORY "ContentSource/Textures/Monsters/PBR"
+#endif
+
 namespace hs::content
 {
 
@@ -71,6 +75,16 @@ struct CharacterCookResult
     std::array<float, 3> bounds_max{
         std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest()};
+};
+
+struct CharacterAssetSource
+{
+    std::filesystem::path model;
+    std::array<std::filesystem::path, 5> animations;
+    std::string output_name;
+    std::string diagnostic_name;
+    bool allow_missing_material_textures{};
+    bool seal_eye_socket{};
 };
 
 struct ParticleSpriteSource
@@ -133,6 +147,12 @@ bool WriteVfxMaskArray(const std::filesystem::path &path,
 bool CookCharacterAsset(const std::filesystem::path &output,
                         CharacterCookResult &character,
                         std::string &error_message);
+bool CookCharacterAsset(const std::filesystem::path &output,
+                        CharacterCookResult &character,
+                        std::string &error_message,
+                        const CharacterAssetSource &source);
+bool CookMonsterMaterialTextures(const std::filesystem::path &output,
+                                 std::string &error_message);
 
 int RunContent(std::string_view mode);
 

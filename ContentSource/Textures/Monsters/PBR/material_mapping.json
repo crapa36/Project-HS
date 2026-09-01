@@ -1,0 +1,130 @@
+{
+  "verified_with_engine": "5.8.1-56057345+++UE5+Release-5.8",
+  "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT",
+  "textures": {
+    "BaseColor": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/BasecolorDefault_TEX",
+      "file": "ContentSource/Textures/Monsters/PBR/BasecolorDefault_TEX.png",
+      "success": true,
+      "srgb": true,
+      "errors": []
+    },
+    "Emissive": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/Emissive_TEX",
+      "file": "ContentSource/Textures/Monsters/PBR/Emissive_TEX.png",
+      "success": true,
+      "srgb": true,
+      "errors": []
+    },
+    "RAM": {
+      "asset": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX",
+      "file": "ContentSource/Textures/Monsters/PBR/RAM_TEX.png",
+      "success": true,
+      "srgb": false,
+      "errors": []
+    }
+  },
+  "connections": {
+    "BaseColor": {
+      "output": "RGB",
+      "graph": {
+        "node_class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/BasecolorDefault_TEX.BasecolorDefault_TEX"
+      }
+    },
+    "EmissiveColor": {
+      "output": "",
+      "graph": {
+        "node_class": "MaterialExpressionMultiply",
+        "inputs": [
+          {
+            "node_class": "MaterialExpressionTextureSample",
+            "texture": "/Game/MonsterForSurvivalGame/Texture/Emissive_TEX.Emissive_TEX",
+            "output": "RGB"
+          },
+          {
+            "node_class": "MaterialExpressionConstant",
+            "value": 80.0,
+            "output": ""
+          }
+        ]
+      }
+    },
+    "Roughness": {
+      "output": "R",
+      "graph": {
+        "node_class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX.RAM_TEX"
+      }
+    },
+    "AmbientOcclusion": {
+      "output": "",
+      "graph": null
+    },
+    "Metallic": {
+      "output": "B",
+      "graph": {
+        "node_class": "MaterialExpressionTextureSample",
+        "texture": "/Game/MonsterForSurvivalGame/Texture/RAM_TEX.RAM_TEX"
+      }
+    }
+  },
+  "mesh_material_slots": {
+    "Beholder_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Cactus_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "ChestMonster_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Mushroom_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Slime_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Swarm08_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "Swarm09_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ],
+    "TurtleShell_SK": [
+      {
+        "source_slot": "lambert1",
+        "fbx_material": "DefaultPBR_MAT",
+        "material": "/Game/MonsterForSurvivalGame/Material/DefaultPBR_MAT.DefaultPBR_MAT"
+      }
+    ]
+  }
+}

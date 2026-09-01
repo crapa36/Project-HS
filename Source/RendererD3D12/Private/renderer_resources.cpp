@@ -279,6 +279,106 @@ Result D3D12Renderer::Impl::CreateGpuData()
     vertex_view = {vertices.resource->GetGPUVirtualAddress(), sizeof(kCubeVertices),
                    sizeof(Vertex)};
 
+    constexpr std::array<const char *, 6> monster_names{
+        "enemy_melee", "enemy_ranged", "enemy_suicide", "boss_5m", "boss_10m", "boss_final"};
+    std::vector<DirectX::XMFLOAT4X4> skin_matrices;
+    for (std::size_t asset_index = 0; asset_index < monster_names.size(); ++asset_index)
+    {
+        auto &asset = monster_assets[asset_index];
+        std::vector<SkinnedVertex> vertices_for_asset;
+        std::vector<CharacterClipHeader> clips;
+        std::vector<std::uint16_t> parents;
+        std::vector<std::array<float, 16>> inverse_bind_matrices;
+        std::vector<CharacterLocalTransform> transforms;
+        std::vector<float> upper_body_weights;
+        if (auto loaded = LoadCharacterAsset(
+                CurrentExecutableDirectory() / "Cooked" /
+                    (std::string(monster_names[asset_index]) + ".meshbin"),
+                vertices_for_asset, clips, parents, inverse_bind_matrices,
+                upper_body_weights, transforms,
+                asset.bone_count, asset.ground_offset, asset.material_count, false);
+            !loaded)
+        {
+            return loaded;
+        }
+        asset.vertex_count = static_cast<std::uint32_t>(vertices_for_asset.size());
+        const auto bytes_for_asset = vertices_for_asset.size() * sizeof(vertices_for_asset.front());
+        if (auto created = CreateAllocation(asset.vertices, upload_allocation,
+                                            BufferDescription(bytes_for_asset),
+                                            D3D12_RESOURCE_STATE_GENERIC_READ);
+            !created)
+        {
+            return created;
+        }
+        std::byte *asset_mapped{};
+        result = asset.vertices.resource->Map(0, &no_read,
+                                              reinterpret_cast<void **>(&asset_mapped));
+        if (FAILED(result)) return HResultFailure("Map monster vertex buffer", result);
+        std::memcpy(asset_mapped, vertices_for_asset.data(), bytes_for_asset);
+        asset.vertices.resource->Unmap(0, nullptr);
+        asset.vertex_view = {asset.vertices.resource->GetGPUVirtualAddress(),
+                             static_cast<UINT>(bytes_for_asset), sizeof(SkinnedVertex)};
+
+        asset.skin_offset = static_cast<std::uint32_t>(skin_matrices.size());
+        for (const auto &clip : clips)
+        {
+            asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {
+                static_cast<std::uint32_t>(skin_matrices.size() - asset.skin_offset),
+                clip.frame_count, clip.looping, asset.bone_count};
+            for (std::uint32_t frame = 0; frame < clip.frame_count; ++frame)
+            {
+                std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> globals{};
+                for (std::uint32_t bone = 0; bone < asset.bone_count; ++bone)
+                {
+                    const auto &local = transforms[clip.first_transform +
+                        frame * asset.bone_count + bone];
+                    const auto local_matrix = DirectX::XMMatrixScaling(
+                        local.scale[0], local.scale[1], local.scale[2]) *
+                        DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(
+                            local.rotation[0], local.rotation[1], local.rotation[2], local.rotation[3])) *
+                        DirectX::XMMatrixTranslation(local.translation[0], local.translation[1],
+                                                     local.translation[2]);
+                    const auto parent = parents[bone];
+                    const auto global = parent == std::numeric_limits<std::uint16_t>::max()
+                                            ? local_matrix
+                                            : local_matrix * DirectX::XMLoadFloat4x4(&globals[parent]);
+                    DirectX::XMStoreFloat4x4(&globals[bone], global);
+                    DirectX::XMFLOAT4X4 inverse_bind{};
+                    std::memcpy(&inverse_bind, inverse_bind_matrices[bone].data(),
+                                sizeof(inverse_bind));
+                    // Cooked FBX inverse-bind matrices use column-vector layout;
+                    // DirectX runtime transforms use row-vector layout.
+                    const auto skin = DirectX::XMMatrixTranspose(
+                                          DirectX::XMLoadFloat4x4(&inverse_bind)) *
+                                      global;
+                    const auto determinant = DirectX::XMVectorGetX(
+                        DirectX::XMMatrixDeterminant(skin));
+                    if (!std::isfinite(determinant) || determinant <= 0.0001f ||
+                        DirectX::XMMatrixIsNaN(skin) || DirectX::XMMatrixIsInfinite(skin))
+                    {
+                        return Result::Failure(
+                            ErrorCode::InvalidState, "hs_renderer_d3d12",
+                            "Monster animation produced an invalid skin pose.");
+                    }
+                    auto &stored_skin = skin_matrices.emplace_back();
+                    DirectX::XMStoreFloat4x4(&stored_skin,
+                                             DirectX::XMMatrixTranspose(skin));
+                }
+            }
+        }
+    }
+    const auto skin_bytes = skin_matrices.size() * sizeof(skin_matrices.front());
+    if (auto created = CreateAllocation(monster_skin_matrices, upload_allocation,
+                                        BufferDescription(skin_bytes),
+                                        D3D12_RESOURCE_STATE_GENERIC_READ);
+        !created)
+        return created;
+    result = monster_skin_matrices.resource->Map(0, &no_read,
+                                                 reinterpret_cast<void **>(&mapped));
+    if (FAILED(result)) return HResultFailure("Map monster skin buffer", result);
+    std::memcpy(mapped, skin_matrices.data(), skin_bytes);
+    monster_skin_matrices.resource->Unmap(0, nullptr);
+
     std::vector<SkinnedVertex> cooked_vertices;
     if (auto loaded = LoadCharacterAsset(
             CurrentExecutableDirectory() / "Cooked" / "archer.meshbin",
@@ -478,11 +578,91 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         return Result::Success();
     };
 
+    auto upload_shared = [&](AllocationResource &texture, std::wstring_view filename) -> Result {
+        std::vector<std::byte> storage;
+        std::span<const std::byte> pixels;
+        std::uint32_t source_width{}, source_height{};
+        if (auto loaded = LoadRgbaDds(cooked / filename, source_width, source_height,
+                                      pixels, storage); !loaded)
+            return loaded;
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width = source_width;
+        description.Height = source_height;
+        description.DepthOrArraySize = 1;
+        description.MipLevels = 1;
+        description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        description.SampleDesc = {1, 0};
+        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        D3D12MA::ALLOCATION_DESC default_allocation{};
+        default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (auto created = CreateAllocation(texture, default_allocation, description,
+                                             D3D12_RESOURCE_STATE_COPY_DEST);
+            !created)
+            return created;
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rows{};
+        UINT64 row_size{};
+        UINT64 upload_size{};
+        device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, &rows,
+                                      &row_size, &upload_size);
+        uploads.emplace_back();
+        D3D12MA::ALLOCATION_DESC upload_allocation{};
+        upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto created = CreateAllocation(uploads.back(), upload_allocation,
+                                             BufferDescription(upload_size),
+                                             D3D12_RESOURCE_STATE_GENERIC_READ);
+            !created)
+            return created;
+        std::byte *mapped{};
+        D3D12_RANGE no_read{};
+        result = uploads.back().resource->Map(0, &no_read,
+                                               reinterpret_cast<void **>(&mapped));
+        if (FAILED(result))
+            return HResultFailure("Map monster texture upload", result);
+        for (std::uint32_t row = 0; row < source_height; ++row)
+        {
+            auto *destination = mapped + footprint.Offset +
+                                static_cast<std::size_t>(row) * footprint.Footprint.RowPitch;
+            const auto source_row = row;
+            for (std::uint32_t column = 0; column < source_width; ++column)
+            {
+                const auto source_column = column;
+                std::memcpy(destination + static_cast<std::size_t>(column) * 4,
+                            pixels.data() + (source_row * source_width + source_column) * 4,
+                            4);
+            }
+        }
+        uploads.back().resource->Unmap(0, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = texture.resource.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = uploads.back().resource.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint = footprint;
+        command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture.resource.Get();
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        command_list->ResourceBarrier(1, &barrier);
+        return Result::Success();
+    };
+
     if (auto uploaded = upload_array(archer_diffuse, L"archer_diffuse_");
         !uploaded)
     {
         return uploaded;
     }
+    if (auto uploaded = upload_shared(monster_basecolor, L"monster_basecolor.dds"); !uploaded)
+        return uploaded;
+    if (auto uploaded = upload_shared(monster_emissive, L"monster_emissive.dds"); !uploaded)
+        return uploaded;
+    if (auto uploaded = upload_shared(monster_ram, L"monster_ram.dds"); !uploaded)
+        return uploaded;
     if (auto uploaded = upload_array(archer_normal, L"archer_normal_"); !uploaded)
     {
         return uploaded;
@@ -603,6 +783,19 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         vfx_view.Texture2DArray.MipLevels = 10;
         vfx_view.Texture2DArray.ArraySize = vfx_sprite_count;
         device->CreateShaderResourceView(vfx_masks.resource.Get(), &vfx_view, handle);
+        handle.ptr += srv_stride;
+        auto create_shared_view = [&](ID3D12Resource *texture, DXGI_FORMAT format) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = format;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2D.MipLevels = 1;
+            device->CreateShaderResourceView(texture, &view, handle);
+            handle.ptr += srv_stride;
+        };
+        create_shared_view(monster_basecolor.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        create_shared_view(monster_emissive.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        create_shared_view(monster_ram.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
     }
     return Result::Success();
 }
