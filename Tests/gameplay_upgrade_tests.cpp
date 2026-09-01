@@ -471,4 +471,3 @@ void TestHighFanoutChainsTerminate()
 }
 
 } // namespace gameplay_test
-
