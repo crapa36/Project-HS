@@ -32,6 +32,17 @@ namespace
     return std::clamp(value, 0.0f, 1.0f);
 }
 
+[[nodiscard]] bool SameWaveFormat(const WAVEFORMATEX &a, const WAVEFORMATEX &b) noexcept
+{
+    return a.wFormatTag == b.wFormatTag &&
+           a.nChannels == b.nChannels &&
+           a.nSamplesPerSec == b.nSamplesPerSec &&
+           a.nAvgBytesPerSec == b.nAvgBytesPerSec &&
+           a.nBlockAlign == b.nBlockAlign &&
+           a.wBitsPerSample == b.wBitsPerSample &&
+           a.cbSize == b.cbSize;
+}
+
 [[nodiscard]] X3DAUDIO_VECTOR Normalize(Float3 value, X3DAUDIO_VECTOR fallback) noexcept
 {
     const auto length_squared = value.x * value.x + value.y * value.y + value.z * value.z;
@@ -273,6 +284,7 @@ struct AudioEngine::Impl
         std::uint32_t aggregation_count{1};
         std::uint64_t started_ms{};
         std::uint64_t serial{};
+        bool queued{};
     };
 
     Microsoft::WRL::ComPtr<IXAudio2> engine;
@@ -347,12 +359,8 @@ struct AudioEngine::Impl
             if (!active.voice) continue;
             XAUDIO2_VOICE_STATE state{};
             active.voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            if (state.BuffersQueued == 0)
-            {
-                active.voice->DestroyVoice();
-                active = {};
-            }
-            else ++status.active_source_voices;
+            active.queued = state.BuffersQueued != 0;
+            status.active_source_voices += active.queued;
         }
     }
 
@@ -600,7 +608,8 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
         if (event.asset.value == MakeAssetId("audio.pickup.xp_collect").value)
             if (const auto active = std::find_if(impl_->active_voices.begin(), impl_->active_voices.end(),
                                                  [&](const auto &voice) {
-                                                     return voice.voice && voice.cue.value == event.asset.value;
+                                                      return voice.voice && voice.queued &&
+                                                             voice.cue.value == event.asset.value;
                                                  });
                 active != impl_->active_voices.end())
             {
@@ -612,14 +621,14 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
     }
     std::uint32_t same_cue{};
     for (const auto &active : impl_->active_voices)
-        if (active.voice && active.cue.value == event.asset.value) ++same_cue;
+        if (active.voice && active.queued && active.cue.value == event.asset.value) ++same_cue;
     if (same_cue >= cue.max_simultaneous) return;
     std::uint32_t same_priority{};
     std::array<Sequence, 6> recent_arrow_sequences{};
     std::uint32_t recent_arrow_impacts{};
     for (const auto &active : impl_->active_voices)
     {
-        if (!active.voice) continue;
+        if (!active.voice || !active.queued) continue;
         if (active.priority == cue.priority) ++same_priority;
         if (cue.arrow_impact_family && active.arrow_impact_family &&
             now - active.started_ms < 30 &&
@@ -650,7 +659,7 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
     }
     if (!impl_->engine || !impl_->device_voice) return;
     const auto slot = std::find_if(impl_->active_voices.begin(), impl_->active_voices.end(),
-                                   [](const auto &voice) { return voice.voice == nullptr; });
+                                   [](const auto &voice) { return voice.voice == nullptr || !voice.queued; });
     auto selected = slot;
     if (selected == impl_->active_voices.end())
     {
@@ -663,13 +672,23 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
         if (selected->voice && static_cast<unsigned>(selected->priority) >= static_cast<unsigned>(cue.priority)) return;
         if (selected->voice)
         {
-            selected->voice->DestroyVoice();
-            selected->voice = nullptr;
+            selected->queued = false;
             if (impl_->status.active_source_voices > 0) --impl_->status.active_source_voices;
         }
     }
-    IXAudio2SourceVoice *source{};
-    if (FAILED(impl_->engine->CreateSourceVoice(&source, &sample->format, 0, 2.0f, nullptr, nullptr, nullptr))) return;
+    IXAudio2SourceVoice *source = selected->voice;
+    if (source && (!selected->sample || !SameWaveFormat(selected->sample->format, sample->format)))
+    {
+        source->DestroyVoice();
+        source = nullptr;
+        selected->voice = nullptr;
+        selected->sample.reset();
+    }
+    const bool created = source == nullptr;
+    if (created && FAILED(impl_->engine->CreateSourceVoice(&source, &sample->format, 0, 2.0f, nullptr, nullptr, nullptr))) return;
+    (void)source->Stop();
+    (void)source->FlushSourceBuffers();
+    (void)source->SetFrequencyRatio(1.0f);
     const auto target_bus = cue.bus == AudioBus::Sfx ? impl_->sfx_bus : cue.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
     XAUDIO2_SEND_DESCRIPTOR send{0, target_bus ? target_bus : impl_->master_bus};
     XAUDIO2_VOICE_SENDS sends{1, &send};
@@ -681,7 +700,14 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
     if (cue.loop) buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
     if (FAILED(source->SubmitSourceBuffer(&buffer)) || FAILED(source->Start()))
     {
-        source->DestroyVoice();
+        (void)source->Stop();
+        (void)source->FlushSourceBuffers();
+        selected->queued = false;
+        if (created)
+        {
+            source->DestroyVoice();
+            source = nullptr;
+        }
         return;
     }
     if (cue.spatial && sample->format.nChannels == 1)
@@ -715,6 +741,7 @@ void AudioEngine::Play(const PresentationEvent &event) noexcept
     selected->aggregation_count = 1;
     selected->started_ms = now;
     selected->serial = ++impl_->voice_serial;
+    selected->queued = true;
     impl_->last_play_ms[event.asset.value] = now;
     ++impl_->status.played_count;
     ++impl_->status.active_source_voices;
@@ -730,9 +757,8 @@ void AudioEngine::Stop(AssetId cue) noexcept
     for (auto &active : impl_->active_voices)
         if (active.voice && active.cue.value == cue.value)
         {
-            active.voice->Stop();
-            active.voice->DestroyVoice();
-            active = {};
+            (void)active.voice->Stop();
+            (void)active.voice->FlushSourceBuffers();
         }
     impl_->Reclaim();
 }
@@ -742,9 +768,8 @@ void AudioEngine::StopBus(AudioBus bus) noexcept
     for (auto &active : impl_->active_voices)
         if (active.voice && active.bus == bus)
         {
-            active.voice->Stop();
-            active.voice->DestroyVoice();
-            active = {};
+            (void)active.voice->Stop();
+            (void)active.voice->FlushSourceBuffers();
         }
     impl_->Reclaim();
 }
@@ -757,7 +782,8 @@ void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noe
     impl_->listener.OrientTop = Normalize(up, {0.0f, 1.0f, 0.0f});
     for (auto &active : impl_->active_voices)
     {
-        if (!active.voice || !active.spatial || !active.sample || active.sample->format.nChannels != 1)
+        if (!active.voice || !active.queued || !active.spatial || !active.sample ||
+            active.sample->format.nChannels != 1)
             continue;
         X3DAUDIO_EMITTER emitter{};
         emitter.Position = {active.position.x, active.position.y, active.position.z};
@@ -789,7 +815,7 @@ void AudioEngine::PauseCombat() noexcept
     impl_->status.combat_paused = true;
     for (auto &active : impl_->active_voices)
     {
-        if (active.voice && IsCombatBus(active.bus))
+        if (active.voice && active.queued && IsCombatBus(active.bus))
         {
             (void)active.voice->Stop();
         }
@@ -806,7 +832,7 @@ void AudioEngine::ResumeCombat() noexcept
     impl_->status.combat_paused = false;
     for (auto &active : impl_->active_voices)
     {
-        if (active.voice && IsCombatBus(active.bus))
+        if (active.voice && active.queued && IsCombatBus(active.bus))
         {
             (void)active.voice->Start();
         }
