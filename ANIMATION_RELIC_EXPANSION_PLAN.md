@@ -173,4 +173,3 @@ correctly with the existing model.
   `cmake --workflow --preset verify` pass from a clean MSVC build.
 - Automated evidence is separate from final gameplay feel, effect readability,
   Slime visual quality, and user approval.
-
