@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"05_sixth_basic_radial","scenario":"","skills":[],"upgrade_masks":{"basic_attack":57},"relic":"sixth_basic_radial","expect_activation":true},
+    {"id":"10_crowd_pressure_push_slow","scenario":"crowd_pressure","skills":[],"upgrade_masks":{"basic_attack":57},"relic":"on_damage_push_slow","expect_activation":true}
+  ]
+}

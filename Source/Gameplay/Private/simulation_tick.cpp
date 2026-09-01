@@ -14,6 +14,7 @@ GameSimulation::SimulationWorld::SimulationWorld()
     pending_projectile_spawns.reserve(512);
     pending_area_spawns.reserve(128);
     pending_boss_spawns.reserve(3);
+    pending_enemy_spawns_delayed.reserve(256);
     pickups.reserve(1'536);
     combat.Reserve(4'096);
     scheduled_actions.reserve(512);
@@ -64,7 +65,8 @@ void GameSimulation::SimulationWorld::InitializePlayerState()
     {
         const auto relic = initial.starting_relic_ids[index];
         if (relic < RelicKind::Count)
-            player.relic_mask |= static_cast<std::uint16_t>(1u << static_cast<unsigned>(relic));
+            player.relic_mask |=
+                RelicMask{1} << static_cast<unsigned>(relic);
     }
     relic_rules.Rebuild(player.relic_mask);
 }
@@ -176,6 +178,21 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
     return true;
 }
 
+void GameSimulation::SimulationWorld::QueueEnemySpawn(EnemyKind kind, std::uint64_t random_key)
+{
+    bool used_fallback{};
+    const auto position = SpawnPosition(random_key, used_fallback);
+    if (!used_fallback)
+    {
+        SpawnEnemy(kind, position, random_key);
+        return;
+    }
+    pending_enemy_spawns_delayed.push_back({kind, position, random_key,
+                                            tick + rules.spawn_placement.fallback_warning_ticks});
+    EmitSignal(DomainSignalKind::EnemySpawnWarning, position,
+               static_cast<std::uint8_t>(kind));
+}
+
 bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
 {
     const auto edge = rules.arena_half_extent - 1.0f;
@@ -218,6 +235,17 @@ void GameSimulation::SimulationWorld::CommitBossSpawns()
                   [this](const PendingBossSpawn &pending) { return pending.due <= tick; });
 }
 
+void GameSimulation::SimulationWorld::CommitDelayedEnemySpawns()
+{
+    for (const auto &pending : pending_enemy_spawns_delayed)
+    {
+        if (pending.due <= tick)
+            SpawnEnemy(pending.kind, pending.position, pending.random_key);
+    }
+    std::erase_if(pending_enemy_spawns_delayed,
+                  [this](const PendingEnemySpawn &pending) { return pending.due <= tick; });
+}
+
 void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
                  bool guaranteed)
 {
@@ -255,6 +283,7 @@ void GameSimulation::SimulationWorld::StartSession()
     pending_projectile_spawns.clear();
     pending_area_spawns.clear();
     pending_boss_spawns.clear();
+    pending_enemy_spawns_delayed.clear();
     areas.clear();
     pickups.clear();
     combat.Clear();
@@ -565,6 +594,12 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(player.revive_invulnerable_until);
     value(player.kill_cooldown_progress);
     value(player.combat_hit_progress);
+    value(player.projectile_cadence_progress);
+    value(player.hit_streak_progress);
+    value(player.pre_damage_guard_ready);
+    value(player.area_resonance_ready);
+    value(player.pickup_reward_until);
+    value(player.low_health_survival_ready);
     value(player.charging);
     value(player.charging_skill);
     value(player.charging_slot);
@@ -654,11 +689,14 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(enemy.last_damage_origin);
         value(enemy.last_damage_cast);
         value(enemy.last_damage_upgrade);
+        value(enemy.last_damage_relic);
         value(enemy.marked_by_skill);
         value(enemy.marked_damage_coefficient);
         value(enemy.mark_expires);
         value(enemy.bleed_burn_ready);
         value(enemy.different_skill_ready);
+        value(enemy.slow_synergy_ready);
+        value(enemy.boss_pressure_ready);
         value(enemy.last_active_hit);
         value(enemy.last_active_hit_tick);
         value(enemy.attacking);
@@ -865,6 +903,17 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
             value(pending.due);
         }
     }
+    if (!pending_enemy_spawns_delayed.empty())
+    {
+        count(pending_enemy_spawns_delayed.size());
+        for (const auto &pending : pending_enemy_spawns_delayed)
+        {
+            value(pending.kind);
+            vector2(pending.position);
+            value(pending.random_key);
+            value(pending.due);
+        }
+    }
     value(card_count);
     for (std::size_t index = 0; index < card_count; ++index)
     {
@@ -933,21 +982,48 @@ const SpawnStage &GameSimulation::SimulationWorld::CurrentSpawnStage() const noe
     return *selected;
 }
 
-Float2 GameSimulation::SimulationWorld::SpawnPosition(std::uint64_t salt) const noexcept
+Float2 GameSimulation::SimulationWorld::SpawnPosition(std::uint64_t salt, bool &used_fallback) const noexcept
 {
-    const auto angle = RandomUnit(salt, 0x535041574Eull) * 2.0f * kPi;
     const auto &placement = rules.spawn_placement;
-    const auto distance = placement.minimum_player_distance_m +
-                          RandomUnit(salt, 0x44495354ull) *
-                              (placement.maximum_player_distance_m -
-                               placement.minimum_player_distance_m);
-    auto position = Add(
-        player.position,
-        {std::cos(angle) * distance, std::sin(angle) * distance});
     const auto extent = rules.arena_half_extent - 1.0f;
-    position.x = std::clamp(position.x, -extent, extent);
-    position.y = std::clamp(position.y, -extent, extent);
-    return position;
+    constexpr std::uint32_t attempts = 32;
+    for (std::uint32_t attempt = 0; attempt < attempts; ++attempt)
+    {
+        const auto key = salt + attempt;
+        const auto angle = RandomUnit(key, 0x535041574Eull) * 2.0f * kPi;
+        const auto distance = placement.minimum_player_distance_m +
+                              RandomUnit(key, 0x44495354ull) *
+                                  (placement.maximum_player_distance_m -
+                                   placement.minimum_player_distance_m);
+        const auto position = Add(player.position,
+                                  {std::cos(angle) * distance, std::sin(angle) * distance});
+        if (placement.require_inside_arena &&
+            (std::abs(position.x) > extent || std::abs(position.y) > extent))
+            continue;
+        if (placement.require_outside_max_zoom_view)
+        {
+            const auto offset = Subtract(position, player.position);
+            const auto forward = offset.x * placement.max_zoom_view_forward_x +
+                                 offset.y * placement.max_zoom_view_forward_z;
+            const auto right = offset.x * placement.max_zoom_view_forward_z -
+                               offset.y * placement.max_zoom_view_forward_x;
+            if (forward >= placement.max_zoom_view_min_forward_m &&
+                forward <= placement.max_zoom_view_max_forward_m &&
+                std::abs(right) <= placement.max_zoom_view_half_right_m)
+                continue;
+        }
+        used_fallback = false;
+        return position;
+    }
+
+    std::array<Float2, 4> corners{{{-extent, -extent}, {extent, -extent},
+                                    {-extent, extent}, {extent, extent}}};
+    const auto farthest = std::ranges::max_element(
+        corners, {}, [this](const Float2 &candidate) {
+            return LengthSquared(Subtract(candidate, player.position));
+        });
+    used_fallback = true;
+    return *farthest;
 }
 
 EnemyKind GameSimulation::SimulationWorld::ChooseEnemyKind(std::uint64_t salt) const noexcept
@@ -965,8 +1041,12 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     {
         return;
     }
+    const auto final_boss_tick = !final_boss_spawned &&
+        growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::Final)];
+    if (!final_boss_tick)
+        CommitDelayedEnemySpawns();
     CommitBossSpawns();
-    if (!final_boss_spawned)
+    if (!final_boss_spawned && !final_boss_tick)
     {
         const auto &stage = CurrentSpawnStage();
         spawn_accumulator += stage.per_second;
@@ -974,7 +1054,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         {
             spawn_accumulator -= 60.0f;
             const auto salt = next_enemy_random_key++;
-            SpawnEnemy(ChooseEnemyKind(salt), SpawnPosition(salt), salt);
+            QueueEnemySpawn(ChooseEnemyKind(salt), salt);
         }
     }
     for (const auto &wave : rules.waves)
@@ -991,11 +1071,11 @@ void GameSimulation::SimulationWorld::SpawnPhase()
             std::min<std::uint64_t>(wave.total,
                 (static_cast<std::uint64_t>(elapsed + 1) * wave.total +
                  wave.duration - 1) / wave.duration));
-        while (wave.emitted < desired &&
+        while (!final_boss_tick && wave.emitted < desired &&
                (!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss))
         {
             const auto salt = next_enemy_random_key++;
-            SpawnEnemy(ChooseEnemyKind(salt), SpawnPosition(salt), salt);
+            QueueEnemySpawn(ChooseEnemyKind(salt), salt);
             ++wave.emitted;
         }
     }
@@ -1013,6 +1093,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         final_boss_spawned = true;
         spawn_accumulator = 0;
         waves.clear();
+        pending_enemy_spawns_delayed.clear();
         SpawnBoss(BossKind::Final, rules.boss_common.spawn_warning_ticks);
     }
 }
@@ -1031,6 +1112,12 @@ float GameSimulation::SimulationWorld::SlowMultiplier(EnemyActor &enemy)
 
 void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
 {
+    if (boss.boss_action_until != 0 && tick > boss.boss_action_until)
+    {
+        boss.boss_action_started = 0;
+        boss.boss_action_until = 0;
+        boss.boss_action_recoil = false;
+    }
     if (tick < boss.invulnerable_until)
     {
         boss.velocity = {};
@@ -1110,6 +1197,14 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     const auto cast_id = next_cast_id++;
     ++balance.enemy_attack_attempts[EnemyTelemetryIndex(boss)];
     const auto add = [&](BossAction action) {
+        const auto previous = std::ranges::find_if(
+            boss_actions.rbegin(), boss_actions.rend(), [&](const BossAction &candidate) {
+                return candidate.cast_id == action.cast_id;
+            });
+        action.animation_started = previous == boss_actions.rend() ? tick
+                                   : previous->due == action.due
+                                       ? previous->animation_started
+                                       : previous->due;
         boss_actions.push_back(action);
         const auto context = static_cast<std::uint8_t>(kind);
         const auto position = action.kind == BossActionKind::Dash ||

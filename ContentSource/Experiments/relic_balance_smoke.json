@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 60,
+  "seeds": [1001, 2002, 3003],
+  "pair_limit": 20
+}

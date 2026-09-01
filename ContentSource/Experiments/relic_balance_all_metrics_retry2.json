@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"10_crowd_pressure_mobile","scenario":"crowd_pressure","skills":[],"upgrade_masks":{"basic_attack":57},"relic":"on_damage_push_slow","expect_activation":true}
+  ]
+}

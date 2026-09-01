@@ -398,7 +398,7 @@ void ValidateDocuments(const ContentSources &sources)
     RequireCount(boss_entries, "bosses", "$/entries", 3);
     RequireCount(level_entries, "level", "$/entries", 1);
     RequireCount(stat_entries, "stats", "$/entries", 1);
-    RequireCount(relic_entries, "relics", "$/entries", 12);
+    RequireCount(relic_entries, "relics", "$/entries", 20);
     RequireCount(upgrade_groups, "upgrades", "$/groups", 9);
     RequireCount(material_entries, "materials", "$/entries", 11);
     RequireCount(ui_entries, "ui_strings", "$/entries", 28);
@@ -413,7 +413,7 @@ void ValidateDocuments(const ContentSources &sources)
     constexpr std::array required_particle_ids{
         "particle.basic_attack", "particle.boss.area.activate", "particle.boss.dash.impact",
         "particle.boss.dash.start", "particle.boss.phase_change", "particle.boss.shockwave.release",
-        "particle.boss.spawn", "particle.boss.volley.release",
+        "particle.boss.spawn", "particle.boss.death", "particle.enemy.spawn_warning", "particle.boss.volley.release",
         "particle.common.enemy_death", "particle.common.explosion_large", "particle.common.explosion_small",
         "particle.common.heal", "particle.common.heavy_hit", "particle.common.hit", "particle.common.mark_apply",
         "particle.common.mark_trigger", "particle.common.player_death", "particle.common.player_hit",
@@ -422,7 +422,9 @@ void ValidateDocuments(const ContentSources &sources)
         "particle.enemy.suicide.charge", "particle.enemy.suicide.explosion",
         "particle.line.burn_transfer", "particle.line.relic_chain", "particle.line.ricochet",
         "particle.pickup.heal_collect", "particle.pickup.magnet_collect", "particle.pickup.relic_collect",
-        "particle.pickup.xp_spawn", "particle.relic.bleed_burn_explosion",
+        "particle.pickup.xp_spawn", "particle.pickup.xp_collect", "particle.relic.cooldown_surge",
+        "particle.relic.cooldown_refund", "particle.relic.tracking_arrow", "particle.relic.afterimage_arrow",
+        "particle.relic.revive", "particle.relic.bleed_burn_explosion",
         "particle.relic.combat_chain", "particle.relic.damage_push",
         "particle.relic.radial_arrows", "particle.skill.arrow_rain", "particle.skill.arrow_rain.area_pulse",
         "particle.skill.arrow_rain.impact", "particle.skill.charged_shot", "particle.skill.charged_shot.pulse",
@@ -590,7 +592,49 @@ void ValidateDocuments(const ContentSources &sources)
         if (RequireInteger(relic_entries[index], "relics", path, "ordinal") !=
             static_cast<std::int64_t>(index + 1))
         {
-            ThrowValidationError("relics", path + "/ordinal", "ordinal must be 1 through 12");
+            ThrowValidationError("relics", path + "/ordinal", "ordinal must be 1 through 20");
+        }
+    }
+
+    constexpr std::array<std::string_view, 20> expected_relic_ids{
+        "relic.bleed_kill_heal", "relic.burn_spread_on_kill", "relic.kill_cooldown_surge",
+        "relic.bleed_burn_explosion", "relic.sixth_basic_radial", "relic.basic_kill_tracking_arrow",
+        "relic.movement_afterimage_arrow", "relic.alternating_active_refund", "relic.cross_active_tracking_arrow",
+        "relic.on_damage_push_slow", "relic.once_revive", "relic.combat_hit_chain",
+        "relic.projectile_cadence_reward", "relic.pre_damage_guard", "relic.slow_synergy",
+        "relic.area_resonance", "relic.boss_pressure", "relic.hit_streak_reward", "relic.pickup_reward",
+        "relic.low_health_survival"};
+    constexpr std::array<std::string_view, 20> expected_relic_logics{
+        "bleeding_enemy_kill_heal", "burning_enemy_kill_spread", "every_tenth_kill_reduce_active_cooldowns",
+        "burn_applied_to_bleeding_explosion", "sixth_basic_attack_radial_arrows", "basic_kill_tracking_arrow",
+        "movement_distance_afterimage_arrow", "different_active_within_window_refund", "different_active_same_target_tracking_arrow",
+        "player_damaged_push_and_slow", "fatal_damage_once_revive", "every_twelfth_direct_hit_chain",
+        "projectile_cadence_reward", "pre_damage_guard", "slow_synergy", "area_resonance", "boss_pressure",
+        "hit_streak_reward", "pickup_reward", "low_health_survival"};
+    for (std::size_t index = 0; index < relic_entries.size(); ++index)
+    {
+        const auto path = "$/entries/" + std::to_string(index);
+        if (RequireString(relic_entries[index], "relics", path, "id") != expected_relic_ids[index])
+            ThrowValidationError("relics", path + "/id", "relic IDs/order are part of the cooked ABI");
+        if (RequireString(relic_entries[index], "relics", path, "logic_id") != expected_relic_logics[index])
+            ThrowValidationError("relics", path + "/logic_id", "relic logic/order is part of the cooked ABI");
+        if (index >= 12)
+        {
+            constexpr std::array<std::array<std::string_view, 3>, 8> expected_parameters{{
+                {{"hits_per_trigger", "cooldown_reduction", ""}},
+                {{"damage_reduction_fraction", "cooldown", ""}},
+                {{"damage_multiplier", "per_target_cooldown", ""}},
+                {{"damage_multiplier", "cooldown", ""}},
+                {{"damage_multiplier", "per_target_cooldown", ""}},
+                {{"direct_hits_per_trigger", "damage_multiplier", ""}},
+                {{"attack_power_fraction", "duration", ""}},
+                {{"health_threshold_fraction", "damage_reduction_fraction", "cooldown"}}}};
+            const auto &keys = expected_parameters[index - 12];
+            if (keys[2].empty())
+                RequireExactParameterKeys(relic_entries[index], "relics", path,
+                                          std::array{keys[0], keys[1]});
+            else
+                RequireExactParameterKeys(relic_entries[index], "relics", path, keys);
         }
     }
 

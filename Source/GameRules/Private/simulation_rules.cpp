@@ -4,12 +4,14 @@
 
 #include <bit>
 #include <cstring>
+#include <format>
 #include <span>
 #include <type_traits>
 #include <vector>
 
 namespace hs
 {
+// Spawn placement includes cooker-derived max-zoom view bounds.
 namespace
 {
 
@@ -41,7 +43,7 @@ constexpr std::array<std::array<SkillTagMask, kUpgradeCount>, kCombatSkillCount>
 
 constexpr std::array<SkillTagMask, kRelicCount> kRelicPrerequisites{
     TagMask(Bleed), TagMask(Burn), 0, TagMask(Bleed, Burn),
-    0, 0, 0, 0, 0, 0, 0, 0};
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, TagMask(Slow), TagMask(Slow), 0, 0, 0, 0};
 
 class CanonicalHash
 {
@@ -450,6 +452,23 @@ void HashRelics(CanonicalHash &hash, const RelicDefinitions &r) noexcept
     hash.Add(r.combat_hit_chain.search_radius);
     hash.Add(r.combat_hit_chain.maximum_targets);
     hash.Add(r.combat_hit_chain.damage_multiplier);
+    hash.Add(r.projectile_cadence_reward.hits_per_trigger);
+    hash.Add(r.projectile_cadence_reward.cooldown_reduction_ticks);
+    hash.Add(r.pre_damage_guard.damage_reduction_fraction);
+    hash.Add(r.pre_damage_guard.cooldown_ticks);
+    hash.Add(r.slow_synergy.damage_multiplier);
+    hash.Add(r.slow_synergy.per_target_cooldown_ticks);
+    hash.Add(r.area_resonance.damage_multiplier);
+    hash.Add(r.area_resonance.cooldown_ticks);
+    hash.Add(r.boss_pressure.damage_multiplier);
+    hash.Add(r.boss_pressure.per_target_cooldown_ticks);
+    hash.Add(r.hit_streak_reward.direct_hits_per_trigger);
+    hash.Add(r.hit_streak_reward.damage_multiplier);
+    hash.Add(r.pickup_reward.attack_power_fraction);
+    hash.Add(r.pickup_reward.duration_ticks);
+    hash.Add(r.low_health_survival.health_threshold_fraction);
+    hash.Add(r.low_health_survival.damage_reduction_fraction);
+    hash.Add(r.low_health_survival.cooldown_ticks);
 }
 
 } // namespace
@@ -478,7 +497,7 @@ SkillTagMask RelicPrerequisiteTags(RelicKind relic) noexcept
 SimulationRules SimulationRules::Defaults() noexcept
 {
     SimulationRules data{};
-    data.version = 5;
+    data.version = 6;
     data.arena_half_extent = 60.0f;
     data.player_health = 100;
     data.player_attack = 10.0f;
@@ -547,7 +566,9 @@ SimulationRules SimulationRules::Defaults() noexcept
     data.relic_drop = {1, 0.25f, 0.00001f, 0.000004f, 1.0f, 3, 0.01f, 0.08f,
                        false, true, true, true, true, true};
     data.spawn_placement = {20.0f, 30.0f, true, true, 30,
-                            SpawnFallbackLocation::FarthestArenaEdge};
+                            SpawnFallbackLocation::FarthestArenaEdge,
+                            -10.0f, 32.0f, 24.0f, 0.70710678118f,
+                            0.70710678118f};
     data.boss_common = {1.1f, 90, 90, 3, 1, 2, false, false, true, true,
                         true, true, true, true, true, 24.0f, 0.25f};
 
@@ -738,18 +759,26 @@ SimulationRules SimulationRules::Defaults() noexcept
                   WaveDefinition{14, 50'400, 100, 1'200}};
 
     auto &r = data.relics;
-    r.bleed_kill_heal = {0.005f, 60};
-    r.burn_propagation = {5.0f, 0.4f, 2};
-    r.kill_cooldown_surge = {10, 60};
+    r.bleed_kill_heal = {0.05f, 60};
+    r.burn_propagation = {5.0f, 0.5f, 2};
+    r.kill_cooldown_surge = {10, 120};
     r.bleed_burn_explosion = {5.0f, 2.0f, 120};
-    r.radial_basic_attack = {6, 8, 0.45f};
-    r.basic_kill_tracker = {8.0f, 1.0f, 1};
+    r.radial_basic_attack = {6, 8, 0.15f};
+    r.basic_kill_tracker = {8.0f, 0.20f, 1};
     r.movement_echo = {6.0f, 60, 0.8f};
-    r.alternating_skills = {240, 0.15f};
+    r.alternating_skills = {240, 0.20f};
     r.different_skill_tracker = {120, 5.0f, 120};
-    r.damage_knockback = {4.0f, 3.0f, 0.5f, 120, 6};
+    r.damage_knockback = {4.0f, 0.25f, 0.5f, 120, 60};
     r.once_revive = {0.5f, 60, 1};
     r.combat_hit_chain = {12, 30.0f, 4, 2.5f};
+    r.projectile_cadence_reward = {8, 45};
+    r.pre_damage_guard = {0.20f, 360};
+    r.slow_synergy = {0.25f, 30};
+    r.area_resonance = {0.60f, 60};
+    r.boss_pressure = {0.25f, 60};
+    r.hit_streak_reward = {10, 1.50f};
+    r.pickup_reward = {0.10f, 90};
+    r.low_health_survival = {0.35f, 0.40f, 480};
 
     auto &u = data.upgrades;
     u.basic_attack.third_attack_delayed = {3, 5, 0.7f};
@@ -829,7 +858,7 @@ SimulationRules SimulationRules::Defaults() noexcept
 
 std::uint64_t SimulationRulesSchemaHash() noexcept
 {
-    return Fnv1a64("project_hs_simulation_rules_v3");
+    return Fnv1a64("project_hs_simulation_rules_v4");
 }
 
 std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept
@@ -946,6 +975,11 @@ std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept
     hash.Add(placement.require_outside_max_zoom_view);
     hash.Add(placement.fallback_warning_ticks);
     hash.Add(placement.fallback_location);
+    hash.Add(placement.max_zoom_view_min_forward_m);
+    hash.Add(placement.max_zoom_view_max_forward_m);
+    hash.Add(placement.max_zoom_view_half_right_m);
+    hash.Add(placement.max_zoom_view_forward_x);
+    hash.Add(placement.max_zoom_view_forward_z);
 
     const auto &common = rules.boss_common;
     hash.Add(common.collision_radius);
@@ -1039,10 +1073,11 @@ Result LoadSimulationRules(const std::filesystem::path &path,
     if (payload.size() != sizeof(SimulationRules))
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
-                               "Cooked game data has an unexpected table size.");
+                               std::format("Cooked game data table size is {}, expected {}.",
+                                           payload.size(), sizeof(SimulationRules)));
     }
     std::memcpy(&rules, payload.data(), sizeof(rules));
-    if (rules.version != 5)
+    if (rules.version != 6)
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Cooked game data version is unsupported.");

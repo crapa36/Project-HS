@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"14_guard_40_damage","scenario":"varied_incoming","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"pre_damage_guard","expect_activation":true},
+    {"id":"19_pickup_30_hp","scenario":"pickup_normal","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"pickup_reward","expect_activation":true},
+    {"id":"20_low_health_40_damage","scenario":"incoming_low_health","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"low_health_survival","expect_activation":true}
+  ]
+}

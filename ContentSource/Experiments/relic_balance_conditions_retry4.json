@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"boss-only-retry2","scenario":"boss_only","skills":["explosive_arrow"],"upgrades":{},"relic":"boss_pressure"}
+  ]
+}

@@ -13,13 +13,17 @@ namespace hs
 inline constexpr std::size_t kActiveSkillCount = 8;
 inline constexpr std::size_t kCombatSkillCount = 9;
 inline constexpr std::size_t kUpgradeCount = 8;
-inline constexpr std::size_t kRelicCount = 12;
+inline constexpr std::size_t kRelicCount = 20;
 inline constexpr std::size_t kStatCount = 6;
 inline constexpr std::size_t kEnemyArchetypeCount = 6;
 inline constexpr std::size_t kPickupKindCount = 4;
-inline constexpr std::uint32_t kSimulationVersion = 2;
-inline constexpr std::uint32_t kGameplayHashVersion = 3;
+inline constexpr std::uint32_t kSimulationVersion = 4;
+inline constexpr std::uint32_t kGameplayHashVersion = 6;
 inline constexpr std::uint32_t kDeterminismProfile = 1;
+using RelicMask = std::uint32_t;
+static_assert(kRelicCount < 32);
+inline constexpr RelicMask kAllRelicsMask =
+    (RelicMask{1} << kRelicCount) - RelicMask{1};
 enum class UpgradeEffectMetric : std::uint8_t
 {
     ProjectilesCreated,
@@ -43,6 +47,11 @@ enum class UpgradeEffectMetric : std::uint8_t
     Kills,
     DamageAmplified,
     Activations,
+    DamagePrevented,
+    DamageOverTime,
+    DamageOverTimeEvents,
+    DamageOverTimeKills,
+    EffectActiveTicks,
     Count,
 };
 inline constexpr std::size_t kUpgradeEffectMetricCount =
@@ -68,7 +77,8 @@ inline constexpr std::array<std::string_view, kUpgradeEffectMetricCount>
         "slow_active_ticks", "cooldown_ticks_saved", "healing",
         "displacement_millimetres", "extra_targets_hit", "extra_bounces",
         "charge_ticks_saved", "duration_ticks_added", "marks_applied", "kills",
-        "damage_amplified", "activations"};
+        "damage_amplified", "activations", "damage_prevented", "damage_over_time",
+        "damage_over_time_events", "damage_over_time_kills", "effect_active_ticks"};
 inline constexpr std::array<std::string_view, kUpgradeRelicSynergyMetricCount>
     kUpgradeRelicSynergyMetricIds{"damage", "damage_events", "activations", "healing",
                                    "burn_applications", "slow_applications",
@@ -126,6 +136,14 @@ enum class RelicKind : std::uint8_t
     DamageKnockback,
     OnceRevive,
     CombatHitChain,
+    ProjectileCadenceReward,
+    PreDamageGuard,
+    SlowSynergy,
+    AreaResonance,
+    BossPressure,
+    HitStreakReward,
+    PickupReward,
+    LowHealthSurvival,
     Count,
 };
 
@@ -202,6 +220,7 @@ struct BalanceTelemetry
     std::uint16_t upgrade_relic_synergy_count{};
     std::array<std::uint64_t, kRelicCount> relic_damage{};
     std::array<std::uint64_t, kRelicCount> relic_triggers{};
+    std::array<std::uint64_t, kRelicCount> relic_kills{};
     std::array<std::array<std::uint64_t, kUpgradeEffectMetricCount>, kRelicCount>
         relic_effects{};
     std::array<std::uint64_t, kEnemyArchetypeCount> enemy_spawned{};
@@ -258,7 +277,7 @@ struct SessionProbe
     std::array<std::uint8_t, kCombatSkillCount> upgrade_masks{};
     std::array<std::uint32_t, kActiveSkillCount> cooldown_ticks{};
     std::array<std::uint8_t, kStatCount> stat_points{};
-    std::uint16_t relic_mask{};
+    RelicMask relic_mask{};
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};
     bool final_boss_spawned{};

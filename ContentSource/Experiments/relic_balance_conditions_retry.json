@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"incoming-low-health-retry","scenario":"incoming_low_health","skills":[],"upgrades":{},"relic":"low_health_survival"},
+    {"id":"movement-retry","scenario":"movement","skills":[],"upgrades":{},"relic":"movement_afterimage_arrow"},
+    {"id":"pickup-normal-retry","scenario":"pickup_normal","skills":[],"upgrades":{},"relic":"pickup_reward"}
+  ]
+}

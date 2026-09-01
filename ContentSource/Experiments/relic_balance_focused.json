@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 300,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"explosive_arrow113_combat_hit_chain","skills":["explosive_arrow"],"upgrade_masks":{"explosive_arrow":113},"relic":"combat_hit_chain"},
+    {"id":"trap90_basic_kill_tracking_arrow","skills":["trap"],"upgrade_masks":{"trap":90},"relic":"basic_kill_tracking_arrow"},
+    {"id":"explosive_arrow120_kill_cooldown_surge","skills":["explosive_arrow"],"upgrade_masks":{"explosive_arrow":120},"relic":"kill_cooldown_surge"},
+    {"id":"explosive_arrow27_projectile_cadence_reward","skills":["explosive_arrow"],"upgrade_masks":{"explosive_arrow":27},"relic":"projectile_cadence_reward"},
+    {"id":"basic_attack57_slow_synergy","skills":[],"upgrade_masks":{"basic_attack":57},"relic":"slow_synergy"},
+    {"id":"basic_attack60_bleed_burn_explosion","skills":[],"upgrade_masks":{"basic_attack":60},"relic":"bleed_burn_explosion"},
+    {"id":"arrow_rain166_area_resonance","skills":["arrow_rain"],"upgrade_masks":{"arrow_rain":166},"relic":"area_resonance"},
+    {"id":"alternating_active_refund","skills":["explosive_arrow","trap"],"upgrade_masks":{"explosive_arrow":113,"trap":90},"relic":"alternating_active_refund"},
+    {"id":"cross_active_tracking_arrow","skills":["explosive_arrow","trap"],"upgrade_masks":{"explosive_arrow":113,"trap":90},"relic":"cross_active_tracking_arrow"}
+  ]
+}

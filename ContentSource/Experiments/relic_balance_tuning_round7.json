@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"06_basic_kill_neighbors","scenario":"basic_kill_neighbors","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"basic_kill_tracking_arrow","expect_activation":true}
+  ]
+}

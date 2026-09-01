@@ -196,7 +196,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                    "Debug relic is invalid.");
         }
-        impl_->player.relic_mask |= 1u << command.value;
+        impl_->player.relic_mask |= RelicMask{1} << command.value;
         impl_->relic_rules.Rebuild(impl_->player.relic_mask);
         break;
     case DebugCommandKind::SpawnEnemy:
@@ -432,6 +432,11 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                         enemy.locked_aim,
                         enemy.warning_extent,
                         enemy.spawned_tick,
+                        enemy.attacking ? enemy.attack_resolve - enemy.warning_ticks : Tick{},
+                        enemy.attack_resolve,
+                        enemy.boss_action_started,
+                        enemy.boss_action_until,
+                        enemy.boss_action_recoil,
                         enemy.health,
                         enemy.max_health,
                         statuses,
@@ -478,7 +483,8 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     for (const auto &action : impl_->boss_actions)
     {
         model.AddBossAction({static_cast<BossActionViewKind>(action.kind),
-                             action.boss_id, action.position,
+                             action.boss_id, action.animation_started, action.due,
+                             action.position,
                              action.direction, action.distance, action.arc_degrees,
                              action.angle_offset, action.radius, action.cast_id});
     }

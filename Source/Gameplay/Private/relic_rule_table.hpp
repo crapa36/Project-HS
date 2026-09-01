@@ -24,6 +24,7 @@ enum class RelicRuleHook : std::uint8_t
     OnEnemyKilled,
     OnAbilityUsed,
     OnDistanceMoved,
+    OnPickup,
     Count,
 };
 
@@ -41,6 +42,14 @@ enum class RelicRuleHandlerId : std::uint8_t
     DamageKnockback,
     OnceRevive,
     CombatHitChain,
+    ProjectileCadenceReward,
+    PreDamageGuard,
+    SlowSynergy,
+    AreaResonance,
+    BossPressure,
+    HitStreakReward,
+    PickupReward,
+    LowHealthSurvival,
 };
 
 struct ActiveRelicRule
@@ -54,12 +63,14 @@ struct RelicRuleTable
 {
     std::array<std::vector<ActiveRelicRule>, static_cast<std::size_t>(RelicRuleHook::Count)> hooks;
 
-    void Rebuild(std::uint16_t relic_mask)
+    void Rebuild(RelicMask relic_mask)
     {
         for (auto &rules : hooks) rules.clear();
         const auto add = [&](RelicRuleHook hook, RelicKind relic, RelicRuleHandlerId handler,
                              std::int16_t priority = 0) {
-            if ((relic_mask & (1u << static_cast<unsigned>(relic))) == 0) return;
+            if ((relic_mask &
+                 (RelicMask{1} << static_cast<unsigned>(relic))) == 0)
+                return;
             hooks[static_cast<std::size_t>(hook)].push_back({relic, priority, handler});
         };
         add(RelicRuleHook::OnEnemyKilled, RelicKind::BleedKillHeal,
@@ -86,6 +97,22 @@ struct RelicRuleTable
             RelicRuleHandlerId::OnceRevive);
         add(RelicRuleHook::AfterDamage, RelicKind::CombatHitChain,
             RelicRuleHandlerId::CombatHitChain);
+        add(RelicRuleHook::OnProjectileHit, RelicKind::ProjectileCadenceReward,
+            RelicRuleHandlerId::ProjectileCadenceReward);
+        add(RelicRuleHook::BeforeDamage, RelicKind::PreDamageGuard,
+            RelicRuleHandlerId::PreDamageGuard);
+        add(RelicRuleHook::AfterDamage, RelicKind::SlowSynergy,
+            RelicRuleHandlerId::SlowSynergy);
+        add(RelicRuleHook::AfterDamage, RelicKind::AreaResonance,
+            RelicRuleHandlerId::AreaResonance);
+        add(RelicRuleHook::AfterDamage, RelicKind::BossPressure,
+            RelicRuleHandlerId::BossPressure);
+        add(RelicRuleHook::AfterDamage, RelicKind::HitStreakReward,
+            RelicRuleHandlerId::HitStreakReward);
+        add(RelicRuleHook::OnPickup, RelicKind::PickupReward,
+            RelicRuleHandlerId::PickupReward);
+        add(RelicRuleHook::BeforeDamage, RelicKind::LowHealthSurvival,
+            RelicRuleHandlerId::LowHealthSurvival);
         for (auto &rules : hooks)
             std::ranges::sort(rules, [](const ActiveRelicRule &left,
                                         const ActiveRelicRule &right) {

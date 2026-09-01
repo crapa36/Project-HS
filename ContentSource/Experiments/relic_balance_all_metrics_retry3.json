@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 6,
+  "seeds": [2101],
+  "cases": [
+    {"id":"11_revive_invulnerability","scenario":"fatal_hit","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"once_revive","expect_activation":true}
+  ]
+}

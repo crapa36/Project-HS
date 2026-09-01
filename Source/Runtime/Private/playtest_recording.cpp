@@ -26,10 +26,12 @@ constexpr std::array<std::string_view, kCombatSkillCount> kPlaytestSkillIds{
     "basic_attack", "piercing_shot", "multi_shot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
 constexpr std::array<std::string_view, kRelicCount> kPlaytestRelicIds{
-    "bleed_kill_heal", "burn_propagation", "kill_cooldown_surge", "bleed_burn_explosion",
-    "radial_basic_attack", "basic_kill_tracker", "movement_echo",
-    "alternating_skills", "different_skill_tracker", "damage_knockback",
-    "once_revive", "combat_hit_chain"};
+    "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge", "bleed_burn_explosion",
+    "sixth_basic_radial", "basic_kill_tracking_arrow", "movement_afterimage_arrow",
+    "alternating_active_refund", "cross_active_tracking_arrow", "on_damage_push_slow",
+    "once_revive", "combat_hit_chain", "projectile_cadence_reward",
+    "pre_damage_guard", "slow_synergy", "area_resonance", "boss_pressure",
+    "hit_streak_reward", "pickup_reward", "low_health_survival"};
 constexpr std::array<std::string_view, kStatCount> kPlaytestStatIds{
     "max_health", "move_speed", "attack_power", "attack_speed",
     "cooldown_reduction", "magnet_radius"};
@@ -44,13 +46,15 @@ constexpr std::array<std::string_view, kUpgradeEffectMetricCount> kUpgradeEffect
     "count", "count", "count", "stacks", "count", "count", "target_ticks",
     "stack_ticks", "target_ticks", "stack_ticks", "ticks", "health",
     "millimetres", "count", "count", "ticks",
-    "ticks", "count", "count", "damage", "count"};
+    "ticks", "count", "count", "damage", "count", "damage", "damage",
+    "count", "count", "ticks"};
 constexpr std::array<std::string_view, kUpgradeEffectMetricCount> kUpgradeEffectLabels{
     "추가 투사체", "추가 영역", "추가 폭발", "출혈 중첩 부여", "화상 부여",
     "둔화 부여", "둔화 누적 대상 틱", "출혈 실제 중첩 틱",
     "화상 실제 대상 틱", "둔화 실제 중첩 틱", "쿨타임 단축 틱", "회복량",
     "강제 이동 거리(mm)", "추가 적중 대상", "추가 도탄", "충전 단축 틱",
-    "지속시간 증가 틱", "표식 부여", "처치", "추가 피해", "발동"};
+    "지속시간 증가 틱", "표식 부여", "처치", "추가 피해", "발동", "피해 방지",
+    "지속 피해", "지속 피해 이벤트", "지속 피해 처치", "효과 활성 틱"};
 double Ratio(std::uint64_t numerator, std::uint64_t denominator)
 {
     return denominator == 0 ? 0.0 : static_cast<double>(numerator) /
@@ -222,7 +226,7 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
                     probe.balance.skill_uses[skill];
             }
     for (std::size_t relic = 0; relic < kRelicCount; ++relic)
-        if ((probe.relic_mask & (1u << relic)) != 0 &&
+        if ((probe.relic_mask & (RelicMask{1} << relic)) != 0 &&
             impl_->relic_acquired_ticks[relic] == std::numeric_limits<Tick>::max())
             impl_->relic_acquired_ticks[relic] = probe.tick;
     impl_->inputs << InputJson(input, checksum).dump() << '\n';
@@ -369,9 +373,10 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                 {{"value", probe.balance.relic_effects[index][effect]},
                  {"unit", kUpgradeEffectUnits[effect]}};
         Json metric{{"id", kPlaytestRelicIds[index]},
-                    {"acquired", (probe.relic_mask & (1u << index)) != 0},
-                    {"damage", probe.balance.relic_damage[index]},
-                    {"triggers", probe.balance.relic_triggers[index]},
+                    {"acquired", (probe.relic_mask & (RelicMask{1} << index)) != 0},
+                     {"damage", probe.balance.relic_damage[index]},
+                     {"kills", probe.balance.relic_kills[index]},
+                     {"triggers", probe.balance.relic_triggers[index]},
                     {"damage_events", probe.balance.relic_triggers[index]},
                     {"effects", std::move(effects)}};
         if (impl_->relic_acquired_ticks[index] != std::numeric_limits<Tick>::max())

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"movement-retry2","scenario":"movement","skills":[],"upgrades":{},"relic":"movement_afterimage_arrow"},
+    {"id":"pickup-normal-retry2","scenario":"pickup_normal","skills":[],"upgrades":{},"relic":"pickup_reward"}
+  ]
+}

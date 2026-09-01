@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"01_wounded_bleed_kill_heal","scenario":"wounded_bleed_kill","skills":[],"upgrade_masks":{"basic_attack":60},"relic":"bleed_kill_heal","expect_activation":true},
+    {"id":"05_sixth_basic_radial","scenario":"","skills":[],"upgrade_masks":{"basic_attack":57},"relic":"sixth_basic_radial","expect_activation":true},
+    {"id":"16_durable_slow_area","scenario":"durable_slow_area","skills":["arrow_rain"],"upgrade_masks":{"arrow_rain":166},"relic":"area_resonance","expect_activation":true},
+    {"id":"20_low_health_incoming","scenario":"incoming_low_health","skills":[],"upgrade_masks":{"basic_attack":1},"relic":"low_health_survival","expect_activation":true}
+  ]
+}

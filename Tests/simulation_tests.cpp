@@ -36,7 +36,7 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    constexpr hs::GameplayChecksum kGameplayOracle = 5918223288484240663ull;
+    constexpr hs::GameplayChecksum kGameplayOracle = 16316430143236922700ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");
     Check(first == kGameplayOracle,
@@ -94,8 +94,11 @@ void TestRulesHashAndAbilityMapping()
 void TestSameTickFinalBossVictory()
 {
     auto rules = hs::SimulationRules::Defaults();
-    for (auto &stage : rules.spawn_stages) stage.per_second = 0.0f;
+    for (auto &stage : rules.spawn_stages) stage.per_second = 60.0f;
     for (auto &wave : rules.waves) wave.count = 0;
+    rules.waves.front().start_tick = rules.progression.boss_spawn_ticks[2];
+    rules.waves.front().duration_ticks = 1;
+    rules.waves.front().count = 1;
     hs::GameSimulation simulation;
     Check(simulation.Initialize({91}, rules).Succeeded(),
           "victory priority initialize");
@@ -107,8 +110,12 @@ void TestSameTickFinalBossVictory()
     input.target_tick = 1;
     (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
     Check(simulation.GetSessionProbe().final_boss_spawned &&
-              simulation.GetObservation().boss_count == 0,
-          "final boss warning starts before spawn");
+              simulation.GetObservation().boss_count == 0 &&
+              simulation.GetObservation().normal_enemy_count == 0,
+          "final boss warning starts without a same-tick normal spawn");
+    for (const auto &signal : simulation.PendingDomainSignals())
+        Check(signal.kind != hs::DomainSignalKind::EnemySpawnWarning,
+              "final boss tick emits no canceled normal-spawn warning");
     for (hs::Tick tick = 2; tick <= 91; ++tick)
     {
         input.target_tick = tick;

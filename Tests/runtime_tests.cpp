@@ -220,6 +220,9 @@ void TestVfxCatalog()
           "particle.common.player_death",
           "particle.enemy.melee.windup",
           "particle.enemy.melee.hit",
+          "particle.enemy.ranged.release",
+          "particle.enemy.suicide.charge",
+          "particle.enemy.suicide.explosion",
           "particle.boss.dash.start",
           "particle.boss.dash.impact",
           "particle.boss.volley.release",
@@ -308,7 +311,8 @@ void TestVfxCatalog()
           "pull chevrons stay normalized at the physical boundary");
     const auto small_explosion = expanded("particle.common.explosion_small");
     Check(std::ranges::any_of(small_explosion, [](const auto &command) {
-              return command.primitive == hs::VfxPrimitive::ShockShell;
+              return command.renderer == hs::VfxRenderer::Sprite &&
+                     command.primitive == hs::VfxPrimitive::Flame;
           }) &&
               std::ranges::any_of(small_explosion, [](const auto &command) {
                   return command.primitive == hs::VfxPrimitive::Shard;
@@ -327,7 +331,8 @@ void TestVfxCatalog()
           "heavy hit keeps a central fracture and radial shards");
     const auto large_explosion = expanded("particle.common.explosion_large");
     Check(std::ranges::any_of(large_explosion, [](const auto &command) {
-              return command.primitive == hs::VfxPrimitive::ShockShell;
+              return command.renderer == hs::VfxRenderer::Sprite &&
+                     command.primitive == hs::VfxPrimitive::Flame;
           }) &&
               std::ranges::any_of(large_explosion, [](const auto &command) {
                   return command.primitive == hs::VfxPrimitive::Shard;
@@ -345,7 +350,7 @@ void TestVfxCatalog()
     check_visual("particle.skill.retreat_shot.move", hs::VfxRenderer::Segment,
                  hs::VfxPrimitive::DashWake);
     check_visual("particle.status.burn_apply", hs::VfxRenderer::Sprite,
-                 hs::VfxPrimitive::Soft);
+                 hs::VfxPrimitive::Flame);
 }
 
 void TestAudioCatalogValidation(const std::filesystem::path &root)
@@ -416,6 +421,13 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
     Check(status.loaded_cues == 1 && status.loaded_files == 0,
           "preload false leaves PCM payload unloaded");
 
+    hs::PresentationEvent missing_event;
+    missing_event.kind = hs::PresentationKind::Audio;
+    missing_event.asset = hs::MakeAssetId("audio.missing");
+    engine.Play(missing_event);
+    Check(engine.Status().skipped_missing_cues == 1,
+          "missing audio cue increments diagnostics");
+
     hs::PresentationEvent event;
     event.kind = hs::PresentationKind::Audio;
     event.asset = hs::MakeAssetId("audio.lazy");
@@ -453,6 +465,7 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     probe.balance.upgrade_effects[1][0][static_cast<std::size_t>(
         hs::UpgradeEffectMetric::CooldownTicksSaved)] = 12;
     probe.balance.upgrade_relic_synergy_count = 1;
+    probe.balance.relic_kills[static_cast<std::size_t>(hs::RelicKind::BurnPropagation)] = 4;
     auto &synergy = probe.balance.upgrade_relic_synergies[0];
     synergy.skill = hs::SkillKind::PiercingShot;
     synergy.upgrade = 0;
@@ -497,7 +510,8 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
                result_json.contains("\"cooldown_ticks_saved\"") &&
                result_json.contains("\"value\": 12") &&
                result_json.contains("\"upgrade_relic_synergies\"") &&
-               result_json.contains("\"burn_propagation\"") &&
+               result_json.contains("\"burn_spread_on_kill\"") &&
+               result_json.contains("\"kills\": 4") &&
                result_json.contains("\"damage\": 23"),
           "playtest result contains balance metrics");
     Check(result_json.contains("\"outcome\": \"defeat\"") &&

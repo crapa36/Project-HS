@@ -268,6 +268,11 @@ struct SpawnPlacement
     bool require_outside_max_zoom_view{};
     Tick fallback_warning_ticks{};
     SpawnFallbackLocation fallback_location{};
+    float max_zoom_view_min_forward_m{};
+    float max_zoom_view_max_forward_m{};
+    float max_zoom_view_half_right_m{};
+    float max_zoom_view_forward_x{};
+    float max_zoom_view_forward_z{};
 };
 
 struct BossPhaseTransition
@@ -455,6 +460,14 @@ struct RelicDefinitions
         std::uint32_t maximum_targets{};
         float damage_multiplier{};
     } combat_hit_chain;
+    struct ProjectileCadenceReward { std::uint32_t hits_per_trigger{}; Tick cooldown_reduction_ticks{}; } projectile_cadence_reward;
+    struct PreDamageGuard { float damage_reduction_fraction{}; Tick cooldown_ticks{}; } pre_damage_guard;
+    struct SlowSynergy { float damage_multiplier{}; Tick per_target_cooldown_ticks{}; } slow_synergy;
+    struct AreaResonance { float damage_multiplier{}; Tick cooldown_ticks{}; } area_resonance;
+    struct BossPressure { float damage_multiplier{}; Tick per_target_cooldown_ticks{}; } boss_pressure;
+    struct HitStreakReward { std::uint32_t direct_hits_per_trigger{}; float damage_multiplier{}; } hit_streak_reward;
+    struct PickupReward { float attack_power_fraction{}; Tick duration_ticks{}; } pickup_reward;
+    struct LowHealthSurvival { float health_threshold_fraction{}; float damage_reduction_fraction{}; Tick cooldown_ticks{}; } low_health_survival;
 };
 
 struct BasicAttackUpgrades

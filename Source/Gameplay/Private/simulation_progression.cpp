@@ -8,6 +8,9 @@ using namespace gameplay_detail;
 void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
 {
     pickup.dead = true;
+    for (const auto &rule : relic_rules.RulesFor(RelicRuleHook::OnPickup))
+        if (rule.handler == RelicRuleHandlerId::PickupReward)
+            HandlePickupReward(pickup.kind);
     ++balance.pickup_collected[static_cast<std::size_t>(pickup.kind)];
     if (pickup.attracted_by_magnet_stat)
         ++balance.stat_utility[static_cast<std::size_t>(StatKind::MagnetRadius)];
@@ -184,7 +187,7 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
     {
         const auto prerequisite = RelicPrerequisiteTags(
             static_cast<RelicKind>(relic));
-        if ((player.relic_mask & (1u << relic)) == 0 &&
+        if ((player.relic_mask & (RelicMask{1} << relic)) == 0 &&
             (build_tags & prerequisite) == prerequisite)
         {
             candidates.push_back({CardKind::Relic, relic, 0});
@@ -193,7 +196,7 @@ void GameSimulation::SimulationWorld::GenerateRelicCards(bool exclude_current)
     if (candidates.empty())
     {
         for (std::uint8_t relic = 0; relic < kRelicCount; ++relic)
-            if ((player.relic_mask & (1u << relic)) == 0)
+            if ((player.relic_mask & (RelicMask{1} << relic)) == 0)
                 candidates.push_back({CardKind::Relic, relic, 0});
     }
     if (exclude_current && candidates.size() > rules.progression.card_candidate_count)
@@ -252,7 +255,7 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     }
     else
     {
-        player.relic_mask |= 1u << card.subject;
+        player.relic_mask |= RelicMask{1} << card.subject;
         relic_rules.Rebuild(player.relic_mask);
         card_count = 0;
         session_phase = SessionPhase::Playing;

@@ -110,9 +110,9 @@ void TestStartingEnemyBalanceAndBoundary()
     Check(WriteSnapshot(simulation, spawn_snapshot), "spawn snapshot");
     const auto spawned_enemy = std::ranges::find_if(
         spawn_snapshot.View().instances, [](const hs::RenderInstance &instance) {
-            return instance.mesh == hs::RenderMesh::Enemy ||
-                   instance.mesh == hs::RenderMesh::EnemyRanged ||
-                   instance.mesh == hs::RenderMesh::EnemySuicide;
+            return instance.mesh == hs::RenderMesh::MonsterMelee ||
+                   instance.mesh == hs::RenderMesh::MonsterRanged ||
+                   instance.mesh == hs::RenderMesh::MonsterSuicide;
         });
     const auto spawn_distance = spawned_enemy != spawn_snapshot.View().instances.end()
                                     ? std::hypot(spawned_enemy->position.x,
@@ -120,12 +120,47 @@ void TestStartingEnemyBalanceAndBoundary()
                                     : 0.0f;
     Check(spawn_distance >= 20.0f && spawn_distance <= 30.0f,
           "normal enemies spawn in the original twenty-to-thirty metre ring");
-    Check(std::ranges::none_of(
-              simulation.PendingDomainSignals(), [](const hs::DomainSignal &) {
-                  return true;
-              }),
-          "normal enemy spawning has no warning effect");
     Check(simulation.Shutdown().Succeeded(), "starting balance shutdown");
+
+    auto fallback_rules = QuietGameData();
+    fallback_rules.spawn_stages.front().per_second = data.spawn_stages.front().per_second;
+    fallback_rules.spawn_placement.require_outside_max_zoom_view = true;
+    fallback_rules.spawn_placement.fallback_warning_ticks = 30;
+    fallback_rules.spawn_placement.max_zoom_view_min_forward_m = -100.0f;
+    fallback_rules.spawn_placement.max_zoom_view_max_forward_m = 100.0f;
+    fallback_rules.spawn_placement.max_zoom_view_half_right_m = 100.0f;
+    hs::GameSimulation fallback;
+    Check(fallback.Initialize({12}, fallback_rules).Succeeded(), "spawn fallback initialize");
+    for (std::uint32_t tick = 0; tick < 67; ++tick) (void)Tick(fallback);
+    Check(fallback.GetObservation().normal_enemy_count == 0 &&
+              std::ranges::any_of(fallback.PendingDomainSignals(), [](const hs::DomainSignal &signal) {
+                  return signal.kind == hs::DomainSignalKind::EnemySpawnWarning;
+              }),
+          "normal enemy fallback warns before the farthest arena edge spawn");
+    const auto warning = std::ranges::find_if(
+        fallback.PendingDomainSignals(), [](const hs::DomainSignal &signal) {
+            return signal.kind == hs::DomainSignalKind::EnemySpawnWarning;
+        });
+    std::array<hs::PresentationEvent, 4> projected{};
+    const auto projected_count = warning != fallback.PendingDomainSignals().end()
+                                     ? hs::ProjectDomainSignal(*warning, projected)
+                                     : 0u;
+    const auto parameters = hs::DecodeVfxParameters(projected[0].parameters);
+    Check(warning != fallback.PendingDomainSignals().end() &&
+              projected_count == 1 &&
+              projected[0].kind == hs::PresentationKind::Vfx &&
+              projected[0].asset.value ==
+                  hs::MakeAssetId("particle.enemy.spawn_warning").value,
+           "normal enemy fallback warning projects to a visible world effect");
+    Check(std::hypot(parameters.direction.x, parameters.direction.z) > 0.0001f,
+          "spawn warning VFX projection carries a valid direction");
+    for (std::uint32_t tick = 0; tick < 29; ++tick) (void)Tick(fallback);
+    Check(fallback.GetObservation().normal_enemy_count == 0,
+          "normal enemy fallback remains absent during its warning window");
+    (void)Tick(fallback);
+    Check(fallback.GetObservation().normal_enemy_count == 1,
+          "normal enemy fallback commits after the authored warning duration");
+    Check(fallback.Shutdown().Succeeded(), "spawn fallback shutdown");
 }
 
 void TestExperienceBalance()

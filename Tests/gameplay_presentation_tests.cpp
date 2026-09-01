@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <format>
 #include <filesystem>
+#include <numbers>
 #include <span>
 #include <string>
 #include <string_view>
@@ -336,6 +337,106 @@ void TestSkillUpgradeCardsHaveDescriptions()
     Check(simulation.Shutdown().Succeeded(), "upgrade description shutdown");
 }
 
+void TestBossAnimationReachesReleaseFrame()
+{
+    hs::GameReadModelStorage model_storage;
+    hs::EnemyView enemy{};
+    enemy.id = {1};
+    enemy.boss = hs::BossKind::FiveMinute;
+    enemy.max_health = enemy.health = 100;
+    enemy.boss_action_started = 0;
+    enemy.boss_action_until = 10;
+    model_storage.AddEnemy(enemy);
+    hs::BossActionView pending_action{};
+    pending_action.boss_id = enemy.id.value;
+    pending_action.animation_started = 0;
+    pending_action.execute_tick = 10;
+    model_storage.AddBossAction(pending_action);
+    hs::RenderSnapshotStorage snapshot(8, 1, 1, 16);
+    hs::SettingsData settings{};
+    const auto project = [&](hs::Tick tick) {
+        model_storage.tick = tick;
+        snapshot.Clear();
+        return hs::ProjectRenderSnapshot(model_storage.View(), DefaultContent().presentation,
+                                         test_ui, settings, snapshot);
+    };
+    Check(project(9), "boss animation pre-release projection");
+    Check(snapshot.View().poses.size() == 2 && snapshot.View().poses.back().normalized_time > 0.89f,
+          "boss animation progresses monotonically before release");
+    Check(project(10), "boss animation release projection");
+    Check(snapshot.View().poses.size() == 2 && snapshot.View().poses.back().normalized_time == 1.0f,
+          "boss animation reaches release frame");
+
+    enemy.boss_action_started = enemy.boss_action_until = 0;
+    const auto project_pending = [&](hs::Tick start, hs::Tick execute, hs::Tick tick) {
+        model_storage.Clear();
+        model_storage.AddEnemy(enemy);
+        hs::BossActionView action{};
+        action.boss_id = enemy.id.value;
+        action.animation_started = start;
+        action.execute_tick = execute;
+        model_storage.AddBossAction(action);
+        return project(tick);
+    };
+    Check(project_pending(0, 10, 9) && snapshot.View().poses.back().normalized_time > 0.89f,
+          "first boss action approaches its release frame");
+    Check(project_pending(10, 20, 10) && snapshot.View().poses.back().normalized_time == 0.0f,
+          "chained boss action restarts its animation");
+}
+
+void TestMonsterVisualScalesAndAttackFacing()
+{
+    hs::GameReadModelStorage model_storage;
+    const auto add_enemy = [&](hs::EntityId id, hs::EnemyKind kind) {
+        hs::EnemyView enemy{};
+        enemy.id = id;
+        enemy.kind = kind;
+        enemy.health = enemy.max_health = 100;
+        model_storage.AddEnemy(enemy);
+    };
+    add_enemy({1}, hs::EnemyKind::Melee);
+    add_enemy({2}, hs::EnemyKind::Ranged);
+    add_enemy({3}, hs::EnemyKind::Suicide);
+
+    hs::RenderSnapshotStorage snapshot(64, 4, 4, 16);
+    hs::SettingsData settings{};
+    Check(hs::ProjectRenderSnapshot(model_storage.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot),
+          "monster scale projection");
+    const auto instances = snapshot.View().instances;
+    const auto check_scale = [&](hs::RenderMesh mesh, float expected) {
+        const auto instance = std::ranges::find_if(instances, [mesh](const auto &candidate) {
+            return candidate.mesh == mesh;
+        });
+        Check(instance != instances.end(), "monster mesh is projected");
+        Check(instance->scale.x == expected && instance->scale.y == expected &&
+                  instance->scale.z == expected,
+              "monster visual scale is uniform and mesh-specific");
+    };
+    check_scale(hs::RenderMesh::MonsterMelee, 1.50f);
+    check_scale(hs::RenderMesh::MonsterRanged, 2.00f);
+    check_scale(hs::RenderMesh::MonsterSuicide, 2.40f);
+    hs::GameReadModelStorage facing_model;
+    hs::EnemyView ranged{};
+    ranged.id = {4};
+    ranged.kind = hs::EnemyKind::Ranged;
+    ranged.health = ranged.max_health = 100;
+    ranged.attacking = true;
+    ranged.locked_aim = {1.0f, 0.0f};
+    facing_model.AddEnemy(ranged);
+    snapshot.Clear();
+    Check(hs::ProjectRenderSnapshot(facing_model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot),
+          "ranged attack facing projection");
+    const auto projected_ranged = std::ranges::find_if(
+        snapshot.View().instances, [](const auto &instance) {
+            return instance.mesh == hs::RenderMesh::MonsterRanged;
+        });
+    Check(projected_ranged != snapshot.View().instances.end() &&
+              std::abs(projected_ranged->yaw - std::numbers::pi_v<float> * 0.5f) < 0.001f,
+          "stationary ranged enemy faces its locked attack direction");
+}
+
 void RunGameplayPresentationTests()
 {
     TestCursorMovement();
@@ -343,6 +444,8 @@ void RunGameplayPresentationTests()
     TestCharacterInformationPage();
     TestPauseMenuActions();
     TestSkillUpgradeCardsHaveDescriptions();
+    TestBossAnimationReachesReleaseFrame();
+    TestMonsterVisualScalesAndAttackFacing();
 }
 
 } // namespace gameplay_test

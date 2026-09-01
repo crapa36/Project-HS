@@ -416,6 +416,9 @@ target_compile_definitions(
         HS_SCHEMA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
         HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
+        HS_MONSTER_MODEL_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters"
+        HS_MONSTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters"
+        HS_MONSTER_TEXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Monsters/PBR"
 )
 target_include_directories(hs_content SYSTEM PRIVATE "${HS_FBX_SDK_ROOT}/include")
 hs_configure_target(hs_content)
@@ -442,12 +445,59 @@ file(GLOB HS_ARCHER_TEXTURE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbm/*"
 )
 list(APPEND HS_ARCHER_ASSET_SOURCES ${HS_ARCHER_TEXTURE_SOURCES})
+file(GLOB HS_MONSTER_TEXTURE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Monsters/PBR/*.png"
+)
+set(
+    HS_MONSTER_ASSET_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Slime_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Cactus_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Swarm09_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/TurtleShell_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/ChestMonster_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Beholder_SK.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/IdleBattle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/RunFWD.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Attack01.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Attack02.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Die.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/IdleBattle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/RunFWD.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Attack01.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Attack02.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Die.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Idle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/MoveFWD.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Attack.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Die.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/IdleBattle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Run.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Attack01.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Attack02.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Die.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/10m/IdleBattle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/10m/Run.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/10m/Attack01.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/10m/Attack02.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/10m/Die.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/IdleBattle.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Run.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Attack01.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Attack03.fbx"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Die.fbx"
+)
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     COMMAND "$<TARGET_FILE:hs_content>" --cook
-    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
+    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} ${HS_MONSTER_ASSET_SOURCES} ${HS_MONSTER_TEXTURE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_5m.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_10m.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_final.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_1.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_2.dds"
@@ -460,6 +510,9 @@ add_custom_command(
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_3.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_basecolor.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_emissive.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_ram.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/simulation_rules.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
@@ -488,6 +541,9 @@ target_compile_definitions(
         HS_AUDIO_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Audio"
         HS_CHARACTER_MODEL="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Characters/Archer/ErikaArcher.fbx"
         HS_CHARACTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer"
+        HS_MONSTER_MODEL_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters"
+        HS_MONSTER_ANIMATION_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters"
+        HS_MONSTER_TEXTURE_DIRECTORY="${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Monsters/PBR"
         HS_CONTENT_EXECUTABLE="$<TARGET_FILE:hs_content>"
         HS_PROJECT_EXECUTABLE="$<TARGET_FILE:ProjectHS>"
         HS_COOKED_DIRECTORY="${CMAKE_CURRENT_BINARY_DIR}/Cooked"
@@ -569,6 +625,10 @@ if(HS_BUILD_TESTS)
         Tests/gameplay_test_support.cpp
         Tests/gameplay_content_tests.cpp
         Tests/gameplay_combat_tests.cpp
+        Tests/gameplay_skill_tests.cpp
+        Tests/gameplay_upgrade_tests.cpp
+        Tests/gameplay_relic_tests.cpp
+        Tests/gameplay_boss_tests.cpp
         Tests/gameplay_progression_tests.cpp
         Tests/gameplay_presentation_tests.cpp
         Tests/gameplay_determinism_tests.cpp

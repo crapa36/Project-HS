@@ -48,7 +48,9 @@ constexpr std::array<std::string_view, hs::kRelicCount> kCombatSuiteRelicIds{
     "bleed_burn_explosion", "sixth_basic_radial", "basic_kill_tracking_arrow",
     "movement_afterimage_arrow", "alternating_active_refund",
     "cross_active_tracking_arrow", "on_damage_push_slow", "once_revive",
-    "combat_hit_chain"};
+    "combat_hit_chain", "projectile_cadence_reward", "pre_damage_guard",
+    "slow_synergy", "area_resonance", "boss_pressure", "hit_streak_reward",
+    "pickup_reward", "low_health_survival"};
 constexpr std::array<std::string_view, hs::kStatCount> kCombatSuiteStatIds{
     "maximum_hp", "movement_speed", "attack_power", "basic_attack_speed",
     "cooldown_reduction", "magnet_radius"};
@@ -59,6 +61,8 @@ struct CombatBuild
     std::array<std::uint8_t, hs::kCombatSkillCount> upgrade_masks{};
     std::vector<std::uint8_t> relics;
     std::array<std::uint8_t, hs::kStatCount> stats{};
+    std::string scenario;
+    bool expect_relic_activation{};
 };
 
 struct CombatSimulationSuite
@@ -182,6 +186,118 @@ ProgressionSimulationSuite LoadProgressionSimulationSuite(const std::filesystem:
     return suite;
 }
 
+CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
+{
+    std::ifstream stream(path);
+    Json root;
+    stream >> root;
+    if (!stream || root.value("schema_version", 0) != 1)
+        throw std::runtime_error("Relic balance suite must be schema_version 1 JSON.");
+    const auto seconds = root.at("duration_seconds").get<std::uint32_t>();
+    if (seconds == 0 || seconds > 1'800)
+        throw std::runtime_error("duration_seconds must be in [1, 1800].");
+    CombatSimulationSuite suite;
+    suite.maximum_ticks = static_cast<hs::Tick>(seconds) * 60;
+    suite.seeds = root.at("seeds").get<std::vector<std::uint64_t>>();
+    if (suite.seeds.empty() || suite.seeds.size() > 8 ||
+        std::set(suite.seeds.begin(), suite.seeds.end()).size() != suite.seeds.size())
+        throw std::runtime_error("seeds must contain 1-8 unique values.");
+
+    // Optional focused cases keep the expensive exhaustive scan available while
+    // allowing a small, explicitly reviewed set of high-value combinations.
+    if (root.contains("cases"))
+    {
+        std::set<std::string> build_ids;
+        for (const auto &source : root.at("cases"))
+        {
+            const auto case_id = source.at("id").get<std::string>();
+            if (case_id.empty() || !build_ids.insert(case_id + "-off").second ||
+                !build_ids.insert(case_id + "-on").second)
+                throw std::runtime_error("Focused relic case ids must be unique and non-empty.");
+            CombatBuild off;
+            off.id = case_id + "-off";
+            off.scenario = source.value("scenario", std::string{});
+            for (const auto &skill : source.at("skills"))
+            {
+                const auto index = RequireIdIndex(skill.get<std::string>(), kCombatSuiteSkillIds, "skill");
+                if (index == 0 || off.skills.size() == 4 ||
+                    std::ranges::find(off.skills, index) != off.skills.end())
+                    throw std::runtime_error("Focused cases require 0-4 unique non-basic active skills.");
+                off.skills.push_back(static_cast<std::uint8_t>(index));
+            }
+            const auto &upgrade_source = source.contains("upgrade_masks") ? source.at("upgrade_masks") : source.at("upgrades");
+            for (const auto &[skill_id, upgrades] : upgrade_source.items())
+            {
+                const auto skill = RequireIdIndex(skill_id, kCombatSuiteSkillIds, "upgrade skill");
+                if (skill != 0 && std::ranges::find(off.skills, skill) == off.skills.end())
+                    throw std::runtime_error("Focused upgrades require the owning active skill.");
+                if (source.contains("upgrade_masks"))
+                {
+                    const auto mask = upgrades.get<std::uint32_t>();
+                    if (mask > 0xffu || std::popcount(mask) > 4)
+                        throw std::runtime_error("Focused upgrade masks must be 8-bit with at most four upgrades.");
+                    off.upgrade_masks[skill] = static_cast<std::uint8_t>(mask);
+                    continue;
+                }
+                for (const auto &ordinal_json : upgrades)
+                {
+                    const auto ordinal = ordinal_json.get<std::uint32_t>();
+                    if (ordinal == 0 || ordinal > hs::kUpgradeCount ||
+                        (off.upgrade_masks[skill] & (1u << (ordinal - 1))) != 0)
+                        throw std::runtime_error("Focused upgrade ordinals must be unique values in [1, 8].");
+                    off.upgrade_masks[skill] |= 1u << (ordinal - 1);
+                }
+                if (std::popcount(off.upgrade_masks[skill]) > 4)
+                    throw std::runtime_error("Focused cases allow at most four upgrades per skill.");
+            }
+            if (source.contains("stats"))
+                for (const auto &[stat_id, points_json] : source.at("stats").items())
+                {
+                    const auto stat = RequireIdIndex(stat_id, kCombatSuiteStatIds, "stat");
+                    const auto points = points_json.get<std::uint32_t>();
+                    if (points > 10) throw std::runtime_error("Focused stat points must be in [0, 10].");
+                    off.stats[stat] = static_cast<std::uint8_t>(points);
+                }
+            off.expect_relic_activation = source.value("expect_activation", false);
+            auto on = off;
+            on.id = case_id + "-on";
+            on.relics.push_back(static_cast<std::uint8_t>(RequireIdIndex(
+                source.at("relic").get<std::string>(), kCombatSuiteRelicIds, "relic")));
+            suite.builds.push_back(std::move(off));
+            suite.builds.push_back(std::move(on));
+        }
+        if (suite.builds.empty()) throw std::runtime_error("At least one focused relic case is required.");
+        return suite;
+    }
+    const auto pair_limit = root.value("pair_limit", std::numeric_limits<std::size_t>::max());
+
+    // ponytail: exhaustive 9*choose(8,4) scan; use duration/seeds to stage cost.
+    std::vector<std::uint32_t> combinations;
+    for (std::uint32_t mask = 0; mask < (1u << hs::kUpgradeCount); ++mask)
+        if (std::popcount(mask) == 4) combinations.push_back(mask);
+    for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
+        for (const auto mask : combinations)
+            for (std::size_t relic = 0; relic < hs::kRelicCount; ++relic)
+            {
+                if (suite.builds.size() / 2 >= pair_limit) break;
+                CombatBuild off;
+                off.id = "s" + std::to_string(skill) + "-m" + std::to_string(mask) +
+                         "-r" + std::to_string(relic) + "-off";
+                if (skill != 0) off.skills = {static_cast<std::uint8_t>(skill)};
+                off.upgrade_masks[skill] = static_cast<std::uint8_t>(mask);
+                suite.builds.push_back(off);
+                auto on = off;
+                on.id.resize(on.id.size() - 3); on.id += "on";
+                on.relics.push_back(static_cast<std::uint8_t>(relic));
+                suite.builds.push_back(std::move(on));
+            }
+    const auto expected_pairs = std::min(pair_limit, hs::kCombatSkillCount *
+                                                     combinations.size() * hs::kRelicCount);
+    if (suite.builds.size() != expected_pairs * 2)
+        throw std::runtime_error("Relic balance coverage generation failed.");
+    return suite;
+}
+
 hs::Float3 SelectNearestEnemyAim(const hs::RenderSnapshot &snapshot,
                      hs::Float2 player_position)
 {
@@ -189,10 +305,12 @@ hs::Float3 SelectNearestEnemyAim(const hs::RenderSnapshot &snapshot,
     auto best_distance = std::numeric_limits<float>::max();
     for (const auto &instance : snapshot.instances)
     {
-        if (instance.mesh == hs::RenderMesh::Enemy ||
-            instance.mesh == hs::RenderMesh::EnemyRanged ||
-            instance.mesh == hs::RenderMesh::EnemySuicide ||
-            instance.mesh == hs::RenderMesh::Boss)
+        if (instance.mesh == hs::RenderMesh::MonsterMelee ||
+            instance.mesh == hs::RenderMesh::MonsterRanged ||
+            instance.mesh == hs::RenderMesh::MonsterSuicide ||
+            instance.mesh == hs::RenderMesh::BossFiveMinute ||
+            instance.mesh == hs::RenderMesh::BossTenMinute ||
+            instance.mesh == hs::RenderMesh::BossFinal)
         {
             const auto dx = instance.position.x - player_position.x;
             const auto dy = instance.position.z - player_position.y;
@@ -217,6 +335,7 @@ hs::GameAction SkillSlotAction(std::size_t slot)
 struct CombatControlState
 {
     std::uint64_t sequence{};
+    std::string scenario;
     hs::Tick next_active_tick{1};
     hs::Tick charged_release_tick{};
     std::uint32_t charged_cast_count{};
@@ -231,8 +350,12 @@ hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
                                CombatControlState &state)
 {
     state.held = {};
-    state.held.basic_attack_held = true;
+    state.held.basic_attack_held = state.scenario != "movement" || target_tick % 300 >= 120;
     state.held.aim_world = SelectNearestEnemyAim(snapshot, probe.player_position);
+    if (state.scenario == "movement") {
+        state.held.move_held = true;
+        state.held.move_target_world = {(target_tick / 600) % 2 == 0 ? 20.0f : -20.0f, 0.0f, 0.0f};
+    }
     std::span<const hs::ActionEdge> edge_span;
     if (state.charged_release_tick != 0 &&
         target_tick >= state.charged_release_tick)
@@ -305,7 +428,7 @@ Json BuildDefinitionJson(const CombatBuild &build)
     Json stats = Json::object();
     for (std::size_t stat = 0; stat < build.stats.size(); ++stat)
         stats[std::string(kCombatSuiteStatIds[stat])] = build.stats[stat];
-    return {{"id", build.id}, {"skills", std::move(skills)},
+    return {{"id", build.id}, {"scenario", build.scenario}, {"skills", std::move(skills)},
             {"upgrades", std::move(upgrades)}, {"relics", std::move(relics)},
             {"stats", std::move(stats)}};
 }
@@ -314,10 +437,69 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
               const hs::SimulationRules &rules)
 {
     hs::GameSimulation simulation;
+    auto scenario_rules = rules;
+    if (!build.scenario.empty())
+    {
+        for (auto &stage : scenario_rules.spawn_stages) stage.per_second = 0.0f;
+        for (auto &wave : scenario_rules.waves) wave.count = 0;
+        scenario_rules.progression.boss_spawn_ticks.fill(std::numeric_limits<hs::Tick>::max());
+    }
+    if (build.scenario == "shared_target" || build.scenario == "durable_slow_area" ||
+        build.scenario == "durable_hit_streak" ||
+        build.scenario == "durable_chain_targets")
+    {
+        auto &enemy = scenario_rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
+        enemy.health = 1'000'000;
+        enemy.move_speed = 0.0f;
+        enemy.damage = 0;
+    }
+    else if (build.scenario == "incoming_normal" || build.scenario == "crowd_pressure" ||
+             build.scenario == "incoming_low_health" ||
+             build.scenario == "fatal_hit" || build.scenario == "varied_incoming")
+    {
+        auto &enemy = scenario_rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
+        enemy.health = 1'000'000;
+        enemy.move_speed = build.scenario == "crowd_pressure"
+                               ? rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].move_speed
+                               : 0.0f;
+        enemy.damage = (build.scenario == "varied_incoming" ||
+                        build.scenario == "incoming_low_health") ? 40 : 10;
+        enemy.attack_range = 2.0f;
+        enemy.warning_ticks = 1;
+        enemy.attack_cooldown_ticks = build.scenario == "fatal_hit" ? 30 : 60;
+    }
+    else if (build.scenario == "wounded_bleed_kill" || build.scenario == "dense_burn_kill" ||
+             build.scenario == "basic_kill_neighbors")
+    {
+        auto &enemy = scenario_rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
+        enemy.health = build.scenario == "wounded_bleed_kill"
+                           ? 100
+                           : (build.scenario == "basic_kill_neighbors" ? 10 : 24);
+        enemy.move_speed = 0.0f;
+        enemy.damage = 0;
+    }
+    else if (build.scenario == "movement")
+    {
+        auto &enemy = scenario_rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
+        enemy.health = 1'000'000;
+        enemy.move_speed = 0.0f;
+        enemy.damage = 0;
+    }
+    else if (build.scenario == "pickup_normal")
+    {
+        auto &enemy = scenario_rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
+        enemy.health = 30;
+        enemy.move_speed = 0.0f;
+        enemy.damage = 0;
+    }
+    if (build.scenario == "boss_only")
+        scenario_rules.bosses[static_cast<std::size_t>(hs::BossKind::FiveMinute)].health = 1'000'000;
     hs::SimulationConfig config{seed};
-    config.scenario = {.player_stationary = true, .player_invulnerable = true,
-                       .progression_enabled = false};
-    if (auto initialized = simulation.Initialize(config, rules); !initialized)
+    config.scenario = {.player_stationary = build.scenario.empty(),
+                       .player_invulnerable = build.scenario != "fatal_hit",
+                       .progression_enabled = false,
+                       .auto_collect_progression = build.scenario == "pickup_normal"};
+    if (auto initialized = simulation.Initialize(config, scenario_rules); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
     const auto apply = [&](hs::DebugCommand command) {
@@ -332,13 +514,37 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                 apply({hs::DebugCommandKind::GrantUpgrade, skill, upgrade});
     for (const auto relic : build.relics)
         apply({hs::DebugCommandKind::GrantRelic, relic});
+    if (build.scenario == "boss_only")
+        apply({hs::DebugCommandKind::SpawnBoss, static_cast<std::uint64_t>(hs::BossKind::FiveMinute)});
+    CombatControlState control;
+    control.scenario = build.scenario;
     for (std::size_t stat = 0; stat < build.stats.size(); ++stat)
         apply({hs::DebugCommandKind::SetStat, stat, build.stats[stat]});
+    if (build.scenario == "incoming_low_health" || build.scenario == "fatal_hit" ||
+        build.scenario == "wounded_bleed_kill")
+        apply({hs::DebugCommandKind::DamagePlayer, build.scenario == "fatal_hit" ? 99u : 66u});
+    if (build.scenario == "shared_target" || build.scenario == "durable_slow_area" ||
+        build.scenario == "durable_hit_streak" ||
+        build.scenario == "durable_chain_targets" ||
+        build.scenario == "incoming_normal" ||
+        build.scenario == "crowd_pressure" || build.scenario == "varied_incoming" ||
+        build.scenario == "incoming_low_health" || build.scenario == "fatal_hit" ||
+        build.scenario == "movement" || build.scenario == "wounded_bleed_kill" ||
+        build.scenario == "dense_burn_kill" ||
+        build.scenario == "basic_kill_neighbors")
+        apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f, 0.0f}});
+    if (build.scenario == "durable_chain_targets")
+        for (int i = 1; i < 4; ++i)
+            apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f + i * 0.5f, 0.0f}});
+    if (build.scenario == "basic_kill_neighbors")
+        apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {2.0f, 0.0f}});
+    if (build.scenario == "crowd_pressure")
+        for (int i = 0; i < 5; ++i)
+            apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f + i * 0.25f, 0.0f}});
 
     hs::RenderSnapshotStorage snapshot(20'000, 2, 2, 128);
     std::vector<std::uint64_t> tick_microseconds;
     tick_microseconds.reserve(static_cast<std::size_t>(maximum_ticks));
-    CombatControlState control;
     std::uint32_t maximum_enemies{};
     std::uint32_t maximum_projectiles{};
     std::uint32_t maximum_pickups{};
@@ -346,8 +552,17 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
 
     for (hs::Tick target_tick = 1; target_tick <= maximum_ticks; ++target_tick)
     {
+        if ((build.scenario == "pickup_normal" || build.scenario == "dense_burn_kill") &&
+            (target_tick - 1) % (build.scenario == "dense_burn_kill" ? 30 : 120) == 0)
+            apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f, 0.0f}});
+        if (build.scenario == "basic_kill_neighbors" && (target_tick - 1) % 60 == 0)
+        {
+            apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f, 0.0f}});
+            apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {2.0f, 0.0f}});
+        }
         const auto before = simulation.GetObservation();
-        if (before.phase == hs::SessionPhase::Victory) break;
+        if (before.phase == hs::SessionPhase::Victory ||
+            before.phase == hs::SessionPhase::Defeat || before.health == 0) break;
         snapshot.Clear();
         if (!WriteSnapshot(simulation, snapshot))
             throw std::runtime_error("Combat target snapshot capacity was exceeded.");
@@ -370,12 +585,17 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
         if (target_tick % 60 == 0)
             maximum_memory = std::max(maximum_memory,
                                       hs::CurrentProcessWorkingSetBytes());
-        if (tick.phase == hs::SessionPhase::Victory) break;
+        if (tick.phase == hs::SessionPhase::Victory ||
+            tick.phase == hs::SessionPhase::Defeat || probe.health == 0) break;
     }
 
     const auto probe = simulation.GetObservation();
-    if (probe.player_position.x != 0.0f || probe.player_position.y != 0.0f ||
-        probe.health != probe.max_health)
+    if (build.expect_relic_activation && !build.relics.empty() &&
+        probe.balance.relic_triggers[build.relics.front()] == 0 &&
+        probe.balance.relic_effects[build.relics.front()][static_cast<std::size_t>(hs::UpgradeEffectMetric::Activations)] == 0)
+        throw std::runtime_error("Focused relic case expected an activation but observed none: " + build.id);
+    if (build.scenario.empty() && (probe.player_position.x != 0.0f || probe.player_position.y != 0.0f ||
+        probe.health != probe.max_health))
         throw std::runtime_error("Stationary invulnerable combat contract was violated.");
     std::ranges::sort(tick_microseconds);
     const auto percentile = [&](double fraction) {
@@ -426,10 +646,25 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                 probe.balance.relic_effects[relic][metric];
         relics.push_back({{"id", kCombatSuiteRelicIds[relic]},
                           {"damage", probe.balance.relic_damage[relic]},
+                          {"kills", probe.balance.relic_kills[relic]},
                           {"triggers", probe.balance.relic_triggers[relic]},
                           {"effects", std::move(effects)}});
     }
 
+    const auto phase_name = [&] {
+        switch (probe.phase) {
+        case hs::SessionPhase::MainMenu: return "main_menu";
+        case hs::SessionPhase::Playing: return "playing";
+        case hs::SessionPhase::Paused: return "paused";
+        case hs::SessionPhase::CardSelection: return "card_selection";
+        case hs::SessionPhase::StatAllocation: return "stat_allocation";
+        case hs::SessionPhase::RelicSelection: return "relic_selection";
+        case hs::SessionPhase::Victory: return "victory";
+        case hs::SessionPhase::Defeat: return "defeat";
+        case hs::SessionPhase::QuitRequested: return "quit_requested";
+        }
+        return "unknown";
+    }();
     Json result{{"build_id", build.id},
                 {"seed", seed},
                 {"ticks", probe.tick},
@@ -437,8 +672,12 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
                 {"checksum", simulation.ComputeChecksum()},
                 {"damage", probe.damage_dealt},
                 {"dps", elapsed_seconds > 0.0 ? probe.damage_dealt / elapsed_seconds : 0.0},
-                {"kills", probe.kills},
-                {"incoming_damage", probe.damage_taken},
+                 {"kills", probe.kills},
+                 {"incoming_damage", probe.damage_taken},
+                 {"healing", probe.healing},
+                 {"ending_health", probe.health},
+                 {"phase", phase_name},
+                 {"player_dead", probe.phase == hs::SessionPhase::Defeat || probe.health <= 0},
                 {"direct_damage", probe.balance.direct_damage},
                 {"derived_damage", probe.balance.derived_damage},
                 {"damage_over_time", probe.balance.damage_over_time},
@@ -611,7 +850,7 @@ CombatBuild FinalBuild(const ProgressionDraftProfile &profile, const hs::Session
             build.skills.push_back(static_cast<std::uint8_t>(skill));
     build.upgrade_masks = probe.upgrade_masks;
     for (std::size_t relic = 0; relic < hs::kRelicCount; ++relic)
-        if ((probe.relic_mask & (1u << relic)) != 0)
+        if ((probe.relic_mask & (hs::RelicMask{1} << relic)) != 0)
             build.relics.push_back(static_cast<std::uint8_t>(relic));
     build.stats = probe.stat_points;
     return build;
@@ -731,7 +970,7 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
     }
     Json relics = Json::array();
     for (std::size_t relic = 0; relic < hs::kRelicCount; ++relic)
-        if ((probe.relic_mask & (1u << relic)) != 0)
+        if ((probe.relic_mask & (hs::RelicMask{1} << relic)) != 0)
         {
             const auto acquired = std::ranges::find_if(
                 acquisitions, [&](const Acquisition &candidate) {
@@ -1009,18 +1248,181 @@ Json Aggregate(const CombatSimulationSuite &suite, const Json &runs)
     return aggregates;
 }
 
+double SumSkillMetric(const Json &run, std::string_view metric)
+{
+    double total{};
+    for (const auto &skill : run.at("skills"))
+        total += skill.at(metric).get<double>();
+    return total;
+}
+
+double SumJsonArray(const Json &run, std::string_view metric)
+{
+    double total{};
+    for (const auto &value : run.at(metric)) total += value.get<double>();
+    return total;
+}
+
+double Percentile(std::vector<double> values, double fraction)
+{
+    if (values.empty()) return 0.0;
+    std::ranges::sort(values);
+    const auto index = static_cast<std::size_t>(std::ceil(
+        fraction * static_cast<double>(values.size()))) - 1;
+    return values[std::min(index, values.size() - 1)];
+}
+
+Json AggregateRelicPairs(const CombatSimulationSuite &suite, const Json &runs)
+{
+    std::map<std::pair<std::string, std::uint64_t>, const Json *> indexed_runs;
+    for (const auto &run : runs)
+        indexed_runs.emplace(
+            std::pair{run.at("build_id").get<std::string>(),
+                      run.at("seed").get<std::uint64_t>()},
+            &run);
+    Json pairs = Json::array();
+    for (std::size_t build = 0; build < suite.builds.size(); build += 2)
+    {
+        const auto &off_build = suite.builds[build];
+        const auto &on_build = suite.builds[build + 1];
+        const auto relic = on_build.relics.front();
+        const auto skill_it = static_cast<std::size_t>(std::ranges::find_if(
+            on_build.upgrade_masks, [](std::uint8_t mask) { return mask != 0; }) -
+            on_build.upgrade_masks.begin());
+        const auto skill = skill_it == on_build.upgrade_masks.size() ? 0 : skill_it;
+        std::vector<double> off_dps, on_dps, dps_delta, dps_uplift_percent;
+        std::size_t zero_dps_baselines{};
+        std::vector<double> kills_delta, casts_delta, seconds_delta, incoming_delta;
+        double activations{}, on_hit_events{}, hit_events_delta{};
+        double relic_damage_events{}, relic_damage{}, relic_kills{};
+        double cooldown_ticks_saved{}, damage_prevented{}, healing_delta{}, ending_health_delta{};
+        double enemy_attack_attempts_delta{}, enemy_hits_delta{}, enemy_damage_delta{};
+        Json mean_effects = Json::object();
+        for (const auto metric : hs::kUpgradeEffectMetricIds) mean_effects[std::string(metric)] = 0.0;
+        for (const auto seed : suite.seeds)
+        {
+            const auto off = indexed_runs.at({off_build.id, seed});
+            const auto on = indexed_runs.at({on_build.id, seed});
+            const auto off_run_dps = off->at("dps").get<double>();
+            const auto on_run_dps = on->at("dps").get<double>();
+            off_dps.push_back(off_run_dps);
+            on_dps.push_back(on_run_dps);
+            dps_delta.push_back(on_run_dps - off_run_dps);
+            if (off_run_dps == 0.0)
+                ++zero_dps_baselines;
+            else
+                dps_uplift_percent.push_back((on_run_dps / off_run_dps - 1.0) * 100.0);
+            kills_delta.push_back(on->at("kills").get<double>() - off->at("kills").get<double>());
+            casts_delta.push_back(SumSkillMetric(*on, "uses") - SumSkillMetric(*off, "uses"));
+            seconds_delta.push_back(on->at("seconds").get<double>() - off->at("seconds").get<double>());
+            incoming_delta.push_back(on->at("incoming_damage").get<double>() -
+                                     off->at("incoming_damage").get<double>());
+            healing_delta += on->at("healing").get<double>() - off->at("healing").get<double>();
+            ending_health_delta += on->at("ending_health").get<double>() - off->at("ending_health").get<double>();
+            enemy_attack_attempts_delta += SumJsonArray(*on, "enemy_attack_attempts") -
+                                            SumJsonArray(*off, "enemy_attack_attempts");
+            enemy_hits_delta += SumJsonArray(*on, "enemy_hits") - SumJsonArray(*off, "enemy_hits");
+            enemy_damage_delta += SumJsonArray(*on, "enemy_damage") - SumJsonArray(*off, "enemy_damage");
+            on_hit_events += SumSkillMetric(*on, "hit_events");
+            hit_events_delta += SumSkillMetric(*on, "hit_events") -
+                                SumSkillMetric(*off, "hit_events");
+            const auto &relic_metrics = on->at("relics").front();
+            const auto &effects = relic_metrics.at("effects");
+            activations += effects.value("activations", 0.0);
+            relic_damage_events += relic_metrics.at("triggers").get<double>();
+            relic_damage += relic_metrics.at("damage").get<double>();
+            relic_kills += relic_metrics.at("kills").get<double>();
+            cooldown_ticks_saved += effects.value("cooldown_ticks_saved", 0.0);
+            damage_prevented += effects.value("damage_prevented", 0.0);
+            for (const auto metric : hs::kUpgradeEffectMetricIds)
+                mean_effects[std::string(metric)] = mean_effects[std::string(metric)].get<double>() +
+                    effects.value(std::string(metric), 0.0);
+        }
+        const auto mean = [](const std::vector<double> &values) {
+            return std::accumulate(values.begin(), values.end(), 0.0) /
+                   static_cast<double>(values.size());
+        };
+        const auto percent_stat = [&](double fraction) -> Json {
+            return dps_uplift_percent.empty() ? Json(nullptr)
+                                              : Json(Percentile(dps_uplift_percent, fraction));
+        };
+        const auto duration_minutes = static_cast<double>(suite.maximum_ticks) / 3600.0;
+        pairs.push_back({{"pair_id", on_build.id.substr(0, on_build.id.size() - 3)},
+                         {"skill", kCombatSuiteSkillIds[skill]},
+                         {"upgrade_mask", [&] {
+                              for (const auto mask : on_build.upgrade_masks)
+                                  if (mask != 0) return mask;
+                              return std::uint8_t{};
+                          }()},
+                         {"relic", kCombatSuiteRelicIds[relic]},
+                         {"seeds", suite.seeds.size()},
+                         {"mean_off_dps", mean(off_dps)},
+                         {"mean_on_dps", mean(on_dps)},
+                         {"mean_dps_delta", mean(dps_delta)},
+                         {"mean_dps_uplift_percent", dps_uplift_percent.empty()
+                                                           ? Json(nullptr)
+                                                           : Json(mean(dps_uplift_percent))},
+                         {"median_dps_uplift_percent", percent_stat(0.5)},
+                         {"p95_dps_uplift_percent", percent_stat(0.95)},
+                         {"maximum_dps_uplift_percent", dps_uplift_percent.empty()
+                                                              ? Json(nullptr)
+                                                              : Json(*std::ranges::max_element(dps_uplift_percent))},
+                         {"zero_dps_baseline_runs", zero_dps_baselines},
+                         {"median_dps_delta", Percentile(dps_delta, 0.5)},
+                         {"p95_dps_delta", Percentile(dps_delta, 0.95)},
+                         {"maximum_dps_delta", *std::ranges::max_element(dps_delta)},
+                         {"mean_kills_delta", mean(kills_delta)},
+                         {"mean_casts_delta", mean(casts_delta)},
+                         {"mean_seconds_delta", mean(seconds_delta)},
+                          {"mean_incoming_damage_delta", mean(incoming_delta)},
+                          {"mean_healing_delta", healing_delta / suite.seeds.size()},
+                          {"mean_ending_health_delta", ending_health_delta / suite.seeds.size()},
+                          {"mean_enemy_attack_attempts_delta", enemy_attack_attempts_delta / suite.seeds.size()},
+                          {"mean_enemy_hits_delta", enemy_hits_delta / suite.seeds.size()},
+                          {"mean_enemy_damage_delta", enemy_damage_delta / suite.seeds.size()},
+                         {"mean_activation_count", activations / suite.seeds.size()},
+                         {"mean_on_hit_events", on_hit_events / suite.seeds.size()},
+                         {"mean_hit_events_delta", hit_events_delta / suite.seeds.size()},
+                         {"mean_relic_damage_events", relic_damage_events / suite.seeds.size()},
+                         {"mean_relic_damage", relic_damage / suite.seeds.size()},
+                         {"mean_damage_per_activation", activations == 0.0
+                                                            ? 0.0
+                                                            : relic_damage / activations},
+                         {"mean_relic_kills", relic_kills / suite.seeds.size()},
+                         {"mean_cooldown_seconds_saved", cooldown_ticks_saved /
+                               (60.0 * suite.seeds.size())},
+                         {"mean_cooldown_seconds_saved_per_minute", cooldown_ticks_saved /
+                               (60.0 * suite.seeds.size() * duration_minutes)},
+                         {"mean_damage_prevented", damage_prevented / suite.seeds.size()},
+                          {"mean_damage_prevented_per_minute", damage_prevented /
+                                (suite.seeds.size() * duration_minutes)},
+                          {"mean_effects", [&] {
+                               for (auto &item : mean_effects.items())
+                                   item.value() = item.value().get<double>() / suite.seeds.size();
+                               return mean_effects;
+                           }()}});
+    }
+    return pairs;
+}
+
 void ValidatePairedWorkloads(const CombatSimulationSuite &suite, const Json &runs)
 {
-    for (const auto seed : suite.seeds)
+    for (std::size_t build = 0; build < suite.builds.size(); build += 2)
     {
-        const Json *expected{};
-        for (const auto &run : runs)
+        const auto &off_id = suite.builds[build].id;
+        const auto &on_id = suite.builds[build + 1].id;
+        for (const auto seed : suite.seeds)
         {
-            if (run.at("seed").get<std::uint64_t>() != seed) continue;
-            if (!expected) expected = &run.at("enemy_spawned");
-            else if (*expected != run.at("enemy_spawned"))
+            const Json *off{}, *on{};
+            for (const auto &run : runs)
+                if (run.at("seed").get<std::uint64_t>() == seed)
+                {
+                    if (run.at("build_id") == off_id) off = &run;
+                    if (run.at("build_id") == on_id) on = &run;
+                }
+            if (off && on && off->at("enemy_spawned") != on->at("enemy_spawned"))
                 throw std::runtime_error(
-                    "Paired build comparison received different enemy spawn streams.");
+                    "Paired build comparison received different enemy spawn counts.");
         }
     }
 }
@@ -1032,6 +1434,7 @@ int main(int argc, char **argv)
     {
         std::filesystem::path suite_path;
         std::filesystem::path progression_suite_path;
+        std::filesystem::path relic_balance_suite_path;
         std::filesystem::path output_directory;
         for (int index = 1; index < argc; ++index)
         {
@@ -1039,13 +1442,16 @@ int main(int argc, char **argv)
             if (argument.starts_with("--suite=")) suite_path = argument.substr(8);
             else if (argument.starts_with("--progression-suite="))
                 progression_suite_path = argument.substr(20);
+            else if (argument.starts_with("--relic-balance-suite="))
+                relic_balance_suite_path = argument.substr(argument.find('=') + 1);
             else if (argument.starts_with("--output=")) output_directory = argument.substr(9);
             else throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE) --output=DIR");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR");
         }
-        if (output_directory.empty() || suite_path.empty() == progression_suite_path.empty())
+        if (output_directory.empty() ||
+            (suite_path.empty() + progression_suite_path.empty() + relic_balance_suite_path.empty()) != 2)
             throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE) --output=DIR");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR");
 
         const auto executable = std::filesystem::absolute(argv[0]);
         hs::SimulationRules rules;
@@ -1174,7 +1580,10 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        const auto suite = LoadCombatSimulationSuite(suite_path);
+        const bool relic_balance_mode = !relic_balance_suite_path.empty();
+        const auto suite = relic_balance_mode
+                               ? LoadRelicBalanceSuite(relic_balance_suite_path)
+                               : LoadCombatSimulationSuite(suite_path);
 
         Json runs = Json::array();
         for (std::size_t seed_index = 0; seed_index < suite.seeds.size(); ++seed_index)
@@ -1188,17 +1597,17 @@ int main(int argc, char **argv)
             }
         }
         ValidatePairedWorkloads(suite, runs);
-        const auto aggregates = Aggregate(suite, runs);
+        const auto aggregates = relic_balance_mode ? Json::array() : Aggregate(suite, runs);
         Json builds = Json::array();
         for (const auto &build : suite.builds)
             builds.push_back(BuildDefinitionJson(build));
         Json report{{"schema_version", 1},
                     {"execution_valid", true},
-                    {"method", "stationary_invulnerable_fixed_tick"},
+                    {"method", relic_balance_mode ? "relic_balance_paired_scan" : "stationary_invulnerable_fixed_tick"},
                     {"aim_policy", "nearest_enemy"},
                     {"active_skill_policy", "round_robin_when_ready"},
                     {"charged_skill_policy", "full_charge"},
-                    {"paired_spawn_streams_valid", true},
+                    {"paired_spawn_counts_valid", true},
                     {"fixed_tick_hz", 60},
                     {"duration_ticks", suite.maximum_ticks},
                     {"baseline_build_id", suite.builds.front().id},
@@ -1206,6 +1615,19 @@ int main(int argc, char **argv)
                     {"builds", std::move(builds)},
                     {"runs", runs},
                     {"aggregates", aggregates}};
+        if (relic_balance_mode)
+        {
+            report["coverage"] = {{"skill_count", hs::kCombatSkillCount},
+                                   {"upgrade_combinations_per_skill", 70},
+                                   {"four_of_eight_scans", 630},
+                                   {"relic_count", hs::kRelicCount},
+                                   {"generated_pairs", suite.builds.size() / 2},
+                                   {"single_skill_four_upgrade_complete",
+                                    suite.builds.size() / 2 == 630 * hs::kRelicCount},
+                                   {"paired_off_on_builds", suite.builds.size()},
+                                   {"metric_semantics", {"uses", "casts", "casts_with_hit", "hit_events", "damage", "kills", "activation_count", "cooldown_saved", "damage_prevented", "dps"}}};
+            report["relic_pairs"] = AggregateRelicPairs(suite, runs);
+        }
         std::ofstream(output_directory / "combat_report.json", std::ios::trunc)
             << report.dump(2) << '\n';
         std::ofstream csv(output_directory / "combat_summary.csv", std::ios::trunc);

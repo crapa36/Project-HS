@@ -7,6 +7,7 @@
 #include "relic_rule_table.hpp"
 #include "damage_command_buffer.hpp"
 #include "simulation_pipeline.hpp"
+#include "spatial_grid.hpp"
 #include "status_state.hpp"
 
 #include <algorithm>
@@ -53,9 +54,6 @@ constexpr Tick AnimationMarkerTicks(Tick source_marker, Tick playback_ticks) noe
 }
 
 constexpr float kPi = std::numbers::pi_v<float>;
-constexpr int kGridDimension = 30;
-constexpr float kGridCellSize = 4.0f;
-constexpr std::size_t kGridCellCount = kGridDimension * kGridDimension;
 constexpr std::uint8_t kNoTelemetrySource = 0xFF;
 constexpr std::uint64_t kPlayerRenderId = 1ull << 60;
 constexpr std::uint64_t kEnemyRenderId = 2ull << 60;
@@ -90,7 +88,7 @@ struct PlayerState
     std::array<std::uint8_t, kCombatSkillCount> skill_levels{};
     std::array<std::uint8_t, kCombatSkillCount> upgrades{};
     std::array<Tick, kActiveSkillCount> cooldowns{};
-    std::uint16_t relic_mask{};
+    RelicMask relic_mask{};
     Tick next_basic_attack{};
     Tick basic_attack_animation_start{};
     Tick basic_attack_animation_until{};
@@ -110,6 +108,12 @@ struct PlayerState
     Tick revive_invulnerable_until{};
     std::uint32_t kill_cooldown_progress{};
     std::uint32_t combat_hit_progress{};
+    std::uint32_t projectile_cadence_progress{};
+    std::uint32_t hit_streak_progress{};
+    Tick pre_damage_guard_ready{};
+    Tick area_resonance_ready{};
+    Tick pickup_reward_until{};
+    Tick low_health_survival_ready{};
     bool charging{};
     SkillKind charging_skill{SkillKind::Count};
     std::uint8_t charging_slot{0xFF};
@@ -154,6 +158,9 @@ struct EnemyActor
     Tick attack_cooldown_ticks{};
     Tick next_attack{};
     Tick attack_resolve{};
+    Tick boss_action_started{};
+    Tick boss_action_until{};
+    bool boss_action_recoil{};
     std::uint64_t attack_cast_id{};
     Float2 locked_aim{};
     Tick pattern_ready{};
@@ -170,11 +177,14 @@ struct EnemyActor
     EffectOrigin last_damage_origin{EffectOrigin::Original};
     std::uint64_t last_damage_cast{};
     std::uint8_t last_damage_upgrade{kNoTelemetrySource};
+    std::uint8_t last_damage_relic{kNoTelemetrySource};
     SkillKind marked_by_skill{SkillKind::Count};
     float marked_damage_coefficient{};
     Tick mark_expires{};
     Tick bleed_burn_ready{};
     Tick different_skill_ready{};
+    Tick slow_synergy_ready{};
+    Tick boss_pressure_ready{};
     SkillKind last_active_hit{SkillKind::Count};
     Tick last_active_hit_tick{};
     bool attacking{};
@@ -310,6 +320,7 @@ enum class BossActionKind : std::uint8_t
 struct BossAction
 {
     Tick due{};
+    Tick animation_started{};
     BossActionKind kind{};
     std::uint64_t boss_id{};
     Float2 position{};
@@ -372,6 +383,14 @@ struct PendingBossSpawn
     Tick due{};
 };
 
+struct PendingEnemySpawn
+{
+    EnemyKind kind{};
+    Float2 position{};
+    std::uint64_t random_key{};
+    Tick due{};
+};
+
 inline float LengthSquared(Float2 value) noexcept
 {
     return value.x * value.x + value.y * value.y;
@@ -426,9 +445,9 @@ inline bool HasUpgrade(std::uint8_t mask, std::uint8_t one_based_index) noexcept
     return (mask & (1u << (one_based_index - 1u))) != 0;
 }
 
-inline bool HasRelic(std::uint16_t mask, RelicKind relic) noexcept
+inline bool HasRelic(RelicMask mask, RelicKind relic) noexcept
 {
-    return (mask & (1u << static_cast<unsigned>(relic))) != 0;
+    return (mask & (RelicMask{1} << static_cast<unsigned>(relic))) != 0;
 }
 
 inline std::int32_t RoundDamage(float value) noexcept
@@ -517,12 +536,13 @@ struct GameSimulation::SimulationWorld
     std::vector<AreaHitRecord> area_hits;
     std::vector<CastRuntime> cast_runtimes;
     std::vector<DomainSignal> domain_signals;
-    std::array<std::vector<std::size_t>, kGridCellCount> enemy_grid;
+    EnemySpatialGrid enemy_grid;
     std::vector<std::size_t> collision_candidates;
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};
     std::vector<ActiveWave> waves;
     std::vector<PendingBossSpawn> pending_boss_spawns;
+    std::vector<PendingEnemySpawn> pending_enemy_spawns_delayed;
     InputFrame current_input{};
     Tick tick{};
     Tick growth_ticks{};
@@ -594,8 +614,10 @@ struct GameSimulation::SimulationWorld
                      float height = 0.75f);
     bool SpawnEnemy(EnemyKind kind, Float2 position,
                     std::uint64_t random_key = 0);
+    void QueueEnemySpawn(EnemyKind kind, std::uint64_t random_key);
     bool SpawnBoss(BossKind kind, Tick warning_ticks);
     void CommitBossSpawns();
+    void CommitDelayedEnemySpawns();
     void SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
                      bool guaranteed = false);
     ProjectileActor *FireProjectile(SkillKind skill, Float2 position, Float2 direction,
@@ -686,6 +708,13 @@ struct GameSimulation::SimulationWorld
     void HandleAlternatingSkills(SkillKind skill, std::size_t cooldown_index);
     void HandleDamageKnockback();
     void HandleCombatHitChain(const DamageCommand &event);
+    void HandleProjectileCadenceReward();
+    std::int32_t ApplyIncomingDamageRelics(std::int32_t amount);
+    void HandleSlowSynergy(EnemyActor &enemy, const DamageCommand &event);
+    void HandleAreaResonance(EnemyActor &enemy, const DamageCommand &event);
+    void HandleBossPressure(EnemyActor &enemy, const DamageCommand &event);
+    void HandleHitStreakReward(EnemyActor &enemy, const DamageCommand &event);
+    void HandlePickupReward(PickupKind kind);
     void HandleBleedBurnExplosion(EnemyActor &enemy,
                                   const DamageCommand &event,
                                   std::uint8_t source_upgrade);
@@ -707,7 +736,7 @@ struct GameSimulation::SimulationWorld
     bool DispatchPlayerDeathRules();
     void SessionTimerPhase();
     const SpawnStage &CurrentSpawnStage() const noexcept;
-    Float2 SpawnPosition(std::uint64_t salt) const noexcept;
+    Float2 SpawnPosition(std::uint64_t salt, bool &used_fallback) const noexcept;
     EnemyKind ChooseEnemyKind(std::uint64_t salt) const noexcept;
     void SpawnPhase();
     float SlowMultiplier(EnemyActor &enemy);

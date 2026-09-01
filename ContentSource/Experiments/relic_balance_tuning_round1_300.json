@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 300,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"03_kill_cooldown_surge","scenario":"","skills":["explosive_arrow"],"upgrade_masks":{"explosive_arrow":120},"relic":"kill_cooldown_surge","expect_activation":true}
+  ]
+}

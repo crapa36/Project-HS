@@ -127,11 +127,12 @@
     "camera": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["yaw_degrees", "pitch_degrees", "vertical_fov_degrees", "rotation_enabled", "minimum_distance_percent", "maximum_distance_percent", "tracks_player"],
+      "required": ["yaw_degrees", "pitch_degrees", "vertical_fov_degrees", "distance_m", "rotation_enabled", "minimum_distance_percent", "maximum_distance_percent", "tracks_player"],
       "properties": {
         "yaw_degrees": {"type": "number"},
         "pitch_degrees": {"type": "number"},
         "vertical_fov_degrees": {"type": "number", "exclusiveMinimum": 0},
+        "distance_m": {"type": "number", "exclusiveMinimum": 0},
         "rotation_enabled": {"type": "boolean"},
         "minimum_distance_percent": {"type": "number", "exclusiveMinimum": 0},
         "maximum_distance_percent": {"type": "number", "exclusiveMinimum": 0},
@@ -217,7 +218,7 @@
         "all_unlocked_in_first_version": {"type": "boolean"},
         "box_rules": {"$ref": "#/$defs/relic_box_rules"},
         "healing_pickup": {"$ref": "#/$defs/healing_pickup"},
-        "entries": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"$ref": "#/$defs/relic"}}
+        "entries": {"type": "array", "minItems": 20, "maxItems": 20, "items": {"$ref": "#/$defs/relic"}}
       }
     },
     "relic_box_rules": {
@@ -254,7 +255,7 @@
       "required": ["id", "display_name", "ordinal", "logic_id", "icon_asset_id", "parameters", "rule"],
       "properties": {
         "id": {"$ref": "#/$defs/stable_id"},
-        "ordinal": {"type": "integer", "minimum": 1, "maximum": 12},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 20},
         "logic_id": {"$ref": "#/$defs/stable_id"},
         "icon_asset_id": {"$ref": "#/$defs/asset_id"},
         "parameters": {"$ref": "#/$defs/parameters"},
@@ -845,7 +846,7 @@
       "properties":{
         "sprite":{"$ref":"#/$defs/stable_id"},
         "renderer":{"enum":["sprite","ground","segment","mesh"]},
-        "primitive":{"enum":["soft","disc","ring","sector","chevron","rune","cracks","arrow","shard","ember","spike","shock_shell","solid_trail","dashed_ricochet","fire_transfer","relic_chain","dash_wake"]},
+        "primitive":{"enum":["soft","disc","ring","sector","chevron","rune","cracks","arrow","shard","ember","spike","shock_shell","solid_trail","dashed_ricochet","fire_transfer","relic_chain","dash_wake","flame"]},
         "shape":{"enum":["point","sphere","disc","ring","line"]},
         "velocity":{"enum":["direction","cone","radial","inward","upward"]},
         "facing":{"enum":["camera","velocity","ground"]},

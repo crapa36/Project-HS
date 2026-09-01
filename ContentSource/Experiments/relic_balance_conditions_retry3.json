@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "duration_seconds": 180,
+  "seeds": [1001, 2002, 3003, 4004, 5005],
+  "cases": [
+    {"id":"shared-target-retry","scenario":"shared_target","skills":["explosive_arrow","trap"],"upgrades":{},"relic":"cross_active_tracking_arrow"},
+    {"id":"incoming-normal-retry","scenario":"incoming_normal","skills":[],"upgrades":{},"relic":"pre_damage_guard"},
+    {"id":"fatal-hit-retry","scenario":"fatal_hit","skills":[],"upgrades":{},"relic":"once_revive"},
+    {"id":"boss-only-retry","scenario":"boss_only","skills":["explosive_arrow"],"upgrades":{},"relic":"boss_pressure"}
+  ]
+}
