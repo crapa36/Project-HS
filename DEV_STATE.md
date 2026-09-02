@@ -138,6 +138,15 @@ skill VFX, without inventing speculative architecture.
   10-edge loop receives eight skinned triangles with regenerated normals and
   tangents. Cooked `enemy_melee.meshbin` is 3,051 vertices / 1,017 triangles;
   Idle, Run, both attacks, and Death D3D12 previews complete successfully.
+- 2026-09-02 continuation found the first Debug render crash was a stale-object
+  ABI mismatch after the expanded read-model balance summary. The crash mapped
+  to `GameSimulation::WriteReadModel`; a clean MSVC Debug rebuild fixed it and
+  `integration.render-smoke` passes again. A fresh, non-repeated Slime-only gate
+  captured 5 clips x 3 normalized times from the front under
+  `Artifacts/slime_eye_clean_front`. All 15 runs complete with empty D3D12
+  validation logs, and enlarged review shows no detached triangles or open eye
+  socket. Attack/death frames do close or occlude the eye as part of the authored
+  pose; final motion-quality approval remains manual.
 - Relic ABI/content/gameplay now contains 20 relics. Six appended relics are
   universal; Slow Synergy and Area Resonance require the Slow build tag. The
   54-run progression matrix is valid and observes all new offensive/utility
