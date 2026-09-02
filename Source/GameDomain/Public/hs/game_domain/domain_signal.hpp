@@ -93,6 +93,8 @@ enum class DomainSignalKind : std::uint8_t
     BossDied,
     ExperienceCollected,
     SkillUnlocked,
+    // context is the RelicKind that produced the activation.
+    RelicTriggered,
     Count,
 };
 

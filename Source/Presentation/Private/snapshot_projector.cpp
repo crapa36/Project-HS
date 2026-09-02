@@ -1,6 +1,7 @@
 #include <hs/presentation/projector.hpp>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -824,8 +825,19 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                    {730.0f + static_cast<float>(slot) * 190.0f, 948},
                    {180, 92}, 0xFF31425Au, text, 1.0f, 20);
         }
-        add_ui(UiModel::Kind::Text, {1'520, 32}, {360, 50}, 0xFFFFFFFFu,
-               std::format("유물 {:05X}", probe.relic_mask));
+        std::string relic_hud = std::format("유물 {}", std::popcount(probe.relic_mask));
+        std::size_t shown_relics{};
+        for (std::size_t relic = 0; relic < kRelicCount && shown_relics < 3; ++relic)
+        {
+            if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
+            relic_hud += std::format("\n{}", presentation.relic_names[relic].data());
+            ++shown_relics;
+        }
+        const auto hidden_relics = std::popcount(probe.relic_mask) - shown_relics;
+        if (hidden_relics > 0) relic_hud += std::format("  외 {}개", hidden_relics);
+        add_ui(UiModel::Kind::Panel, {1'510, 24}, {380, 122}, 0xB8202B3Au, "");
+        add_ui(UiModel::Kind::Text, {1'530, 34}, {340, 102}, 0xFFF0D890u,
+               relic_hud, 1.0f, 18);
 
         for (const auto &wave : model.waves)
         {
@@ -1115,14 +1127,30 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
                     const auto column = relic_count / 5;
                     const auto row = relic_count % 5;
+                    const auto &effects = model.summary.relic_effects[relic];
+                    const auto cooldown = effects[static_cast<std::size_t>(
+                        UpgradeEffectMetric::CooldownTicksSaved)];
+                    const auto prevented = effects[static_cast<std::size_t>(
+                        UpgradeEffectMetric::DamagePrevented)];
+                    const auto healing = effects[static_cast<std::size_t>(
+                        UpgradeEffectMetric::Healing)];
+                    std::string utility;
+                    if (cooldown > 0)
+                        utility += std::format(" · 쿨감 {:.1f}초",
+                                               static_cast<double>(cooldown) / 60.0);
+                    if (prevented > 0) utility += std::format(" · 방어 {}", prevented);
+                    if (healing > 0) utility += std::format(" · 회복 {}", healing);
                     add_ui(UiModel::Kind::Button,
-                           {80.0f + static_cast<float>(column) * 460.0f,
+                           {300.0f + static_cast<float>(column) * 405.0f,
                             235.0f + static_cast<float>(row) * 140.0f},
-                           {420, 125}, 0xFF2D4058u,
-                           std::format("{}\n{}",
+                           {385, 125}, 0xFF2D4058u,
+                           std::format("{}\n발동 {} · 피해 {} · 킬 {}{}\n{}",
                                        presentation.relic_names[relic].data(),
+                                       model.summary.relic_triggers[relic],
+                                       model.summary.relic_damage[relic],
+                                       model.summary.relic_kills[relic], utility,
                                        presentation.relic_rules[relic].data()),
-                           1.0f, 15);
+                           1.0f, 14);
                     ++relic_count;
                 }
                 if (relic_count == 0)
@@ -1163,12 +1191,29 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                            probe.upgrade_masks[0], probe.upgrade_masks[1],
                            probe.upgrade_masks[2], probe.upgrade_masks[3],
                            probe.upgrade_masks[4]), 1.0f, 26);
-        add_ui(UiModel::Kind::Text, {550, 630}, {820, 60}, 0xFFFFFFFFu,
-               std::format("강화 5~8: {:02X}/{:02X}/{:02X}/{:02X}  유물 {:05X}",
+        std::string result_relics = std::format("유물 {}개", std::popcount(probe.relic_mask));
+        std::size_t result_relic_count{};
+        for (std::size_t relic = 0; relic < kRelicCount; ++relic)
+        {
+            if (!HasRelic(probe.relic_mask, static_cast<RelicKind>(relic))) continue;
+            if (result_relic_count == 4) break;
+            result_relics += std::format("\n{} · 발동 {} · 피해 {} · 킬 {}",
+                                         presentation.relic_names[relic].data(),
+                                         model.summary.relic_triggers[relic],
+                                         model.summary.relic_damage[relic],
+                                         model.summary.relic_kills[relic]);
+            ++result_relic_count;
+        }
+        const auto hidden_result_relics =
+            std::popcount(probe.relic_mask) - result_relic_count;
+        if (hidden_result_relics > 0)
+            result_relics += std::format("\n외 {}개", hidden_result_relics);
+        add_ui(UiModel::Kind::Text, {550, 630}, {820, 180}, 0xFFFFFFFFu,
+               std::format("강화 5~8: {:02X}/{:02X}/{:02X}/{:02X}\n{}",
                            probe.upgrade_masks[5], probe.upgrade_masks[6],
                            probe.upgrade_masks[7], probe.upgrade_masks[8],
-                           probe.relic_mask), 1.0f, 26);
-        add_ui(UiModel::Kind::Text, {550, 710}, {820, 80}, 0xFFFFFFFFu,
+                           result_relics), 1.0f, 20);
+        add_ui(UiModel::Kind::Text, {550, 820}, {820, 60}, 0xFFFFFFFFu,
                std::format("스탯 {}/{}/{}/{}/{}/{}  시드 {}",
                            probe.stat_points[0], probe.stat_points[1],
                            probe.stat_points[2], probe.stat_points[3],

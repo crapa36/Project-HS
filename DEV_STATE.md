@@ -189,6 +189,15 @@ skill VFX, without inventing speculative architecture.
   +14.76% mean/+17.31% P95; Alternating Active 14.72 cooldown sec/min; Projectile
   Cadence +9.6 casts; Area Resonance +10.49% DPS; Low Health Survival 122.67
   prevention/min. No completed matrix was repeated.
+- Relic presentation now exposes all 20 owned relics by name instead of a hex
+  mask. The character relic page shows per-relic activations, damage, kills,
+  cooldown saved, damage prevented, and healing, and its four-column cards stay
+  inside the character panel. The result screen also lists relic contribution.
+  New relics 13-20 emit one source-tagged `RelicTriggered` domain signal per
+  activation and project to eight distinct primitive-based VFX assets. A clean
+  RelWithDebInfo rebuild and the full validation suite pass, 20/20; the VFX
+  showcase capture is mechanically valid, with final in-game readability still
+  requiring visual approval.
 
 ## Remaining Acceptance
 

@@ -14,6 +14,21 @@ constexpr std::array<std::string_view, 64> kVfxAssets{
 static_assert(static_cast<std::size_t>(DomainSignalKind::BossSpawnWarning) == kVfxAssets.size());
 
 [[nodiscard]] AssetId Cue(std::string_view id) noexcept { return MakeAssetId(id); }
+[[nodiscard]] std::string_view RelicTriggerVfx(std::uint8_t relic) noexcept
+{
+    switch (relic)
+    {
+    case static_cast<std::uint8_t>(RelicKind::ProjectileCadenceReward): return "particle.relic.projectile_cadence_reward";
+    case static_cast<std::uint8_t>(RelicKind::PreDamageGuard): return "particle.relic.pre_damage_guard";
+    case static_cast<std::uint8_t>(RelicKind::SlowSynergy): return "particle.relic.slow_synergy";
+    case static_cast<std::uint8_t>(RelicKind::AreaResonance): return "particle.relic.area_resonance";
+    case static_cast<std::uint8_t>(RelicKind::BossPressure): return "particle.relic.boss_pressure";
+    case static_cast<std::uint8_t>(RelicKind::HitStreakReward): return "particle.relic.hit_streak_reward";
+    case static_cast<std::uint8_t>(RelicKind::PickupReward): return "particle.relic.pickup_reward";
+    case static_cast<std::uint8_t>(RelicKind::LowHealthSurvival): return "particle.relic.low_health_survival";
+    default: return {};
+    }
+}
 [[nodiscard]] std::string_view Release(std::uint8_t c) noexcept { switch (c) { case 1: return "audio.skill.piercing.release"; case 2: return "audio.skill.multishot.release"; case 3: return "audio.skill.charged.release"; case 4: return "audio.skill.explosive.release"; case 5: return "audio.skill.ricochet.release"; case 6: return "audio.skill.arrow_rain.cast"; case 7: return "audio.skill.trap.cast"; case 8: return "audio.skill.retreat.cast"; default: return "audio.skill.basic.release"; } }
 [[nodiscard]] std::string_view Impact(std::uint8_t c) noexcept { switch (c) { case 1: return "audio.skill.piercing.pierce"; case 3: return "audio.skill.charged.hit"; case 4: return "audio.skill.explosive.main"; case 5: return "audio.skill.ricochet.hit"; default: return "audio.common.arrow_impact_light"; } }
 void AddAudio(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t &n, std::string_view cue, AudioEventAction action = AudioEventAction::Play) noexcept
@@ -139,6 +154,9 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::BossShockwaveTelegraphed: AddAudio(s,out,n,"audio.boss.shockwave.telegraph"); break;
     case DomainSignalKind::BossDied: AddVfx(s,out,n,"particle.boss.death"); AddAudio(s,out,n,"audio.boss.death"); break;
     case DomainSignalKind::SkillUnlocked: AddAudio(s,out,n,"audio.ui.unlock"); break;
+    case DomainSignalKind::RelicTriggered:
+        if (const auto asset = RelicTriggerVfx(s.context); !asset.empty()) AddVfx(s, out, n, asset);
+        break;
     default: break;
     }
     return n;

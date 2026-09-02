@@ -226,8 +226,10 @@ void TestCharacterInformationPage()
     Check(WriteSnapshot(simulation, snapshot), "character relic snapshot");
     Check(test_ui.page == hs::UiPage::CharacterStats &&
               contains_text(snapshot.View(), "피의 회복") &&
-              contains_text(snapshot.View(), "출혈 중인 적을 처치하면"),
-          "relic page shows acquired relic effects");
+              contains_text(snapshot.View(), "출혈 중인 적을 처치하면") &&
+              contains_text(snapshot.View(), "발동 0 · 피해 0 · 킬 0") &&
+              !contains_text(snapshot.View(), "유물 00001"),
+          "relic page shows acquired relic effects and contribution metrics");
 
     const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
@@ -437,6 +439,31 @@ void TestMonsterVisualScalesAndAttackFacing()
           "stationary ranged enemy faces its locked attack direction");
 }
 
+void TestRelicTriggerProjection()
+{
+    constexpr std::array<std::string_view, 8> assets{
+        "particle.relic.projectile_cadence_reward",
+        "particle.relic.pre_damage_guard",
+        "particle.relic.slow_synergy",
+        "particle.relic.area_resonance",
+        "particle.relic.boss_pressure",
+        "particle.relic.hit_streak_reward",
+        "particle.relic.pickup_reward",
+        "particle.relic.low_health_survival"};
+    for (std::size_t index = 0; index < assets.size(); ++index)
+    {
+        hs::DomainSignal signal;
+        signal.kind = hs::DomainSignalKind::RelicTriggered;
+        signal.context = static_cast<std::uint8_t>(
+            static_cast<std::size_t>(hs::RelicKind::ProjectileCadenceReward) + index);
+        std::array<hs::PresentationEvent, 1> output{};
+        const auto count = hs::ProjectDomainSignal(signal, output);
+        Check(count == 1 && output[0].kind == hs::PresentationKind::Vfx &&
+                  output[0].asset.value == hs::MakeAssetId(assets[index]).value,
+              "new relic activation projects its distinct VFX");
+    }
+}
+
 void RunGameplayPresentationTests()
 {
     TestCursorMovement();
@@ -446,6 +473,7 @@ void RunGameplayPresentationTests()
     TestSkillUpgradeCardsHaveDescriptions();
     TestBossAnimationReachesReleaseFrame();
     TestMonsterVisualScalesAndAttackFacing();
+    TestRelicTriggerProjection();
 }
 
 } // namespace gameplay_test

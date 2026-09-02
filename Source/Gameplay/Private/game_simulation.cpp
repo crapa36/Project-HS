@@ -409,7 +409,11 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.summary = {impl_->balance.direct_damage,
                      impl_->balance.derived_damage,
                      impl_->balance.damage_over_time,
-                     impl_->balance.upgrade_damage};
+                     impl_->balance.upgrade_damage,
+                     impl_->balance.relic_damage,
+                     impl_->balance.relic_triggers,
+                     impl_->balance.relic_kills,
+                     impl_->balance.relic_effects};
 
     for (const auto &enemy : impl_->enemies)
     {

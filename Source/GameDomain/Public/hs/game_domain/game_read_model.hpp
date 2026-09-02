@@ -161,6 +161,11 @@ struct SessionSummaryView
     std::uint64_t damage_over_time{};
     std::array<std::array<std::uint64_t, kUpgradeCount>, kCombatSkillCount>
         upgrade_damage{};
+    std::array<std::uint64_t, kRelicCount> relic_damage{};
+    std::array<std::uint64_t, kRelicCount> relic_triggers{};
+    std::array<std::uint64_t, kRelicCount> relic_kills{};
+    std::array<std::array<std::uint64_t, kUpgradeEffectMetricCount>, kRelicCount>
+        relic_effects{};
 };
 
 struct GameReadModel

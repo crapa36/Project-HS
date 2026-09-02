@@ -3404,6 +3404,8 @@ void GameSimulation::SimulationWorld::HandleProjectileCadenceReward()
     }
     RecordRelicEffect(RelicKind::ProjectileCadenceReward,
                       UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, player.position,
+               static_cast<std::uint8_t>(RelicKind::ProjectileCadenceReward));
     RecordRelicEffect(RelicKind::ProjectileCadenceReward,
                       UpgradeEffectMetric::CooldownTicksSaved, saved);
 }
@@ -3438,6 +3440,8 @@ std::int32_t GameSimulation::SimulationWorld::ApplyIncomingDamageRelics(
         amount = RoundFinalDamage(amount * (1.0f - reduction), rules);
         *ready = tick + cooldown;
         RecordRelicEffect(rule.id, UpgradeEffectMetric::Activations);
+        EmitSignal(DomainSignalKind::RelicTriggered, player.position,
+                   static_cast<std::uint8_t>(rule.id));
         RecordRelicEffect(rule.id, UpgradeEffectMetric::DamagePrevented,
                           static_cast<std::uint64_t>(before_reduction - amount));
     }
@@ -3459,6 +3463,8 @@ void GameSimulation::SimulationWorld::HandleSlowSynergy(
                 0.0f, 0, event.source_upgrade,
                 static_cast<std::uint8_t>(RelicKind::SlowSynergy));
     RecordRelicEffect(RelicKind::SlowSynergy, UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, enemy.position,
+               static_cast<std::uint8_t>(RelicKind::SlowSynergy));
 }
 
 void GameSimulation::SimulationWorld::HandleAreaResonance(
@@ -3475,6 +3481,8 @@ void GameSimulation::SimulationWorld::HandleAreaResonance(
                 0.0f, 0, event.source_upgrade,
                 static_cast<std::uint8_t>(RelicKind::AreaResonance));
     RecordRelicEffect(RelicKind::AreaResonance, UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, enemy.position,
+               static_cast<std::uint8_t>(RelicKind::AreaResonance));
 }
 
 void GameSimulation::SimulationWorld::HandleBossPressure(
@@ -3491,6 +3499,8 @@ void GameSimulation::SimulationWorld::HandleBossPressure(
                 0.0f, 0, event.source_upgrade,
                 static_cast<std::uint8_t>(RelicKind::BossPressure));
     RecordRelicEffect(RelicKind::BossPressure, UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, enemy.position,
+               static_cast<std::uint8_t>(RelicKind::BossPressure));
 }
 
 void GameSimulation::SimulationWorld::HandleHitStreakReward(
@@ -3507,6 +3517,8 @@ void GameSimulation::SimulationWorld::HandleHitStreakReward(
                 0.0f, 0, event.source_upgrade,
                 static_cast<std::uint8_t>(RelicKind::HitStreakReward));
     RecordRelicEffect(RelicKind::HitStreakReward, UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, enemy.position,
+               static_cast<std::uint8_t>(RelicKind::HitStreakReward));
 }
 
 void GameSimulation::SimulationWorld::HandlePickupReward(PickupKind kind)
@@ -3515,6 +3527,8 @@ void GameSimulation::SimulationWorld::HandlePickupReward(PickupKind kind)
     player.pickup_reward_until =
         std::max(player.pickup_reward_until, tick + rules.relics.pickup_reward.duration_ticks);
     RecordRelicEffect(RelicKind::PickupReward, UpgradeEffectMetric::Activations);
+    EmitSignal(DomainSignalKind::RelicTriggered, player.position,
+               static_cast<std::uint8_t>(RelicKind::PickupReward));
 }
 
 void GameSimulation::SimulationWorld::HandleBleedBurnExplosion(EnemyActor &enemy,
