@@ -1125,15 +1125,22 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 for (std::uint8_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
                 {
                     if (!HasUpgrade(probe.upgrade_masks[selected], upgrade + 1)) continue;
+                    const auto column = upgrade_row % 2;
+                    const auto row = upgrade_row / 2;
+                    const auto x = 780.0f + static_cast<float>(column) * 398.0f;
+                    const auto y = 530.0f + static_cast<float>(row) * 90.0f;
                     add_ui(UiModel::Kind::Button,
-                           {780, 530.0f + static_cast<float>(upgrade_row) * 98.0f},
-                           {780, 86}, 0xFF2D4058u,
-                            std::format("강화 {} · {}  ·  기여 피해 {}\n{}",
-                                        static_cast<unsigned>(upgrade) + 1,
-                                        skill_upgrade_names[selected][upgrade],
-                                        model.summary.upgrade_damage[selected][upgrade],
-                                        skill_upgrade_descriptions[selected][upgrade]),
-                           1.0f, 19);
+                           {x, y}, {382, 82}, 0xFF2D4058u, "");
+                    add_ui(UiModel::Kind::Text, {x + 14, y + 9}, {354, 23},
+                           0xFF78B8FFu,
+                           std::format("강화 {} · {}  ·  피해 {}",
+                                       static_cast<unsigned>(upgrade) + 1,
+                                       skill_upgrade_names[selected][upgrade],
+                                       model.summary.upgrade_damage[selected][upgrade]),
+                           1.0f, 16);
+                    add_ui(UiModel::Kind::Text, {x + 14, y + 36}, {354, 38},
+                           0xFFD7E0ECu,
+                           skill_upgrade_descriptions[selected][upgrade], 1.0f, 14);
                     ++upgrade_row;
                 }
                 if (upgrade_row == 0)
@@ -1161,16 +1168,22 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                                static_cast<double>(cooldown) / 60.0);
                     if (prevented > 0) utility += std::format(" · 방어 {}", prevented);
                     if (healing > 0) utility += std::format(" · 회복 {}", healing);
+                    const auto x = 300.0f + static_cast<float>(column) * 334.0f;
+                    const auto y = 235.0f + static_cast<float>(row) * 140.0f;
                     add_ui(UiModel::Kind::Button,
-                           {300.0f + static_cast<float>(column) * 405.0f,
-                            235.0f + static_cast<float>(row) * 140.0f},
-                           {385, 125}, 0xFF2D4058u,
-                           std::format("{}\n발동 {} · 피해 {} · 킬 {}{}\n{}",
-                                       presentation.relic_names[relic].data(),
+                           {x, y}, {318, 125}, 0xFF2D4058u, "");
+                    add_ui(UiModel::Kind::Text, {x + 16, y + 12}, {286, 25},
+                           0xFFFFD06Au, presentation.relic_names[relic].data(),
+                           1.0f, 18);
+                    add_ui(UiModel::Kind::Text, {x + 16, y + 42}, {286, 23},
+                           0xFF9CC8FFu,
+                           std::format("발동 {} · 피해 {} · 킬 {}{}",
                                        model.summary.relic_triggers[relic],
                                        model.summary.relic_damage[relic],
-                                       model.summary.relic_kills[relic], utility,
-                                       presentation.relic_rules[relic].data()),
+                                       model.summary.relic_kills[relic], utility),
+                           1.0f, 14);
+                    add_ui(UiModel::Kind::Text, {x + 16, y + 70}, {286, 43},
+                           0xFFB8C2D0u, presentation.relic_rules[relic].data(),
                            1.0f, 14);
                     ++relic_count;
                 }

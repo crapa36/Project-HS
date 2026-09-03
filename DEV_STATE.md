@@ -203,8 +203,13 @@ skill VFX, without inventing speculative architecture.
   than silently dropping entries after 32. The combat HUD has a readable dark
   backing panel; selection cards separate category-colored titles, descriptions,
   and actions; the result screen shows readable skill levels and upgrade counts
-  instead of hexadecimal masks. RelWithDebInfo CTest passes 20/20, and a fresh
-  render-smoke capture confirms intact HP/XP labels and the updated HUD styling.
+  instead of hexadecimal masks. DirectWrite layouts now shrink against measured
+  wrapped text and use character ellipsis only below the 8px floor. Bars do not
+  wrap, and controls are centered. All 20 relic cards fit four columns inside the
+  character panel, while all eight upgrade cards fit a two-column grid; each uses
+  separate colored heading, contribution, and description text. RelWithDebInfo
+  CTest passes 20/20, and a fresh render-smoke capture confirms intact centered
+  HP/XP labels with zero D3D12 validation errors.
 
 ## Remaining Acceptance
 

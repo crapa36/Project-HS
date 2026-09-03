@@ -178,7 +178,16 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
             &format);
         if (FAILED(format_result))
             return HResultFailure("Create UI text format", format_result);
-        format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        const auto centered_control = model.kind == UiModel::Kind::Button ||
+                                      model.kind == UiModel::Kind::Bar;
+        format->SetWordWrapping(model.kind == UiModel::Kind::Bar
+                                    ? DWRITE_WORD_WRAPPING_NO_WRAP
+                                    : DWRITE_WORD_WRAPPING_WRAP);
+        if (centered_control)
+        {
+            format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
         const auto inset_x = model.kind == UiModel::Kind::Button ||
                                      model.kind == UiModel::Kind::Panel
                                  ? 14.0f
@@ -196,10 +205,39 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         surface.brush->SetColor(model.kind == UiModel::Kind::Text
                                     ? color_of(model.color_rgba)
                                     : D2D1_COLOR_F{1, 1, 1, 1});
-        surface.target->DrawText(text.data(), static_cast<UINT32>(text.size()), format.Get(),
-                                 text_rectangle, surface.brush.Get(),
-                                 D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                                 DWRITE_MEASURING_MODE_NATURAL);
+        const auto text_width = std::max(text_rectangle.right - text_rectangle.left, 1.0f);
+        const auto text_height = std::max(text_rectangle.bottom - text_rectangle.top, 1.0f);
+        ComPtr<IDWriteTextLayout> layout;
+        const auto layout_result = ui_dwrite_factory->CreateTextLayout(
+            text.data(), static_cast<UINT32>(text.size()), format.Get(),
+            text_width, static_cast<float>(kUiHeight), &layout);
+        if (FAILED(layout_result))
+            return HResultFailure("Create UI text layout", layout_result);
+        DWRITE_TEXT_METRICS metrics{};
+        auto fitted_size = font_size;
+        while (SUCCEEDED(layout->GetMetrics(&metrics)) && fitted_size > 8.0f &&
+               (metrics.height > text_height ||
+                metrics.widthIncludingTrailingWhitespace > text_width))
+        {
+            fitted_size -= 1.0f;
+            layout->SetFontSize(fitted_size, {0, static_cast<UINT32>(text.size())});
+        }
+        layout->GetMetrics(&metrics);
+        layout->SetMaxHeight(text_height);
+        if (metrics.height > text_height ||
+            metrics.widthIncludingTrailingWhitespace > text_width)
+        {
+            ComPtr<IDWriteInlineObject> ellipsis;
+            if (SUCCEEDED(ui_dwrite_factory->CreateEllipsisTrimmingSign(format.Get(),
+                                                                        &ellipsis)))
+            {
+                const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+                layout->SetTrimming(&trimming, ellipsis.Get());
+            }
+        }
+        surface.target->DrawTextLayout(
+            {text_rectangle.left, text_rectangle.top}, layout.Get(), surface.brush.Get(),
+            D2D1_DRAW_TEXT_OPTIONS_CLIP);
     }
 
     const auto draw_result = surface.target->EndDraw();

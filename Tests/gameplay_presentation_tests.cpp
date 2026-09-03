@@ -153,10 +153,11 @@ void TestCharacterInformationPage()
     hs::GameSimulation simulation;
     Check(simulation.Initialize({18}, QuietGameData()).Succeeded(),
           "character page initialize");
-    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
-          static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
-    Debug(simulation, hs::DebugCommandKind::GrantRelic,
-          static_cast<std::uint64_t>(hs::RelicKind::BleedKillHeal));
+    for (std::uint32_t upgrade = 0; upgrade < hs::kUpgradeCount; ++upgrade)
+        Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), upgrade);
+    for (std::uint64_t relic = 0; relic < hs::kRelicCount; ++relic)
+        Debug(simulation, hs::DebugCommandKind::GrantRelic, relic);
     Debug(simulation, hs::DebugCommandKind::GrantSkill,
           static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
     Debug(simulation, hs::DebugCommandKind::GrantSkill,
@@ -196,6 +197,22 @@ void TestCharacterInformationPage()
               contains_text(snapshot.View(), "연속 추가 화살") &&
               contains_text(snapshot.View(), "기본 공격을 유지하면"),
           "skill page shows current upgrades and detailed skill explanation");
+    const auto upgrade_cards = std::ranges::count_if(
+        snapshot.View().ui, [](const hs::UiModel &model) {
+            return model.kind == hs::UiModel::Kind::Button &&
+                   model.color_rgba == 0xFF2D4058u;
+        });
+    const auto upgrades_fit = std::ranges::all_of(
+        snapshot.View().ui, [](const hs::UiModel &model) {
+            if (model.kind != hs::UiModel::Kind::Button ||
+                model.color_rgba != 0xFF2D4058u)
+                return true;
+            return model.anchor_pixels.x >= 780.0f &&
+                   model.anchor_pixels.x + model.size_pixels.x <= 1'560.0f &&
+                   model.anchor_pixels.y + model.size_pixels.y <= 920.0f;
+        });
+    Check(upgrade_cards == hs::kUpgradeCount && upgrades_fit,
+          "all upgrade cards fit the character panel");
 
     SetCursor(held, 850, 240);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -225,11 +242,38 @@ void TestCharacterInformationPage()
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "character relic snapshot");
     Check(test_ui.page == hs::UiPage::CharacterStats &&
-              contains_text(snapshot.View(), "피의 회복") &&
-              contains_text(snapshot.View(), "출혈 중인 적을 처치하면") &&
+               contains_text(snapshot.View(), "피의 회복") &&
+               contains_text(snapshot.View(), "출혈 중인 적을 처치하면") &&
               contains_text(snapshot.View(), "발동 0 · 피해 0 · 킬 0") &&
-              !contains_text(snapshot.View(), "유물 00001"),
-          "relic page shows acquired relic effects and contribution metrics");
+               !contains_text(snapshot.View(), "유물 00001"),
+           "relic page shows acquired relic effects and contribution metrics");
+    const auto has_relic_text = [&](std::uint32_t color, float y) {
+        return std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &model) {
+            return model.kind == hs::UiModel::Kind::Text &&
+                   model.color_rgba == color && model.anchor_pixels.x == 316.0f &&
+                   model.anchor_pixels.y == y;
+        });
+    };
+    Check(has_relic_text(0xFFFFD06Au, 247.0f) &&
+              has_relic_text(0xFF9CC8FFu, 277.0f) &&
+              has_relic_text(0xFFB8C2D0u, 305.0f),
+          "relic cards separate name, contribution, and rule hierarchy");
+    const auto relic_cards = std::ranges::count_if(
+        snapshot.View().ui, [](const hs::UiModel &model) {
+            return model.kind == hs::UiModel::Kind::Button &&
+                   model.color_rgba == 0xFF2D4058u;
+        });
+    const auto relics_fit = std::ranges::all_of(
+        snapshot.View().ui, [](const hs::UiModel &model) {
+            if (model.kind != hs::UiModel::Kind::Button ||
+                model.color_rgba != 0xFF2D4058u)
+                return true;
+            return model.anchor_pixels.x >= 300.0f &&
+                   model.anchor_pixels.x + model.size_pixels.x <= 1'620.0f &&
+                   model.anchor_pixels.y + model.size_pixels.y <= 935.0f;
+        });
+    Check(relic_cards == hs::kRelicCount && relics_fit,
+          "all relic cards fit the character panel");
 
     const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
