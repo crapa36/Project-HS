@@ -314,26 +314,37 @@ void TestSkillUpgradeCardsHaveDescriptions()
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
     Check(WriteSnapshot(simulation, snapshot), "upgrade description snapshot");
     bool checked_upgrade{};
-    for (const auto &card : probe.cards)
+    for (std::size_t card_index = 0; card_index < probe.card_count; ++card_index)
     {
+        const auto card = probe.cards[card_index];
         if (card.kind != hs::CardKind::BasicUpgrade &&
             card.kind != hs::CardKind::SkillUpgrade)
             continue;
         checked_upgrade = true;
-        const auto heading = std::format("강화 {} · ",
+        const auto heading = std::format("강화 {}",
                                          static_cast<unsigned>(card.upgrade) + 1);
+        const auto expected_x = 384.0f + static_cast<float>(card_index) * 420.0f;
+        const auto has_heading = std::ranges::any_of(
+            snapshot.View().ui, [&](const hs::UiModel &model) {
+                const auto end = std::ranges::find(model.utf8_text, '\0');
+                const std::string_view text(model.utf8_text.data(),
+                                            end - model.utf8_text.begin());
+                return model.kind == hs::UiModel::Kind::Text &&
+                       model.color_rgba == 0xFF78B8FFu &&
+                       model.anchor_pixels.x == expected_x && text.contains(heading);
+            });
         const auto has_description = std::ranges::any_of(
             snapshot.View().ui, [&](const hs::UiModel &model) {
                 const auto end = std::ranges::find(model.utf8_text, '\0');
                 const std::string_view text(model.utf8_text.data(),
                                             end - model.utf8_text.begin());
-                const auto heading_position = text.find(heading);
-                return heading_position != std::string_view::npos &&
-                       text.find('#', heading_position) == std::string_view::npos &&
-                       std::ranges::count(text, '\n') >= 1 &&
-                       heading_position + heading.size() + 30 < text.size();
+                return model.kind == hs::UiModel::Kind::Text &&
+                       model.color_rgba == 0xFFD7E0ECu &&
+                       model.anchor_pixels.x == expected_x &&
+                       model.anchor_pixels.y == 420.0f && text.size() > 30;
             });
-        Check(has_description, "skill upgrade card includes readable effect description");
+        Check(has_heading && has_description,
+              "skill upgrade card separates heading and readable description");
     }
     Check(checked_upgrade, "upgrade description test has an upgrade card");
     Check(simulation.Shutdown().Succeeded(), "upgrade description shutdown");

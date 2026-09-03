@@ -793,6 +793,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     {
         const auto time = probe.final_boss_spawned ? probe.boss_fight_ticks
                                                    : probe.growth_ticks;
+        add_ui(UiModel::Kind::Panel, {20, 20}, {452, 146}, 0xA8181D28u, "");
         add_ui(UiModel::Kind::Text, {32, 32}, {680, 50}, 0xFFFFFFFFu,
                std::format("LV {}  {:02}:{:02}  적 {}", probe.level,
                            (time / 60) / 60, (time / 60) % 60,
@@ -895,24 +896,44 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         for (std::size_t index = 0; index < probe.card_count; ++index)
         {
             const auto card = probe.cards[index];
-            std::string label;
+            std::string title;
+            std::string detail;
             if (card.kind == CardKind::LearnSkill)
-                label = std::format("{}\n{}", skill_names[card.subject],
-                                    skill_descriptions[card.subject]);
+            {
+                title = std::format("새 스킬 · {}", skill_names[card.subject]);
+                detail = std::string(skill_descriptions[card.subject]);
+            }
             else if (card.kind == CardKind::Relic)
-                label = std::format(
-                    "{}\n{}", presentation.relic_names[card.subject].data(),
-                    presentation.relic_rules[card.subject].data());
+            {
+                title = std::format("유물 · {}",
+                                    presentation.relic_names[card.subject].data());
+                detail = presentation.relic_rules[card.subject].data();
+            }
             else if (card.kind == CardKind::BonusStatPoint)
-                label = "스탯 포인트 +1";
+            {
+                title = "보너스 · 스탯 포인트 +1";
+                detail = "원하는 능력치에 투자할 포인트를 하나 더 얻습니다.";
+            }
             else
-                label = std::format("{}\n강화 {} · {}\n{}", skill_names[card.subject],
-                                    static_cast<unsigned>(card.upgrade) + 1,
-                                    skill_upgrade_names[card.subject][card.upgrade],
-                                    skill_upgrade_descriptions[card.subject][card.upgrade]);
+            {
+                title = std::format("{} · 강화 {}", skill_names[card.subject],
+                                    static_cast<unsigned>(card.upgrade) + 1);
+                detail = std::format("{}\n\n{}",
+                    skill_upgrade_names[card.subject][card.upgrade],
+                    skill_upgrade_descriptions[card.subject][card.upgrade]);
+            }
+            const auto x = 360.0f + static_cast<float>(index) * 420.0f;
+            const auto accent = card.kind == CardKind::Relic ? 0xFFFFD06Au :
+                                card.kind == CardKind::BonusStatPoint ? 0xFF76E0A0u :
+                                                                      0xFF78B8FFu;
             add_ui(UiModel::Kind::Button,
-                   {360.0f + static_cast<float>(index) * 420.0f, 300},
-                   {360, 420}, 0xFF334A64u, label, 1.0f, 24);
+                   {x, 300}, {360, 420}, 0xF02A394Cu, "");
+            add_ui(UiModel::Kind::Text, {x + 24, 326}, {312, 72}, accent,
+                   title, 1.0f, 27);
+            add_ui(UiModel::Kind::Text, {x + 24, 420}, {312, 240}, 0xFFD7E0ECu,
+                   detail, 1.0f, 20);
+            add_ui(UiModel::Kind::Text, {x + 24, 674}, {312, 24}, 0xFF8190A4u,
+                   std::format("클릭하여 선택  ·  {}", index + 1), 1.0f, 15);
         }
         add_ui(UiModel::Kind::Button, {760, 790}, {400, 72}, 0xFF5A4050u,
                std::format("재추첨 {}",
@@ -1163,7 +1184,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     {
         add_ui(UiModel::Kind::Panel, {500, 100}, {920, 880}, 0xE0181D28u,
                "");
-        add_ui(UiModel::Kind::Text, {550, 130}, {820, 70}, 0xFFFFFFFFu,
+        add_ui(UiModel::Kind::Text, {550, 130}, {820, 70},
+               probe.phase == SessionPhase::Victory ? 0xFFFFD06Au : 0xFFFF7070u,
                std::format("{}  레벨 {}  처치 {}  보스전 {:02}:{:02}",
                            probe.phase == SessionPhase::Victory ? "승리" : "패배",
                            probe.level, probe.kills,
@@ -1186,11 +1208,21 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         if (damage_table == "전투 피해 통계\n") damage_table += "기록 없음";
         add_ui(UiModel::Kind::Text, {550, 285}, {820, 260}, 0xFFFFFFFFu,
                damage_table, 1.0f, 23);
-        add_ui(UiModel::Kind::Text, {550, 560}, {820, 60}, 0xFFFFFFFFu,
-               std::format("강화 기본~4: {:02X}/{:02X}/{:02X}/{:02X}/{:02X}",
-                           probe.upgrade_masks[0], probe.upgrade_masks[1],
-                           probe.upgrade_masks[2], probe.upgrade_masks[3],
-                           probe.upgrade_masks[4]), 1.0f, 26);
+        std::string skill_build = std::format(
+            "{} Lv{} · 강화 {}개", skill_names[0], probe.skill_levels[0],
+            std::popcount(probe.upgrade_masks[0]));
+        for (const auto skill : probe.skill_loadout)
+        {
+            if (skill == SkillKind::Count) continue;
+            const auto index = static_cast<std::size_t>(skill);
+            skill_build += std::format("\n{} Lv{} · 강화 {}개", skill_names[index],
+                                       probe.skill_levels[index],
+                                       std::popcount(probe.upgrade_masks[index]));
+        }
+        add_ui(UiModel::Kind::Text, {550, 555}, {820, 32}, 0xFFFFD06Au,
+               "빌드 요약", 1.0f, 24);
+        add_ui(UiModel::Kind::Text, {550, 590}, {820, 105}, 0xFFD7E0ECu,
+               skill_build, 1.0f, 18);
         std::string result_relics = std::format("유물 {}개", std::popcount(probe.relic_mask));
         std::size_t result_relic_count{};
         for (std::size_t relic = 0; relic < kRelicCount; ++relic)
@@ -1208,12 +1240,9 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             std::popcount(probe.relic_mask) - result_relic_count;
         if (hidden_result_relics > 0)
             result_relics += std::format("\n외 {}개", hidden_result_relics);
-        add_ui(UiModel::Kind::Text, {550, 630}, {820, 180}, 0xFFFFFFFFu,
-               std::format("강화 5~8: {:02X}/{:02X}/{:02X}/{:02X}\n{}",
-                           probe.upgrade_masks[5], probe.upgrade_masks[6],
-                           probe.upgrade_masks[7], probe.upgrade_masks[8],
-                           result_relics), 1.0f, 20);
-        add_ui(UiModel::Kind::Text, {550, 820}, {820, 60}, 0xFFFFFFFFu,
+        add_ui(UiModel::Kind::Text, {550, 700}, {820, 135}, 0xFFD7E0ECu,
+               result_relics, 1.0f, 18);
+        add_ui(UiModel::Kind::Text, {550, 840}, {820, 45}, 0xFF8190A4u,
                std::format("스탯 {}/{}/{}/{}/{}/{}  시드 {}",
                            probe.stat_points[0], probe.stat_points[1],
                            probe.stat_points[2], probe.stat_points[3],

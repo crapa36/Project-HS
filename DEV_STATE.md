@@ -198,6 +198,13 @@ skill VFX, without inventing speculative architecture.
   RelWithDebInfo rebuild and the full validation suite pass, 20/20; the VFX
   showcase capture is mechanically valid, with final in-game readability still
   requiring visual approval.
+- UI rendering now honors authored text colors, applies consistent button/panel
+  padding and rounded corners, and renders the complete bounded UI model rather
+  than silently dropping entries after 32. The combat HUD has a readable dark
+  backing panel; selection cards separate category-colored titles, descriptions,
+  and actions; the result screen shows readable skill levels and upgrade counts
+  instead of hexadecimal masks. RelWithDebInfo CTest passes 20/20, and a fresh
+  render-smoke capture confirms intact HP/XP labels and the updated HUD styling.
 
 ## Remaining Acceptance
 

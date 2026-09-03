@@ -123,7 +123,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                             static_cast<float>((packed >> 16) & 0xff) * inverse_byte,
                             static_cast<float>((packed >> 24) & 0xff) * inverse_byte};
     };
-    for (const auto &model : models.first(std::min<std::size_t>(models.size(), 32)))
+    for (const auto &model : models)
     {
         const auto element_width = std::max(model.size_pixels.x, 0.0f);
         const auto element_height = std::max(model.size_pixels.y, 0.0f);
@@ -140,7 +140,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         case UiModel::Kind::Button:
             if (element_width > 0 && element_height > 0)
             {
-                const D2D1_ROUNDED_RECT rounded{rectangle, 6.0f, 6.0f};
+                const D2D1_ROUNDED_RECT rounded{rectangle, 11.0f, 11.0f};
                 surface.target->FillRoundedRectangle(rounded, surface.brush.Get());
             }
             break;
@@ -179,13 +179,23 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         if (FAILED(format_result))
             return HResultFailure("Create UI text format", format_result);
         format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        const auto inset_x = model.kind == UiModel::Kind::Button ||
+                                     model.kind == UiModel::Kind::Panel
+                                 ? 14.0f
+                                 : model.kind == UiModel::Kind::Bar ? 8.0f : 0.0f;
+        const auto inset_y = model.kind == UiModel::Kind::Button ||
+                                     model.kind == UiModel::Kind::Panel
+                                 ? 9.0f
+                                 : 0.0f;
         const D2D1_RECT_F text_rectangle{
-            model.anchor_pixels.x, model.anchor_pixels.y,
+            model.anchor_pixels.x + inset_x, model.anchor_pixels.y + inset_y,
             model.anchor_pixels.x +
-                (element_width > 0 ? element_width : kUiWidth - model.anchor_pixels.x),
+                (element_width > 0 ? element_width - inset_x : kUiWidth - model.anchor_pixels.x),
             model.anchor_pixels.y +
-                (element_height > 0 ? element_height : font_size * 1.6f)};
-        surface.brush->SetColor(D2D1_COLOR_F{1, 1, 1, 1});
+                (element_height > 0 ? element_height - inset_y : font_size * 1.6f)};
+        surface.brush->SetColor(model.kind == UiModel::Kind::Text
+                                    ? color_of(model.color_rgba)
+                                    : D2D1_COLOR_F{1, 1, 1, 1});
         surface.target->DrawText(text.data(), static_cast<UINT32>(text.size()), format.Get(),
                                  text_rectangle, surface.brush.Get(),
                                  D2D1_DRAW_TEXT_OPTIONS_CLIP,
