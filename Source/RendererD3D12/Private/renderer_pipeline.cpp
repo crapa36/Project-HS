@@ -26,7 +26,16 @@ Result D3D12Renderer::Impl::CreatePipeline()
     monster_pbr_range.RegisterSpace = 1;
     monster_pbr_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
     monster_pbr_range.OffsetInDescriptorsFromTableStart = kCharacterDescriptorCount;
-    const std::array ranges{character_range, monster_pbr_range};
+    D3D12_DESCRIPTOR_RANGE1 environment_range{};
+    environment_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    environment_range.NumDescriptors = kEnvironmentDescriptorCount;
+    environment_range.BaseShaderRegister = 0;
+    environment_range.RegisterSpace = 2;
+    environment_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                              D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    environment_range.OffsetInDescriptorsFromTableStart =
+        kCharacterDescriptorCount + kMonsterPbrDescriptorCount;
+    const std::array ranges{character_range, monster_pbr_range, environment_range};
 
     std::array<D3D12_ROOT_PARAMETER1, 16> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -77,7 +86,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
                                  D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
 
-    std::array<D3D12_STATIC_SAMPLER_DESC, 3> samplers{};
+    std::array<D3D12_STATIC_SAMPLER_DESC, 5> samplers{};
     samplers[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samplers[0].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
@@ -99,6 +108,17 @@ Result D3D12Renderer::Impl::CreatePipeline()
     samplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     samplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
     samplers[2].ShaderRegister = 2;
+    samplers[3] = samplers[2];
+    samplers[3].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+    samplers[3].Filter = D3D12_FILTER_ANISOTROPIC;
+    samplers[3].MaxAnisotropy = 16;
+    samplers[3].ShaderRegister = 3;
+    samplers[4] = samplers[3];
+    samplers[4].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[4].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[4].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    samplers[4].MaxLOD = 5.0f;
+    samplers[4].ShaderRegister = 4;
 
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
     root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -130,8 +150,10 @@ Result D3D12Renderer::Impl::CreatePipeline()
     std::vector<std::byte> scene_vertex;
     std::vector<std::byte> scene_pixel;
     std::vector<std::byte> shadow_vertex;
+    std::vector<std::byte> shadow_pixel;
     std::vector<std::byte> particle_vertex;
     std::vector<std::byte> particle_pixel;
+    std::vector<std::byte> slime_pixel;
     std::vector<std::byte> particle_compute;
     std::vector<std::byte> full_screen_vertex;
     std::vector<std::byte> deferred_pixel;
@@ -145,8 +167,10 @@ Result D3D12Renderer::Impl::CreatePipeline()
              std::pair{"scene_vs.dxil", &scene_vertex},
              std::pair{"scene_ps.dxil", &scene_pixel},
              std::pair{"shadow_vs.dxil", &shadow_vertex},
+             std::pair{"shadow_ps.dxil", &shadow_pixel},
              std::pair{"particle_vs.dxil", &particle_vertex},
              std::pair{"particle_ps.dxil", &particle_pixel},
+             std::pair{"slime_ps.dxil", &slime_pixel},
              std::pair{"particle_cs.dxil", &particle_compute},
              std::pair{"fullscreen_vs.dxil", &full_screen_vertex},
              std::pair{"deferred_ps.dxil", &deferred_pixel},
@@ -190,7 +214,7 @@ Result D3D12Renderer::Impl::CreatePipeline()
     scene.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     scene.SampleMask = UINT_MAX;
     scene.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    scene.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    scene.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
     scene.RasterizerState.FrontCounterClockwise = FALSE;
     scene.RasterizerState.DepthClipEnable = TRUE;
     scene.DepthStencilState.DepthEnable = TRUE;
@@ -198,10 +222,12 @@ Result D3D12Renderer::Impl::CreatePipeline()
     scene.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
     scene.InputLayout = {input_layout, static_cast<UINT>(std::size(input_layout))};
     scene.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    scene.NumRenderTargets = 3;
+    scene.NumRenderTargets = 4;
     scene.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
     scene.RTVFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    scene.RTVFormats[2] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    // Preserve world position precision for deferred shadow comparisons.
+    scene.RTVFormats[2] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    scene.RTVFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;
     scene.DSVFormat = kDepthFormat;
     scene.SampleDesc = {1, 0};
     result = device->CreateGraphicsPipelineState(&scene, IID_PPV_ARGS(&scene_pipeline));
@@ -212,12 +238,14 @@ Result D3D12Renderer::Impl::CreatePipeline()
 
     auto shadow_state = scene;
     shadow_state.VS = {shadow_vertex.data(), shadow_vertex.size()};
-    shadow_state.PS = {};
+    shadow_state.PS = {shadow_pixel.data(), shadow_pixel.size()};
     shadow_state.NumRenderTargets = 0;
     std::fill(std::begin(shadow_state.RTVFormats), std::end(shadow_state.RTVFormats),
               DXGI_FORMAT_UNKNOWN);
-    shadow_state.RasterizerState.DepthBias = 800;
-    shadow_state.RasterizerState.SlopeScaledDepthBias = 1.5f;
+    // Reversed-Z stores larger depths toward the light. Bias casters away
+    // from the light, matching the GREATER_EQUAL comparison and reversed projection.
+    shadow_state.RasterizerState.DepthBias = -800;
+    shadow_state.RasterizerState.SlopeScaledDepthBias = -1.5f;
     result = device->CreateGraphicsPipelineState(&shadow_state, IID_PPV_ARGS(&shadow_pipeline));
     if (FAILED(result))
     {
@@ -250,11 +278,20 @@ Result D3D12Renderer::Impl::CreatePipeline()
     particle.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
     particle.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
     particle.RTVFormats[2] = DXGI_FORMAT_UNKNOWN;
+    particle.RTVFormats[3] = DXGI_FORMAT_UNKNOWN;
     result = device->CreateGraphicsPipelineState(&particle, IID_PPV_ARGS(&particle_pipeline));
     if (FAILED(result))
     {
         return HResultFailure("Create particle PSO", result);
     }
+
+    auto slime = particle;
+    slime.VS = scene.VS;
+    slime.PS = {slime_pixel.data(), slime_pixel.size()};
+    slime.InputLayout = scene.InputLayout;
+    slime.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+    result = device->CreateGraphicsPipelineState(&slime, IID_PPV_ARGS(&slime_pipeline));
+    if (FAILED(result)) return HResultFailure("Create slime PSO", result);
 
     D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};
     compute.pRootSignature = root_signature.Get();
@@ -347,6 +384,7 @@ Result D3D12Renderer::Impl::ReloadPipeline()
     auto previous_scene = std::move(scene_pipeline);
     auto previous_shadow = std::move(shadow_pipeline);
     auto previous_particle = std::move(particle_pipeline);
+    auto previous_slime = std::move(slime_pipeline);
     auto previous_particle_compute = std::move(particle_compute_pipeline);
     auto previous_deferred = std::move(deferred_pipeline);
     auto previous_composite = std::move(composite_pipeline);
@@ -364,6 +402,7 @@ Result D3D12Renderer::Impl::ReloadPipeline()
         scene_pipeline = std::move(previous_scene);
         shadow_pipeline = std::move(previous_shadow);
         particle_pipeline = std::move(previous_particle);
+        slime_pipeline = std::move(previous_slime);
         particle_compute_pipeline = std::move(previous_particle_compute);
         deferred_pipeline = std::move(previous_deferred);
         composite_pipeline = std::move(previous_composite);

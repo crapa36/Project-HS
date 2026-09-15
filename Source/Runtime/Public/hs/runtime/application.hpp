@@ -34,6 +34,8 @@ struct ApplicationConfig
     bool character_preview{};
     bool mute_audio{};
     std::uint32_t monster_preview_asset{0xFFFFFFFFu};
+    std::uint32_t slime_family_preview_count{};
+    bool environment_preview{};
     std::uint32_t monster_preview_clip{};
     float monster_preview_time{0.5f};
     bool preview_camera_override{};
@@ -50,6 +52,7 @@ struct ApplicationConfig
     std::uint32_t height{720};
     std::uint32_t frame_cap{60};
     std::uint32_t render_scale_percent{100};
+    std::uint32_t camera_zoom_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
     std::uint64_t seed{1};

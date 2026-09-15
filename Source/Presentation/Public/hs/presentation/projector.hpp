@@ -11,6 +11,8 @@
 #include <optional>
 #include <span>
 #include <cstdint>
+#include <unordered_map>
+#include <vector>
 
 namespace hs
 {
@@ -41,6 +43,34 @@ struct PresentationUiState
     std::uint8_t loadout_source_slot{0xFF};
 };
 
+// Updated once per simulation tick, independently of snapshot availability.
+class EnemyAnimationState
+{
+  public:
+    struct DeathPose
+    {
+        std::uint64_t id{};
+        EnemyKind kind{};
+        Float3 position{};
+        Float3 direction{};
+        Tick started{};
+    };
+    void Update(const GameReadModel &model, std::span<const DomainSignal> signals);
+    [[nodiscard]] std::optional<Tick> RecoilStart(std::uint64_t id) const;
+    [[nodiscard]] std::optional<Tick> ReleaseTick(std::uint64_t id) const;
+    [[nodiscard]] std::optional<Float3> ReleaseDirection(std::uint64_t id) const;
+    [[nodiscard]] std::span<const DeathPose> DeathPoses() const { return deaths_; }
+
+  private:
+    struct LivingPose { std::int32_t health{}; std::optional<Tick> recoil; std::optional<Tick> release; Float3 release_direction{}; bool seen{}; };
+    std::unordered_map<std::uint64_t, LivingPose> living_;
+    std::vector<DeathPose> deaths_;
+    Tick tick_{};
+    std::uint64_t seed_{};
+    SessionPhase phase_{};
+    bool initialized_{};
+};
+
 [[nodiscard]] std::size_t ProjectDomainSignal(
     const DomainSignal &signal, std::span<PresentationEvent> output) noexcept;
 [[nodiscard]] UiInteraction ResolveUiInteraction(const SessionProbe &session,
@@ -52,6 +82,7 @@ struct PresentationUiState
                                          const PresentationUiState &ui,
                                          const SettingsData &settings,
                                          RenderSnapshotStorage &snapshot,
-                                         std::uint8_t pending_rebind_slot = 0xFF);
+                                         std::uint8_t pending_rebind_slot = 0xFF,
+                                         const EnemyAnimationState *enemy_animations = nullptr);
 
 } // namespace hs

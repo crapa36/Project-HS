@@ -48,7 +48,7 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
     rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtv_description.NumDescriptors = 11;
+    rtv_description.NumDescriptors = 12;
     result = device->CreateDescriptorHeap(&rtv_description, IID_PPV_ARGS(&rtv_heap));
     if (FAILED(result))
     {
@@ -76,6 +76,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     gbuffer_base.Reset();
     gbuffer_normal.Reset();
     gbuffer_position.Reset();
+    gbuffer_material.Reset();
     hdr_color.Reset();
     oit_accumulation.Reset();
     oit_revealage.Reset();
@@ -109,12 +110,13 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     for (auto [resource, format, clear] : {
              std::tuple{&gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&gbuffer_normal, DXGI_FORMAT_R16G16B16A16_FLOAT, normal_clear},
-             std::tuple{&gbuffer_position, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
+             std::tuple{&gbuffer_position, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&oit_accumulation, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
              std::tuple{&post_a, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&post_b, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
+             std::tuple{&gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
          })
     {
         if (auto created = create_target(*resource, format, clear); !created)
@@ -128,12 +130,13 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     for (auto [resource, format] : {
              std::pair{gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
              std::pair{gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{gbuffer_position.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{gbuffer_position.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
              std::pair{hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
              std::pair{post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
          })
     {
         D3D12_RENDER_TARGET_VIEW_DESC view{};
@@ -173,13 +176,13 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         };
         create_srv(gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
         create_srv(gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        create_srv(gbuffer_position.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        create_srv(gbuffer_position.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
         D3D12_SHADER_RESOURCE_VIEW_DESC shadow_view{};
         shadow_view.Format = DXGI_FORMAT_R32_FLOAT;
-        shadow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        shadow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         shadow_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        shadow_view.Texture2DArray.MipLevels = 1;
-        shadow_view.Texture2DArray.ArraySize = 3;
+        shadow_view.Texture2D.MipLevels = 1;
+
         device->CreateShaderResourceView(shadow.resource.Get(), &shadow_view, srv);
         srv.ptr += srv_stride;
         create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -188,6 +191,9 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
         create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         create_srv(ui_textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
+        srv = srv_heap->GetCPUDescriptorHandleForHeapStart();
+        srv.ptr += (static_cast<SIZE_T>(frame_index + 1) * kTextureDescriptorCount - 1) * srv_stride;
+        create_srv(gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
     }
     return Result::Success();
 }
@@ -232,9 +238,10 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
 
     auto shadow_description = depth_description;
     shadow_description.Format = DXGI_FORMAT_R32_TYPELESS;
-    shadow_description.Width = std::clamp(config.shadow_resolution, 1024u, 2048u);
-    shadow_description.Height = static_cast<UINT>(shadow_description.Width);
-    shadow_description.DepthOrArraySize = 3;
+    const auto base_shadow = std::clamp(config.shadow_resolution, 1024u, 2048u);
+    shadow_description.Width = base_shadow * 5u;
+    shadow_description.Height = base_shadow * 4u;
+    shadow_description.DepthOrArraySize = 1;
     if (auto created = CreateAllocation(shadow, allocation, shadow_description,
                                         D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
         !created)
@@ -247,9 +254,9 @@ Result D3D12Renderer::Impl::CreateDepthAndShadow()
     {
         D3D12_DEPTH_STENCIL_VIEW_DESC view{};
         view.Format = kDepthFormat;
-        view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-        view.Texture2DArray.ArraySize = 1;
-        view.Texture2DArray.FirstArraySlice = cascade;
+        view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+        view.Texture2D.MipSlice = 0;
+
         device->CreateDepthStencilView(shadow.resource.Get(), &view, shadow_handle);
         shadow_handle.ptr += dsv_stride;
     }
@@ -410,8 +417,36 @@ Result D3D12Renderer::Impl::CreateGpuData()
     std::memcpy(mapped, cooked_vertices.data(), archer_vertex_bytes);
     archer_vertices.resource->Unmap(0, nullptr);
     archer_vertex_view = {archer_vertices.resource->GetGPUVirtualAddress(),
-                          static_cast<UINT>(archer_vertex_bytes),
-                          sizeof(SkinnedVertex)};
+                           static_cast<UINT>(archer_vertex_bytes),
+                           sizeof(SkinnedVertex)};
+
+    std::vector<SkinnedVertex> projectile_vertices;
+    std::vector<CharacterClipHeader> projectile_clips;
+    std::vector<std::uint16_t> projectile_parents;
+    std::vector<std::array<float, 16>> projectile_inverse_bind;
+    std::vector<float> projectile_weights;
+    std::vector<CharacterLocalTransform> projectile_transforms;
+    std::uint32_t projectile_bones{}, projectile_materials{};
+    float projectile_ground{};
+    if (auto loaded = LoadCharacterAsset(
+            CurrentExecutableDirectory() / "Cooked" / "enemy_gel_projectile.meshbin",
+            projectile_vertices, projectile_clips, projectile_parents,
+            projectile_inverse_bind, projectile_weights, projectile_transforms,
+            projectile_bones, projectile_ground, projectile_materials, false); !loaded)
+        return loaded;
+    gel_projectile_vertex_count = static_cast<std::uint32_t>(projectile_vertices.size());
+    const auto projectile_bytes = projectile_vertices.size() * sizeof(SkinnedVertex);
+    if (auto created = CreateAllocation(gel_projectile_vertices, upload_allocation,
+                                        BufferDescription(projectile_bytes),
+                                        D3D12_RESOURCE_STATE_GENERIC_READ); !created)
+        return created;
+    result = gel_projectile_vertices.resource->Map(0, &no_read,
+                                                    reinterpret_cast<void **>(&mapped));
+    if (FAILED(result)) return HResultFailure("Map gel projectile vertex buffer", result);
+    std::memcpy(mapped, projectile_vertices.data(), projectile_bytes);
+    gel_projectile_vertices.resource->Unmap(0, nullptr);
+    gel_projectile_vertex_view = {gel_projectile_vertices.resource->GetGPUVirtualAddress(),
+                                  static_cast<UINT>(projectile_bytes), sizeof(SkinnedVertex)};
 
     D3D12MA::ALLOCATION_DESC default_allocation{};
     default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -652,6 +687,85 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         return Result::Success();
     };
 
+    auto upload_family_array = [&](AllocationResource &texture,
+                                   std::wstring_view prefix) -> Result {
+        constexpr std::uint32_t slices = 3;
+        constexpr std::uint32_t mips = 11;
+        D3D12_RESOURCE_DESC description{};
+        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        description.Width = 1024u;
+        description.Height = 1024u;
+        description.DepthOrArraySize = slices;
+        description.MipLevels = mips;
+        description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        description.SampleDesc = {1, 0};
+        D3D12MA::ALLOCATION_DESC allocation{};
+        allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (auto created = CreateAllocation(texture, allocation, description,
+                                             D3D12_RESOURCE_STATE_COPY_DEST); !created)
+            return created;
+        const auto count = slices * mips;
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count);
+        std::vector<UINT> rows(count);
+        std::vector<UINT64> row_sizes(count);
+        UINT64 upload_size{};
+        device->GetCopyableFootprints(&description, 0, count, 0, footprints.data(),
+                                      rows.data(), row_sizes.data(), &upload_size);
+        uploads.emplace_back();
+        allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+        if (auto created = CreateAllocation(uploads.back(), allocation,
+                                             BufferDescription(upload_size),
+                                             D3D12_RESOURCE_STATE_GENERIC_READ); !created)
+            return created;
+        std::byte *mapped{}; D3D12_RANGE no_read{};
+        result = uploads.back().resource->Map(0, &no_read,
+                                               reinterpret_cast<void **>(&mapped));
+        if (FAILED(result)) return HResultFailure("Map family texture upload", result);
+
+        for (std::uint32_t slice = 0; slice < slices; ++slice)
+        {
+            std::size_t source_offset{};
+            std::vector<std::byte> storage; std::span<const std::byte> pixels;
+            std::uint32_t width{}, height{}, level_count{};
+            static constexpr std::wstring_view names[] = {L"melee", L"ranged", L"suicide"};
+            const auto stem = prefix == L"enemy_" ?
+                (std::wstring(prefix) + std::wstring(names[slice]) + L"_diffuse_") :
+                (std::wstring(prefix) + std::wstring(names[slice]) + L"_0.dds");
+            const auto path = prefix == L"enemy_" ? cooked / (stem + L"0.dds") :
+                cooked / (std::wstring(L"enemy_") + std::wstring(names[slice]) + L"_normal_0.dds");
+            if (auto loaded = LoadRgbaDds(path, width, height, pixels, storage, &level_count);
+                !loaded) return loaded;
+            if (width != 1024u || height != 1024u || level_count != mips)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Family DDS dimensions or mips are invalid.");
+            for (std::uint32_t mip = 0; mip < mips; ++mip)
+            {
+                const auto index = slice * mips + mip;
+                const auto w = std::max(1u, width >> mip);
+                const auto h = std::max(1u, height >> mip);
+                const auto bytes_per_row = static_cast<std::size_t>(w) * 4;
+                for (std::uint32_t row = 0; row < h; ++row)
+                    std::memcpy(mapped + footprints[index].Offset + static_cast<std::size_t>(row) * footprints[index].Footprint.RowPitch,
+                                pixels.data() + source_offset + static_cast<std::size_t>(row) * bytes_per_row,
+                                bytes_per_row);
+                source_offset += bytes_per_row * h;
+            }
+        }
+        uploads.back().resource->Unmap(0, nullptr);
+        for (std::uint32_t index = 0; index < count; ++index)
+        {
+            D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = texture.resource.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex = index;
+            D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = uploads.back().resource.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint = footprints[index];
+            command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+        D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = texture.resource.Get(); barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES; command_list->ResourceBarrier(1, &barrier);
+        return Result::Success();
+    };
+
     if (auto uploaded = upload_array(archer_diffuse, L"archer_diffuse_");
         !uploaded)
     {
@@ -662,6 +776,10 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
     if (auto uploaded = upload_shared(monster_emissive, L"monster_emissive.dds"); !uploaded)
         return uploaded;
     if (auto uploaded = upload_shared(monster_ram, L"monster_ram.dds"); !uploaded)
+        return uploaded;
+    if (auto uploaded = upload_family_array(family_diffuse, L"enemy_"); !uploaded)
+        return uploaded;
+    if (auto uploaded = upload_family_array(family_normal, L"enemy_normal_"); !uploaded)
         return uploaded;
     if (auto uploaded = upload_array(archer_normal, L"archer_normal_"); !uploaded)
     {
@@ -714,6 +832,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             0, &no_read, reinterpret_cast<void **>(&mapped));
         if (FAILED(result)) return HResultFailure("Map VFX mask upload", result);
         std::size_t source_offset{};
+
         for (std::uint32_t subresource = 0; subresource < subresource_count;
              ++subresource)
         {
@@ -796,6 +915,15 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         create_shared_view(monster_basecolor.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         create_shared_view(monster_emissive.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
         create_shared_view(monster_ram.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        auto create_family_view = [&](ID3D12Resource *texture, DXGI_FORMAT format) {
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = format; view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2DArray.MipLevels = 11; view.Texture2DArray.ArraySize = 3;
+            device->CreateShaderResourceView(texture, &view, handle); handle.ptr += srv_stride;
+        };
+        create_family_view(family_diffuse.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+        create_family_view(family_normal.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
     }
     return Result::Success();
 }

@@ -6,11 +6,13 @@
 #include <hs/core/cooked_format.hpp>
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
+#include "camera_pose.hpp"
 
 #include <Windows.h>
 
 #include <array>
 #include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -547,6 +549,25 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
           "playtest inputs replay exactly");
 }
 
+void TestCameraPoseContinuity()
+{
+    const auto at80 = hs::ComputeRuntimeCameraPose(28.0f, 55.0f, 80.0f);
+    Check(std::abs(at80.distance_m - 22.4f) < 0.001f && at80.pitch_degrees == 55.0f && at80.target_height_m == 0.0f,
+          "camera preserves authored 80 percent pose");
+    auto previous = hs::ComputeRuntimeCameraPose(28.0f, 55.0f, 80.0f);
+    for (float zoom = 75.0f; zoom >= 15.0f; zoom -= 1.0f)
+    {
+        const auto pose = hs::ComputeRuntimeCameraPose(28.0f, 55.0f, zoom);
+        Check(pose.distance_m < previous.distance_m && pose.pitch_degrees < previous.pitch_degrees &&
+                  pose.target_height_m > previous.target_height_m,
+              "close camera pose changes monotonically");
+        previous = pose;
+    }
+    const auto close = hs::ComputeRuntimeCameraPose(28.0f, 55.0f, 15.0f);
+    Check(std::abs(close.distance_m - 4.2f) < 0.001f && close.pitch_degrees == 18.0f && close.target_height_m == 1.0f,
+          "close camera reaches third person endpoint");
+}
+
 void TestSessionProbeUiBridge()
 {
     hs::RuntimeChannels channels;
@@ -582,6 +603,7 @@ int main()
         TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
         TestSessionProbeUiBridge();
+        TestCameraPoseContinuity();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";
         return 0;

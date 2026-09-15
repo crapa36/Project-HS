@@ -44,6 +44,8 @@ struct RendererConfig
     bool interpolate{true};
     bool character_preview{};
     std::uint32_t monster_preview_asset{0xFFFFFFFFu};
+    std::uint32_t slime_family_preview_count{};
+    bool environment_preview{};
     std::uint32_t monster_preview_clip{};
     float monster_preview_time{0.5f};
     bool preview_camera_override{};

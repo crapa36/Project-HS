@@ -68,10 +68,13 @@ constexpr std::uint32_t kUiWidth = 1'920;
 constexpr std::uint32_t kUiHeight = 1'080;
 constexpr std::uint32_t kPostTextureDescriptorCount = 10;
 constexpr std::uint32_t kCharacterDescriptorCount = 3;
-constexpr std::uint32_t kMonsterPbrDescriptorCount = 3;
+constexpr std::uint32_t kMonsterPbrDescriptorCount = 5;
+constexpr std::uint32_t kEnvironmentTextureCount = 20;
+constexpr std::uint32_t kEnvironmentDescriptorCount = 21;
 constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kTextureDescriptorCount =
-    kPostTextureDescriptorCount + kCharacterDescriptorCount + kMonsterPbrDescriptorCount;
+    kPostTextureDescriptorCount + kCharacterDescriptorCount + kMonsterPbrDescriptorCount +
+    kEnvironmentDescriptorCount;
 constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kRenderPassCount * 2);
@@ -144,11 +147,15 @@ struct FrameConstants
     DirectX::XMFLOAT4 screen_size;
     DirectX::XMFLOAT4 camera_forward_softness;
     DirectX::XMFLOAT4X4 shadow_view_projection[3];
+    DirectX::XMFLOAT4 shadow_atlas_scale_offset[3];
+    DirectX::XMFLOAT4 shadow_atlas_texel_size;
     DirectX::XMFLOAT4X4 archer_bones[kMaxCharacterBones];
     DirectX::XMUINT4 monster_asset_meta[6];
     DirectX::XMUINT4 monster_clip_meta[6][static_cast<std::size_t>(CharacterAnimationClip::Count)];
     DirectX::XMFLOAT4 render_options;
     DirectX::XMUINT4 particle_options;
+    DirectX::XMFLOAT4 grass_benders[32];
+    DirectX::XMUINT4 grass_bender_count;
 };
 
 static_assert(sizeof(FrameConstants) <= kInstanceDataOffset);
@@ -301,9 +308,10 @@ struct DdsHeaderDx10
 }
 
 [[nodiscard]] inline Result LoadRgbaDds(const std::filesystem::path &path,
-                                 std::uint32_t &width, std::uint32_t &height,
-                                 std::span<const std::byte> &pixels,
-                                 std::vector<std::byte> &storage)
+                                  std::uint32_t &width, std::uint32_t &height,
+                                  std::span<const std::byte> &pixels,
+                                  std::vector<std::byte> &storage,
+                                  std::uint32_t *mip_count = nullptr)
 {
     if (auto loaded = ReadBinary(path, storage); !loaded)
     {
@@ -318,7 +326,19 @@ struct DdsHeaderDx10
     DdsHeader header{};
     std::memcpy(&magic, storage.data(), sizeof(magic));
     std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
-    const auto pixel_bytes = static_cast<std::uint64_t>(header.width) * header.height * 4;
+    const auto levels = std::max(header.mip_count, 1u);
+    std::uint64_t pixel_bytes{};
+    auto mip_width = header.width;
+    auto mip_height = header.height;
+    if (levels > 32 || (!mip_count && levels != 1))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Character DDS mip count is invalid.");
+    for (std::uint32_t mip = 0; mip < levels; ++mip)
+    {
+        pixel_bytes += static_cast<std::uint64_t>(mip_width) * mip_height * 4;
+        mip_width = std::max(mip_width / 2, 1u);
+        mip_height = std::max(mip_height / 2, 1u);
+    }
     if (magic != kDdsMagic || header.size != 124 || header.pixel_format.size != 32 ||
         header.pixel_format.rgb_bit_count != 32 || header.width == 0 ||
         header.height == 0 || header.pitch != header.width * 4 ||
@@ -329,6 +349,7 @@ struct DdsHeaderDx10
     }
     width = header.width;
     height = header.height;
+    if (mip_count) *mip_count = levels;
     pixels = std::span(storage).subspan(sizeof(magic) + sizeof(header));
     return Result::Success();
 }
@@ -549,6 +570,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ReloadPipeline();
     [[nodiscard]] Result CreateGpuData();
     [[nodiscard]] Result CreateCharacterTextures();
+    [[nodiscard]] Result CreateEnvironmentTextures();
+    [[nodiscard]] Result CreateEnvironmentMeshes();
     [[nodiscard]] Result CreateUiTexture();
     [[nodiscard]] Result RasterizeUi(std::uint32_t frame_index,
                                      std::span<const UiModel> models);
@@ -596,6 +619,9 @@ struct D3D12Renderer::Impl
     AllocationResource shadow;
     AllocationResource vertices;
     AllocationResource archer_vertices;
+    AllocationResource gel_projectile_vertices;
+    D3D12_VERTEX_BUFFER_VIEW gel_projectile_vertex_view{};
+    std::uint32_t gel_projectile_vertex_count{};
     std::array<MonsterAsset, 6> monster_assets;
     AllocationResource monster_skin_matrices;
     AllocationResource archer_diffuse;
@@ -603,6 +629,8 @@ struct D3D12Renderer::Impl
     AllocationResource monster_basecolor;
     AllocationResource monster_emissive;
     AllocationResource monster_ram;
+    AllocationResource family_diffuse;
+    AllocationResource family_normal;
     AllocationResource vfx_masks;
     std::uint32_t vfx_sprite_count{};
     Tick last_status_visual_tick{std::numeric_limits<Tick>::max()};
@@ -614,6 +642,15 @@ struct D3D12Renderer::Impl
     AllocationResource gbuffer_base;
     AllocationResource gbuffer_normal;
     AllocationResource gbuffer_position;
+    AllocationResource gbuffer_material;
+    std::array<AllocationResource, kEnvironmentTextureCount> environment_textures;
+    struct EnvironmentMeshGpu
+    {
+        AllocationResource vertices;
+        D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+        UINT vertex_count{};
+    };
+    std::array<EnvironmentMeshGpu, 42> environment_meshes;
     AllocationResource hdr_color;
     AllocationResource oit_accumulation;
     AllocationResource oit_revealage;
@@ -636,6 +673,7 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> scene_pipeline;
     ComPtr<ID3D12PipelineState> shadow_pipeline;
     ComPtr<ID3D12PipelineState> particle_pipeline;
+    ComPtr<ID3D12PipelineState> slime_pipeline;
     ComPtr<ID3D12PipelineState> particle_compute_pipeline;
     ComPtr<ID3D12PipelineState> deferred_pipeline;
     ComPtr<ID3D12PipelineState> composite_pipeline;

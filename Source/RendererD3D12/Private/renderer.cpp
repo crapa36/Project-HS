@@ -56,6 +56,14 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     {
         return result;
     }
+    if (auto result = impl_->CreateEnvironmentTextures(); !result)
+    {
+        return result;
+    }
+    if (auto result = impl_->CreateEnvironmentMeshes(); !result)
+    {
+        return result;
+    }
 #if defined(HS_DEVELOPMENT_TOOLS)
     D3D12_DESCRIPTOR_HEAP_DESC description{};
     description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -244,6 +252,8 @@ Result D3D12Renderer::Shutdown()
     impl_->shadow.Reset();
     impl_->vertices.Reset();
     impl_->archer_vertices.Reset();
+    impl_->gel_projectile_vertices.Reset();
+    impl_->slime_pipeline.Reset();
     for (auto &asset : impl_->monster_assets)
         asset.vertices.Reset();
     impl_->monster_skin_matrices.Reset();
@@ -252,6 +262,8 @@ Result D3D12Renderer::Shutdown()
     impl_->monster_basecolor.Reset();
     impl_->monster_emissive.Reset();
     impl_->monster_ram.Reset();
+    impl_->family_diffuse.Reset();
+    impl_->family_normal.Reset();
     impl_->vfx_masks.Reset();
     impl_->particles.Reset();
     for (auto &alive : impl_->particle_alive)
@@ -264,6 +276,9 @@ Result D3D12Renderer::Shutdown()
     impl_->gbuffer_base.Reset();
     impl_->gbuffer_normal.Reset();
     impl_->gbuffer_position.Reset();
+    impl_->gbuffer_material.Reset();
+    for (auto &texture : impl_->environment_textures) texture.Reset();
+    for (auto &mesh : impl_->environment_meshes) mesh.vertices.Reset();
     impl_->hdr_color.Reset();
     impl_->oit_accumulation.Reset();
     impl_->oit_revealage.Reset();

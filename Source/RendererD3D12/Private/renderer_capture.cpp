@@ -51,8 +51,17 @@ Result D3D12Renderer::Impl::WritePng(const std::filesystem::path &path,
     {
         return HResultFailure("Set PNG format", result);
     }
-    result = frame->WritePixels(height, row_pitch, row_pitch * height,
-                                const_cast<BYTE *>(reinterpret_cast<const BYTE *>(pixels)));
+    // SetPixelFormat returns the encoder's supported format, which can be BGRA
+    // even though the readback is RGBA. Convert instead of reinterpreting bytes.
+    ComPtr<IWICBitmap> bitmap;
+    result = imaging_factory->CreateBitmapFromMemory(
+        width, height, GUID_WICPixelFormat32bppRGBA, row_pitch, row_pitch * height,
+        const_cast<BYTE *>(reinterpret_cast<const BYTE *>(pixels)), &bitmap);
+    ComPtr<IWICBitmapSource> converted;
+    if (SUCCEEDED(result))
+        result = WICConvertBitmapSource(format, bitmap.Get(), &converted);
+    if (SUCCEEDED(result))
+        result = frame->WriteSource(converted.Get(), nullptr);
     if (FAILED(result) || FAILED(frame->Commit()) || FAILED(encoder->Commit()))
     {
         return HResultFailure("Write PNG", FAILED(result) ? result : E_FAIL);

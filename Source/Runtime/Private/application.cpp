@@ -4,6 +4,7 @@
 #include "runtime_channels.hpp"
 #include "vfx_catalog.hpp"
 #include "window.hpp"
+#include "camera_pose.hpp"
 
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
@@ -133,6 +134,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     }
 
     RuntimeChannels channels;
+    channels.camera_zoom_percent.store(std::clamp(config.camera_zoom_percent, 15u, 120u));
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
     TaskSystem task_system;
     Window window(channels, settings.skill_virtual_keys, presentation_catalog.camera);
@@ -266,6 +268,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.interpolate = !config.smoke;
         renderer_config.character_preview = config.character_preview;
         renderer_config.monster_preview_asset = config.monster_preview_asset;
+        renderer_config.slime_family_preview_count = config.slime_family_preview_count;
+        renderer_config.environment_preview = config.environment_preview;
         renderer_config.monster_preview_clip = config.monster_preview_clip;
         renderer_config.monster_preview_time = config.monster_preview_time;
         renderer_config.preview_camera_override = config.preview_camera_override;
@@ -784,6 +788,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::array<UiAction, 64> ui_action_storage{};
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
         GameReadModelStorage read_model;
+        EnemyAnimationState enemy_animations;
         std::size_t next_timeline_action{};
         std::size_t replay_frame_index{};
         if (!config.heartbeat_path.empty())
@@ -937,6 +942,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto tick = simulation.TickFixed(input, FixedStepClock::kFixedStep);
                 simulation.WriteReadModel(read_model);
                 const auto model = read_model.View();
+                enemy_animations.Update(model, simulation.PendingDomainSignals());
                 const auto &probe = model.session;
                 channels.PublishSessionProbe(probe);
                 if (replaying && !config.replay_compare && tick.checksum !=
@@ -1013,12 +1019,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (auto slot = channels.snapshots.TryBeginWrite())
                 {
                     slot->storage->camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
-                    slot->storage->camera.pitch_degrees = presentation_catalog.camera.pitch_degrees;
+                    const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
+                    const auto pose = ComputeRuntimeCameraPose(presentation_catalog.camera.distance_m, presentation_catalog.camera.pitch_degrees, zoom_percent);
+                    slot->storage->camera.pitch_degrees = pose.pitch_degrees;
                     slot->storage->camera.vertical_fov_degrees =
                         presentation_catalog.camera.vertical_fov_degrees;
-                    slot->storage->camera.distance = presentation_catalog.camera.distance_m *
-                        static_cast<float>(channels.camera_zoom_percent.load(
-                            std::memory_order_acquire)) / 100.0f;
+                    slot->storage->camera.distance = pose.distance_m;
                     if (ProjectRenderSnapshot(read_model.View(), presentation_catalog,
                                               {static_cast<UiPage>(channels.ui_page.load(
                                                    std::memory_order_acquire)),
@@ -1027,9 +1033,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                channels.loadout_source.load(std::memory_order_acquire)},
                                               projection_settings,
                                               *slot->storage,
-                                              channels.pending_rebind_slot.load(
-                                                  std::memory_order_acquire)))
+                                               channels.pending_rebind_slot.load(
+                                                   std::memory_order_acquire),
+                                               &enemy_animations))
                     {
+                        slot->storage->camera.target.y = pose.target_height_m;
                         channels.snapshots.Publish(*slot, ++publish_sequence);
                     }
                     else

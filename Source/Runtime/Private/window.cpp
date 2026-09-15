@@ -1,4 +1,5 @@
 #include "window.hpp"
+#include "camera_pose.hpp"
 
 #include <hidusage.h>
 
@@ -148,14 +149,15 @@ bool Window::PumpMessages()
             ui_cursor_normalized_ = {reference_u * 2.0f - 1.0f,
                                      1.0f - reference_v * 2.0f};
             const auto yaw = camera_.yaw_degrees * 3.14159265358979323846f / 180.0f;
-            const auto pitch = camera_.pitch_degrees * 3.14159265358979323846f / 180.0f;
+            const auto zoom_percent = static_cast<float>(channels_->camera_zoom_percent.load(std::memory_order_acquire));
+            const auto pose = ComputeRuntimeCameraPose(camera_.distance_m, camera_.pitch_degrees, zoom_percent);
+            const auto pitch = pose.pitch_degrees * 3.14159265358979323846f / 180.0f;
             const auto vertical_fov = camera_.vertical_fov_degrees *
                                       3.14159265358979323846f / 180.0f;
             const auto target_x = channels_->camera_target_x.load(std::memory_order_acquire);
             const auto target_z = channels_->camera_target_z.load(std::memory_order_acquire);
-            const auto distance = camera_.distance_m *
-                static_cast<float>(channels_->camera_zoom_percent.load(
-                    std::memory_order_acquire)) / 100.0f;
+            const auto target_y = pose.target_height_m;
+            const auto distance = pose.distance_m;
             const auto forward_x = std::cos(pitch) * std::sin(yaw);
             const auto forward_y = -std::sin(pitch);
             const auto forward_z = std::cos(pitch) * std::cos(yaw);
@@ -178,7 +180,7 @@ bool Window::PumpMessages()
             ray_y /= ray_length;
             ray_z /= ray_length;
             const auto eye_x = target_x - forward_x * distance;
-            const auto eye_y = -forward_y * distance;
+            const auto eye_y = target_y - forward_y * distance;
             const auto eye_z = target_z - forward_z * distance;
             const auto ray_time = ray_y < -0.0001f ? -eye_y / ray_y : distance;
             held_.aim_world = {eye_x + ray_x * ray_time, 0.0f,
@@ -445,7 +447,7 @@ void Window::HandleRawInput(HRAWINPUT input)
             const auto next = static_cast<std::int64_t>(zoom) + step;
             zoom = static_cast<std::uint32_t>(std::clamp(
                 next,
-                static_cast<std::int64_t>(camera_.minimum_distance_percent),
+                static_cast<std::int64_t>(std::min<std::uint32_t>(camera_.minimum_distance_percent, 15u)),
                 static_cast<std::int64_t>(camera_.maximum_distance_percent)));
             channels_->camera_zoom_percent.store(zoom, std::memory_order_release);
         }

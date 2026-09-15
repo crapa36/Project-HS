@@ -7,11 +7,15 @@ cbuffer FrameConstants : register(b0)
     float4 ScreenSize;
     float4 CameraForwardSoftness;
     float4x4 ShadowViewProjection[3];
+    float4 ShadowAtlasScaleOffset[3];
+    float4 ShadowAtlasTexelSize;
     row_major float4x4 ArcherBones[128];
     uint4 MonsterAssetMeta[6];
     uint4 MonsterClipMeta[6][5];
     float4 RenderOptions;
     uint4 ParticleOptions;
+    float4 GrassBenders[32];
+    uint4 GrassBenderCount;
 };
 
 cbuffer PassConstants : register(b1)
@@ -69,7 +73,7 @@ RWByteAddressBuffer ParticleCounters : register(u5);
 Texture2D<float4> GBufferBase : register(t2);
 Texture2D<float4> GBufferNormal : register(t3);
 Texture2D<float4> GBufferPosition : register(t4);
-Texture2DArray<float> ShadowMap : register(t5);
+Texture2D<float> ShadowMap : register(t5);
 Texture2D<float4> HdrColor : register(t6);
 Texture2D<float4> OitAccumulation : register(t7);
 Texture2D<float> OitRevealage : register(t8);
@@ -82,6 +86,8 @@ Texture2DArray<float> VfxMasks : register(t16);
 Texture2D<float4> MonsterBasecolor : register(t0, space1);
 Texture2D<float4> MonsterEmissive : register(t1, space1);
 Texture2D<float4> MonsterRam : register(t2, space1);
+Texture2DArray<float4> FamilyDiffuse : register(t3, space1);
+Texture2DArray<float4> FamilyNormal : register(t4, space1);
 SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
 SamplerState MaterialSampler : register(s2);
@@ -107,7 +113,14 @@ struct SceneOutput
     float2 Uv : TEXCOORD2;
     float4 WorldTangent : TEXCOORD3;
     nointerpolation uint Material : TEXCOORD4;
+    nointerpolation float Charge : TEXCOORD5;
+    nointerpolation uint EnvironmentSeed : TEXCOORD6;
+    nointerpolation float EnvironmentFade : TEXCOORD7;
+    nointerpolation uint EnvironmentFlags : TEXCOORD8;
+    float3 EnvironmentStableWorld : TEXCOORD9;
 };
+
+#include "environment.hlsli"
 
 float4 UnpackColor(uint packed)
 {
@@ -152,7 +165,15 @@ void SkinMonster(inout float3 position, inout float3 normal, inout float3 tangen
         MonsterSkinMatrices[matrix_base + input.BoneIndices.z] * input.BoneWeights.z +
         MonsterSkinMatrices[matrix_base + input.BoneIndices.w] * input.BoneWeights.w;
     position = mul(skin, float4(position, 1.0)).xyz;
-    normal = normalize(mul((float3x3)skin, normal));
+    // Squash/stretch needs the inverse transpose, including for blended
+    // matrices with shear. Normalization removes the determinant magnitude.
+    const float3x3 linear_skin = (float3x3)skin;
+    const float3x3 cofactor = float3x3(
+        cross(linear_skin[1], linear_skin[2]),
+        cross(linear_skin[2], linear_skin[0]),
+        cross(linear_skin[0], linear_skin[1]));
+    const float determinant = dot(linear_skin[0], cofactor[0]);
+    normal = normalize(mul(cofactor, normal) * (determinant < 0.0 ? -1.0 : 1.0));
     tangent = normalize(mul((float3x3)skin, tangent));
 }
 
@@ -167,7 +188,7 @@ float3 ShapePlaceholder(float3 position, uint mesh)
     {
         position.xz *= lerp(1.0, 0.28, saturate(position.y + 0.5));
     }
-    else if (mesh == 5 || mesh == 6) // projectiles: arrow-like wedge
+    else if (mesh == 5) // projectiles: arrow-like wedge
     {
         position.x *= lerp(0.25, 1.0, saturate(0.5 - position.z));
         position.y *= 0.55;
@@ -187,7 +208,47 @@ float3 ShapePlaceholder(float3 position, uint mesh)
     {
         position.y *= 0.1;
     }
+    else if (mesh == 16) // faceted tree trunk
+    {
+        position.xz *= lerp(0.72, 0.42, saturate(position.y + 0.5));
+    }
+    else if (mesh == 17) // faceted tree canopy
+    {
+        position.y = position.y * 0.72 + 0.55;
+        position.xz *= lerp(0.95, 0.58, saturate(position.y));
+    }
+    else if (mesh == 18) // low-poly rock
+    {
+        position.y = (position.y + 0.5) * 0.62 - 0.5;
+        position.xz *= lerp(0.82, 0.58, saturate(position.y + 0.5));
+    }
+    else if (mesh == 19) // thin grass blade
+    {
+        position.x *= 0.08;
+        position.z *= 0.8;
+        position.y = (position.y + 0.5) * 0.5 - 0.5;
+    }
+    else if (mesh == 20) // dirt patch
+    {
+        position.y *= 0.035;
+    }
     return position;
+}
+
+float3 BendGrass(float3 world, float3 local_position)
+{
+    if (local_position.y <= -0.45) return world;
+    float3 bend = 0.0;
+    const uint count = min(GrassBenderCount.x, 32u);
+    for (uint index = 0; index < count; ++index)
+    {
+        const float2 delta = world.xz - GrassBenders[index].xz;
+        const float radius = max(GrassBenders[index].w, 0.1);
+        const float weight = saturate(1.0 - length(delta) / radius);
+        bend += float3(delta.x, 0.0, delta.y) * weight * 0.42 * saturate(local_position.y + 0.5);
+    }
+    const float wind = sin(CameraTime.w * 1.7 + world.x * 0.11 + world.z * 0.07) * 0.035;
+    return world + bend + float3(wind, 0.0, wind * 0.7) * saturate(local_position.y + 0.5);
 }
 
 float3 InstanceWorldPosition(InstanceData instance, float3 position)
@@ -195,18 +256,24 @@ float3 InstanceWorldPosition(InstanceData instance, float3 position)
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    float3 local = ShapePlaceholder(position, instance.Mesh) * instance.Scale.xyz;
+    const uint mesh = instance.Mesh & 255;
+    const bool authored = (instance.Mesh & 0x10000) != 0;
+    float3 local = ((authored || mesh == 16 || mesh == 17 || mesh == 19) ? position : ShapePlaceholder(position, mesh)) * instance.Scale.xyz;
     float3 rotated = float3(
         local.x * cosine_yaw + local.z * sine_yaw,
         local.y,
         -local.x * sine_yaw + local.z * cosine_yaw);
-    return instance.Position.xyz + rotated;
+    const float3 world = instance.Position.xyz + rotated;
+    return world;
 }
 
-SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
+SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     InstanceData instance = Instances[instance_id];
     const uint mesh = instance.Mesh & 0xff;
+    uint environment_seed = (mesh == 9 || mesh == 20) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
+    uint environment_entry;
+    EnvironmentVertex(input, instance, vertex_id, environment_seed, environment_entry);
     float3 local_position = input.Position;
     float3 local_normal = input.Normal;
     float3 local_tangent = input.Tangent.xyz;
@@ -215,8 +282,11 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    float3 world = InstanceWorldPosition(instance, local_position);
+    const float3 stable_world = InstanceWorldPosition(instance, local_position);
+    float3 world = mesh == 19 ? BendGrass(stable_world, local_position -
+        float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0)) : stable_world;
     local_normal /= max(instance.Scale.xyz, 0.0001);
+    local_tangent *= instance.Scale.xyz;
     float3 normal = normalize(float3(
         local_normal.x * cosine_yaw + local_normal.z * sine_yaw,
         local_normal.y,
@@ -234,21 +304,27 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID)
     output.Mesh = mesh;
     output.Uv = input.Uv;
     output.WorldTangent = float4(tangent, input.Tangent.w);
-    output.Material = input.Material;
+    output.Material = (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
+    output.EnvironmentSeed = environment_seed;
+    output.EnvironmentFade = instance.Scale.w;
+    output.EnvironmentFlags = instance.Mesh & 0x30000;
+    output.EnvironmentStableWorld = stable_world;
+    output.Charge = mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2
+        ? saturate(instance.Padding) : 0.0;
     return output;
 }
 
-float4 ShadowVS(SceneInput input, uint instance_id : SV_InstanceID) : SV_Position
+SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
-    InstanceData instance = Instances[instance_id];
-    const uint mesh = instance.Mesh & 0xff;
-    float3 local_position = input.Position;
-    float3 local_normal = input.Normal;
-    float3 local_tangent = input.Tangent.xyz;
-    SkinArcher(local_position, local_normal, local_tangent, input, mesh);
-    SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
-    float3 world = InstanceWorldPosition(instance, local_position);
-    return mul(float4(world, 1.0), ShadowViewProjection[PassValue]);
+    SceneOutput output = SceneVS(input, instance_id, vertex_id);
+    output.Position = mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[PassValue]);
+    return output;
+}
+void ShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    EnvironmentLodClip(input);
+    if (input.Mesh == 17 || input.Mesh == 19) clip(FoliageColor(input.Mesh, input.Material, input.Uv).a - 0.5);
+    else if (!front) discard;
 }
 
 struct GBufferOutput
@@ -256,6 +332,7 @@ struct GBufferOutput
     float4 BaseColor : SV_Target0;
     float4 Normal : SV_Target1;
     float4 Position : SV_Target2;
+    float4 Material : SV_Target3;
 };
 
 float4 SampleArcherDiffuse(uint material, float2 uv)
@@ -282,40 +359,71 @@ float3 SampleMonsterPbr(float2 uv)
     return lit_base * metal_tint + emissive * 80.0;
 }
 
-GBufferOutput ScenePS(SceneOutput input)
+GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
 {
+    EnvironmentLodClip(input);
     GBufferOutput output;
     output.BaseColor = input.Color;
+    output.Material = 0;
+    if (!front && input.Mesh != 17 && input.Mesh != 19) discard;
     float3 world_normal = normalize(input.WorldNormal);
-    if (input.Mesh == 0)
+    float roughness = 0.3;
+    if (input.Mesh == 6) discard; // gel projectiles use the transparent pass
+    if (input.Mesh == 0 || (input.Mesh >= 10 && input.Mesh <= 12))
     {
-        const uint material = input.Material;
-        const float4 base_color = SampleArcherDiffuse(material, input.Uv);
-        clip(base_color.a - 0.2);
+        const bool family = input.Mesh >= 10;
+        const float3 uv = float3(input.Uv, input.Mesh - 10);
+        const float4 base_color = family ? FamilyDiffuse.Sample(MaterialSampler, uv)
+            : SampleArcherDiffuse(input.Material, input.Uv);
+        clip(base_color.a - (family ? 0.98 : 0.2));
         output.BaseColor = float4(base_color.rgb, 1.0);
-        const float3 tangent_normal =
-            SampleArcherNormal(material, input.Uv) * 2.0 - 1.0;
-        const float3 tangent = normalize(input.WorldTangent.xyz);
-        const float3 bitangent =
-            normalize(cross(world_normal, tangent)) * input.WorldTangent.w;
+        const float4 normal_map = family ? FamilyNormal.Sample(MaterialSampler, uv)
+            : float4(SampleArcherNormal(input.Material, input.Uv), 0.3);
+        roughness = normal_map.a;
+        float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
+        // Blender +Y normals need a green flip after the cooker's UV.v flip.
+        if (family) tangent_normal.y = -tangent_normal.y;
+        const float3 tangent = normalize(input.WorldTangent.xyz -
+            world_normal * dot(world_normal, input.WorldTangent.xyz));
+        const float3 bitangent = normalize(cross(world_normal, tangent)) * input.WorldTangent.w;
         world_normal = normalize(tangent * tangent_normal.x +
-                                 bitangent * tangent_normal.y +
-                                 world_normal * tangent_normal.z);
+            bitangent * tangent_normal.y + world_normal * tangent_normal.z);
     }
-    if (input.Mesh >= 10 && input.Mesh <= 15)
-    {
+    if (input.Mesh >= 13 && input.Mesh <= 15)
         output.BaseColor = float4(SampleMonsterPbr(input.Uv), 1.0);
-    }
-    if (input.Mesh == 9)
+    if (input.Mesh == 9 || input.Mesh == 20 || (input.Mesh >= 16 && input.Mesh <= 19))
     {
-        const float2 distance_to_line =
-            abs(frac(input.WorldPosition.xz + 0.5) - 0.5) /
-            max(fwidth(input.WorldPosition.xz), 0.0001);
-        const float grid = 1.0 - saturate(min(distance_to_line.x,
-                                              distance_to_line.y));
-        output.BaseColor.rgb = lerp(input.Color.rgb, 1.0, grid);
+        EnvMaterial m = (EnvMaterial)0;
+        float flag = 1;
+        if (input.Mesh == 9 || input.Mesh == 20)
+            m = EnvTerrain(input.WorldPosition, input.Mesh, input.EnvironmentSeed);
+        else if (input.Mesh == 16 || input.Mesh == 18)
+        {
+            m = EnvOpaque(input.Uv, input.Material, input.Mesh == 18, length(CameraTime.xyz-input.WorldPosition));
+            {
+                float3 t = normalize(input.WorldTangent.xyz-world_normal*dot(world_normal,input.WorldTangent.xyz));
+                float3 b = normalize(cross(world_normal,t))*input.WorldTangent.w;
+                m.normal = normalize(t*m.normal.x+b*m.normal.y+world_normal*m.normal.z);
+            }
+        }
+        else
+        {
+            float4 color = FoliageColor(input.Mesh,input.Material,input.Uv);
+            clip(color.a-0.5);
+            float3 uv = FoliageUv(input.Mesh,input.Material,input.Uv);
+            float3 n = EnvDecode(input.Mesh==19 ? GrassNormal.Sample(FoliageClamp,uv).rg : LeafNormal.Sample(FoliageClamp,uv).rg);
+            if (!front) world_normal = -world_normal;
+            float3 t = normalize(input.WorldTangent.xyz-world_normal*dot(world_normal,input.WorldTangent.xyz));
+            float3 b = normalize(cross(world_normal,t))*input.WorldTangent.w;
+            m.color=color.rgb;m.normal=normalize(t*n.x+b*n.y+world_normal*n.z);m.ao=1;
+            m.roughness=input.Mesh==19 ? GrassRoughness.Sample(FoliageClamp,uv) : LeafRoughness.Sample(FoliageClamp,uv);
+            flag=input.Mesh==19 ? 0.6 : 0.75;
+        }
+        output.BaseColor=float4(m.color,1);world_normal=m.normal;
+        output.Material=float4(m.roughness,m.ao,0,flag);
     }
-    output.Normal = float4(world_normal * 0.5 + 0.5, 1.0);
+    output.Normal = float4(world_normal * 0.5 + 0.5,
+        input.Mesh >= 10 && input.Mesh <= 12 ? 2.0 + roughness : 1.0);
     output.Position = float4(input.WorldPosition, input.Mesh == 0 ? 1.0 : 0.0);
     return output;
 }
@@ -339,25 +447,66 @@ FullScreenOutput FullScreenVS(uint vertex_id : SV_VertexID)
 
 float ShadowVisibility(float3 world)
 {
-    float distance_from_target = length(world.xz);
-    uint cascade = distance_from_target < 9.0 ? 0 : (distance_from_target < 18.0 ? 1 : 2);
-    float4 shadow_position = mul(float4(world, 1.0), ShadowViewProjection[cascade]);
-    shadow_position.xyz /= shadow_position.w;
-    float2 shadow_uv =
-        float2(shadow_position.x * 0.5 + 0.5, 0.5 - shadow_position.y * 0.5);
-    if (any(shadow_uv < 0.0) || any(shadow_uv > 1.0))
+    float visibility = 1.0;
+    // Coarse coverage supplies the edge of each finer map, including the far fade.
+    [unroll] for (int cascade = 2; cascade >= 0; --cascade)
     {
-        return 1.0;
+        float4 projected = mul(float4(world, 1.0), ShadowViewProjection[cascade]);
+        projected.xyz /= projected.w;
+        const float2 uv = projected.xy * float2(0.5, -0.5) + 0.5;
+        if (any(uv < 0.0) || any(uv > 1.0) || projected.z < 0.0 || projected.z > 1.0)
+            continue;
+        const float4 tile = ShadowAtlasScaleOffset[cascade];
+        const float2 atlas_uv = uv * tile.xy + tile.zw;
+        const float2 lower = tile.zw + ShadowAtlasTexelSize.xy * 0.5;
+        const float2 upper = tile.zw + tile.xy - ShadowAtlasTexelSize.xy * 0.5;
+        float filtered = 0.0;
+        [unroll] for (int y = -1; y <= 1; ++y)
+        {
+            [unroll] for (int x = -1; x <= 1; ++x)
+            {
+                const float2 sample_uv = clamp(
+                    atlas_uv + float2(x, y) * ShadowAtlasTexelSize.xy, lower, upper);
+                filtered += ShadowMap.SampleCmpLevelZero(ShadowCompare, sample_uv, projected.z);
+            }
+        }
+        const float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+        visibility = lerp(visibility, filtered / 9.0, smoothstep(0.02, 0.12, edge));
     }
-    return ShadowMap.SampleCmpLevelZero(
-        ShadowCompare, float3(shadow_uv, cascade), shadow_position.z + 0.001);
+    return visibility;
+}
+
+// Shared lighting for opaque family features and transparent jelly bodies.
+float3 JellyLighting(float3 base, float3 normal, float3 world, float roughness, float charge)
+{
+    const float3 view = normalize(CameraTime.xyz - world);
+    const float3 light = normalize(-LightDirectionIntensity.xyz);
+    const float3 halfway = normalize(view + light);
+    const float nv = saturate(dot(normal, view));
+    const float nl = dot(normal, light);
+    const float visibility = lerp(0.42, 1.0, ShadowVisibility(world));
+    const float wrapped = saturate((nl + 0.4) / 1.4);
+    const float fresnel = 0.035 + 0.965 * pow(1.0 - nv, 5.0);
+    const float gloss = lerp(160.0, 18.0, saturate(roughness));
+    const float highlight = pow(saturate(dot(normal, halfway)), gloss);
+    const float thickness = pow(nv, 1.5);
+    const float internal = thickness * (0.05 + 0.15 * saturate(-nl) + charge * 0.45);
+    return base * (0.30 + (saturate(nl) * visibility + wrapped * 0.25) * LightColor.rgb + internal)
+        + LightColor.rgb * highlight * (0.35 + fresnel) * visibility
+        + lerp(base, float3(0.70, 0.85, 1.0), 0.30) * fresnel * 0.32;
 }
 
 float4 DeferredPS(FullScreenOutput input) : SV_Target0
 {
     float4 base = GBufferBase.SampleLevel(LinearClamp, input.Uv, 0);
-    float3 normal = normalize(GBufferNormal.SampleLevel(LinearClamp, input.Uv, 0).xyz * 2.0 - 1.0);
+    float4 normal_material = GBufferNormal.SampleLevel(LinearClamp, input.Uv, 0);
+    float3 normal = normalize(normal_material.xyz * 2.0 - 1.0);
     float3 world = GBufferPosition.SampleLevel(LinearClamp, input.Uv, 0).xyz;
+    float4 environment_material = GBufferMaterial.SampleLevel(LinearClamp,input.Uv,0);
+    if (environment_material.a > 0.5)
+        return float4(EnvironmentLighting(base.rgb,normal,world,environment_material,ShadowVisibility(world)),1);
+    if (normal_material.a >= 2.0)
+        return float4(JellyLighting(base.rgb, normal, world, normal_material.a - 2.0, 0.0), 1.0);
     float3 light = normalize(-LightDirectionIntensity.xyz);
     float diffuse = dot(normal, light);
     float stepped_diffuse = diffuse > 0.55 ? 1.0 : (diffuse > 0.05 ? 0.62 : 0.28);
@@ -763,6 +912,44 @@ float FlameDensity(float2 uv, float progress, bool ground)
     }
     float aa = max(fwidth(density), 0.002);
     return smoothstep(0.15 - aa, 0.62 + aa, density);
+}
+
+OitOutput SlimePS(SceneOutput input)
+{
+    float4 base = float4(0.08, 0.68, 0.12, 0.72);
+    float3 normal = normalize(input.WorldNormal);
+    float roughness = 0.25;
+    if (input.Mesh != 6)
+    {
+        const float3 uv = float3(input.Uv, input.Mesh - 10);
+        base = FamilyDiffuse.Sample(MaterialSampler, uv);
+        if (base.a >= 0.98) discard; // opaque eyes and ornaments wrote depth already
+        const float4 normal_map = FamilyNormal.Sample(MaterialSampler, uv);
+        roughness = normal_map.a;
+        float3 tn = normal_map.xyz * 2.0 - 1.0;
+        tn.y = -tn.y;
+        const float3 tangent = normalize(input.WorldTangent.xyz - normal * dot(normal, input.WorldTangent.xyz));
+        const float3 bitangent = normalize(cross(normal, tangent)) * input.WorldTangent.w;
+        normal = normalize(tangent * tn.x + bitangent * tn.y + normal * tn.z);
+        if (input.Mesh == 12)
+        {
+            const float3 charge_color = input.Charge < 0.5
+                ? lerp(float3(1.0, 0.26, 0.025), float3(1.0, 0.065, 0.012), input.Charge * 2.0)
+                : lerp(float3(1.0, 0.065, 0.012), float3(0.95, 0.008, 0.018), input.Charge * 2.0 - 1.0);
+            base.rgb *= charge_color / float3(1.0, 0.26, 0.025);
+        }
+    }
+    clip(base.a - 0.001);
+    const float3 color = JellyLighting(base.rgb, normal, input.WorldPosition, roughness, input.Charge);
+    // Keep authored opaque features in the depth pass; the jelly body transmits the floor.
+    const float alpha = base.a * 0.45;
+    const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
+    const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
+        1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
+    OitOutput output;
+    output.Accumulation = float4(color * alpha * weight, alpha * weight);
+    output.Revealage = alpha.xxxx;
+    return output;
 }
 
 OitOutput ParticlePS(ParticleOutput input)

@@ -64,6 +64,11 @@ enum class RenderMesh : std::uint8_t
     BossFiveMinute,
     BossTenMinute,
     BossFinal,
+    TreeTrunk,
+    TreeCanopy,
+    Rock,
+    Grass,
+    DirtPatch,
 };
 
 struct RenderInstance
@@ -75,6 +80,8 @@ struct RenderInstance
     RenderMesh mesh{};
     std::uint64_t stable_id{};
     std::uint32_t status_visual_mask{};
+    std::uint32_t environment_seed{};
+    std::uint32_t environment_variant{};
 };
 
 struct AnimationPoseRef

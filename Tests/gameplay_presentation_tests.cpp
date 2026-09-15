@@ -519,6 +519,146 @@ void TestRelicTriggerProjection()
     }
 }
 
+void TestEnemyAnimationStateSignals()
+{
+    hs::GameReadModelStorage storage;
+    hs::EnemyView enemy{};
+    enemy.id = {7}; enemy.kind = hs::EnemyKind::Ranged;
+    enemy.health = enemy.max_health = 100;
+    storage.AddEnemy(enemy);
+    hs::EnemyAnimationState state;
+    state.Update(storage.View(), {});
+    enemy.health = 90; storage.Clear(); storage.AddEnemy(enemy);
+    storage.tick = 1; state.Update(storage.View(), {});
+    Check(state.RecoilStart(7).has_value(), "nonattacking health drop starts recoil");
+    enemy.attacking = true;
+    storage.Clear(); storage.AddEnemy(enemy); storage.tick = 2;
+    state.Update(storage.View(), {});
+    Check(!state.RecoilStart(7).has_value(), "attack draw takes priority over hit recoil");
+    hs::DomainSignal release{}; release.kind = hs::DomainSignalKind::RangedEnemyReleased;
+    release.tick = 1; release.source_entity_id = 7; release.direction = {1, 0, 0};
+    state.Update(storage.View(), std::span(&release, 1));
+    Check(state.ReleaseTick(7) == 1, "ranged release keeps source entity id");
+    hs::DomainSignal death{}; death.kind = hs::DomainSignalKind::EnemyDied;
+    death.tick = 1; death.source_entity_id = 7; death.context = static_cast<std::uint8_t>(hs::EnemyKind::Ranged);
+    state.Update(storage.View(), std::span(&death, 1));
+    Check(state.DeathPoses().size() == 1, "normal death creates corpse pose");
+    hs::EnemyAnimationState suicide_state;
+    hs::GameReadModelStorage suicide_storage;
+    suicide_storage.tick = 1;
+    suicide_state.Update(suicide_storage.View(), {});
+    Check(suicide_state.DeathPoses().empty(), "suicide explosion without death signal has no corpse");
+    storage.tick = 49; state.Update(storage.View(), {});
+    Check(state.DeathPoses().empty(), "corpse expires after 48 ticks");
+}
+
+void TestAuthoredEnvironmentProjection()
+{
+    auto rules = QuietGameData();
+    hs::GameSimulation simulation;
+    constexpr std::uint64_t seed = 0x1234567887654321ull;
+    Check(simulation.Initialize({seed}, rules).Succeeded(), "environment initialize");
+    hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
+    Check(WriteSnapshot(simulation, snapshot), "environment snapshot capacity");
+    const auto instances = snapshot.View().instances;
+    std::size_t trees{}, grass{}, ground{};
+    for (std::size_t i = 0; i < instances.size(); ++i)
+    {
+        const auto &item = instances[i];
+        Check(item.mesh != hs::RenderMesh::DirtPatch, "dirt path blends in terrain without coplanar rectangle overlays");
+        if (item.mesh == hs::RenderMesh::Ground)
+        {
+            ++ground;
+            Check(item.environment_seed == static_cast<std::uint32_t>(seed ^ (seed >> 32)),
+                  "all continuous ground tiles share the map seed");
+        }
+        if (item.mesh == hs::RenderMesh::TreeTrunk)
+        {
+            ++trees;
+            Check(i + 1 < instances.size(), "tree has a canopy");
+            const auto &canopy = instances[i + 1];
+            Check(canopy.mesh == hs::RenderMesh::TreeCanopy && canopy.environment_variant == item.environment_variant &&
+                      item.environment_variant < 3, "trunk and canopy share one authored tree species");
+            Check(canopy.position.x == item.position.x && canopy.position.y == item.position.y &&
+                      canopy.position.z == item.position.z && canopy.yaw == item.yaw &&
+                      canopy.scale.x == item.scale.x && canopy.scale.y == item.scale.y &&
+                      canopy.scale.z == item.scale.z && item.scale.x == item.scale.y && item.scale.y == item.scale.z,
+                  "authored tree parts share ground origin and uniform metre scale");
+        }
+        if (item.mesh == hs::RenderMesh::Grass)
+        {
+            ++grass;
+            Check(item.environment_variant < 4 && item.scale.x == item.scale.y && item.scale.y == item.scale.z,
+                  "grass atlas aspect survives instance scaling");
+        }
+    }
+    Check(trees > 0 && grass > 0 && ground > 0, "authored environment is present in normal gameplay");
+    Check(ground == 1, "exterior environment uses one continuous floor");
+    const auto &floor = std::ranges::find_if(instances, [](const auto &item) { return item.mesh == hs::RenderMesh::Ground; });
+    Check(floor != instances.end() && floor->scale.x >= 52.0f && floor->scale.z >= 52.0f,
+          "continuous floor covers exterior tree rows");
+}
+
+void TestDenseGrassProjection()
+{
+    hs::GameReadModelStorage model;
+    model.seed = 0x1234567887654321ull;
+    model.arena_half_extent = 16.0f;
+    model.arena_boundary.count = 4;
+    model.arena_boundary.points[0] = {-16, -16};
+    model.arena_boundary.points[1] = {-16, 16};
+    model.arena_boundary.points[2] = {16, 16};
+    model.arena_boundary.points[3] = {16, -16};
+    model.arena_obstacle_count = 1;
+    model.arena_obstacles[0].center = {9, 0};
+    model.arena_obstacles[0].radius = 2.0f;
+    const auto project_grass = [&] {
+        hs::RenderSnapshotStorage snapshot(30000, 16, 8, 2048);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                       test_ui, hs::SettingsData{}, snapshot), "dense grass snapshot");
+        std::vector<hs::RenderInstance> result;
+        for (const auto &instance : snapshot.View().instances)
+            if (instance.mesh == hs::RenderMesh::Grass) result.push_back(instance);
+        return result;
+    };
+    const auto grass = project_grass();
+    const auto repeated = project_grass();
+    Check(grass.size() > 600 && grass.size() == repeated.size(), "grass forms dense patches within allowed terrain");
+    std::array<bool, 4> variants{};
+    std::size_t grouped{};
+    for (std::size_t i = 0; i < grass.size(); ++i)
+    {
+        const auto &item = grass[i];
+        Check(item.position.x == repeated[i].position.x && item.position.z == repeated[i].position.z &&
+                  item.yaw == repeated[i].yaw && item.scale.x == repeated[i].scale.x &&
+                  item.environment_variant == repeated[i].environment_variant,
+              "grass placement is deterministic for the map seed");
+        Check(std::abs(item.position.x) <= 14 && std::abs(item.position.z) <= 14 &&
+                  std::abs(item.position.x - std::sin(item.position.z * 0.085f) * 6.5f) >= 4.8f,
+              "dense grass preserves arena inset and open path");
+        const auto dx = item.position.x - 9.0f;
+        Check(dx * dx + item.position.z * item.position.z >= 2.45f * 2.45f,
+              "dense grass preserves obstacle clearance");
+        variants[item.environment_variant] = true;
+        std::size_t neighbours{};
+        for (std::size_t j = 0; j < grass.size(); ++j)
+        {
+            if (i == j) continue;
+            const auto x = item.position.x - grass[j].position.x;
+            const auto z = item.position.z - grass[j].position.z;
+            if (x * x + z * z < 0.65f * 0.65f) ++neighbours;
+        }
+        if (neighbours >= 3) ++grouped;
+    }
+    Check(grouped * 4 > grass.size() * 3, "most grass has several nearby neighbours instead of isolated tufts");
+    Check(std::ranges::all_of(variants, [](bool present) { return present; }), "all four grass variants populate patches");
+    model.seed ^= 1ull << 40;
+    const auto changed = project_grass();
+    Check(!changed.empty() && (changed.front().position.x != grass.front().position.x ||
+                              changed.front().position.z != grass.front().position.z),
+          "high seed bits change grass placement");
+}
+
 void RunGameplayPresentationTests()
 {
     TestCursorMovement();
@@ -529,6 +669,9 @@ void RunGameplayPresentationTests()
     TestBossAnimationReachesReleaseFrame();
     TestMonsterVisualScalesAndAttackFacing();
     TestRelicTriggerProjection();
+    TestEnemyAnimationStateSignals();
+    TestAuthoredEnvironmentProjection();
+    TestDenseGrassProjection();
 }
 
 } // namespace gameplay_test

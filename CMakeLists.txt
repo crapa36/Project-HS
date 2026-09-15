@@ -4,6 +4,23 @@ project(ProjectHS VERSION 0.2.0 LANGUAGES C CXX)
 
 include(FetchContent)
 
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+    if(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX STREQUAL "李멸퀬: ?ы븿 ?뚯씪: ")
+        # CMake can transcode the Korean MSVC prefix twice while probing cl.exe.
+        # Ninja compares bytes, so restore the actual UTF-8 compiler output.
+        set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "참고: 포함 파일: ")
+        set(CMAKE_CL_SHOWINCLUDES_PREFIX "${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}")
+    endif()
+    if(NOT CMAKE_CXX_CL_SHOWINCLUDES_PREFIX STREQUAL "Note: including file: " AND
+       NOT CMAKE_CXX_CL_SHOWINCLUDES_PREFIX STREQUAL "참고: 포함 파일: ")
+        message(FATAL_ERROR
+            "MSVC/Ninja header dependency tracking detected an unsupported /showIncludes prefix. "
+            "Reconfigure with 'cmake --fresh --preset <msvc-preset>'. "
+            "Detected prefix: '${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}'"
+        )
+    endif()
+endif()
+
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 23)
@@ -195,6 +212,8 @@ add_library(
     Source/RendererD3D12/Private/renderer_frame.cpp
     Source/RendererD3D12/Private/renderer_pipeline.cpp
     Source/RendererD3D12/Private/renderer_resources.cpp
+    Source/RendererD3D12/Private/renderer_environment.cpp
+    Source/RendererD3D12/Private/renderer_environment_mesh.cpp
     Source/RendererD3D12/Private/renderer_ui.cpp
 )
 target_sources(
@@ -276,7 +295,7 @@ function(hs_compile_shader output entry profile)
         COMMAND
             "${HS_DXC}" -nologo -WX -O3 -Ges -E "${entry}" -T "${profile}"
             -Fo "${HS_SHADER_DIRECTORY}/${output}" "${HS_SHADER_SOURCE}"
-        DEPENDS "${HS_SHADER_SOURCE}"
+        DEPENDS "${HS_SHADER_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
         VERBATIM
     )
     set(HS_SHADER_OUTPUTS ${HS_SHADER_OUTPUTS} "${HS_SHADER_DIRECTORY}/${output}" PARENT_SCOPE)
@@ -284,7 +303,9 @@ endfunction()
 
 hs_compile_shader(scene_vs.dxil SceneVS vs_6_0)
 hs_compile_shader(scene_ps.dxil ScenePS ps_6_0)
+hs_compile_shader(slime_ps.dxil SlimePS ps_6_6)
 hs_compile_shader(shadow_vs.dxil ShadowVS vs_6_0)
+hs_compile_shader(shadow_ps.dxil ShadowPS ps_6_0)
 hs_compile_shader(particle_vs.dxil ParticleVS vs_6_0)
 hs_compile_shader(particle_ps.dxil ParticlePS ps_6_0)
 hs_compile_shader(particle_cs.dxil ParticleCS cs_6_0)
@@ -393,6 +414,9 @@ add_executable(
     hs_content
     Source/Apps/Content/main.cpp
     Source/Apps/Content/character_asset_cooker.cpp
+    Source/Apps/Content/environment_texture_cooker.cpp
+    Source/Apps/Content/environment_histogram_cooker.cpp
+    Source/Apps/Content/environment_mesh_cooker.cpp
     Source/Apps/Content/content_cooker.cpp
     Source/Apps/Content/content_source_inventory.cpp
     Source/Apps/Content/game_data_cooker.cpp
@@ -402,7 +426,7 @@ add_executable(
 target_link_libraries(
     hs_content
     PRIVATE hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json
-            DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs
+            DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs d3d11
 )
 add_dependencies(hs_content hs_shaders)
 target_compile_definitions(
@@ -438,6 +462,10 @@ set(
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/AimRecoil.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Characters/Archer/DeathBackward.fbx"
 )
+file(GLOB_RECURSE HS_ENVIRONMENT_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/*.png"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/*.json"
+)
 file(GLOB HS_VFX_TEXTURE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX/*.png"
 )
@@ -450,26 +478,9 @@ file(GLOB HS_MONSTER_TEXTURE_SOURCES CONFIGURE_DEPENDS
 )
 set(
     HS_MONSTER_ASSET_SOURCES
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Slime_SK.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Cactus_SK.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Swarm09_SK.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/TurtleShell_SK.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/ChestMonster_SK.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/Beholder_SK.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/IdleBattle.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/RunFWD.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Attack01.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Attack02.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/melee/Die.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/IdleBattle.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/RunFWD.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Attack01.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Attack02.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/ranged/Die.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Idle.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/MoveFWD.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Attack.fbx"
-    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/suicide/Die.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/IdleBattle.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Run.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/5m/Attack01.fbx"
@@ -486,15 +497,66 @@ set(
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Attack03.fbx"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/final/Die.fbx"
 )
+foreach(variant Melee Ranged Suicide Projectile)
+    if(variant STREQUAL "Projectile")
+        set(stem SlimeGelProjectile)
+    else()
+        set(stem Slime${variant})
+        foreach(clip Idle Run Draw Recoil Death)
+            list(APPEND HS_MONSTER_ASSET_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Animations/Monsters/SlimeFamily/${variant}/${clip}.fbx")
+        endforeach()
+    endif()
+    list(APPEND HS_MONSTER_ASSET_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/SlimeFamily/${variant}/${stem}.fbx"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/SlimeFamily/${variant}/${stem}.fbm/${stem}_BaseColor.png"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Monsters/SlimeFamily/${variant}/${stem}.fbm/${stem}_Normal.png")
+endforeach()
+set(HS_ENVIRONMENT_COOKED
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/environment_terrain_gaussian.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/environment_terrain_histogram.dds")
+foreach(group terrain rock bark grass leaf)
+    if(group STREQUAL "terrain")
+        set(roles basecolor surface normal detail height)
+    elseif(group STREQUAL "rock" OR group STREQUAL "bark")
+        set(roles basecolor surface normal detail)
+    else()
+        set(roles basecolor normal roughness)
+    endif()
+    foreach(role IN LISTS roles)
+        list(APPEND HS_ENVIRONMENT_COOKED "${CMAKE_CURRENT_BINARY_DIR}/Cooked/environment_${group}_${role}.dds")
+    endforeach()
+endforeach()
+foreach(group trunk leaf rock grass)
+    if(group STREQUAL "trunk" OR group STREQUAL "leaf")
+        set(last_variant 2)
+    else()
+        set(last_variant 3)
+    endif()
+    foreach(variant RANGE 0 ${last_variant})
+        foreach(suffix "" _lod1 _lod2)
+            list(APPEND HS_ENVIRONMENT_COOKED "${CMAKE_CURRENT_BINARY_DIR}/Cooked/environment_${group}_${variant}${suffix}.meshbin")
+        endforeach()
+    endforeach()
+endforeach()
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     COMMAND "$<TARGET_FILE:hs_content>" --cook
-    DEPENDS hs_content hs_shaders ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} ${HS_MONSTER_ASSET_SOURCES} ${HS_MONSTER_TEXTURE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
+    DEPENDS hs_content hs_shaders "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json" ${HS_ENVIRONMENT_SOURCES} ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} ${HS_MONSTER_ASSET_SOURCES} ${HS_MONSTER_TEXTURE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
+        ${HS_ENVIRONMENT_COOKED}
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_diffuse_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_normal_0.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_diffuse_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_normal_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_diffuse_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_normal_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile.meshbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_diffuse_0.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_normal_0.dds"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_5m.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_10m.meshbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_final.meshbin"
@@ -521,7 +583,7 @@ add_custom_command(
 )
 add_custom_target(
     hs_cooked_content ALL
-    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
+    DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt" ${HS_ENVIRONMENT_COOKED}
 )
 add_dependencies(hs_combat_sim hs_cooked_content)
 if(HS_BUILD_RUNTIME)
@@ -569,11 +631,25 @@ if(HS_BUILD_TESTS)
             -DSOURCE_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_architecture.cmake
     )
+    if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja")
+        add_test(
+            NAME build.msvc-header-dependencies
+            COMMAND ${CMAKE_COMMAND}
+                -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+                -DBINARY_DIR=${CMAKE_BINARY_DIR}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_msvc_dependencies.cmake
+        )
+    endif()
     add_executable(hs_gameplay_internal_tests Tests/gameplay_internal_tests.cpp)
     target_link_libraries(hs_gameplay_internal_tests PRIVATE hs_game_domain)
     target_include_directories(hs_gameplay_internal_tests PRIVATE Source/Gameplay/Private)
     hs_configure_target(hs_gameplay_internal_tests)
     add_test(NAME simulation.internal-invariants COMMAND hs_gameplay_internal_tests)
+    add_executable(hs_navigation_tests Tests/gameplay_navigation_tests.cpp)
+    target_link_libraries(hs_navigation_tests PRIVATE hs_game_domain)
+    target_include_directories(hs_navigation_tests PRIVATE Source/Gameplay/Private)
+    hs_configure_target(hs_navigation_tests)
+    add_test(NAME simulation.navigation COMMAND hs_navigation_tests)
     add_executable(hs_simulation_tests Tests/simulation_tests.cpp)
     target_link_libraries(hs_simulation_tests PRIVATE hs_core hs_game_rules hs_gameplay)
     hs_configure_target(hs_simulation_tests)
@@ -636,6 +712,9 @@ if(HS_BUILD_TESTS)
     target_link_libraries(hs_gameplay_tests PRIVATE hs_core hs_gameplay hs_presentation)
     hs_configure_target(hs_gameplay_tests)
     add_dependencies(hs_gameplay_tests hs_cooked_content)
+    add_test(NAME content.environment-assets COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+        -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_environment_assets.ps1"
+        -Cooked "${CMAKE_CURRENT_BINARY_DIR}/Cooked")
     add_test(NAME simulation.content COMMAND hs_gameplay_tests content)
     add_test(NAME simulation.combat COMMAND hs_gameplay_tests combat)
     add_test(NAME simulation.progression COMMAND hs_gameplay_tests progression)
@@ -658,6 +737,14 @@ if(HS_BUILD_TESTS)
             --output=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/combat-simulator
     )
     set_tests_properties(scenario.combat-simulator PROPERTIES TIMEOUT 30)
+    add_test(
+        NAME tools.combat-suite-input
+        COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+            -File ${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_combat_suite_input.ps1
+            -Binary $<TARGET_FILE:hs_combat_sim>
+            -SourceRoot ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    set_tests_properties(tools.combat-suite-input PROPERTIES TIMEOUT 30)
     endif()
 
     if(HS_BUILD_RUNTIME)

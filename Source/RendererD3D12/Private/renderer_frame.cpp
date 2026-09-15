@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include <bit>
 
 #include <numbers>
 #include <ranges>
@@ -74,11 +75,31 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                   0.0f, 1.0f)
             : 1.0f;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
-                                                 snapshot.instances.end());
+                                                  snapshot.instances.end());
+    if (const auto count = impl_->config.slime_family_preview_count; count != 0)
+    {
+        render_instances.clear();
+        const auto columns = count == 1 ? 3u : static_cast<std::uint32_t>(std::ceil(std::sqrt(count * 3.0f)));
+        for (std::uint32_t i = 0; i < count * 3; ++i)
+        {
+            const auto row = i / columns, column = i % columns;
+            const auto x = count == 1 ? (static_cast<float>(i) - 1.0f) * 2.5f
+                                      : (static_cast<float>(column) - (columns - 1) * 0.5f) * 1.1f;
+            const auto rows = (count * 3 + columns - 1) / columns;
+            const auto z = count == 1 ? 0.0f : (static_cast<float>(row) - (rows - 1) * 0.5f) * 1.1f;
+            const auto kind = i % 3;
+            const auto scale = kind == 0 ? 1.5f : kind == 1 ? 2.0f : 2.4f;
+            render_instances.push_back({{x, 0.0f, z}, 0.0f, {scale, scale, scale},
+                                         0xffffffffu, static_cast<RenderMesh>(10 + kind), 0, 0});
+            if (kind == 2)
+                render_instances.push_back({{x - 1.25f, 0.45f, z - 1.5f}, 0.0f, {.24f, .24f, .8f},
+                                             0xff60d060u, RenderMesh::EnemyProjectile, 0, 0});
+        }
+    }
     const auto is_monster = [](RenderMesh mesh) {
         return mesh >= RenderMesh::MonsterMelee && mesh <= RenderMesh::BossFinal;
     };
-    if (impl_->config.monster_preview_asset < 6)
+    if (impl_->config.monster_preview_asset < 6 && impl_->config.slime_family_preview_count == 0)
     {
         const auto preview_mesh = static_cast<RenderMesh>(
             static_cast<std::uint32_t>(RenderMesh::MonsterMelee) +
@@ -97,6 +118,97 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             render_instances.clear();
         }
     }
+    if (impl_->config.environment_preview)
+    {
+        render_instances.clear();
+        const auto add = [&](RenderMesh mesh, Float3 position, Float3 scale, std::uint32_t variant) {
+            RenderInstance instance{};
+            instance.mesh = mesh;
+            instance.position = position;
+            instance.scale = scale;
+            instance.environment_variant = variant;
+            instance.environment_seed = 0x4853454eu;
+            render_instances.push_back(instance);
+        };
+        for (std::uint32_t variant = 0; variant < 3; ++variant)
+        {
+            const float x = static_cast<float>(variant)*5.0f-5.0f;
+            add(RenderMesh::TreeTrunk, {x,0,0}, {1,1,1}, variant);
+            add(RenderMesh::TreeCanopy, {x,0,0}, {1,1,1}, variant);
+        }
+        for (std::uint32_t variant = 0; variant < 4; ++variant)
+        {
+            const float x = static_cast<float>(variant)*3.0f-4.5f;
+            add(RenderMesh::Rock, {x,0,-5}, {.8f,.8f,.8f}, variant);
+            add(RenderMesh::Grass, {x,0,-8}, {1,1,1}, variant);
+        }
+        for (int z=-5; z<=2; ++z)
+            for (int x=-5; x<=5; ++x)
+                add(RenderMesh::Ground, {static_cast<float>(x)*2.5f,-.055f,static_cast<float>(z)*2.5f},
+                    {2.5f,.1f,2.5f}, 0);
+        snapshot.camera.target = {0,1,0};
+        if (!impl_->config.preview_camera_override)
+        {
+            snapshot.camera.yaw_degrees = 0.0f;
+            snapshot.camera.pitch_degrees = 22.0f;
+            snapshot.camera.distance = 22.0f;
+        }
+    }
+    const auto family_preview = impl_->config.slime_family_preview_count != 0;
+    const auto monster_preview = impl_->config.monster_preview_asset < 6 || family_preview;
+    const auto target_height = monster_preview
+                                   ? (!family_preview && impl_->config.monster_preview_asset >= 3 ? 3.0f : 1.0f)
+                               : impl_->config.character_preview ? 1.0f
+                                                                : snapshot.camera.target.y;
+    const auto target = DirectX::XMVectorSet(family_preview ? 0.0f : snapshot.camera.target.x, target_height,
+                                             family_preview ? 0.0f : snapshot.camera.target.z, 1.0f);
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto camera_yaw = impl_->config.preview_camera_override
+                                ? impl_->config.preview_camera_yaw
+                            : impl_->config.character_preview ? impl_->preview_yaw
+                                                              : snapshot.camera.yaw_degrees;
+    const auto camera_pitch = impl_->config.preview_camera_override
+                                  ? impl_->config.preview_camera_pitch
+                              : impl_->config.character_preview ? impl_->preview_pitch
+                                                                : snapshot.camera.pitch_degrees;
+    const auto camera_distance = impl_->config.preview_camera_override
+                                     ? impl_->config.preview_camera_distance
+                                 : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
+                                 : monster_preview
+                                     ? (impl_->config.monster_preview_asset >= 3 ? 18.0f : 8.0f)
+                                 : impl_->config.character_preview ? impl_->preview_distance
+                                     : snapshot.camera.distance;
+#else
+    // Command-line captures also run in the validation build without the Debug UI.
+    const auto camera_yaw = impl_->config.preview_camera_override
+                                ? impl_->config.preview_camera_yaw
+                                : snapshot.camera.yaw_degrees;
+    const auto camera_pitch = impl_->config.preview_camera_override
+                                  ? impl_->config.preview_camera_pitch
+                                  : snapshot.camera.pitch_degrees;
+    const auto camera_distance = impl_->config.preview_camera_override
+                                     ? impl_->config.preview_camera_distance
+                                     : family_preview ? std::max(10.0f, std::sqrt(impl_->config.slime_family_preview_count * 3.0f) * 1.9f)
+                                     : snapshot.camera.distance;
+#endif
+    const auto yaw = DirectX::XMConvertToRadians(camera_yaw);
+    const auto pitch = DirectX::XMConvertToRadians(camera_pitch);
+    const auto direction = DirectX::XMVector3Normalize(
+        DirectX::XMVectorSet(std::cos(pitch) * std::sin(yaw), -std::sin(pitch),
+                             std::cos(pitch) * std::cos(yaw), 0.0f));
+    const auto eye = DirectX::XMVectorSubtract(
+        target, DirectX::XMVectorScale(direction, camera_distance));
+    DirectX::XMFLOAT3 lod_eye{};
+    DirectX::XMStoreFloat3(&lod_eye, eye);
+    const auto is_environment_mesh = [](RenderMesh mesh) {
+        return mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass;
+    };
+    const auto environment_mesh_index = [](const RenderInstance &source) -> std::size_t {
+        const auto type = static_cast<std::size_t>(source.mesh) - static_cast<std::size_t>(RenderMesh::TreeTrunk);
+        constexpr std::array<std::size_t, 4> offsets{0, 3, 6, 10};
+        constexpr std::array<std::size_t, 4> counts{3, 3, 4, 4};
+        return offsets[type] + source.environment_variant % counts[type];
+    };
     std::vector<RenderInstance> ordered_instances;
     ordered_instances.reserve(render_instances.size());
     for (const auto &source : render_instances)
@@ -105,13 +217,59 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         for (const auto &source : render_instances)
             if (is_monster(source.mesh) &&
                 static_cast<std::uint32_t>(source.mesh) -
-                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee) == asset)
-                ordered_instances.push_back(source);
+                 static_cast<std::uint32_t>(RenderMesh::MonsterMelee) == asset)
+                 ordered_instances.push_back(source);
     for (const auto &source : render_instances)
-        if (source.mesh != RenderMesh::Archer && !is_monster(source.mesh))
+        if (source.mesh == RenderMesh::EnemyProjectile) ordered_instances.push_back(source);
+    struct EnvironmentLod { float threshold{1.0f}; bool complement{}; };
+    std::vector<EnvironmentLod> ordered_lods(ordered_instances.size());
+    std::array<std::pair<std::size_t, std::size_t>, 42> environment_ranges{};
+    const auto select_lod = [&](const RenderInstance &source, std::size_t lod, EnvironmentLod &selection) {
+        const float dx = source.position.x - lod_eye.x;
+        const float dy = source.position.y - lod_eye.y;
+        const float dz = source.position.z - lod_eye.z;
+        const float distance = std::sqrt(dx*dx + dy*dy + dz*dz);
+        const std::size_t low = distance < 32.0f ? 0 : distance < 65.0f ? 1 : 2;
+        const float start = low == 0 ? 25.0f : 55.0f;
+        const float end = low == 0 ? 32.0f : 65.0f;
+        const bool transition = low < 2 && distance > start;
+        if (lod == low)
+        {
+            selection = {transition ? 1.0f-(distance-start)/(end-start) : 1.0f, false};
+            return true;
+        }
+        if (transition && lod == low+1)
+        {
+            selection = {1.0f-(distance-start)/(end-start), true};
+            return true;
+        }
+        return false;
+    };
+    for (std::size_t asset = 0; asset < environment_ranges.size(); ++asset)
+    {
+        const auto begin = ordered_instances.size();
+        for (const auto &source : render_instances)
+        {
+            EnvironmentLod selection;
+            if (is_environment_mesh(source.mesh) && environment_mesh_index(source) == asset/3 &&
+                select_lod(source, asset%3, selection))
+            {
+                ordered_instances.push_back(source);
+                ordered_lods.push_back(selection);
+            }
+        }
+        environment_ranges[asset] = {begin, ordered_instances.size() - begin};
+    }
+    for (const auto &source : render_instances)
+        if (source.mesh != RenderMesh::Archer && !is_monster(source.mesh) &&
+            !is_environment_mesh(source.mesh) && source.mesh != RenderMesh::EnemyProjectile)
+        {
             ordered_instances.push_back(source);
+            ordered_lods.push_back({});
+        }
     render_instances = std::move(ordered_instances);
     std::array<std::pair<std::size_t, std::size_t>, 6> monster_ranges{};
+    std::pair<std::size_t, std::size_t> projectile_range{};
     for (std::size_t asset = 0; asset < monster_ranges.size(); ++asset)
     {
         const auto first = std::ranges::find_if(render_instances, [&](const auto &source) {
@@ -129,8 +287,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ++last;
         monster_ranges[asset] = {begin, static_cast<std::size_t>(last - first)};
     }
+    if (const auto first = std::ranges::find_if(render_instances, [](const auto &source) {
+            return source.mesh == RenderMesh::EnemyProjectile;
+        }); first != render_instances.end())
+    {
+        auto last = first;
+        while (last != render_instances.end() && last->mesh == RenderMesh::EnemyProjectile) ++last;
+        projectile_range = {static_cast<std::size_t>(first - render_instances.begin()),
+                            static_cast<std::size_t>(last - first)};
+    }
     std::vector<ParticleSpawnCommand> frame_particle_spawns(particle_spawns.begin(),
                                                              particle_spawns.end());
+    if (impl_->config.slime_family_preview_count != 0) frame_particle_spawns.clear();
     if (snapshot.header.tick != impl_->last_status_visual_tick)
     {
         impl_->last_status_visual_tick = snapshot.header.tick;
@@ -729,40 +897,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->particles_initialized && snapshot.header.tick > impl_->last_particle_tick
             ? snapshot.header.tick - impl_->last_particle_tick
             : 0;
-    const auto monster_preview = impl_->config.monster_preview_asset < 6;
-    const auto target_height = monster_preview
-                                   ? (impl_->config.monster_preview_asset >= 3 ? 3.0f : 1.0f)
-                               : impl_->config.character_preview ? 1.0f
-                                                                : snapshot.camera.target.y;
-    const auto target = DirectX::XMVectorSet(snapshot.camera.target.x, target_height,
-                                             snapshot.camera.target.z, 1.0f);
-#if defined(HS_DEVELOPMENT_TOOLS)
-    const auto camera_yaw = impl_->config.preview_camera_override
-                                ? impl_->config.preview_camera_yaw
-                            : impl_->config.character_preview ? impl_->preview_yaw
-                                                              : snapshot.camera.yaw_degrees;
-    const auto camera_pitch = impl_->config.preview_camera_override
-                                  ? impl_->config.preview_camera_pitch
-                              : impl_->config.character_preview ? impl_->preview_pitch
-                                                                : snapshot.camera.pitch_degrees;
-    const auto camera_distance = impl_->config.preview_camera_override
-                                     ? impl_->config.preview_camera_distance
-                                 : monster_preview
-                                     ? (impl_->config.monster_preview_asset >= 3 ? 18.0f : 8.0f)
-                                 : impl_->config.character_preview ? impl_->preview_distance
-                                     : snapshot.camera.distance;
-#else
-    const auto camera_yaw = snapshot.camera.yaw_degrees;
-    const auto camera_pitch = snapshot.camera.pitch_degrees;
-    const auto camera_distance = snapshot.camera.distance;
-#endif
-    const auto yaw = DirectX::XMConvertToRadians(camera_yaw);
-    const auto pitch = DirectX::XMConvertToRadians(camera_pitch);
-    const auto direction = DirectX::XMVector3Normalize(
-        DirectX::XMVectorSet(std::cos(pitch) * std::sin(yaw), -std::sin(pitch),
-                             std::cos(pitch) * std::cos(yaw), 0.0f));
-    const auto eye = DirectX::XMVectorSubtract(
-        target, DirectX::XMVectorScale(direction, camera_distance));
     const auto view =
         DirectX::XMMatrixLookAtLH(eye, target, DirectX::XMVectorSet(0, 1, 0, 0));
     const auto projection = DirectX::XMMatrixPerspectiveFovLH(
@@ -805,20 +939,27 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     DirectX::XMStoreFloat3(&camera_forward, direction);
     constants->camera_forward_softness = {camera_forward.x, camera_forward.y,
                                           camera_forward.z, 0.35f};
-    constexpr float cascade_extent[] = {18.0f, 36.0f, 72.0f};
-    const auto light_direction = DirectX::XMVector3Normalize(
-        DirectX::XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f));
-    const auto light_eye =
-        DirectX::XMVectorSubtract(target, DirectX::XMVectorScale(light_direction, 60.0f));
-    const auto light_view =
-        DirectX::XMMatrixLookAtLH(light_eye, target, DirectX::XMVectorSet(0, 1, 0, 0));
-    for (std::size_t cascade = 0; cascade < std::size(cascade_extent); ++cascade)
+    constexpr float cascade_extent[] = {18.0f, 48.0f, 160.0f};
+    const auto base_shadow = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
+    constants->shadow_atlas_texel_size = {1.0f / float(base_shadow * 5u), 1.0f / float(base_shadow * 4u), float(base_shadow * 5u), float(base_shadow * 4u)};
+    const auto light_direction = DirectX::XMVector3Normalize(DirectX::XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f));
+    const auto light_up = std::abs(DirectX::XMVectorGetY(light_direction)) > 0.99f
+        ? DirectX::XMVectorSet(0, 0, 1, 0) : DirectX::XMVectorSet(0, 1, 0, 0);
+    const auto light_view = DirectX::XMMatrixLookAtLH(
+        DirectX::XMVectorScale(light_direction, -160.0f), DirectX::XMVectorZero(), light_up);
+    for (std::size_t cascade = 0; cascade < 3; ++cascade)
     {
-        const auto light_projection = DirectX::XMMatrixOrthographicLH(
-            cascade_extent[cascade], cascade_extent[cascade], 120.0f, 0.1f);
-        DirectX::XMStoreFloat4x4(
-            &constants->shadow_view_projection[cascade],
-            DirectX::XMMatrixTranspose(light_view * light_projection));
+        const float resolution = cascade == 0 ? float(base_shadow * 4u) : float(base_shadow);
+        const float extent = cascade_extent[cascade];
+        const auto center = DirectX::XMVector3TransformCoord(target, light_view);
+        const float texel = extent / resolution;
+        const float cx = std::round(DirectX::XMVectorGetX(center) / texel) * texel;
+        const float cy = std::round(DirectX::XMVectorGetY(center) / texel) * texel;
+        const float cz = DirectX::XMVectorGetZ(center);
+        const float half = extent * 0.5f;
+        const auto projection = DirectX::XMMatrixOrthographicOffCenterLH(cx-half, cx+half, cy-half, cy+half, cz+160.0f, cz-160.0f);
+        DirectX::XMStoreFloat4x4(&constants->shadow_view_projection[cascade], DirectX::XMMatrixTranspose(light_view * projection));
+        constants->shadow_atlas_scale_offset[cascade] = cascade == 0 ? DirectX::XMFLOAT4{0.8f, 1.0f, 0.0f, 0.0f} : (cascade == 1 ? DirectX::XMFLOAT4{0.2f, 0.25f, 0.8f, 0.0f} : DirectX::XMFLOAT4{0.2f, 0.25f, 0.8f, 0.25f});
     }
     for (auto &bone : constants->archer_bones)
     {
@@ -961,6 +1102,49 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
                                    total_particles_to_spawn,
                                    impl_->archer_material_count};
+    std::vector<std::pair<float, std::uint64_t>> grass_candidates;
+    DirectX::XMFLOAT3 player_position{};
+    bool have_player = false;
+    for (const auto &source : render_instances)
+    {
+        if (source.mesh == RenderMesh::Archer)
+        {
+            player_position = {source.position.x, source.position.y, source.position.z};
+            have_player = true;
+            break;
+        }
+    }
+    if (have_player)
+    {
+        for (const auto &source : render_instances)
+        {
+            if (source.mesh < RenderMesh::MonsterMelee || source.mesh > RenderMesh::BossFinal)
+                continue;
+            const auto dx = source.position.x - player_position.x;
+            const auto dz = source.position.z - player_position.z;
+            grass_candidates.emplace_back(dx * dx + dz * dz, source.stable_id);
+        }
+        std::ranges::sort(grass_candidates);
+        constants->grass_benders[0] = {player_position.x, player_position.y,
+                                       player_position.z, 1.25f};
+        const auto count = std::min<std::size_t>(grass_candidates.size() + 1, 32);
+        std::size_t output = 1;
+        for (const auto &candidate : grass_candidates)
+        {
+            if (output == count) break;
+            const auto it = std::ranges::find_if(render_instances, [&](const auto &source) {
+                return source.stable_id == candidate.second;
+            });
+            if (it == render_instances.end()) continue;
+            constants->grass_benders[output++] = {it->position.x, it->position.y,
+                                                  it->position.z, 1.0f};
+        }
+        constants->grass_bender_count = {static_cast<std::uint32_t>(output), 0, 0, 0};
+    }
+    else
+    {
+        constants->grass_bender_count = {};
+    }
     for (std::size_t index = 0; index < instance_count; ++index)
     {
         const auto &source = render_instances[index];
@@ -980,7 +1164,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 yaw_value = previous.yaw + yaw_delta * interpolation;
             }
         }
-        const auto vertical_offset = source.mesh == RenderMesh::Archer
+        const auto vertical_offset = is_environment_mesh(source.mesh) ? 0.0f : source.mesh == RenderMesh::Archer
                                          ? impl_->archer_ground_offset
                                          : is_monster(source.mesh)
                                              ? impl_->monster_assets[static_cast<std::size_t>(
@@ -989,10 +1173,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                                    .ground_offset * source.scale.y
                                              : source.scale.y * 0.5f;
         auto mesh = static_cast<std::uint32_t>(source.mesh);
-        float animation_time{};
+        if (is_environment_mesh(source.mesh))
+            mesh |= 0x10000u | (ordered_lods[index].complement ? 0x20000u : 0u);
+        float animation_time = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch
+            ? std::bit_cast<float>(source.environment_seed) : 0.0f;
         if (is_monster(source.mesh))
         {
-            if (impl_->config.monster_preview_asset < 6)
+            if (impl_->config.monster_preview_asset < 6 || family_preview)
             {
                 mesh |= impl_->config.monster_preview_clip << 8u;
                 animation_time = impl_->config.monster_preview_time;
@@ -1005,7 +1192,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
         instances[index] = {{position.x, position.y + vertical_offset, position.z, 1.0f},
-                            {source.scale.x, source.scale.y, source.scale.z, 0.0f},
+                            {source.scale.x, source.scale.y, source.scale.z, ordered_lods[index].threshold},
                             source.color_rgba,
                             mesh,
                             yaw_value,
@@ -1077,6 +1264,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto oit_revealage_rtv = rtv_at(kFrameCount + 5);
     const auto post_a_rtv = rtv_at(kFrameCount + 6);
     const auto post_b_rtv = rtv_at(kFrameCount + 7);
+    const auto gbuffer_material_rtv = rtv_at(kFrameCount + 8);
     const auto dsv = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
     ID3D12DescriptorHeap *descriptor_heaps[] = {impl_->srv_heap.Get()};
     impl_->command_list->SetDescriptorHeaps(1, descriptor_heaps);
@@ -1137,6 +1325,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {impl_->oit_revealage.resource.Get()}, initial_color_access, "OitRevealage");
     const auto post_a = impl_->graph.ImportTexture(
         {impl_->post_a.resource.Get()}, initial_color_access, "PostA");
+    const auto gbuffer_material = impl_->graph.ImportTexture(
+        {impl_->gbuffer_material.resource.Get()}, initial_color_access, "GBufferMaterial");
     const auto post_b = impl_->graph.ImportTexture(
         {impl_->post_b.resource.Get()}, initial_color_access, "PostB");
     const auto ui = impl_->graph.ImportTexture(
@@ -1223,11 +1413,21 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             impl_->command_list->DrawInstanced(impl_->monster_assets[asset].vertex_count,
                                                static_cast<UINT>(count), 0, 0);
         }
+        for (std::size_t asset = 0; asset < environment_ranges.size(); ++asset)
+        {
+            const auto [begin, count] = environment_ranges[asset];
+            if (count == 0) continue;
+            const auto &mesh = impl_->environment_meshes[asset];
+            impl_->command_list->SetGraphicsRootShaderResourceView(1, base + begin * sizeof(GpuInstance));
+            impl_->command_list->IASetVertexBuffers(0, 1, &mesh.vertex_view);
+            impl_->command_list->DrawInstanced(mesh.vertex_count, static_cast<UINT>(count), 0, 0);
+        }
         const auto procedural_begin = std::ranges::find_if(
-            render_instances, [](const auto &source) {
-                return source.mesh != RenderMesh::Archer &&
+            render_instances, [&](const auto &source) {
+                return source.mesh != RenderMesh::Archer && !is_environment_mesh(source.mesh) &&
                        !(source.mesh >= RenderMesh::MonsterMelee &&
-                         source.mesh <= RenderMesh::BossFinal);
+                          source.mesh <= RenderMesh::BossFinal) &&
+                       source.mesh != RenderMesh::EnemyProjectile;
             });
         if (procedural_begin != render_instances.end())
         {
@@ -1254,11 +1454,17 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         auto handle = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
         handle.ptr += impl_->dsv_stride;
+        impl_->command_list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
         for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
         {
-            impl_->command_list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0,
-                                                        0, nullptr);
             impl_->command_list->OMSetRenderTargets(0, nullptr, FALSE, &handle);
+            const UINT tile = cascade == 0 ? static_cast<UINT>(shadow_size * 4.0f) : static_cast<UINT>(shadow_size);
+            const UINT x = cascade == 0 ? 0u : tile * 4u;
+            const UINT y = cascade == 2 ? tile : 0u;
+            const D3D12_VIEWPORT tile_view{static_cast<float>(x), static_cast<float>(y), static_cast<float>(tile), static_cast<float>(tile), 0, 1};
+            const D3D12_RECT tile_rect{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + tile), static_cast<LONG>(y + tile)};
+            impl_->command_list->RSSetViewports(1, &tile_view );
+            impl_->command_list->RSSetScissorRects(1, &tile_rect);
             impl_->command_list->SetGraphicsRoot32BitConstant(6, cascade, 0);
             draw_character_instances();
             handle.ptr += impl_->dsv_stride;
@@ -1271,20 +1477,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     gbuffer_pass.Write(gbuffer_base, Access::RenderTarget);
     gbuffer_pass.Write(gbuffer_normal, Access::RenderTarget);
     gbuffer_pass.Write(gbuffer_position, Access::RenderTarget);
+    gbuffer_pass.Write(gbuffer_material, Access::RenderTarget);
     gbuffer_pass.Write(depth, Access::DepthWrite);
     gbuffer_pass.SetExecute([&](RenderPassContext &) {
         constexpr float clear_base[] = {0, 0, 0, 0};
         constexpr float clear_normal[] = {0.5f, 1.0f, 0.5f, 0};
         constexpr float clear_position[] = {0, 0, 0, 0};
         impl_->command_list->ClearRenderTargetView(gbuffer_base_rtv, clear_base, 0, nullptr);
+        impl_->command_list->ClearRenderTargetView(gbuffer_material_rtv, clear_base, 0, nullptr);
         impl_->command_list->ClearRenderTargetView(gbuffer_normal_rtv, clear_normal, 0, nullptr);
         impl_->command_list->ClearRenderTargetView(gbuffer_position_rtv, clear_position, 0,
                                                    nullptr);
         impl_->command_list->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0,
                                                    nullptr);
         const D3D12_CPU_DESCRIPTOR_HANDLE targets[] = {
-            gbuffer_base_rtv, gbuffer_normal_rtv, gbuffer_position_rtv};
-        impl_->command_list->OMSetRenderTargets(3, targets, FALSE, &dsv);
+            gbuffer_base_rtv, gbuffer_normal_rtv, gbuffer_position_rtv, gbuffer_material_rtv};
+        impl_->command_list->OMSetRenderTargets(4, targets, FALSE, &dsv);
         impl_->command_list->SetPipelineState(impl_->scene_pipeline.Get());
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         draw_character_instances();
@@ -1294,6 +1502,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     lighting_pass.Read(gbuffer_base, Access::ShaderRead);
     lighting_pass.Read(gbuffer_normal, Access::ShaderRead);
     lighting_pass.Read(gbuffer_position, Access::ShaderRead);
+    lighting_pass.Read(gbuffer_material, Access::ShaderRead);
     lighting_pass.Read(shadow, Access::ShaderRead);
     lighting_pass.Write(hdr, Access::RenderTarget);
     lighting_pass.SetExecute([&](RenderPassContext &) {
@@ -1304,6 +1513,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     auto transparent_pass = impl_->graph.AddPass(kRenderPassNames[4], QueueHint::Direct);
     transparent_pass.Read(depth, Access::DepthRead);
+    transparent_pass.Read(shadow, Access::ShaderRead);
     transparent_pass.Read(particles, Access::ShaderRead);
     transparent_pass.Read(particle_alive_output, Access::ShaderRead);
     transparent_pass.Read(indirect_arguments, Access::IndirectArgs);
@@ -1331,6 +1541,28 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->command_list->ExecuteIndirect(
             impl_->draw_signature.Get(), 1, impl_->indirect_arguments.resource.Get(), 0, nullptr,
             0);
+
+        // Family bodies and gel projectiles use the weighted OIT mesh pipeline.
+        impl_->command_list->SetPipelineState(impl_->slime_pipeline.Get());
+        impl_->command_list->IASetVertexBuffers(0, 1, &impl_->monster_assets[0].vertex_view);
+        const auto draw_slime_range = [&](std::pair<std::size_t, std::size_t> range,
+                                          const D3D12_VERTEX_BUFFER_VIEW &view,
+                                          UINT vertices) {
+            if (range.second == 0) return;
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                1, frame.upload.resource->GetGPUVirtualAddress() + kInstanceDataOffset +
+                       range.first * sizeof(GpuInstance));
+            impl_->command_list->IASetVertexBuffers(0, 1, &view);
+            impl_->command_list->DrawInstanced(vertices, static_cast<UINT>(range.second), 0, 0);
+        };
+        draw_slime_range(monster_ranges[0],
+                         impl_->monster_assets[0].vertex_view, impl_->monster_assets[0].vertex_count);
+        draw_slime_range(monster_ranges[1],
+                         impl_->monster_assets[1].vertex_view, impl_->monster_assets[1].vertex_count);
+        draw_slime_range(monster_ranges[2],
+                         impl_->monster_assets[2].vertex_view, impl_->monster_assets[2].vertex_count);
+        draw_slime_range(projectile_range,
+                         impl_->gel_projectile_vertex_view, impl_->gel_projectile_vertex_count);
     });
 
     auto composite_pass = impl_->graph.AddPass(kRenderPassNames[5], QueueHint::Direct);
@@ -1396,6 +1628,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->graph.SetFinalAccess(gbuffer_base, Access::ShaderRead);
     impl_->graph.SetFinalAccess(gbuffer_normal, Access::ShaderRead);
     impl_->graph.SetFinalAccess(gbuffer_position, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(gbuffer_material, Access::ShaderRead);
     impl_->graph.SetFinalAccess(hdr, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_accumulation, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_revealage, Access::ShaderRead);

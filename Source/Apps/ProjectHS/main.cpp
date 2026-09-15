@@ -71,6 +71,10 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         {
             config.borderless = true;
         }
+        else if (argument == "--environment-preview")
+        {
+            config.environment_preview = true;
+        }
         else if (argument == "--character-preview")
         {
             config.character_preview = true;
@@ -110,6 +114,21 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
                     config.vsync = false;
                     config.frame_cap = 0;
                 }
+            }
+        }
+        else if (argument.starts_with("--slime-family-preview="))
+        {
+            const auto value = argument.substr(std::string_view{"--slime-family-preview="}.size());
+            std::uint32_t count{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), count);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                count >= 1 && count <= 300)
+            {
+                config.slime_family_preview_count = count;
+                config.smoke = true;
+                config.visible = false;
+                config.vsync = false;
+                config.frame_cap = 0;
             }
         }
         else if (argument.starts_with("--preview-camera="))
@@ -216,6 +235,15 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
         else if (argument == "--barriers=enhanced")
         {
             config.barrier_mode = hs::BarrierMode::Enhanced;
+        }
+        else if (argument.starts_with("--camera-zoom="))
+        {
+            const auto value = argument.substr(std::string_view{"--camera-zoom="}.size());
+            std::uint32_t zoom{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), zoom);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() &&
+                zoom >= 15 && zoom <= 120)
+                config.camera_zoom_percent = zoom;
         }
         else if (argument.starts_with("--ticks="))
         {
