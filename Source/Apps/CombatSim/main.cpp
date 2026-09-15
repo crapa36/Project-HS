@@ -97,6 +97,23 @@ std::size_t RequireIdIndex(std::string_view value,
     return static_cast<std::size_t>(found - ids.begin());
 }
 
+void RequireObjectKeys(const Json &object, std::span<const std::string_view> allowed,
+                       std::string_view category)
+{
+    if (!object.is_object())
+        throw std::runtime_error(std::string(category) + " must be an object.");
+    for (const auto &[key, value] : object.items())
+        if (std::ranges::find(allowed, key) == allowed.end())
+            throw std::runtime_error(std::string(category) + " key is invalid: " + key);
+}
+
+constexpr std::array<std::string_view, 15> kRelicBalanceScenarios{
+    "shared_target", "durable_slow_area", "durable_hit_streak",
+    "durable_chain_targets", "incoming_normal", "crowd_pressure",
+    "incoming_low_health", "fatal_hit", "varied_incoming", "movement",
+    "wounded_bleed_kill", "dense_burn_kill", "basic_kill_neighbors",
+    "pickup_normal", "boss_only"};
+
 CombatSimulationSuite LoadCombatSimulationSuite(const std::filesystem::path &path)
 {
     std::ifstream stream(path);
@@ -193,7 +210,13 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
     stream >> root;
     if (!stream || root.value("schema_version", 0) != 1)
         throw std::runtime_error("Relic balance suite must be schema_version 1 JSON.");
-    const auto seconds = root.at("duration_seconds").get<std::uint32_t>();
+    constexpr std::array<std::string_view, 5> kRootKeys{
+        "schema_version", "duration_seconds", "seeds", "cases", "pair_limit"};
+    RequireObjectKeys(root, kRootKeys, "Relic balance suite");
+    const auto &duration_json = root.at("duration_seconds");
+    if (!duration_json.is_number_unsigned())
+        throw std::runtime_error("duration_seconds must be a positive integer.");
+    const auto seconds = duration_json.get<std::uint64_t>();
     if (seconds == 0 || seconds > 1'800)
         throw std::runtime_error("duration_seconds must be in [1, 1800].");
     CombatSimulationSuite suite;
@@ -203,13 +226,28 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
         std::set(suite.seeds.begin(), suite.seeds.end()).size() != suite.seeds.size())
         throw std::runtime_error("seeds must contain 1-8 unique values.");
 
-    // Optional focused cases keep the expensive exhaustive scan available while
-    // allowing a small, explicitly reviewed set of high-value combinations.
-    if (root.contains("cases"))
+    const bool has_cases = root.contains("cases");
+    const bool has_pair_limit = root.contains("pair_limit");
+    if (has_cases == has_pair_limit)
+        throw std::runtime_error(
+            "Relic balance suite requires exactly one of cases or a positive pair_limit.");
+
+    // Focused cases keep the expensive exhaustive scan available while allowing
+    // a small, explicitly reviewed set of high-value combinations.
+    if (has_cases)
     {
+        if (!root.at("cases").is_array())
+            throw std::runtime_error("Relic balance cases must be an array.");
         std::set<std::string> build_ids;
         for (const auto &source : root.at("cases"))
         {
+            constexpr std::array<std::string_view, 8> kCaseKeys{
+                "id", "scenario", "skills", "upgrades", "upgrade_masks",
+                "relic", "expect_activation", "stats"};
+            RequireObjectKeys(source, kCaseKeys, "Relic balance case");
+            if (source.contains("upgrades") == source.contains("upgrade_masks"))
+                throw std::runtime_error(
+                    "Relic balance cases require exactly one of upgrades or upgrade_masks.");
             const auto case_id = source.at("id").get<std::string>();
             if (case_id.empty() || !build_ids.insert(case_id + "-off").second ||
                 !build_ids.insert(case_id + "-on").second)
@@ -217,6 +255,11 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
             CombatBuild off;
             off.id = case_id + "-off";
             off.scenario = source.value("scenario", std::string{});
+            if (!off.scenario.empty() &&
+                std::ranges::find(kRelicBalanceScenarios, off.scenario) ==
+                    kRelicBalanceScenarios.end())
+                throw std::runtime_error("Relic balance case scenario is invalid: " +
+                                         off.scenario);
             for (const auto &skill : source.at("skills"))
             {
                 const auto index = RequireIdIndex(skill.get<std::string>(), kCombatSuiteSkillIds, "skill");
@@ -225,7 +268,9 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
                     throw std::runtime_error("Focused cases require 0-4 unique non-basic active skills.");
                 off.skills.push_back(static_cast<std::uint8_t>(index));
             }
-            const auto &upgrade_source = source.contains("upgrade_masks") ? source.at("upgrade_masks") : source.at("upgrades");
+            const auto &upgrade_source = source.contains("upgrade_masks")
+                                             ? source.at("upgrade_masks")
+                                             : source.at("upgrades");
             for (const auto &[skill_id, upgrades] : upgrade_source.items())
             {
                 const auto skill = RequireIdIndex(skill_id, kCombatSuiteSkillIds, "upgrade skill");
@@ -266,10 +311,18 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
             suite.builds.push_back(std::move(off));
             suite.builds.push_back(std::move(on));
         }
-        if (suite.builds.empty()) throw std::runtime_error("At least one focused relic case is required.");
+        if (suite.builds.empty())
+            throw std::runtime_error("At least one focused relic case is required.");
         return suite;
     }
-    const auto pair_limit = root.value("pair_limit", std::numeric_limits<std::size_t>::max());
+    const auto &pair_limit_json = root.at("pair_limit");
+    if (!pair_limit_json.is_number_unsigned())
+        throw std::runtime_error("pair_limit must be a positive integer.");
+    const auto pair_limit = pair_limit_json.get<std::size_t>();
+    constexpr auto kMaximumRelicBalancePairs =
+        hs::kCombatSkillCount * 70u * hs::kRelicCount;
+    if (pair_limit == 0 || pair_limit > kMaximumRelicBalancePairs)
+        throw std::runtime_error("pair_limit must be in [1, 12600].");
 
     // ponytail: exhaustive 9*choose(8,4) scan; use duration/seeds to stage cost.
     std::vector<std::uint32_t> combinations;
@@ -1436,6 +1489,7 @@ int main(int argc, char **argv)
         std::filesystem::path progression_suite_path;
         std::filesystem::path relic_balance_suite_path;
         std::filesystem::path output_directory;
+        bool validate_only = false;
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument = argv[index];
@@ -1445,13 +1499,41 @@ int main(int argc, char **argv)
             else if (argument.starts_with("--relic-balance-suite="))
                 relic_balance_suite_path = argument.substr(argument.find('=') + 1);
             else if (argument.starts_with("--output=")) output_directory = argument.substr(9);
+            else if (argument == "--validate-only") validate_only = true;
             else throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--validate-only]");
         }
-        if (output_directory.empty() ||
+        if ((!validate_only && output_directory.empty()) ||
             (suite_path.empty() + progression_suite_path.empty() + relic_balance_suite_path.empty()) != 2)
             throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--validate-only]");
+
+        if (validate_only)
+        {
+            if (!progression_suite_path.empty())
+            {
+                const auto suite = LoadProgressionSimulationSuite(progression_suite_path);
+                std::cout << "validated progression_suite planned_builds="
+                          << (18 * suite.seeds.size()) << " seeds=" << suite.seeds.size()
+                          << " ticks=" << suite.maximum_ticks << '\n';
+            }
+            else if (!relic_balance_suite_path.empty())
+            {
+                const auto suite = LoadRelicBalanceSuite(relic_balance_suite_path);
+                std::cout << "validated relic_balance_suite planned_builds="
+                          << suite.builds.size() << " pairs=" << suite.builds.size() / 2
+                          << " seeds=" << suite.seeds.size()
+                          << " ticks=" << suite.maximum_ticks << '\n';
+            }
+            else
+            {
+                const auto suite = LoadCombatSimulationSuite(suite_path);
+                std::cout << "validated combat_suite planned_builds="
+                          << suite.builds.size() << " seeds=" << suite.seeds.size()
+                          << " ticks=" << suite.maximum_ticks << '\n';
+            }
+            return 0;
+        }
 
         const auto executable = std::filesystem::absolute(argv[0]);
         hs::SimulationRules rules;
@@ -1459,11 +1541,10 @@ int main(int argc, char **argv)
                 executable.parent_path() / "Cooked" / "simulation_rules.hsbin", rules);
             !loaded)
             throw std::runtime_error(std::string(loaded.Message()));
-        std::filesystem::create_directories(output_directory);
-
         if (!progression_suite_path.empty())
         {
             const auto suite = LoadProgressionSimulationSuite(progression_suite_path);
+            std::filesystem::create_directories(output_directory);
             std::vector<ProgressionDraftProfile> profiles;
             for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
                 for (std::uint8_t variant = 0; variant < 2; ++variant)
@@ -1584,6 +1665,17 @@ int main(int argc, char **argv)
         const auto suite = relic_balance_mode
                                ? LoadRelicBalanceSuite(relic_balance_suite_path)
                                : LoadCombatSimulationSuite(suite_path);
+        if (relic_balance_mode)
+        {
+            constexpr std::array<std::string_view, 2> outputs{
+                "combat_report.json", "combat_summary.csv"};
+            for (const auto output : outputs)
+                if (std::filesystem::exists(output_directory / output))
+                    throw std::runtime_error(
+                        "Relic balance output already exists: " +
+                        (output_directory / output).string());
+        }
+        std::filesystem::create_directories(output_directory);
 
         Json runs = Json::array();
         for (std::size_t seed_index = 0; seed_index < suite.seeds.size(); ++seed_index)
@@ -1607,9 +1699,10 @@ int main(int argc, char **argv)
                     {"aim_policy", "nearest_enemy"},
                     {"active_skill_policy", "round_robin_when_ready"},
                     {"charged_skill_policy", "full_charge"},
-                    {"paired_spawn_counts_valid", true},
-                    {"fixed_tick_hz", 60},
-                    {"duration_ticks", suite.maximum_ticks},
+                     {"paired_spawn_counts_valid", true},
+                     {"fixed_tick_hz", 60},
+                     {"rules_hash", hs::SimulationRulesHash(rules)},
+                     {"duration_ticks", suite.maximum_ticks},
                     {"baseline_build_id", suite.builds.front().id},
                     {"seeds", suite.seeds},
                     {"builds", std::move(builds)},

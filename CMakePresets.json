@@ -11,6 +11,9 @@
       "hidden": true,
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/Build/${presetName}",
+      "environment": {
+        "VSLANG": "1033"
+      },
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "HS_BUILD_TESTS": "ON"
@@ -23,6 +26,16 @@
         "CMAKE_BUILD_TYPE": "Debug",
         "HS_BUILD_RUNTIME": "OFF",
         "HS_BUILD_CONTENT_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "msvc-asan-core",
+      "inherits": "msvc-core",
+      "binaryDir": "${sourceDir}/Build/tooling/msvc-asan-core",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "/O2 /Ob1 /DNDEBUG /Zi /fsanitize=address",
+        "CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO": "/debug /INCREMENTAL:NO"
       }
     },
     {
@@ -65,6 +78,14 @@
       "targets": [
         "hs_tests",
         "hs_gameplay_internal_tests",
+        "hs_navigation_tests",
+        "hs_simulation_tests"
+      ]
+    },
+    {
+      "name": "msvc-asan-core",
+      "configurePreset": "msvc-asan-core",
+      "targets": [
         "hs_simulation_tests"
       ]
     },
@@ -91,7 +112,19 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|determinism-core)$)"
+          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core)$)"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-asan-core",
+      "configurePreset": "msvc-asan-core",
+      "filter": {
+        "include": {
+          "name": "^simulation\\.determinism-core$"
         }
       },
       "output": {

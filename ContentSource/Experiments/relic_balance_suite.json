@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
   "duration_seconds": 60,
-  "seeds": [1001]
+  "seeds": [1001],
+  "pair_limit": 12600
 }

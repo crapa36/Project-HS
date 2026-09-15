@@ -1,0 +1,5 @@
+[mcp_servers.hs_lsp]
+command = "node"
+args = ["C:/Users/crapa/Documents/GitHub/Project HS/Tools/tooling/lsp-server.mjs"]
+startup_timeout_sec = 30
+tool_timeout_sec = 60
