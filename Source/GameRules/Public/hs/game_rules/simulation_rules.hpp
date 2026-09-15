@@ -2,6 +2,8 @@
 
 #include <hs/core/result.hpp>
 #include <hs/game_domain/game_types.hpp>
+#include <hs/game_domain/arena_boundary.hpp>
+#include <hs/game_domain/arena_obstacle.hpp>
 
 #include <array>
 #include <cstddef>
@@ -595,6 +597,9 @@ struct SimulationRules
 {
     std::uint32_t version{};
     float arena_half_extent{};
+    ArenaBoundary arena_boundary{};
+    std::array<ArenaObstacle2D, kArenaObstacleMaxCount> arena_obstacles{};
+    std::uint8_t arena_obstacle_count{};
     std::int32_t player_health{};
     float player_attack{};
     float player_attack_speed{};

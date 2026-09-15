@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/gameplay/game_simulation.hpp>
+#include "navigation_grid.hpp"
 #include <hs/core/cooked_format.hpp>
 
 #include "cast_runtime.hpp"
@@ -19,6 +20,7 @@
 #include <format>
 #include <limits>
 #include <iterator>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <ranges>
@@ -92,6 +94,8 @@ struct PlayerState
     Tick next_basic_attack{};
     Tick basic_attack_animation_start{};
     Tick basic_attack_animation_until{};
+    std::uint64_t basic_attack_cast_id{};
+    Tick basic_attack_release_tick{};
     std::uint64_t basic_sequence{};
     std::uint64_t basic_arrow_sequence{};
     Tick active_basic_empower_until{};
@@ -134,6 +138,7 @@ struct PlayerState
     SkillKind next_active_refund_source{SkillKind::Count};
     SkillKind buffered_skill{SkillKind::Count};
     Tick buffered_skill_expires{};
+    std::uint8_t buffered_skill_slot{0xFF};
 };
 
 struct EnemyActor
@@ -511,6 +516,8 @@ inline bool SegmentCircle(Float2 from, Float2 to, Float2 center, float radius) n
 
 } // namespace hs::gameplay_detail
 
+#include "simulation_state.hpp"
+
 namespace hs
 {
 
@@ -520,29 +527,11 @@ struct GameSimulation::SimulationWorld
 {
     SimulationRules rules{SimulationRules::Defaults()};
     SimulationConfig config{};
-    PlayerState player{};
-    std::vector<EnemyActor> enemies;
-    std::vector<ProjectileActor> projectiles;
-    std::vector<AreaActor> areas;
-    std::vector<PickupActor> pickups;
-    std::vector<EnemyActor> pending_enemy_spawns;
-    std::vector<ProjectileActor> pending_projectile_spawns;
-    std::vector<AreaActor> pending_area_spawns;
-    DamageCommandBuffer combat;
-    RelicRuleTable relic_rules;
-    std::vector<ScheduledAction> scheduled_actions;
-    std::vector<BossAction> boss_actions;
-    std::vector<CastHitRecord> cast_hits;
-    std::vector<AreaHitRecord> area_hits;
-    std::vector<CastRuntime> cast_runtimes;
-    std::vector<DomainSignal> domain_signals;
-    EnemySpatialGrid enemy_grid;
-    std::vector<std::size_t> collision_candidates;
-    std::array<CardView, 3> cards{};
-    std::uint8_t card_count{};
-    std::vector<ActiveWave> waves;
-    std::vector<PendingBossSpawn> pending_boss_spawns;
-    std::vector<PendingEnemySpawn> pending_enemy_spawns_delayed;
+    std::unique_ptr<ActorState> actors;
+    std::unique_ptr<CombatState> combat_state;
+    std::unique_ptr<NavigationState> navigation;
+    std::unique_ptr<ProgressionState> progression;
+    std::unique_ptr<TelemetryState> telemetry;
     InputFrame current_input{};
     Tick tick{};
     Tick growth_ticks{};
@@ -554,18 +543,6 @@ struct GameSimulation::SimulationWorld
     std::uint64_t next_enemy_attack_id{1};
     std::uint64_t damage_sequence{};
     float spawn_accumulator{};
-    std::uint32_t normal_chest_kills{};
-    std::uint32_t heal_pickup_misses{};
-    std::uint32_t magnet_pickup_misses{};
-    std::uint64_t level_reroll_sequence{};
-    std::uint64_t relic_reroll_sequence{};
-    std::uint32_t kills{};
-    std::uint64_t damage_dealt{};
-    std::array<std::uint64_t, kCombatSkillCount> damage_by_skill{};
-    std::uint64_t damage_taken{};
-    std::uint64_t healing{};
-    BalanceObserver balance_observer{};
-    BalanceTelemetry &balance{balance_observer.metrics};
     GameplayChecksum checksum{};
     SessionPhase session_phase{SessionPhase::Playing};
     bool initialized{};
@@ -575,7 +552,13 @@ struct GameSimulation::SimulationWorld
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
     SimulationWorld();
+    BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
+    const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
     void InitializePlayerState();
+    std::span<const ArenaObstacle2D> ArenaObstacles() const noexcept
+    {
+        return {rules.arena_obstacles.data(), rules.arena_obstacle_count};
+    }
     std::uint64_t Random(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     float RandomUnit(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     EntityId AllocateEntityId() noexcept;
@@ -609,7 +592,8 @@ struct GameSimulation::SimulationWorld
                     std::uint8_t context = 0);
     void EmitVfx(DomainSignalKind effect, Float2 position,
                  Float2 direction = {0.0f, 1.0f}, float scale = 1.0f,
-                 float height = 0.3f, std::uint8_t context = 0);
+                 float height = 0.3f, std::uint8_t context = 0,
+                 std::uint64_t source_entity_id = 0);
     void EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                      float height = 0.75f);
     bool SpawnEnemy(EnemyKind kind, Float2 position,
@@ -627,7 +611,8 @@ struct GameSimulation::SimulationWorld
                                     bool player_owned = true,
                                     std::uint8_t source_upgrade = kNoTelemetrySource,
                                     std::uint8_t source_relic = kNoTelemetrySource,
-                                    std::uint8_t source_enemy = kNoTelemetrySource);
+                                    std::uint8_t source_enemy = kNoTelemetrySource,
+                                    std::uint64_t source_entity_id = 0);
     AreaActor *SpawnArea(AreaKind kind, SkillKind skill, Float2 position, float radius,
                          float coefficient, float duration, float activation_delay,
                          EffectOrigin origin, std::uint64_t cast_id,

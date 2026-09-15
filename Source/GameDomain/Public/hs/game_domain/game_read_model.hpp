@@ -1,6 +1,8 @@
 #pragma once
 
 #include <hs/game_domain/game_types.hpp>
+#include <hs/game_domain/arena_boundary.hpp>
+#include <hs/game_domain/arena_obstacle.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -185,6 +187,8 @@ struct GameReadModel
     float effective_move_speed{};
     float effective_magnet_radius{};
     float arena_half_extent{};
+    ArenaBoundary arena_boundary{};
+    std::span<const ArenaObstacle2D> arena_obstacles;
     float charge_range{};
     float charge_radius{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};
@@ -219,6 +223,9 @@ class GameReadModelStorage
     float effective_move_speed{};
     float effective_magnet_radius{};
     float arena_half_extent{};
+    ArenaBoundary arena_boundary{};
+    std::array<ArenaObstacle2D, kArenaObstacleMaxCount> arena_obstacles{};
+    std::uint8_t arena_obstacle_count{};
     float charge_range{};
     float charge_radius{};
     std::array<SkillRuntimeView, kCombatSkillCount> skills{};

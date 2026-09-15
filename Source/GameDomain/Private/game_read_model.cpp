@@ -54,6 +54,8 @@ GameReadModel GameReadModelStorage::View() const noexcept
             effective_move_speed,
             effective_magnet_radius,
             arena_half_extent,
+            arena_boundary,
+            std::span<const ArenaObstacle2D>(arena_obstacles.data(), arena_obstacle_count),
             charge_range,
             charge_radius,
             skills,

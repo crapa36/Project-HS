@@ -20,6 +20,7 @@ void TestCombatVfxCoverage();
 void TestAttackStopsMovementAndFacesAim();
 void TestBasicAttackStopsAtFirstEnemy();
 void TestQwerInputBuffer();
+void TestBasicAttackSkillCancellationAndBufferRules();
 void TestSkillMovementPauseAndResume();
 void TestQwerSkills();
 void TestChargedShotDamageFormula();
@@ -217,6 +218,69 @@ void TestBasicAttackStopsAtFirstEnemy()
     Check(simulation.Shutdown().Succeeded(), "basic pierce shutdown");
 }
 
+void TestBasicAttackSkillCancellationAndBufferRules()
+{
+    {
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xCA11u}, QuietGameData()).Succeeded(), "cast cancellation initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+        hs::HeldInputState held; held.aim_world = {20.0f, 0.0f, 0.0f}; held.basic_attack_held = true;
+        (void)Tick(simulation, held);
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        held.basic_attack_held = false;
+        bool basic_emitted{}, skill_emitted{};
+        for (std::uint32_t i = 0; i < 30; ++i)
+        {
+            (void)Tick(simulation, held);
+            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            for (const auto &projectile : model.View().projectiles)
+            {
+                basic_emitted |= projectile.skill == hs::SkillKind::BasicAttack;
+                skill_emitted |= projectile.skill == hs::SkillKind::PiercingShot;
+            }
+        }
+        Check(!basic_emitted && skill_emitted,
+              "successful skill cancels only the pending basic release");
+        Check(simulation.Shutdown().Succeeded(), "cast cancellation shutdown");
+    }
+    {
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xCA12u}, QuietGameData()).Succeeded(), "failed skill preservation initialize");
+        hs::HeldInputState held; held.aim_world = {20.0f, 0.0f, 0.0f}; held.basic_attack_held = true;
+        (void)Tick(simulation, held);
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        held.basic_attack_held = false;
+        bool basic_emitted{};
+        for (std::uint32_t i = 0; i < 30; ++i)
+        {
+            (void)Tick(simulation, held);
+            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            for (const auto &projectile : model.View().projectiles)
+                basic_emitted |= projectile.skill == hs::SkillKind::BasicAttack;
+        }
+        Check(basic_emitted, "failed skill leaves pending basic release intact");
+        Check(simulation.Shutdown().Succeeded(), "failed skill preservation shutdown");
+    }
+    {
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xCA13u}, QuietGameData()).Succeeded(), "tap buffer initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+        hs::HeldInputState held; held.aim_world = {20.0f, 0.0f, 0.0f};
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        while (simulation.GetObservation().cooldown_ticks[0] > 9) (void)Tick(simulation, held);
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        bool recast{};
+        for (std::uint32_t i = 0; i < 12; ++i) { (void)Tick(simulation, held); recast |= simulation.GetObservation().cooldown_ticks[0] > 9; }
+        Check(recast, "tap release preserves buffered skill intent until recovery");
+        Check(simulation.Shutdown().Succeeded(), "tap buffer shutdown");
+    }
+}
+
 void TestQwerInputBuffer()
 {
     hs::GameSimulation simulation;
@@ -255,8 +319,225 @@ void TestQwerInputBuffer()
     Check(simulation.Shutdown().Succeeded(), "input buffer shutdown");
 }
 
+void TestAttacksRespectTerrain()
+{
+    const auto player_damage = [](bool wall, float enemy_x) {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = wall ? 1 : 0;
+        data.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {5.0f, 0.0f}, 1.0f};
+        data.enemies[0].health = 1000;
+        data.enemies[0].move_speed = 0.0f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0x0B51u}, data).Succeeded(), "player terrain initialize");
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {enemy_x, 0});
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
+        (void)Tick(simulation, held); held.basic_attack_held = false;
+        for (int i = 0; i < 80; ++i) (void)Tick(simulation, held);
+        const auto damage = simulation.GetObservation().damage_by_skill[0];
+        Check(simulation.Shutdown().Succeeded(), "player terrain shutdown");
+        return damage;
+    };
+    Check(player_damage(true, 8.0f) == 0, "rock blocks player arrow behind it");
+    Check(player_damage(false, 8.0f) > 0, "clear control arrow reaches same enemy");
+    Check(player_damage(true, 2.0f) > 0, "enemy before rock receives arrow damage");
+    const auto incoming_damage = [](hs::EnemyKind kind, bool wall) {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = wall ? 1 : 0;
+        data.arena_obstacles[0] = {hs::ArenaObstacleKind::Tree, {2.5f, 0.0f}, 0.5f};
+        auto &enemy = data.enemies[static_cast<std::size_t>(kind)];
+        enemy.move_speed = 0.0f;
+        enemy.attack_range = 7.0f;
+        enemy.projectile_range = 20.0f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0x0B52u}, data).Succeeded(), "enemy terrain initialize");
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, static_cast<std::uint64_t>(kind), 0, {5, 0});
+        const auto health = simulation.GetObservation().health;
+        for (int i = 0; i < 180; ++i) (void)Tick(simulation);
+        const auto damage = health - simulation.GetObservation().health;
+        Check(simulation.Shutdown().Succeeded(), "enemy terrain shutdown");
+        return damage;
+    };
+    for (const auto kind : {hs::EnemyKind::Melee, hs::EnemyKind::Ranged})
+    {
+        Check(incoming_damage(kind, true) == 0, "tree blocks enemy attack against player");
+        Check(incoming_damage(kind, false) > 0, "clear control enemy attack damages player");
+    }
+}
+
+void TestChargeBufferAndRecovery()
+{
+    const auto player = [](hs::GameSimulation &simulation) {
+        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        return model.View().player;
+    };
+    // A charge started during windup replaces the pending basic projectile.
+    {
+        hs::GameSimulation simulation;
+        auto data = QuietGameData(); data.arena_obstacle_count = 0;
+        Check(simulation.Initialize({0xC401u}, data).Succeeded(), "charge cancel initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
+        (void)Tick(simulation, held); held.basic_attack_held = false;
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        Check(player(simulation).charging, "charge starts during basic windup");
+        bool basic_emitted{};
+        for (int i = 0; i < 30; ++i)
+        {
+            (void)Tick(simulation, held);
+            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            for (const auto &shot : model.View().projectiles)
+                basic_emitted |= shot.skill == hs::SkillKind::BasicAttack;
+        }
+        Check(!basic_emitted, "charge cancels pending basic emission");
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        const auto recovery_end = player(simulation).active_cast_tick;
+        Check(!player(simulation).charging && recovery_end > simulation.GetObservation().tick,
+              "charge release retains recovery");
+        held.basic_attack_held = true;
+        const auto uses = simulation.GetObservation().balance.skill_uses[0];
+        while (simulation.GetObservation().tick + 1 < recovery_end)
+        {
+            (void)Tick(simulation, held);
+            Check(simulation.GetObservation().balance.skill_uses[0] == uses,
+                  "held basic cannot bypass charged shot recovery");
+        }
+        Check(simulation.Shutdown().Succeeded(), "charge cancel shutdown");
+    }
+    // Once the basic projectile has left, an active skill must respect its remaining recovery.
+    {
+        hs::GameSimulation simulation;
+        auto data = QuietGameData(); data.arena_obstacle_count = 0;
+        Check(simulation.Initialize({0xC403u}, data).Succeeded(), "basic recovery initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
+        (void)Tick(simulation, held); held.basic_attack_held = false;
+        bool emitted{};
+        for (int i = 0; i < 60 && !emitted; ++i)
+        {
+            (void)Tick(simulation, held);
+            emitted = simulation.GetObservation().player_projectile_count != 0;
+        }
+        const auto recovery_end = player(simulation).basic_attack_animation_until;
+        Check(emitted && simulation.GetObservation().tick + 1 < recovery_end,
+              "basic emission precedes recovery boundary");
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        const auto skill_index = static_cast<std::size_t>(hs::SkillKind::PiercingShot);
+        Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
+              "skill press after basic emission cannot cancel recovery");
+        while (simulation.GetObservation().tick + 1 < recovery_end)
+        {
+            (void)Tick(simulation, held);
+            Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
+                  "buffered skill waits through basic recovery");
+        }
+        Check(simulation.Shutdown().Succeeded(), "basic recovery shutdown");
+    }
+    // Queue near charge cooldown completion; release either cancels intent or ends started charge.
+    for (const bool release_before_ready : {true, false})
+    {
+        hs::GameSimulation simulation;
+        auto data = QuietGameData(); data.arena_obstacle_count = 0;
+        Check(simulation.Initialize({0xC402u}, data).Succeeded(), "queued charge initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        const auto cooldown_index = static_cast<std::size_t>(hs::SkillKind::ChargedShot) - 1;
+        for (int i = 0; i < 2000 && simulation.GetObservation().cooldown_ticks[cooldown_index] > 5; ++i)
+            (void)Tick(simulation, held);
+        Check(simulation.GetObservation().cooldown_ticks[cooldown_index] == 5, "charge reaches bounded buffer window");
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        Check(!player(simulation).charging, "queued charge does not bypass cooldown");
+        if (release_before_ready)
+            (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        for (int i = 0; i < 8; ++i) (void)Tick(simulation, held);
+        Check(player(simulation).charging == !release_before_ready,
+              "released queued charge cancels while held queued charge starts");
+        if (!release_before_ready)
+        {
+            (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Released, sequence, held);
+            Check(player(simulation).charging, "unrelated slot release cannot end queued charge");
+            (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+            Check(!player(simulation).charging && simulation.GetObservation().cooldown_ticks[cooldown_index] > 5,
+                  "original slot release fires queued charge and applies cooldown");
+        }
+        Check(simulation.Shutdown().Succeeded(), "queued charge shutdown");
+    }
+}
+
+void TestExplosionUpgradesRespectTerrain()
+{
+    const auto run = [](bool wall) {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = wall ? 1 : 0;
+        data.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {5, 0}, 1.0f};
+        data.enemies[0].health = 10000; data.enemies[0].move_speed = 0.0f;
+        data.upgrades.explosive_arrow.apply_bleed_and_blood_explosions.radius = 8.0f;
+        data.upgrades.explosive_arrow.pre_explosion_pull.pull_radius = 8.0f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xEB10u}, data).Succeeded(), "explosion terrain initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow));
+        for (const auto upgrade : {2u, 5u, 6u})
+            Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+                  static_cast<std::uint64_t>(hs::SkillKind::ExplosiveArrow), upgrade);
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {7, 0});
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        for (int i = 0; i < 180; ++i) (void)Tick(simulation, held);
+        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        Check(model.View().enemies.size() == 1, "explosion test target survives");
+        if (wall && !model.View().enemies.empty())
+        {
+            const auto &enemy = model.View().enemies.front();
+            Check(enemy.health == 10000 && enemy.status_flags == 0,
+                  "blocked blood and satellite explosions cannot damage or bleed target");
+            Check(std::abs(enemy.position.x - 7.0f) < 0.0001f && std::abs(enemy.position.y) < 0.0001f,
+                  "blocked explosion pull cannot displace target");
+        }
+        const auto damage = simulation.GetObservation().damage_by_skill[static_cast<std::size_t>(hs::SkillKind::ExplosiveArrow)];
+        Check(simulation.Shutdown().Succeeded(), "explosion terrain shutdown");
+        return damage;
+    };
+    Check(run(true) == 0, "all explosion derivatives respect terrain");
+    Check(run(false) > 0, "explosion derivative clear control deals damage");
+}
+
+void TestSuccessfulInputReplacesOldBuffer()
+{
+    hs::GameSimulation simulation;
+    auto data = QuietGameData(); data.arena_obstacle_count = 0;
+    Check(simulation.Initialize({0xB0FFu}, data).Succeeded(), "buffer replacement initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+    Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::ChargedShot));
+    hs::HeldInputState held; held.aim_world = {20, 0, 0}; hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+    for (int i = 0; i < 2000 && simulation.GetObservation().cooldown_ticks[0] > 5; ++i)
+        (void)Tick(simulation, held);
+    Check(simulation.GetObservation().cooldown_ticks[0] == 5, "replacement starts inside nine-tick buffer window");
+    // Same-tick edges preserve the critical expiry boundary: stale Q would become
+    // eligible exactly when the successful W tap's nine-tick recovery ends.
+    const std::array edges{
+        hs::ActionEdge{++sequence, hs::GameAction::SkillQ, hs::EdgeKind::Pressed},
+        hs::ActionEdge{++sequence, hs::GameAction::SkillW, hs::EdgeKind::Pressed},
+        hs::ActionEdge{++sequence, hs::GameAction::SkillW, hs::EdgeKind::Released}};
+    (void)Tick(simulation, held, edges);
+    for (int i = 0; i < 12; ++i) (void)Tick(simulation, held);
+    const auto &uses = simulation.GetObservation().balance.skill_uses;
+    Check(uses[static_cast<std::size_t>(hs::SkillKind::ChargedShot)] == 1,
+          "new successful input executes its charge release");
+    Check(uses[static_cast<std::size_t>(hs::SkillKind::PiercingShot)] == 1,
+          "successful new input removes old buffered skill instead of delayed recast");
+    Check(simulation.Shutdown().Succeeded(), "buffer replacement shutdown");
+}
+
 void RunGameplayCombatTests()
 {
+    TestExplosionUpgradesRespectTerrain();
+    TestSuccessfulInputReplacesOldBuffer();
+    TestAttacksRespectTerrain();
+    TestChargeBufferAndRecovery();
     TestCombatVfxCoverage();
     TestAttackStopsMovementAndFacesAim();
     TestSkillMovementPauseAndResume();
@@ -264,6 +545,7 @@ void RunGameplayCombatTests()
     TestTenMinuteBossApproachesAttackRange();
     TestTenMinuteBossGroundAreasStaySeparated();
     TestQwerInputBuffer();
+    TestBasicAttackSkillCancellationAndBufferRules();
     TestQwerSkills();
     TestChargedShotDamageFormula();
     TestEnemyDisplacementInterpolates();

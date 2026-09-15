@@ -497,8 +497,15 @@ SkillTagMask RelicPrerequisiteTags(RelicKind relic) noexcept
 SimulationRules SimulationRules::Defaults() noexcept
 {
     SimulationRules data{};
-    data.version = 6;
+    data.version = 7;
     data.arena_half_extent = 60.0f;
+    data.arena_boundary.count = 16;
+    constexpr std::array<Float2, 16> boundary{{
+        {-60.0f, 5.0f}, {-54.0f, 32.0f}, {-38.0f, 49.0f}, {-16.0f, 57.0f},
+        {8.0f, 59.0f}, {31.0f, 53.0f}, {49.0f, 38.0f}, {58.0f, 15.0f},
+        {59.0f, -14.0f}, {52.0f, -36.0f}, {36.0f, -51.0f}, {12.0f, -58.0f},
+        {-12.0f, -58.0f}, {-34.0f, -53.0f}, {-51.0f, -39.0f}, {-58.0f, -18.0f}}};
+    std::copy(boundary.begin(), boundary.end(), data.arena_boundary.points.begin());
     data.player_health = 100;
     data.player_attack = 10.0f;
     data.player_attack_speed = 0.8f;
@@ -866,6 +873,12 @@ std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept
     CanonicalHash hash;
     hash.Add(rules.version);
     hash.Add(rules.arena_half_extent);
+    hash.Add(rules.arena_boundary.count);
+    for (std::size_t i = 0; i < rules.arena_boundary.count; ++i)
+    { hash.Add(rules.arena_boundary.points[i].x); hash.Add(rules.arena_boundary.points[i].y); }
+    hash.Add(rules.arena_obstacle_count);
+    for (std::size_t i = 0; i < rules.arena_obstacle_count; ++i)
+    { hash.Add(static_cast<std::uint8_t>(rules.arena_obstacles[i].kind)); hash.Add(rules.arena_obstacles[i].center.x); hash.Add(rules.arena_obstacles[i].center.y); hash.Add(rules.arena_obstacles[i].radius); }
 
     const auto &s = rules.stats;
     hash.Add(s.maximum_points_per_stat);
@@ -1077,7 +1090,7 @@ Result LoadSimulationRules(const std::filesystem::path &path,
                                            payload.size(), sizeof(SimulationRules)));
     }
     std::memcpy(&rules, payload.data(), sizeof(rules));
-    if (rules.version != 6)
+    if (rules.version != 7)
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Cooked game data version is unsupported.");

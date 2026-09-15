@@ -36,7 +36,8 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    constexpr hs::GameplayChecksum kGameplayOracle = 16316430143236922700ull;
+    // Includes pending basic cast/release and buffered input slot state.
+    constexpr hs::GameplayChecksum kGameplayOracle = 10598978034812353093ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");
     Check(first == kGameplayOracle,

@@ -112,6 +112,8 @@ struct DomainSignal
     std::uint8_t flags{};
     // SkillKind/BossKind/other semantic source, depending on signal kind.
     std::uint8_t context{};
+    // EnemyDied: normal enemy identity; zero for bosses or unrelated signals.
+    std::uint64_t source_entity_id{};
 };
 
 } // namespace hs

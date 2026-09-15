@@ -592,13 +592,14 @@
     "arena": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["width_m", "depth_m", "plane", "shape", "obstacles", "height_differences", "clamp_players_and_enemies_to_boundary", "solid_player_enemy_collision", "enemy_soft_separation", "enemy_body_contact_damage"],
+      "required": ["width_m", "depth_m", "plane", "shape", "boundary_points_m", "obstacles", "height_differences", "clamp_players_and_enemies_to_boundary", "solid_player_enemy_collision", "enemy_soft_separation", "enemy_body_contact_damage"],
       "properties": {
         "width_m": {"type": "number", "exclusiveMinimum": 0},
         "depth_m": {"type": "number", "exclusiveMinimum": 0},
         "plane": {"const": "XZ"},
-        "shape": {"const": "square"},
-        "obstacles": {"type": "boolean"},
+        "shape": {"const": "convex_polygon"},
+        "boundary_points_m": {"type": "array", "minItems": 16, "maxItems": 24, "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}},
+        "obstacles": {"type": "array", "maxItems": 32, "items": {"type": "object", "required": ["kind", "center_m", "radius_m"], "properties": {"kind": {"enum": ["tree", "rock"]}, "center_m": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "items": false}, "radius_m": {"type": "number", "exclusiveMinimum": 0}}, "additionalProperties": false}},
         "height_differences": {"type": "boolean"},
         "clamp_players_and_enemies_to_boundary": {"type": "boolean"},
         "solid_player_enemy_collision": {"type": "boolean"},

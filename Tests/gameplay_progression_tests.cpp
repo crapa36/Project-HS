@@ -80,22 +80,24 @@ void TestStartingEnemyBalanceAndBoundary()
     Check(simulation.Initialize({10}, data).Succeeded(), "starting balance initialize");
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
     Check(WriteSnapshot(simulation, snapshot), "boundary snapshot capacity");
-    std::uint32_t boundary_count{};
     std::uint32_t ground_count{};
+    std::uint32_t tree_count{};
+    std::uint32_t grass_count{};
+    std::uint32_t dirt_count{};
+    std::uint32_t rock_count{};
     for (const auto &instance : snapshot.View().instances)
     {
-        if (instance.mesh == hs::RenderMesh::Area &&
-            instance.color_rgba == 0xFF20A0FFu)
-        {
-            ++boundary_count;
-        }
-        if (instance.mesh == hs::RenderMesh::Ground)
-        {
-            ++ground_count;
-        }
+        if (instance.mesh == hs::RenderMesh::Ground) ++ground_count;
+        if (instance.mesh == hs::RenderMesh::TreeTrunk) ++tree_count;
+        if (instance.mesh == hs::RenderMesh::Grass) ++grass_count;
+        if (instance.mesh == hs::RenderMesh::DirtPatch) ++dirt_count;
+        if (instance.mesh == hs::RenderMesh::Rock) ++rock_count;
     }
-    Check(boundary_count == 4, "four visible arena boundaries");
-    Check(ground_count == 1, "one test grid ground");
+    Check(ground_count == 1, "continuous ground covers the arena and decorative tree perimeter");
+    Check(tree_count > data.arena_obstacle_count,
+          "dense tree wall surrounds the authored interior obstacles");
+    Check(grass_count > 100 && dirt_count == 0 && rock_count > 0,
+          "village projects grass and authored rocks; dirt is blended in the ground material");
 
     for (std::uint32_t tick = 0; tick < 66; ++tick)
     {
