@@ -63,6 +63,14 @@ Representative commit:
 
 ## Verification Philosophy
 
+일반 PowerShell에서도 `powershell -NoProfile -File Tools/verify.ps1`로 저수준
+검증을 실행할 수 있습니다. Runtime/콘텐츠 변경은 `-Workflow verify`를 사용합니다.
+스크립트는 설치된 MSVC 환경을 불러오고 기존 CMake workflow를 실행하며,
+전체 로그와 실행 결과 JSON을 `Build/verification`에 보관합니다.
+이미 구성된 빌드에서 관련 검사만 실행하려면 예를 들어
+`Tools/verify.ps1 -Workflow verify -Target hs_combat_sim -Test '^tools\.combat-suite-input$'`
+를 사용합니다. 전체 workflow를 대체하는 완료 판정이 아니라 반복 수정용 명령입니다.
+
 AI가 만든 변경을 그대로 반영하지 않고 다음 경로로 확인합니다.
 
 `Requirements → Implementation → Build → Architecture / Rule Tests → Determinism Tests → Runtime Review`
