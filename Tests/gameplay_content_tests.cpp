@@ -1,6 +1,7 @@
 #include "gameplay_test_support.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/dds_format.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <format>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -73,13 +75,111 @@ void TestRelicDataIsCookedFromJson()
               data.relics.low_health_survival.cooldown_ticks == 480,
           "eight appended relic contracts are cooked from JSON");
 
+    std::vector<std::uint16_t> shared_parents;
+    std::vector<std::array<float, 16>> shared_bind;
+    for (const auto asset : {"enemy_melee", "enemy_ranged", "enemy_suicide", "enemy_gel_projectile"})
+    {
     std::ifstream slime(std::filesystem::current_path() / "Cooked" /
-                            "enemy_melee.meshbin",
+                            (std::string(asset) + ".meshbin"),
                         std::ios::binary);
     hs::CharacterAssetHeader slime_header;
     slime.read(reinterpret_cast<char *>(&slime_header), sizeof(slime_header));
-    Check(slime && slime_header.vertex_count == 3'051,
-          "Slime cook seals only the ten-edge eye socket with eight triangles");
+    const auto valid_magic = slime_header.magic ==
+                             std::array<char, 8>{'H', 'S', 'C', 'H', 'A', 'R', '1', '\0'};
+    Check(slime && valid_magic && slime_header.version == hs::kCharacterAssetVersion,
+          "Slime family cooked mesh has a valid character header");
+    const bool is_projectile = std::string_view(asset) == "enemy_gel_projectile";
+    Check(slime_header.bone_count == (is_projectile ? 1u : 14u) && slime_header.clip_count == 5 &&
+              slime_header.material_count == 1,
+          "Slime family keeps the required rig controls, five animation slots, and one material");
+
+    std::vector<hs::SkinnedVertex> slime_vertices(slime_header.vertex_count);
+    std::vector<hs::CharacterClipHeader> slime_clips(slime_header.clip_count);
+    if (!slime_vertices.empty())
+        slime.seekg(slime_header.vertices_offset).read(
+            reinterpret_cast<char *>(slime_vertices.data()),
+            static_cast<std::streamsize>(slime_vertices.size() * sizeof(slime_vertices.front())));
+    if (!slime_clips.empty())
+        slime.seekg(slime_header.clips_offset).read(
+            reinterpret_cast<char *>(slime_clips.data()),
+            static_cast<std::streamsize>(slime_clips.size() * sizeof(slime_clips.front())));
+    Check(slime && std::ranges::all_of(slime_header.bounds_min, [](float value) { return std::isfinite(value); }) &&
+              std::ranges::all_of(slime_header.bounds_max, [](float value) { return std::isfinite(value); }) &&
+              slime_header.bounds_max[0] > slime_header.bounds_min[0] &&
+              slime_header.bounds_max[1] > slime_header.bounds_min[1] &&
+              slime_header.bounds_max[2] > slime_header.bounds_min[2],
+          "Slime family cooked bounds are finite and nonempty");
+    std::vector<std::uint16_t> parents(slime_header.bone_count);
+    std::vector<std::array<float, 16>> bind(slime_header.bone_count);
+    slime.seekg(slime_header.parents_offset).read(reinterpret_cast<char *>(parents.data()),
+        static_cast<std::streamsize>(parents.size() * sizeof(parents.front())));
+    slime.seekg(slime_header.inverse_bind_matrices_offset).read(reinterpret_cast<char *>(bind.data()),
+        static_cast<std::streamsize>(bind.size() * sizeof(bind.front())));
+    if (!is_projectile)
+    {
+        if (shared_parents.empty()) { shared_parents = parents; shared_bind = bind; }
+        Check(slime && parents == shared_parents && bind == shared_bind,
+              "Slime family shares bone hierarchy and bind positions across roles");
+    }
+    Check(slime && std::ranges::all_of(slime_vertices, [](const hs::SkinnedVertex &vertex) {
+              return vertex.material_index == 0;
+          }),
+          "Slime family vertices use the single cooked material slot");
+    if (std::string_view(asset) == "enemy_gel_projectile")
+        Check(slime && std::ranges::all_of(slime_vertices, [](const hs::SkinnedVertex &vertex) {
+                  return vertex.bone_indices[0] == 0 &&
+                         std::abs(vertex.bone_weights[0] - 1.0f) < 0.0001f &&
+                         std::ranges::all_of(std::span(vertex.bone_weights).subspan(1),
+                                             [](float weight) { return std::abs(weight) < 0.0001f; });
+              }),
+              "Slime gel projectile vertices are root-only weighted");
+    Check(slime && std::ranges::all_of(slime_clips, [](const hs::CharacterClipHeader &clip) {
+              return clip.frame_count >= 2 && clip.duration_seconds > 0.0f;
+          }),
+          "Slime family cooks every animation slot with playable frames");
+
+    const auto transform_prefix = slime_header.transforms_offset >= sizeof(slime_header)
+                                      ? slime_header.transforms_offset - sizeof(slime_header)
+                                      : std::numeric_limits<std::uint32_t>::max();
+    const auto layout_valid = transform_prefix <= slime_header.payload_size &&
+                              (slime_header.payload_size - transform_prefix) %
+                                      sizeof(hs::CharacterLocalTransform) ==
+                                  0;
+    const auto transform_bytes = layout_valid ? slime_header.payload_size - transform_prefix : 0;
+    std::vector<hs::CharacterLocalTransform> slime_transforms(
+        transform_bytes / sizeof(hs::CharacterLocalTransform));
+    if (layout_valid)
+        slime.seekg(slime_header.transforms_offset).read(
+            reinterpret_cast<char *>(slime_transforms.data()),
+            static_cast<std::streamsize>(slime_transforms.size() * sizeof(slime_transforms.front())));
+    bool root_stationary = layout_valid && slime.good();
+    for (const auto &clip : slime_clips)
+        for (std::uint32_t frame = 0; frame < clip.frame_count && root_stationary; ++frame) {
+            const auto index = static_cast<std::size_t>(clip.first_transform) +
+                               static_cast<std::size_t>(frame) * slime_header.bone_count;
+            root_stationary = index < slime_transforms.size() &&
+                              std::ranges::all_of(slime_transforms[index].translation,
+                                                  [](float value) { return std::abs(value) < 0.0001f; });
+        }
+    Check(root_stationary, "Slime family animation clips keep root motion stationary");
+    for (const auto suffix : {"_diffuse_0.dds", "_normal_0.dds"})
+    {
+        const auto path = std::filesystem::current_path() / "Cooked" / (std::string(asset) + suffix);
+        std::ifstream texture(path, std::ios::binary);
+        std::uint32_t magic{};
+        hs::DdsHeader header;
+        texture.read(reinterpret_cast<char *>(&magic), sizeof(magic));
+        texture.read(reinterpret_cast<char *>(&header), sizeof(header));
+        std::uintmax_t expected_size = sizeof(magic) + sizeof(header);
+        for (std::uint32_t side = 1024; side; side /= 2) expected_size += side * side * 4;
+        Check(texture && magic == hs::kDdsMagic && header.width == 1024 && header.height == 1024 &&
+                  header.mip_count == 11 && (header.flags & 0x20000) != 0 &&
+                  (header.caps & 0x400008) == 0x400008 && header.pixel_format.alpha_mask == 0xff000000 &&
+                  std::filesystem::file_size(path) == expected_size,
+              "Slime family two-map RGBA textures contain complete 1024-to-1 mip chains");
+    }
+    }
+
 }
 
 void TestTypedSimulationRulesAreCookedFromJson()

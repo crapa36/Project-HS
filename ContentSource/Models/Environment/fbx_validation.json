@@ -1,0 +1,611 @@
+[
+  {
+    "file": "grass_0.fbx",
+    "meshes": [
+      {
+        "name": "grass_0.001",
+        "triangles": 88,
+        "dimensions": [
+          1.2175617218017578,
+          1.0127308368682861,
+          0.8546739220619202
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_0_lod1.001",
+        "triangles": 48,
+        "dimensions": [
+          1.2175617218017578,
+          0.7205981016159058,
+          0.8291087746620178
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_0_lod2.001",
+        "triangles": 8,
+        "dimensions": [
+          0.6092202067375183,
+          0.0892365500330925,
+          0.4652215838432312
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      }
+    ]
+  },
+  {
+    "file": "grass_1.fbx",
+    "meshes": [
+      {
+        "name": "grass_1_lod2.001",
+        "triangles": 8,
+        "dimensions": [
+          1.0461091995239258,
+          0.09525777399539948,
+          0.6090146899223328
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_1_lod1.001",
+        "triangles": 56,
+        "dimensions": [
+          1.0461091995239258,
+          0.9910674691200256,
+          0.8735243678092957
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_1.001",
+        "triangles": 104,
+        "dimensions": [
+          1.0461091995239258,
+          0.9910674691200256,
+          0.8735243678092957
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      }
+    ]
+  },
+  {
+    "file": "grass_2.fbx",
+    "meshes": [
+      {
+        "name": "grass_2.001",
+        "triangles": 120,
+        "dimensions": [
+          1.2564191818237305,
+          1.0440679788589478,
+          0.8836459517478943
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_2_lod1.001",
+        "triangles": 64,
+        "dimensions": [
+          1.2564191818237305,
+          0.7468430995941162,
+          0.8525330424308777
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_2_lod2.001",
+        "triangles": 16,
+        "dimensions": [
+          1.2564191818237305,
+          0.26056671142578125,
+          0.8525330424308777
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      }
+    ]
+  },
+  {
+    "file": "grass_3.fbx",
+    "meshes": [
+      {
+        "name": "grass_3.001",
+        "triangles": 136,
+        "dimensions": [
+          1.1501877307891846,
+          1.153594732284546,
+          0.8696568608283997
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_3_lod1.001",
+        "triangles": 72,
+        "dimensions": [
+          0.9671186804771423,
+          0.8259958028793335,
+          0.8499014973640442
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      },
+      {
+        "name": "grass_3_lod2.001",
+        "triangles": 24,
+        "dimensions": [
+          0.8080273866653442,
+          0.3935595154762268,
+          0.6285260319709778
+        ],
+        "uv_layers": 1,
+        "materials": 2
+      }
+    ]
+  },
+  {
+    "file": "leaf_0.fbx",
+    "meshes": [
+      {
+        "name": "leaf_0.001",
+        "triangles": 9240,
+        "dimensions": [
+          4.730741024017334,
+          5.275336265563965,
+          4.1155900955200195
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_0_lod1.001",
+        "triangles": 4616,
+        "dimensions": [
+          4.592143535614014,
+          4.813016414642334,
+          4.1155900955200195
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_0_lod2.001",
+        "triangles": 1848,
+        "dimensions": [
+          4.544008255004883,
+          4.770545959472656,
+          3.8353281021118164
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      }
+    ]
+  },
+  {
+    "file": "leaf_1.fbx",
+    "meshes": [
+      {
+        "name": "leaf_1.001",
+        "triangles": 9240,
+        "dimensions": [
+          5.2854509353637695,
+          4.9913530349731445,
+          3.755173683166504
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_1_lod1.001",
+        "triangles": 4616,
+        "dimensions": [
+          5.2854509353637695,
+          4.829645156860352,
+          3.6044862270355225
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_1_lod2.001",
+        "triangles": 1848,
+        "dimensions": [
+          5.123251914978027,
+          4.59981632232666,
+          3.4274370670318604
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      }
+    ]
+  },
+  {
+    "file": "leaf_2.fbx",
+    "meshes": [
+      {
+        "name": "leaf_2_lod1.001",
+        "triangles": 4616,
+        "dimensions": [
+          4.963353157043457,
+          4.756183624267578,
+          4.091185092926025
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_2_lod2.001",
+        "triangles": 1848,
+        "dimensions": [
+          4.7631120681762695,
+          4.603896141052246,
+          3.813096761703491
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      },
+      {
+        "name": "leaf_2.001",
+        "triangles": 9240,
+        "dimensions": [
+          4.963353157043457,
+          4.756183624267578,
+          4.200690269470215
+        ],
+        "uv_layers": 1,
+        "materials": 3
+      }
+    ]
+  },
+  {
+    "file": "rock_0.fbx",
+    "meshes": [
+      {
+        "name": "UCX_rock_0_00.001",
+        "triangles": 20,
+        "dimensions": [
+          1.967734932899475,
+          1.6162159442901611,
+          1.440000057220459
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      },
+      {
+        "name": "rock_0.001",
+        "triangles": 1280,
+        "dimensions": [
+          2.3357419967651367,
+          1.781278371810913,
+          1.4804991483688354
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "rock_0_lod1.001",
+        "triangles": 640,
+        "dimensions": [
+          2.3359017372131348,
+          1.7800590991973877,
+          1.4770973920822144
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "rock_0_lod2.001",
+        "triangles": 256,
+        "dimensions": [
+          2.348257541656494,
+          1.7964853048324585,
+          1.487404227256775
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      }
+    ]
+  },
+  {
+    "file": "rock_1.fbx",
+    "meshes": [
+      {
+        "name": "rock_1_lod1.001",
+        "triangles": 640,
+        "dimensions": [
+          1.8406522274017334,
+          2.285189151763916,
+          1.5039867162704468
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "rock_1.001",
+        "triangles": 1280,
+        "dimensions": [
+          1.8406522274017334,
+          2.285189151763916,
+          1.5038037300109863
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_rock_1_00.001",
+        "triangles": 20,
+        "dimensions": [
+          1.967734932899475,
+          1.6162159442901611,
+          1.440000057220459
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      },
+      {
+        "name": "rock_1_lod2.001",
+        "triangles": 256,
+        "dimensions": [
+          1.8392601013183594,
+          2.296323776245117,
+          1.5051151514053345
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      }
+    ]
+  },
+  {
+    "file": "rock_2.fbx",
+    "meshes": [
+      {
+        "name": "rock_2.001",
+        "triangles": 1280,
+        "dimensions": [
+          2.6810317039489746,
+          1.7756657600402832,
+          1.4698736667633057
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "rock_2_lod2.001",
+        "triangles": 256,
+        "dimensions": [
+          2.6877567768096924,
+          1.7836763858795166,
+          1.4747753143310547
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_rock_2_00.001",
+        "triangles": 20,
+        "dimensions": [
+          1.967734932899475,
+          1.6162159442901611,
+          1.440000057220459
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      },
+      {
+        "name": "rock_2_lod1.001",
+        "triangles": 640,
+        "dimensions": [
+          2.685765266418457,
+          1.7792588472366333,
+          1.468310832977295
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      }
+    ]
+  },
+  {
+    "file": "rock_3.fbx",
+    "meshes": [
+      {
+        "name": "rock_3_lod1.001",
+        "triangles": 640,
+        "dimensions": [
+          1.920858383178711,
+          2.456294298171997,
+          1.4803391695022583
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_rock_3_00.001",
+        "triangles": 20,
+        "dimensions": [
+          1.967734932899475,
+          1.6162159442901611,
+          1.440000057220459
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      },
+      {
+        "name": "rock_3_lod2.001",
+        "triangles": 256,
+        "dimensions": [
+          1.9309215545654297,
+          2.4643959999084473,
+          1.4736019372940063
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "rock_3.001",
+        "triangles": 1280,
+        "dimensions": [
+          1.920858383178711,
+          2.45955753326416,
+          1.4801849126815796
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      }
+    ]
+  },
+  {
+    "file": "trunk_0.fbx",
+    "meshes": [
+      {
+        "name": "trunk_0_lod2.001",
+        "triangles": 3634,
+        "dimensions": [
+          3.4899709224700928,
+          3.337076187133789,
+          5.534585475921631
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_0_lod1.001",
+        "triangles": 5524,
+        "dimensions": [
+          3.7313928604125977,
+          4.162113189697266,
+          5.911536693572998
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_0.001",
+        "triangles": 6784,
+        "dimensions": [
+          3.7313928604125977,
+          4.162113189697266,
+          5.911536693572998
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_trunk_0_00.001",
+        "triangles": 44,
+        "dimensions": [
+          0.6000000238418579,
+          0.6000000238418579,
+          2.200000047683716
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      }
+    ]
+  },
+  {
+    "file": "trunk_1.fbx",
+    "meshes": [
+      {
+        "name": "trunk_1.001",
+        "triangles": 6784,
+        "dimensions": [
+          4.1143479347229,
+          4.319490432739258,
+          5.4852519035339355
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_1_lod2.001",
+        "triangles": 3634,
+        "dimensions": [
+          3.392037868499756,
+          3.322791814804077,
+          5.033534526824951
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_1_lod1.001",
+        "triangles": 5524,
+        "dimensions": [
+          4.1143479347229,
+          4.319490432739258,
+          5.482666969299316
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_trunk_1_00.001",
+        "triangles": 44,
+        "dimensions": [
+          0.6000000238418579,
+          0.6000000238418579,
+          2.200000047683716
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      }
+    ]
+  },
+  {
+    "file": "trunk_2.fbx",
+    "meshes": [
+      {
+        "name": "trunk_2_lod2.001",
+        "triangles": 3634,
+        "dimensions": [
+          3.3637616634368896,
+          3.3028016090393066,
+          6.028295516967773
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_2.001",
+        "triangles": 6784,
+        "dimensions": [
+          4.059866905212402,
+          3.8021411895751953,
+          6.350063323974609
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "trunk_2_lod1.001",
+        "triangles": 5524,
+        "dimensions": [
+          4.059866905212402,
+          3.8021411895751953,
+          6.350063323974609
+        ],
+        "uv_layers": 1,
+        "materials": 1
+      },
+      {
+        "name": "UCX_trunk_2_00.001",
+        "triangles": 44,
+        "dimensions": [
+          0.6000000238418579,
+          0.6000000238418579,
+          2.200000047683716
+        ],
+        "uv_layers": 1,
+        "materials": 0
+      }
+    ]
+  }
+]

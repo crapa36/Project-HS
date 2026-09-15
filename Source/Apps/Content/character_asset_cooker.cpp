@@ -7,6 +7,7 @@
 #include <hs/core/dds_format.hpp>
 
 #include <fbxsdk.h>
+#include <DirectXTex.h>
 #include <Windows.h>
 #include <wincodec.h>
 #include <wrl/client.h>
@@ -663,7 +664,8 @@ FbxNode *FindBone(FbxScene &scene, std::string_view name)
 
 void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones,
                      hs::CharacterAnimationClip clip, bool looping,
-                     CharacterCookResult &output)
+                     CharacterCookResult &output,
+                     const std::filesystem::path &animation_path)
 {
     auto *stack = scene.GetSrcObjectCount<FbxAnimStack>() > 0
                       ? scene.GetSrcObject<FbxAnimStack>(0)
@@ -712,9 +714,8 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
             throw std::runtime_error("Animation skeleton contains a duplicate bone name: " +
                                      bone.name);
         animation_bones.push_back(animation_bone);
-        animation_global_bind.push_back(
-            animation_bone->EvaluateGlobalTransform(
-                FBXSDK_TIME_INFINITE, FbxNode::eSourcePivot, false, true));
+        animation_global_bind.push_back(animation_bone->EvaluateGlobalTransform(
+            FBXSDK_TIME_INFINITE, FbxNode::eSourcePivot, false, true));
         required_names.insert(bone.name);
     }
     for (std::size_t index = 0; index < model_bones.size(); ++index)
@@ -799,14 +800,14 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
         }
         const auto root_delta = target_globals.front().GetT() -
                                 model_bones.front().global_bind.GetT();
+        // SetT on a scaled/rotated global decomposes and loses inherited shear.
+        // Apply root-motion removal as a translation matrix instead, preserving
+        // the full global transform before reconstructing each local TRS.
+        FbxAMatrix root_correction;
+        root_correction.SetIdentity();
+        root_correction.SetT(FbxVector4(-root_delta[0], 0.0, -root_delta[2]));
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
-        {
-            corrected_globals[bone_index] = target_globals[bone_index];
-            auto translation = corrected_globals[bone_index].GetT();
-            translation[0] -= root_delta[0];
-            translation[2] -= root_delta[2];
-            corrected_globals[bone_index].SetT(translation);
-        }
+            corrected_globals[bone_index] = root_correction * target_globals[bone_index];
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
         {
             const auto parent = model_bones[bone_index].parent;
@@ -826,17 +827,22 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
             reconstructed.SetT(translation);
             reconstructed.SetQ(rotation);
             reconstructed.SetS(scale);
+            double maximum_residual = 0.0;
             for (int row = 0; row < 4; ++row)
             {
                 for (int column = 0; column < 4; ++column)
                 {
-                    if (std::abs(reconstructed.Get(row, column) -
-                                 local.Get(row, column)) > 1e-5)
-                    {
-                        throw std::runtime_error(
-                            "Animation local transform cannot preserve handedness");
-                    }
+                    maximum_residual = std::max(maximum_residual,
+                        std::abs(reconstructed.Get(row, column) - local.Get(row, column)));
                 }
+            }
+            if (maximum_residual > 1e-5)
+            {
+throw std::runtime_error(std::format(
+                    "Animation local transform cannot preserve handedness: clip={} frame={} bone={} maximum residual={:.9g} shear=({:.9g},{:.9g},{:.9g}) scale=({:.9g},{:.9g},{:.9g}) determinant_sign={:.0f} animation={}",
+                    static_cast<int>(clip), frame, BoneName(*animation_bones[bone_index]),
+                    maximum_residual, shearing[0], shearing[1], shearing[2], scale[0],
+                    scale[1], scale[2], determinant_sign, animation_path.string()));
             }
             hs::CharacterLocalTransform transform;
             for (std::size_t axis = 0; axis < 3; ++axis)
@@ -921,7 +927,7 @@ bool WriteCharacterAsset(const std::filesystem::path &path,
 
 bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
               const std::filesystem::path &source, std::array<std::uint8_t, 4> fallback,
-              std::string &error_message)
+              std::string &error_message, bool generate_mips = false, bool srgb = false)
 {
     constexpr auto magic = hs::kDdsMagic;
     DdsHeader header;
@@ -978,6 +984,40 @@ bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
         header.width = width;
         header.height = height;
         header.pitch = width * 4;
+    }
+    if (generate_mips)
+    {
+        if (source.empty() || header.width != 1024 || header.height != 1024)
+        {
+            error_message = "slime family requires a 1024-square material map: " + source.string();
+            return false;
+        }
+        const DirectX::Image base{header.width, header.height, DXGI_FORMAT_R8G8B8A8_UNORM,
+                                  header.pitch, pixels.size(),
+                                  reinterpret_cast<std::uint8_t *>(pixels.data())};
+        DirectX::ScratchImage chain;
+        // sRGB conversion applies only to RGB; opacity and roughness remain linear.
+        const auto filter = static_cast<DirectX::TEX_FILTER_FLAGS>(
+            DirectX::TEX_FILTER_BOX | DirectX::TEX_FILTER_FORCE_NON_WIC |
+            (srgb ? DirectX::TEX_FILTER_SRGB : 0));
+        if (FAILED(DirectX::GenerateMipMaps(base, filter, 0, chain)))
+        {
+            error_message = "cannot generate material mip chain: " + source.string();
+            return false;
+        }
+        header.mip_count = static_cast<std::uint32_t>(chain.GetMetadata().mipLevels);
+        header.flags |= 0x20000; // DDSD_MIPMAPCOUNT
+        header.caps |= 0x400008; // DDSCAPS_MIPMAP | DDSCAPS_COMPLEX
+        pixels.clear();
+        for (std::size_t level = 0; level < header.mip_count; ++level)
+        {
+            const auto *mip = chain.GetImage(level, 0, 0);
+            for (std::size_t row = 0; row < mip->height; ++row)
+            {
+                const auto *begin = reinterpret_cast<const std::byte *>(mip->pixels + row * mip->rowPitch);
+                pixels.insert(pixels.end(), begin, begin + mip->width * 4);
+            }
+        }
     }
     std::vector<std::byte> file(sizeof(magic) + sizeof(header) + pixels.size());
     auto *cursor = file.data();
@@ -1042,7 +1082,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
              })
         {
             auto *animation = LoadFbx(*manager, animation_path, source.diagnostic_name);
-            GatherAnimation(*animation, bones, clip, looping, character);
+            GatherAnimation(*animation, bones, clip, looping, character, animation_path);
             animation->Destroy();
         }
         if (!WriteCharacterAsset(output / (source.output_name + ".meshbin"), character,
@@ -1072,9 +1112,11 @@ bool CookCharacterAsset(const std::filesystem::path &output,
         const auto suffix = std::to_string(index) + ".dds";
         const auto &material = character.materials[index];
         if (!WriteDds(*factory.Get(), output / (source.output_name + "_diffuse_" + suffix),
-                      material.diffuse, {255, 255, 255, 255}, error_message) ||
+                      material.diffuse, {255, 255, 255, 255}, error_message,
+                      source.generate_material_mips, true) ||
             !WriteDds(*factory.Get(), output / (source.output_name + "_normal_" + suffix),
-                      material.normal, {128, 128, 255, 255}, error_message))
+                      material.normal, {128, 128, 255, 255}, error_message,
+                      source.generate_material_mips, false))
         {
             return false;
         }

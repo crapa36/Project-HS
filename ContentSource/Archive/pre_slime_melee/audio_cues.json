@@ -1,0 +1,40 @@
+[
+  {
+    "id": "audio.enemy.melee.windup",
+    "asset_id": "audio.enemy.melee.windup",
+    "submix": "SFX",
+    "spatial": true,
+    "preload": true,
+    "streaming": false,
+    "encoding": "PCM",
+    "priority": "Enemy",
+    "files": [
+      "audio_enemy_melee_windup_v01.wav",
+      "audio_enemy_melee_windup_v02.wav",
+      "audio_enemy_melee_windup_v03.wav",
+      "audio_enemy_melee_windup_v04.wav"
+    ],
+    "loop": false,
+    "max_simultaneous": 5,
+    "minimum_retrigger_ms": 60
+  },
+  {
+    "id": "audio.enemy.melee.hit",
+    "asset_id": "audio.enemy.melee.hit",
+    "submix": "SFX",
+    "spatial": true,
+    "preload": true,
+    "streaming": false,
+    "encoding": "PCM",
+    "priority": "Enemy",
+    "files": [
+      "audio_enemy_melee_hit_v01.wav",
+      "audio_enemy_melee_hit_v02.wav",
+      "audio_enemy_melee_hit_v03.wav",
+      "audio_enemy_melee_hit_v04.wav"
+    ],
+    "loop": false,
+    "max_simultaneous": 5,
+    "minimum_retrigger_ms": 60
+  }
+]

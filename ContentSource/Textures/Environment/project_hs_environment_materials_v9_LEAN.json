@@ -1,0 +1,788 @@
+{
+  "schema_version": 9,
+  "target": {
+    "renderer": "D3D12",
+    "texture_size_px": 2048,
+    "normal": {
+      "space": "tangent",
+      "convention": "OpenGL_positive_Y",
+      "shader_invert_green": false
+    }
+  },
+  "samplers": {
+    "environment_wrap": {
+      "filter": "D3D12_FILTER_ANISOTROPIC",
+      "address": "WRAP",
+      "max_anisotropy": 16
+    },
+    "foliage_atlas": {
+      "filter": "D3D12_FILTER_ANISOTROPIC",
+      "address": "CLAMP",
+      "max_anisotropy": 16,
+      "max_lod": 5.0
+    }
+  },
+  "terrain": {
+    "mapping": "world_xz",
+    "sampler": "environment_wrap",
+    "layers": [
+      {
+        "id": "terrain_ground_dirt",
+        "slice": 0,
+        "weight_input": "dirt_weight",
+        "meters_per_tile": 2.0,
+        "height_scale_m": 0.025,
+        "textures": {
+          "base_color": "textures/terrain_ground_dirt_basecolor.png",
+          "normal": "textures/terrain_ground_dirt_normal.png",
+          "detail_normal": "textures/terrain_ground_dirt_detail_normal.png",
+          "height": "textures/terrain_ground_dirt_height.png",
+          "surface_ra": "textures/terrain_ground_dirt_surface_ra.png"
+        }
+      },
+      {
+        "id": "terrain_ground_grass_soil",
+        "slice": 1,
+        "weight_input": "grass_weight",
+        "meters_per_tile": 2.0,
+        "height_scale_m": 0.025,
+        "textures": {
+          "base_color": "textures/terrain_ground_grass_soil_basecolor.png",
+          "normal": "textures/terrain_ground_grass_soil_normal.png",
+          "detail_normal": "textures/terrain_ground_grass_soil_detail_normal.png",
+          "height": "textures/terrain_ground_grass_soil_height.png",
+          "surface_ra": "textures/terrain_ground_grass_soil_surface_ra.png"
+        }
+      },
+      {
+        "id": "terrain_ground_dry_soil",
+        "slice": 2,
+        "weight_input": "dryness_weight",
+        "meters_per_tile": 2.0,
+        "height_scale_m": 0.035,
+        "textures": {
+          "base_color": "textures/terrain_ground_dry_soil_basecolor.png",
+          "normal": "textures/terrain_ground_dry_soil_normal.png",
+          "detail_normal": "textures/terrain_ground_dry_soil_detail_normal.png",
+          "height": "textures/terrain_ground_dry_soil_height.png",
+          "surface_ra": "textures/terrain_ground_dry_soil_surface_ra.png"
+        }
+      },
+      {
+        "id": "terrain_ground_gravel",
+        "slice": 3,
+        "weight_input": "rockiness_weight",
+        "meters_per_tile": 1.5,
+        "height_scale_m": 0.05,
+        "textures": {
+          "base_color": "textures/terrain_ground_gravel_basecolor.png",
+          "normal": "textures/terrain_ground_gravel_normal.png",
+          "detail_normal": "textures/terrain_ground_gravel_detail_normal.png",
+          "height": "textures/terrain_ground_gravel_height.png",
+          "surface_ra": "textures/terrain_ground_gravel_surface_ra.png"
+        }
+      }
+    ],
+    "layer_selection": {
+      "max_active": 2,
+      "rule": "Clamp procedural weights to >=0, take largest two, renormalize to sum 1; if total<=1e-5 use terrain_ground_dirt=1.",
+      "single_layer_threshold": 0.1
+    },
+    "height_blend": {
+      "height_influence": 0.35,
+      "formula": "t1=saturate(w1+(h1-h0)*height_influence); t0=1-t1. Each layer uses its own POM-displaced UV and height before this blend."
+    },
+    "pom": {
+      "algorithm": "parallax_occlusion_mapping",
+      "height_semantics": "0=lowest,1=highest",
+      "height_channel": "r",
+      "min_steps": 8,
+      "max_steps": 24,
+      "binary_refinement_steps": 3,
+      "self_shadow": false,
+      "full_until_m": 35.0,
+      "fade_end_m": 55.0,
+      "adaptive_steps": "lerp(min_steps,max_steps,1-saturate(abs(view_ts.z)))",
+      "height_scale_uv": "layer.height_scale_m/layer.meters_per_tile",
+      "view_vector": "view_ws=normalize(camera_world_position-surface_world_position); view_ts=mul(transpose(TBN),view_ws)",
+      "trace": "layer_depth+=1/steps; uv-=(view_ts.xy/max(abs(view_ts.z),0.05))*height_scale_uv/steps until layer_depth>=height(uv); binary refine between last two samples.",
+      "distance_fade": "height_scale_uv*=1-smoothstep(full_until_m,fade_end_m,camera_distance)",
+      "sampling": "Capture ddx/ddy after the stable region UV transform and before ray traversal; use SampleGrad for height and final material samples."
+    },
+    "anti_tiling": {
+      "near_pom": "One stable terrain-region transform: rotate 0/90/180/270 degrees plus tile-periodic UV offset from terrain_region_seed. Apply identically to BaseColor/SurfaceRA/Normal/DetailNormal/Height and transform tangent normal XY consistently.",
+      "far_after_pom_zero": {
+        "transition_m": [
+          55.0,
+          60.0
+        ],
+        "cell_size_m": 4.0,
+        "samples": 3,
+        "algorithm": "p=world_xz/cell_size_m; i=floor(p); f=frac(p). If f.x+f.y<1 use lattice vertices (i, i+(1,0), i+(0,1)) with weights (1-f.x-f.y,f.x,f.y); else use (i+(1,1), i+(0,1), i+(1,0)) with weights (f.x+f.y-1,1-f.x,1-f.y). For each lattice vertex hash(vertex,terrain_region_seed) to choose rotation 0/90/180/270 and an offset in [0,1)^2; apply that transform to the layer base UV, sample BaseColor/SurfaceRA/Normal/DetailNormal, and barycentrically blend. Apply the inverse 2D UV rotation to sampled tangent-normal XY before blending/normalization.",
+        "branch_selection": "Between 55-60m use stable world-locked hash/blue-noise to choose single-sample or 3-sample branch; never evaluate both; never animate per frame."
+      }
+    },
+    "normal_composition": "RNM",
+    "variation": {
+      "macro": {
+        "world_scale_m": 18.0,
+        "basecolor_strength": 0.08,
+        "roughness_strength": 0.04
+      },
+      "meso": {
+        "world_scale_m": 3.0,
+        "basecolor_strength": 0.04
+      },
+      "noise": "Use deterministic 2D value noise in world XZ. For each scale, p=world_xz/world_scale_m; hash the four integer cell corners with terrain_region_seed plus a distinct macro/meso salt to values [0,1]; interpolate with quintic u=f^3*(f*(f*6-15)+10). Remap noise to [-1,1] before multiplying the declared strengths."
+    },
+    "detail_normal_fade_m": [
+      35.0,
+      55.0
+    ],
+    "pipeline_order": [
+      "sample procedural weights and terrain_region_seed",
+      "select top two layers",
+      "choose near-POM or far-stochastic path by distance",
+      "near: run POM independently for each active layer",
+      "sample each layer material maps at its final UV",
+      "height-blend active layers",
+      "RNM-compose main/detail normals",
+      "apply macro/meso variation",
+      "shade with environment PBR"
+    ],
+    "uv_basis": {
+      "uv": "world_position.xz / layer.meters_per_tile",
+      "T": [
+        1,
+        0,
+        0
+      ],
+      "B": [
+        0,
+        0,
+        1
+      ],
+      "N": [
+        0,
+        1,
+        0
+      ],
+      "terrain_region_seed": "Stable uint supplied by procedural map generation for each continuous terrain region."
+    }
+  },
+  "opaque_mesh": {
+    "sampler": "environment_wrap",
+    "normal_composition": "RNM",
+    "materials": [
+      {
+        "id": "mesh_rock",
+        "mapping": {
+          "mode": "triplanar_world",
+          "meters_per_tile": 1.2,
+          "blend_sharpness": 4.0,
+          "rule": "weights=pow(abs(geometric_world_normal),blend_sharpness); weights/=sum(weights). Sample X/Y/Z planar projections at world scale meters_per_tile.",
+          "normal_rule": "Decode tangent normals for each planar projection, reorient each projection normal into world space for its projection axis/sign, then normalize the weighted sum. Do not blend encoded normal RGB."
+        },
+        "textures": {
+          "base_color": "textures/mesh_rock_basecolor.png",
+          "normal": "textures/mesh_rock_normal.png",
+          "detail_normal": "textures/mesh_rock_detail_normal.png",
+          "surface_ra": "textures/mesh_rock_surface_ra.png"
+        }
+      },
+      {
+        "id": "mesh_bark",
+        "mapping": {
+          "mode": "cylindrical_branch_aligned_uv0",
+          "tile_m": 1.0,
+          "u_axis": "circumference",
+          "v_axis": "growth_direction",
+          "u_tiles": "max(1,round(circumference_m/tile_m))",
+          "v_scale": "1 UV tile per tile_m",
+          "duplicate_seam_vertices": true,
+          "major_branches_use_separate_branch_aligned_islands": true,
+          "triplanar_only_for_roots_or_severe_junction_distortion": true,
+          "seam_requirement": "No stable color/roughness/normal line may be visible at integer-U seam under rotating directional light."
+        },
+        "textures": {
+          "base_color": "textures/mesh_bark_basecolor.png",
+          "normal": "textures/mesh_bark_normal.png",
+          "detail_normal": "textures/mesh_bark_detail_normal.png",
+          "surface_ra": "textures/mesh_bark_surface_ra.png"
+        }
+      }
+    ]
+  },
+  "foliage": {
+    "shader": "masked_two_sided_foliage",
+    "sampler": "foliage_atlas",
+    "alpha_cutoff": 0.5,
+    "opacity_source": "base_color_alpha",
+    "backface_normal": "Use SV_IsFrontFace; on backfaces flip geometric/interpolated N, keep T, rebuild B=normalize(cross(N,T))*tangent_w before tangent-normal transform.",
+    "normal_composition": "RNM",
+    "lod_fade": "stable object/world-space hash or blue-noise; never animate frame-to-frame",
+    "atlas": {
+      "size_px": 2048,
+      "gutter_px": 48,
+      "runtime_max_lod": 5,
+      "uv_from_rect": "uv_min=(x,y)/2048; uv_max=(x+w,y+h)/2048",
+      "mip_generation": "Process each entry independently inside its rect, preserve alpha coverage at cutoff 0.5, edge-dilate RGB/normal/roughness into the 48px zero-alpha gutter, then composite the mip atlas. Do not downsample the packed atlas as one image.",
+      "entry_format": [
+        "atlas",
+        "x_px",
+        "y_px",
+        "w_px",
+        "h_px",
+        "group"
+      ]
+    },
+    "grass": {
+      "transmission_strength": 0.3,
+      "pages": [
+        {
+          "base_color": "textures/foliage_grass_atlas_0_basecolor.png",
+          "normal": "textures/foliage_grass_atlas_0_normal.png",
+          "roughness": "textures/foliage_grass_atlas_0_roughness.png"
+        },
+        {
+          "base_color": "textures/foliage_grass_atlas_1_basecolor.png",
+          "normal": "textures/foliage_grass_atlas_1_normal.png",
+          "roughness": "textures/foliage_grass_atlas_1_roughness.png"
+        }
+      ],
+      "entries": [
+        [
+          0,
+          48,
+          48,
+          690,
+          575,
+          "large_clump"
+        ],
+        [
+          0,
+          834,
+          48,
+          676,
+          538,
+          "large_clump"
+        ],
+        [
+          0,
+          834,
+          682,
+          631,
+          463,
+          "large_clump"
+        ],
+        [
+          0,
+          48,
+          719,
+          605,
+          377,
+          "large_clump"
+        ],
+        [
+          0,
+          48,
+          1192,
+          540,
+          573,
+          "large_clump"
+        ],
+        [
+          0,
+          1606,
+          48,
+          355,
+          564,
+          "large_clump"
+        ],
+        [
+          0,
+          1561,
+          708,
+          419,
+          555,
+          "large_clump"
+        ],
+        [
+          0,
+          684,
+          1359,
+          428,
+          555,
+          "large_clump"
+        ],
+        [
+          0,
+          1208,
+          1359,
+          459,
+          512,
+          "large_clump"
+        ],
+        [
+          0,
+          1763,
+          1359,
+          203,
+          500,
+          "medium_clump"
+        ],
+        [
+          1,
+          48,
+          48,
+          481,
+          325,
+          "medium_clump"
+        ],
+        [
+          1,
+          48,
+          469,
+          183,
+          470,
+          "small_clump"
+        ],
+        [
+          1,
+          48,
+          1035,
+          275,
+          454,
+          "medium_clump"
+        ],
+        [
+          1,
+          327,
+          469,
+          191,
+          450,
+          "medium_clump"
+        ],
+        [
+          1,
+          419,
+          1015,
+          403,
+          442,
+          "medium_clump"
+        ],
+        [
+          1,
+          419,
+          1553,
+          364,
+          441,
+          "large_clump"
+        ],
+        [
+          1,
+          48,
+          1585,
+          177,
+          412,
+          "small_clump"
+        ],
+        [
+          1,
+          879,
+          1553,
+          226,
+          404,
+          "small_clump"
+        ],
+        [
+          1,
+          614,
+          469,
+          171,
+          387,
+          "small_clump"
+        ],
+        [
+          1,
+          881,
+          48,
+          215,
+          369,
+          "small_clump"
+        ],
+        [
+          1,
+          881,
+          513,
+          218,
+          360,
+          "medium_clump"
+        ],
+        [
+          1,
+          1192,
+          48,
+          330,
+          342,
+          "medium_clump"
+        ],
+        [
+          1,
+          625,
+          48,
+          106,
+          320,
+          "small_clump"
+        ],
+        [
+          1,
+          918,
+          969,
+          166,
+          318,
+          "small_clump"
+        ],
+        [
+          1,
+          1180,
+          969,
+          119,
+          306,
+          "small_clump"
+        ],
+        [
+          1,
+          1195,
+          486,
+          259,
+          295,
+          "small_clump"
+        ],
+        [
+          1,
+          1618,
+          48,
+          280,
+          290,
+          "medium_clump"
+        ],
+        [
+          1,
+          1618,
+          434,
+          158,
+          277,
+          "small_clump"
+        ],
+        [
+          1,
+          1550,
+          807,
+          168,
+          276,
+          "small_clump"
+        ],
+        [
+          1,
+          1872,
+          434,
+          93,
+          273,
+          "small_clump"
+        ]
+      ],
+      "entry_id": "array_index"
+    },
+    "leaf": {
+      "transmission_strength": 0.45,
+      "tree_species_group_rule": "Use exactly one group per tree archetype; do not mix oak_lobed, maple_lobed, serrated_oval within one tree.",
+      "pages": [
+        {
+          "base_color": "textures/foliage_leaf_atlas_0_basecolor.png",
+          "normal": "textures/foliage_leaf_atlas_0_normal.png",
+          "roughness": "textures/foliage_leaf_atlas_0_roughness.png"
+        },
+        {
+          "base_color": "textures/foliage_leaf_atlas_1_basecolor.png",
+          "normal": "textures/foliage_leaf_atlas_1_normal.png",
+          "roughness": "textures/foliage_leaf_atlas_1_roughness.png"
+        },
+        {
+          "base_color": "textures/foliage_leaf_atlas_2_basecolor.png",
+          "normal": "textures/foliage_leaf_atlas_2_normal.png",
+          "roughness": "textures/foliage_leaf_atlas_2_roughness.png"
+        }
+      ],
+      "entries": [
+        [
+          0,
+          48,
+          48,
+          737,
+          525,
+          "maple_lobed"
+        ],
+        [
+          0,
+          881,
+          48,
+          688,
+          439,
+          "serrated_oval"
+        ],
+        [
+          0,
+          881,
+          583,
+          609,
+          470,
+          "oak_lobed"
+        ],
+        [
+          0,
+          48,
+          669,
+          591,
+          372,
+          "serrated_oval"
+        ],
+        [
+          0,
+          48,
+          1137,
+          589,
+          498,
+          "oak_lobed"
+        ],
+        [
+          0,
+          733,
+          1149,
+          453,
+          584,
+          "serrated_oval"
+        ],
+        [
+          0,
+          1282,
+          1149,
+          432,
+          570,
+          "serrated_oval"
+        ],
+        [
+          1,
+          48,
+          48,
+          569,
+          458,
+          "oak_lobed"
+        ],
+        [
+          1,
+          713,
+          48,
+          565,
+          491,
+          "serrated_oval"
+        ],
+        [
+          1,
+          48,
+          602,
+          547,
+          523,
+          "maple_lobed"
+        ],
+        [
+          1,
+          1374,
+          48,
+          547,
+          455,
+          "serrated_oval"
+        ],
+        [
+          1,
+          1374,
+          599,
+          533,
+          540,
+          "maple_lobed"
+        ],
+        [
+          1,
+          691,
+          635,
+          484,
+          515,
+          "oak_lobed"
+        ],
+        [
+          1,
+          48,
+          1221,
+          493,
+          515,
+          "serrated_oval"
+        ],
+        [
+          1,
+          1271,
+          1235,
+          502,
+          304,
+          "serrated_oval"
+        ],
+        [
+          1,
+          637,
+          1246,
+          483,
+          443,
+          "serrated_oval"
+        ],
+        [
+          2,
+          48,
+          48,
+          446,
+          453,
+          "serrated_oval"
+        ],
+        [
+          0,
+          1586,
+          583,
+          397,
+          404,
+          "serrated_oval"
+        ]
+      ],
+      "entry_id": "array_index"
+    }
+  },
+  "texture_cook": {
+    "formats": {
+      "base_color": "BC7_UNORM_SRGB",
+      "surface_ra": "BC5_UNORM; R=roughness,G=ambient_occlusion",
+      "normal": "BC5_UNORM; decode xy=rg*2-1; z=sqrt(saturate(1-dot(xy,xy)))",
+      "height": "BC4_UNORM",
+      "foliage_roughness": "BC4_UNORM"
+    },
+    "source": {
+      "normal_and_detail_normal": "RGB8 PNG, Linear/Non-Color",
+      "height": "16-bit grayscale PNG, Linear/Non-Color"
+    },
+    "mip_levels": {
+      "opaque": 12,
+      "foliage": 6
+    },
+    "mips": {
+      "base_color": "Filter in linear light and encode sRGB.",
+      "height": "Linear filter.",
+      "normal": "For each footprint decode vectors, average without initial renormalization, save vector length r, normalize average, encode.",
+      "tileable": "Use WRAP border sampling at every mip.",
+      "foliage": "Use per-entry atlas mip rule defined in foliage.atlas.mip_generation.",
+      "specular_aa": "For mip>0, from averaged-normal length r: if r<0.9999, kappa=(3*r-r*r*r)/max(1-r*r,1e-5); roughness=saturate(sqrt(roughness*roughness+1/max(kappa,1e-5))). Apply to SurfaceRA.R or foliage roughness; AO stays linearly filtered."
+    },
+    "resources": {
+      "terrain_arrays": {
+        "slice_order": [
+          "terrain_ground_dirt",
+          "terrain_ground_grass_soil",
+          "terrain_ground_dry_soil",
+          "terrain_ground_gravel"
+        ],
+        "BaseColor": "Texture2DArray BC7_UNORM_SRGB",
+        "SurfaceRA": "Texture2DArray BC5_UNORM",
+        "Normal": "Texture2DArray BC5_UNORM",
+        "DetailNormal": "Texture2DArray BC5_UNORM",
+        "Height": "Texture2DArray BC4_UNORM"
+      },
+      "grass_arrays": {
+        "array_size": 2,
+        "BaseColorAlpha": "BC7_UNORM_SRGB",
+        "Normal": "BC5_UNORM",
+        "Roughness": "BC4_UNORM"
+      },
+      "leaf_arrays": {
+        "array_size": 3,
+        "BaseColorAlpha": "BC7_UNORM_SRGB",
+        "Normal": "BC5_UNORM",
+        "Roughness": "BC4_UNORM"
+      }
+    },
+    "upload": "Create resources/SRVs with declared mip counts and upload every mip for every array slice."
+  },
+  "renderer_integration": {
+    "gbuffer_material": {
+      "format": "DXGI_FORMAT_R8G8B8A8_UNORM",
+      "channels": {
+        "r": "roughness",
+        "g": "ambient_occlusion",
+        "b": "reserved_0",
+        "a": "environment_pbr_flag"
+      }
+    },
+    "pbr_branch": {
+      "trigger": "GBufferMaterial.a>0.5",
+      "dielectric_f0": 0.04,
+      "ndf": "GGX",
+      "geometry": "Smith",
+      "fresnel": "Schlick",
+      "roughness_alpha": "max(roughness*roughness,0.002)",
+      "F0": "0.04.xxx",
+      "diffuse": "(1-F)*base_color/PI",
+      "ao": "Apply only to indirect/ambient lighting.",
+      "indirect_diffuse": "irradiance/sky diffuse",
+      "indirect_specular": "prefiltered environment/sky specular + BRDF integration LUT",
+      "legacy_non_environment": "unchanged",
+      "material_class": "dielectric_environment_only; all materials in this pack have metallic=0"
+    },
+    "foliage_transmission": "For direct light only: back=saturate(dot(-N,L)); transmission=base_color*transmission_strength*back*back*light_color*light_intensity*shadow_visibility. Add after opaque direct BRDF. Alpha mask gates the pixel; no separate thickness texture is supplied.",
+    "bindings": {
+      "terrain": "5 Texture2DArray: BaseColor,SurfaceRA,Normal,DetailNormal,Height",
+      "rock": "BaseColor,SurfaceRA,Normal,DetailNormal",
+      "bark": "BaseColor,SurfaceRA,Normal,DetailNormal",
+      "grass": "3 Texture2DArray: BaseColorAlpha,Normal,Roughness",
+      "leaf": "3 Texture2DArray: BaseColorAlpha,Normal,Roughness"
+    }
+  },
+  "asset_replacement": {
+    "before_final_content_lock": {
+      "mandatory": {
+        "all_normal_textures": "Replace every texture referenced by role normal with Blender high-poly/physically-authored geometry bake or scan/photogrammetry ground truth.",
+        "all_detail_normal_textures": "Replace every texture referenced by role detail_normal by the same ground-truth workflow.",
+        "terrain_height_textures": "Replace all terrain height textures by Blender geometry bake or scan/photogrammetry ground truth."
+      },
+      "preserve_paths_and_atlas_alignment": true
+    },
+    "replacement_rules": {
+      "normal_and_detail_normal": {
+        "space": "tangent",
+        "convention": "OpenGL_positive_Y",
+        "color_space": "Linear/Non-Color",
+        "size_px": 2048,
+        "tile_if_material_tiles": true,
+        "shader_invert_green": false
+      },
+      "height": {
+        "format": "16-bit grayscale PNG",
+        "color_space": "Linear/Non-Color",
+        "size_px": 2048,
+        "black_is_low": true,
+        "white_is_high": true,
+        "tile_seamlessly": true,
+        "no_baked_lighting_or_AO": true
+      },
+      "surface_ra": "If roughness or AO changes, regenerate the matching SurfaceRA file at the same path with R=roughness,G=AO."
+    },
+    "status": {
+      "base_color": "usable integration asset, not calibrated scan albedo; final AAA art review/replacement recommended",
+      "surface_ra": "usable integration asset, not measured; final AAA art review/replacement recommended",
+      "normal_detail_height": "provisional and mandatory to replace before final content lock"
+    }
+  }
+}

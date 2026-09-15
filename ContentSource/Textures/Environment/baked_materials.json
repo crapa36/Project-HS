@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "bark": [
+    {
+      "base_color": "baked/bark_0_basecolor.png",
+      "normal": "baked/bark_0_normal.png",
+      "surface_ra": "baked/bark_0_surface.png",
+      "detail_normal": "baked/bark_0_detail.png"
+    },
+    {
+      "base_color": "baked/bark_1_basecolor.png",
+      "normal": "baked/bark_1_normal.png",
+      "surface_ra": "baked/bark_1_surface.png",
+      "detail_normal": "baked/bark_1_detail.png"
+    },
+    {
+      "base_color": "baked/bark_2_basecolor.png",
+      "normal": "baked/bark_2_normal.png",
+      "surface_ra": "baked/bark_2_surface.png",
+      "detail_normal": "baked/bark_2_detail.png"
+    }
+  ],
+  "rock": [
+    {
+      "base_color": "baked/rock_0_basecolor.png",
+      "normal": "baked/rock_0_normal.png",
+      "surface_ra": "baked/rock_0_surface.png",
+      "detail_normal": "baked/rock_0_detail.png"
+    },
+    {
+      "base_color": "baked/rock_1_basecolor.png",
+      "normal": "baked/rock_1_normal.png",
+      "surface_ra": "baked/rock_1_surface.png",
+      "detail_normal": "baked/rock_1_detail.png"
+    },
+    {
+      "base_color": "baked/rock_2_basecolor.png",
+      "normal": "baked/rock_2_normal.png",
+      "surface_ra": "baked/rock_2_surface.png",
+      "detail_normal": "baked/rock_2_detail.png"
+    },
+    {
+      "base_color": "baked/rock_3_basecolor.png",
+      "normal": "baked/rock_3_normal.png",
+      "surface_ra": "baked/rock_3_surface.png",
+      "detail_normal": "baked/rock_3_detail.png"
+    }
+  ],
+  "foliage_normals": {
+    "grass": [
+      "baked/foliage_grass_atlas_0_normal.png",
+      "baked/foliage_grass_atlas_1_normal.png"
+    ],
+    "leaf": [
+      "baked/foliage_leaf_atlas_0_normal.png",
+      "baked/foliage_leaf_atlas_1_normal.png",
+      "baked/foliage_leaf_atlas_2_normal.png"
+    ]
+  }
+}

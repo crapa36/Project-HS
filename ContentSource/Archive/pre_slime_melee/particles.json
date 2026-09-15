@@ -1,0 +1,140 @@
+[
+  {
+    "id": "particle.enemy.melee.windup",
+    "kind": "particles",
+    "emitters": [
+      {
+        "sprite": "melee_arc",
+        "shape": "point",
+        "velocity": "radial",
+        "facing": "ground",
+        "local_offset": [
+          0,
+          0,
+          0
+        ],
+        "shape_extent": [
+          0,
+          0,
+          0
+        ],
+        "local_direction": [
+          0,
+          1,
+          0
+        ],
+        "start_color": [
+          4,
+          0.05,
+          0.05,
+          0.85
+        ],
+        "end_color": [
+          4,
+          0.05,
+          0.05,
+          0
+        ],
+        "lifetime": [
+          0.35,
+          0.35
+        ],
+        "speed": [
+          0,
+          0
+        ],
+        "cone_degrees": 0,
+        "start_size": [
+          0.7,
+          0.7
+        ],
+        "end_size": [
+          0.18,
+          0.18
+        ],
+        "gravity": 0,
+        "rotation": [
+          0,
+          6.283185
+        ],
+        "angular_velocity": [
+          -2,
+          2
+        ],
+        "stretch": 1,
+        "count": 2,
+        "renderer": "ground",
+        "primitive": "sector"
+      }
+    ]
+  },
+  {
+    "id": "particle.enemy.melee.hit",
+    "kind": "particles",
+    "emitters": [
+      {
+        "sprite": "melee_arc",
+        "shape": "point",
+        "velocity": "cone",
+        "facing": "velocity",
+        "local_offset": [
+          0,
+          0.8,
+          0
+        ],
+        "shape_extent": [
+          0,
+          0,
+          0
+        ],
+        "local_direction": [
+          0,
+          0,
+          1
+        ],
+        "start_color": [
+          4,
+          0.05,
+          0.05,
+          0.95
+        ],
+        "end_color": [
+          1,
+          0.01,
+          0.01,
+          0
+        ],
+        "lifetime": [
+          0.15,
+          0.28
+        ],
+        "speed": [
+          3,
+          7
+        ],
+        "cone_degrees": 55,
+        "start_size": [
+          0.09,
+          0.16
+        ],
+        "end_size": [
+          0,
+          0
+        ],
+        "gravity": -2,
+        "rotation": [
+          0,
+          6.283185
+        ],
+        "angular_velocity": [
+          -3,
+          3
+        ],
+        "stretch": 2.5,
+        "count": 12,
+        "renderer": "mesh",
+        "primitive": "shard"
+      }
+    ]
+  }
+]

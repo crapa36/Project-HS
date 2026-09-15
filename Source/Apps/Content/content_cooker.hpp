@@ -85,6 +85,7 @@ struct CharacterAssetSource
     std::string diagnostic_name;
     bool allow_missing_material_textures{};
     bool seal_eye_socket{};
+    bool generate_material_mips{};
 };
 
 struct ParticleSpriteSource

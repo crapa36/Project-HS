@@ -1,4 +1,4 @@
-﻿{
+{
     "$schema":  "../../Schemas/game.schema.json",
     "schema_version":  3,
     "category":  "particles",
@@ -1727,18 +1727,8 @@
                                                                      0,
                                                                      1
                                                                  ],
-                                             "start_color":  [
-                                                                 4,
-                                                                 0.05,
-                                                                 0.05,
-                                                                 0.9
-                                                             ],
-                                             "end_color":  [
-                                                               4,
-                                                               0.05,
-                                                               0.05,
-                                                               0
-                                                           ],
+                                             "start_color": [0.12, 1.1, 0.28, 0.75],
+                                             "end_color": [0.08, 0.65, 0.18, 0],
                                               "lifetime":  [
                                                                0.18,
                                                                0.3
@@ -1765,7 +1755,7 @@
                                                                       -2,
                                                                       2
                                                                   ],
-                                             "stretch":  2,
+                                             "stretch":  1,
                                               "count":  12,
                                              "renderer":  "mesh",
                                              "primitive":  "ember"
@@ -4658,143 +4648,206 @@
                                      ]
                     },
                     {
-                        "id":  "particle.enemy.melee.windup",
-                        "kind":  "particles",
-                        "emitters":  [
-                                         {
-                                             "sprite":  "melee_arc",
-                                             "shape":  "point",
-                                             "velocity":  "radial",
-                                             "facing":  "ground",
-                                             "local_offset":  [
-                                                                  0,
-                                                                  0,
-                                                                  0
-                                                              ],
-                                             "shape_extent":  [
-                                                                  0,
-                                                                  0,
-                                                                  0
-                                                              ],
-                                             "local_direction":  [
-                                                                     0,
-                                                                     1,
-                                                                     0
-                                                                 ],
-                                             "start_color":  [
-                                                                 4,
-                                                                 0.05,
-                                                                 0.05,
-                                                                 0.85
-                                                             ],
-                                             "end_color":  [
-                                                               4,
-                                                               0.05,
-                                                               0.05,
-                                                               0
-                                                           ],
-                                             "lifetime":  [
-                                                              0.35,
-                                                              0.35
-                                                          ],
-                                             "speed":  [
-                                                           0,
-                                                           0
-                                                       ],
-                                             "cone_degrees":  0,
-                                             "start_size":  [
-                                                                0.7,
-                                                                0.7
-                                                            ],
-                                             "end_size":  [
-                                                              0.18,
-                                                              0.18
-                                                          ],
-                                             "gravity":  0,
-                                             "rotation":  [
-                                                              0,
-                                                              6.283185
-                                                          ],
-                                             "angular_velocity":  [
-                                                                      -2,
-                                                                      2
-                                                                  ],
-                                             "stretch":  1,
-                                             "count":  2,
-                                             "renderer":  "ground",
-                                             "primitive":  "sector"
-                                         }
-                                     ]
-                    },
+    "id": "particle.enemy.melee.windup",
+    "kind": "particles",
+    "emitters": [
+        {
+            "sprite": "ring",
+            "shape": "point",
+            "velocity": "direction",
+            "facing": "velocity",
+            "local_offset": [
+                0,
+                0.035,
+                0.12
+            ],
+            "shape_extent": [
+                0,
+                0,
+                0
+            ],
+            "local_direction": [
+                0,
+                0,
+                1
+            ],
+            "start_color": [
+                0.1,
+                2.2,
+                3.3,
+                0.9
+            ],
+            "end_color": [
+                0.1,
+                1.3,
+                2.8,
+                0
+            ],
+            "lifetime": [
+                0.35,
+                0.35
+            ],
+            "speed": [
+                0.08,
+                0.08
+            ],
+            "cone_degrees": 0,
+            "start_size": [
+                0.78,
+                0.78
+            ],
+            "end_size": [
+                0.95,
+                0.95
+            ],
+            "gravity": 0,
+            "rotation": [
+                0,
+                0
+            ],
+            "angular_velocity": [
+                0,
+                0
+            ],
+            "stretch": 1,
+            "count": 1,
+            "renderer": "ground",
+            "primitive": "sector"
+        }
+    ]
+},
                     {
-                        "id":  "particle.enemy.melee.hit",
-                        "kind":  "particles",
-                        "emitters":  [
-                                         {
-                                             "sprite":  "melee_arc",
-                                             "shape":  "point",
-                                             "velocity":  "cone",
-                                             "facing":  "velocity",
-                                             "local_offset":  [
-                                                                  0,
-                                                                  0.8,
-                                                                  0
-                                                              ],
-                                             "shape_extent":  [
-                                                                  0,
-                                                                  0,
-                                                                  0
-                                                              ],
-                                             "local_direction":  [
-                                                                     0,
-                                                                     0,
-                                                                     1
-                                                                 ],
-                                             "start_color":  [
-                                                                 4,
-                                                                 0.05,
-                                                                 0.05,
-                                                                 0.95
-                                                             ],
-                                             "end_color":  [
-                                                               1,
-                                                               0.01,
-                                                               0.01,
-                                                               0
-                                                           ],
-                                             "lifetime":  [
-                                                              0.15,
-                                                              0.28
-                                                          ],
-                                             "speed":  [
-                                                           3,
-                                                           7
-                                                       ],
-                                             "cone_degrees":  55,
-                                              "start_size":  [
-                                                                 0.09,
-                                                                 0.16
-                                                            ],
-                                             "end_size":  [
-                                                              0,
-                                                              0
-                                                          ],
-                                             "gravity":  -2,
-                                             "rotation":  [
-                                                              0,
-                                                              6.283185
-                                                          ],
-                                             "angular_velocity":  [
-                                                                      -3,
-                                                                      3
-                                                                  ],
-                                             "stretch":  2.5,
-                                             "count":  12,
-                                             "renderer":  "mesh",
-                                             "primitive":  "shard"
-                                         }
-                                     ]
-                    },
+    "id": "particle.enemy.melee.hit",
+    "kind": "particles",
+    "emitters": [
+        {
+            "sprite": "soft_circle",
+            "shape": "point",
+            "velocity": "cone",
+            "facing": "camera",
+            "local_offset": [
+                0,
+                0.55,
+                0
+            ],
+            "shape_extent": [
+                0,
+                0,
+                0
+            ],
+            "local_direction": [
+                0,
+                0,
+                1
+            ],
+            "start_color": [
+                0.1,
+                2.4,
+                3.1,
+                0.95
+            ],
+            "end_color": [
+                0.02,
+                0.6,
+                1.2,
+                0
+            ],
+            "lifetime": [
+                0.15,
+                0.28
+            ],
+            "speed": [
+                0.7,
+                2
+            ],
+            "cone_degrees": 70,
+            "start_size": [
+                0.06,
+                0.13
+            ],
+            "end_size": [
+                0.015,
+                0.03
+            ],
+            "gravity": -3.5,
+            "rotation": [
+                0,
+                6.283185
+            ],
+            "angular_velocity": [
+                -3,
+                3
+            ],
+            "stretch": 1,
+            "count": 9,
+            "renderer": "sprite",
+            "primitive": "soft"
+        },
+        {
+            "sprite": "spark",
+            "shape": "point",
+            "velocity": "direction",
+            "facing": "camera",
+            "local_offset": [
+                0,
+                0.55,
+                0
+            ],
+            "shape_extent": [
+                0,
+                0,
+                0
+            ],
+            "local_direction": [
+                0,
+                1,
+                0
+            ],
+            "start_color": [
+                2.5,
+                3,
+                3.5,
+                1
+            ],
+            "end_color": [
+                0.3,
+                1,
+                1.5,
+                0
+            ],
+            "lifetime": [
+                0.09,
+                0.14
+            ],
+            "speed": [
+                0,
+                0
+            ],
+            "cone_degrees": 70,
+            "start_size": [
+                0.2,
+                0.24
+            ],
+            "end_size": [
+                0.04,
+                0.04
+            ],
+            "gravity": 0,
+            "rotation": [
+                0,
+                6.283185
+            ],
+            "angular_velocity": [
+                -3,
+                3
+            ],
+            "stretch": 1,
+            "count": 1,
+            "renderer": "sprite",
+            "primitive": "soft"
+        }
+    ]
+},
                     {
                         "id":  "particle.boss.dash.start",
                         "kind":  "particles",

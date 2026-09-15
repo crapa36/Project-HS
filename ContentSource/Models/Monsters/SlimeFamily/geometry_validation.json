@@ -1,0 +1,85 @@
+[
+  {
+    "variant": "Melee",
+    "nonmanifold_edges": 0,
+    "zero_area_faces": 0,
+    "unweighted": 0,
+    "max_influences": 4,
+    "used_bones": [
+      "body_back",
+      "body_center",
+      "body_front",
+      "body_left",
+      "body_right",
+      "body_top",
+      "face_left",
+      "face_right",
+      "flower_head",
+      "flower_stem",
+      "mouth",
+      "ornament_left",
+      "ornament_right",
+      "root"
+    ],
+    "signed_volume": 0.36990118231291175
+  },
+  {
+    "variant": "Ranged",
+    "nonmanifold_edges": 0,
+    "zero_area_faces": 0,
+    "unweighted": 0,
+    "max_influences": 4,
+    "used_bones": [
+      "body_back",
+      "body_center",
+      "body_front",
+      "body_left",
+      "body_right",
+      "body_top",
+      "face_left",
+      "face_right",
+      "flower_head",
+      "flower_stem",
+      "mouth",
+      "ornament_left",
+      "ornament_right",
+      "root"
+    ],
+    "signed_volume": 0.37599019950460566
+  },
+  {
+    "variant": "Suicide",
+    "nonmanifold_edges": 0,
+    "zero_area_faces": 0,
+    "unweighted": 0,
+    "max_influences": 4,
+    "used_bones": [
+      "body_back",
+      "body_center",
+      "body_front",
+      "body_left",
+      "body_right",
+      "body_top",
+      "face_left",
+      "face_right",
+      "flower_head",
+      "flower_stem",
+      "mouth",
+      "ornament_left",
+      "ornament_right",
+      "root"
+    ],
+    "signed_volume": 0.3717157906191674
+  },
+  {
+    "variant": "Projectile",
+    "nonmanifold_edges": 0,
+    "zero_area_faces": 0,
+    "unweighted": 0,
+    "max_influences": 1,
+    "used_bones": [
+      "root"
+    ],
+    "signed_volume": 0.15457270146852042
+  }
+]

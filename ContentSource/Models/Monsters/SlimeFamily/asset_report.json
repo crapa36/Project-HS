@@ -1,0 +1,46 @@
+[
+  {
+    "variant": "Melee",
+    "vertices": 3122,
+    "triangles": 6240,
+    "bounds": [
+      1.007899284362793,
+      1.007899284362793,
+      0.6399999856948853
+    ],
+    "rig_controls": 14
+  },
+  {
+    "variant": "Ranged",
+    "vertices": 3654,
+    "triangles": 7296,
+    "bounds": [
+      1.1602925062179565,
+      1.007899284362793,
+      0.6399999856948853
+    ],
+    "rig_controls": 14
+  },
+  {
+    "variant": "Suicide",
+    "vertices": 4444,
+    "triangles": 8856,
+    "bounds": [
+      1.007899284362793,
+      1.007899284362793,
+      0.8330000042915344
+    ],
+    "rig_controls": 14
+  },
+  {
+    "variant": "Projectile",
+    "vertices": 482,
+    "triangles": 960,
+    "bounds": [
+      0.9999994039535522,
+      0.2999998927116394,
+      1.0
+    ],
+    "rig_controls": 1
+  }
+]

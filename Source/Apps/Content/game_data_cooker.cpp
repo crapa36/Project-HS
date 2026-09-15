@@ -179,7 +179,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     BuiltGameData content{};
     auto &data = content.simulation_rules;
     auto &presentation = content.presentation;
-    data.version = 6;
+    data.version = 7;
 
     const auto &stats_document = sources.documents.at("stats");
     const auto &stat = stats_document["entries"][0];
@@ -307,8 +307,50 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &arena = level["arena"];
     const auto width = RequireNumber(arena, "level", "$/entries/0/arena", "width_m");
     if (width != RequireNumber(arena, "level", "$/entries/0/arena", "depth_m"))
-        ThrowValidationError("level", "$/entries/0/arena", "GameData v1 requires a square arena");
+        ThrowValidationError("level", "$/entries/0/arena", "boundary extent must use matching width and depth");
     data.arena_half_extent = static_cast<float>(width * 0.5);
+    const auto &boundary = RequireArray(arena, "level", "$/entries/0/arena", "boundary_points_m");
+    if (boundary.size() > kArenaBoundaryMaxPoints) ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "too many boundary points");
+    data.arena_boundary.count = static_cast<std::uint8_t>(boundary.size());
+    for (std::size_t i = 0; i < boundary.size(); ++i)
+    {
+        if (!boundary[i].is_array() || boundary[i].size() != 2) ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "each point requires x and y");
+        data.arena_boundary.points[i] = {boundary[i][0].get<float>(), boundary[i][1].get<float>()};
+        if (!std::isfinite(data.arena_boundary.points[i].x) || !std::isfinite(data.arena_boundary.points[i].y) ||
+            std::abs(data.arena_boundary.points[i].x) > data.arena_half_extent ||
+            std::abs(data.arena_boundary.points[i].y) > data.arena_half_extent)
+            ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "points must be finite and within arena extent");
+    }
+    if (data.arena_boundary.count < 3 || !ContainsArenaPoint(data.arena_boundary, {0.0f, 0.0f}))
+        ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "boundary must contain origin");
+    for (std::size_t i = 0; i < data.arena_boundary.count; ++i)
+    {
+        const auto &a = data.arena_boundary.points[i];
+        const auto &b = data.arena_boundary.points[(i + 1) % data.arena_boundary.count];
+        const auto &c = data.arena_boundary.points[(i + 2) % data.arena_boundary.count];
+        if ((b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x) >= 0.0f)
+            ThrowValidationError("level", "$/entries/0/arena/boundary_points_m", "points must be clockwise and strictly convex");
+    }
+    const auto &obstacles = RequireArray(arena, "level", "$/entries/0/arena", "obstacles");
+    if (obstacles.size() > kArenaObstacleMaxCount)
+        ThrowValidationError("level", "$/entries/0/arena/obstacles", "too many obstacles");
+    data.arena_obstacle_count = static_cast<std::uint8_t>(obstacles.size());
+    for (std::size_t i = 0; i < obstacles.size(); ++i)
+    {
+        const auto path = "$/entries/0/arena/obstacles/" + std::to_string(i);
+        const auto kind = RequireString(obstacles[i], "level", path, "kind");
+        if (kind == "tree") data.arena_obstacles[i].kind = ArenaObstacleKind::Tree;
+        else if (kind == "rock") data.arena_obstacles[i].kind = ArenaObstacleKind::Rock;
+        else ThrowValidationError("level", path + "/kind", "unknown obstacle kind");
+        const auto &center = RequireArray(obstacles[i], "level", path, "center_m");
+        if (center.size() != 2) ThrowValidationError("level", path + "/center_m", "center requires x and y");
+        data.arena_obstacles[i].center = {center[0].get<float>(), center[1].get<float>()};
+        data.arena_obstacles[i].radius = static_cast<float>(RequireNumber(obstacles[i], "level", path, "radius_m"));
+        if (!std::isfinite(data.arena_obstacles[i].center.x) || !std::isfinite(data.arena_obstacles[i].center.y) ||
+            !std::isfinite(data.arena_obstacles[i].radius) || data.arena_obstacles[i].radius <= 0.0f ||
+            !ContainsArenaPoint(data.arena_boundary, data.arena_obstacles[i].center, data.arena_obstacles[i].radius))
+            ThrowValidationError("level", path, "obstacle must be finite, positive, and inside arena");
+    }
 
     const auto &character = sources.documents.at("characters")["entries"][0];
     const auto &camera = character["camera"];
@@ -478,8 +520,8 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &enemy_entries = enemy_document["entries"];
     constexpr std::array enemy_ids{"enemy.melee", "enemy.ranged", "enemy.suicide"};
     constexpr std::array enemy_logics{"straight_chase_melee", "approach_and_shoot_projectile", "straight_chase_self_destruct"};
-    constexpr std::array enemy_meshes{"monster.mesh.slime", "monster.mesh.cactus",
-                                      "monster.mesh.swarm09"};
+    constexpr std::array enemy_meshes{"monster.mesh.slime.melee", "monster.mesh.slime.ranged",
+                                      "monster.mesh.slime.suicide"};
     for (std::size_t index = 0; index < enemy_entries.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
@@ -621,6 +663,15 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             }
             else ThrowValidationError("bosses", path + "/id", "unknown boss pattern ID");
         }
+    }
+    for (std::size_t index = 0; index < data.arena_obstacle_count; ++index)
+    {
+        const auto &obstacle = data.arena_obstacles[index];
+        if (!ContainsArenaPoint(data.arena_boundary, obstacle.center,
+                                obstacle.radius + data.boss_common.collision_radius))
+            ThrowValidationError("level", "$/entries/0/arena/obstacles/" +
+                                             std::to_string(index),
+                                 "obstacle requires enough boundary clearance for the largest actor");
     }
     return content;
 }

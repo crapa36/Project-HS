@@ -1,0 +1,413 @@
+{
+  "units": "metres",
+  "assets": [
+    {
+      "name": "trunk_0",
+      "triangles": 6784,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_0",
+      "triangles": 9240,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_1",
+      "triangles": 6784,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_1",
+      "triangles": 9240,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_2",
+      "triangles": 6784,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_2",
+      "triangles": 9240,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_0",
+      "triangles": 88,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_0",
+      "triangles": 1280,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_1",
+      "triangles": 104,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_1",
+      "triangles": 1280,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_2",
+      "triangles": 120,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_2",
+      "triangles": 1280,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_3",
+      "triangles": 136,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_3",
+      "triangles": 1280,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_0_lod1",
+      "triangles": 4616,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_0_lod2",
+      "triangles": 1848,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_1_lod1",
+      "triangles": 4616,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_1_lod2",
+      "triangles": 1848,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_2_lod1",
+      "triangles": 4616,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "leaf_2_lod2",
+      "triangles": 1848,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_0_lod1",
+      "triangles": 48,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_0_lod2",
+      "triangles": 8,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_0_lod1",
+      "triangles": 640,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_0_lod2",
+      "triangles": 256,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_1_lod1",
+      "triangles": 56,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_1_lod2",
+      "triangles": 8,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_1_lod1",
+      "triangles": 640,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_1_lod2",
+      "triangles": 256,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_2_lod1",
+      "triangles": 64,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_2_lod2",
+      "triangles": 16,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_2_lod1",
+      "triangles": 640,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_2_lod2",
+      "triangles": 256,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_3_lod1",
+      "triangles": 72,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "grass_3_lod2",
+      "triangles": 24,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_3_lod1",
+      "triangles": 640,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "rock_3_lod2",
+      "triangles": 256,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_0_lod1",
+      "triangles": 5524,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_0_lod2",
+      "triangles": 3634,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_1_lod1",
+      "triangles": 5524,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_1_lod2",
+      "triangles": 3634,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_2_lod1",
+      "triangles": 5524,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    },
+    {
+      "name": "trunk_2_lod2",
+      "triangles": 3634,
+      "units": "metres",
+      "pivot": "ground origin",
+      "uv0": true,
+      "normal": true,
+      "tangent": true
+    }
+  ],
+  "highpoly": [
+    "HP_trunk_0",
+    "HP_trunk_1",
+    "HP_trunk_2",
+    "HP_rock_0",
+    "HP_rock_1",
+    "HP_rock_2",
+    "HP_rock_3",
+    "HP_leaf_0",
+    "HP_leaf_1",
+    "HP_leaf_2",
+    "HP_grass_0",
+    "HP_grass_1",
+    "HP_grass_2",
+    "HP_grass_3",
+    "HP_AtlasSurface_grass_0",
+    "HP_AtlasSurface_grass_1",
+    "HP_AtlasSurface_leaf_0",
+    "HP_AtlasSurface_leaf_1",
+    "HP_AtlasSurface_leaf_2"
+  ],
+  "collision": [
+    "UCX_trunk_0_00",
+    "UCX_trunk_1_00",
+    "UCX_trunk_2_00",
+    "UCX_rock_0_00",
+    "UCX_rock_1_00",
+    "UCX_rock_2_00",
+    "UCX_rock_3_00"
+  ]
+}

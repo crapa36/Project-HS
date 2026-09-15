@@ -132,12 +132,21 @@ ContentSourceInventory LoadContentSourceInventory()
                 monster_animations / std::string(id.substr(id.find('/') + 1)) /
                     std::string(clip));
     };
-    append_monster("enemy/melee", "Slime_SK.fbx",
-                   {"IdleBattle.fbx", "RunFWD.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
-    append_monster("enemy/ranged", "Cactus_SK.fbx",
-                   {"IdleBattle.fbx", "RunFWD.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
-    append_monster("enemy/suicide", "Swarm09_SK.fbx",
-                   {"Idle.fbx", "MoveFWD.fbx", "Attack.fbx", "Die.fbx"});
+    for (const auto variant : {"Melee", "Ranged", "Suicide", "Projectile"})
+    {
+        const auto stem = std::string(variant) == "Projectile"
+                              ? std::string("SlimeGelProjectile")
+                              : std::string("Slime") + variant;
+        const auto id = std::string("slime_family/") + variant;
+        const auto directory = monster_models / "SlimeFamily" / variant;
+        append_presentation_asset(id + "/model", directory / (stem + ".fbx"));
+        for (const auto suffix : {"_BaseColor.png", "_Normal.png"})
+            append_presentation_asset(id + suffix, directory / (stem + ".fbm") / (stem + suffix));
+        if (std::string_view(variant) != "Projectile")
+            for (const auto clip : {"Idle.fbx", "Run.fbx", "Draw.fbx", "Recoil.fbx", "Death.fbx"})
+                append_presentation_asset(id + "/" + clip,
+                    monster_animations / "SlimeFamily" / variant / clip);
+    }
     append_monster("boss/5m", "TurtleShell_SK.fbx",
                    {"IdleBattle.fbx", "Run.fbx", "Attack01.fbx", "Attack02.fbx", "Die.fbx"});
     append_monster("boss/10m", "ChestMonster_SK.fbx",
@@ -152,6 +161,16 @@ ContentSourceInventory LoadContentSourceInventory()
                               monster_textures / "Emissive_TEX.png");
     append_presentation_asset("texture/monster/ram",
                               monster_textures / "RAM_TEX.png");
+
+    const auto environment_root = std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path() / "Textures/Environment";
+    append_presentation_asset("environment/meshes", environment_root.parent_path().parent_path() / "Models/Environment/environment_meshes.json");
+    std::vector<std::filesystem::path> environment_files;
+    for (const auto &entry : std::filesystem::recursive_directory_iterator(environment_root))
+        if (entry.is_regular_file() && (entry.path().extension() == ".png" || entry.path().extension() == ".json"))
+            environment_files.push_back(entry.path());
+    std::ranges::sort(environment_files);
+    for (const auto &path : environment_files)
+        append_presentation_asset("environment/" + path.lexically_relative(environment_root).generic_string(), path);
 
     std::vector<std::filesystem::path> audio_files;
     for (const auto &entry : std::filesystem::directory_iterator(HS_AUDIO_DIRECTORY))
