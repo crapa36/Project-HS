@@ -30,9 +30,7 @@ enum class CharacterAnimationClip : std::uint8_t
     Death,
     Dive,
     Stop,
-    HitBack,
-    HitFront,
-    HitRight,
+    Hit,
     Count,
 };
 
