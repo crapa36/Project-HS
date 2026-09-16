@@ -373,9 +373,10 @@ struct AudioEngine::Impl
 
     void ApplyVolumes() noexcept
     {
+        status.effective_master_volume = status.background_muted ? 0.0f : master_volume;
         if (master_bus)
         {
-            (void)master_bus->SetVolume(master_volume);
+            (void)master_bus->SetVolume(status.effective_master_volume);
         }
         if (bgm_bus)
         {
@@ -582,6 +583,14 @@ void AudioEngine::ApplySettings(const SettingsData &settings) noexcept
     impl_->bgm_volume = ClampVolume(settings.bgm_volume);
     impl_->sfx_volume = ClampVolume(settings.sfx_volume);
     impl_->ui_volume = ClampVolume(settings.ui_volume);
+    impl_->ApplyVolumes();
+}
+
+void AudioEngine::SetBackgroundMuted(bool muted) noexcept
+{
+    if (impl_->status.background_muted == muted)
+        return;
+    impl_->status.background_muted = muted;
     impl_->ApplyVolumes();
 }
 

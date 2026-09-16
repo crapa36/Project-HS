@@ -423,6 +423,27 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
     Check(status.loaded_cues == 1 && status.loaded_files == 0,
           "preload false leaves PCM payload unloaded");
 
+    settings.master_volume = 0.7f;
+    engine.ApplySettings(settings);
+    engine.SetBackgroundMuted(true);
+    Check(engine.Status().background_muted && engine.Status().effective_master_volume == 0.0f,
+          "background mute silences the master bus including UI and music");
+    settings.master_volume = 0.4f;
+    engine.ApplySettings(settings);
+    engine.PauseCombat();
+    engine.ResumeCombat();
+    Check(engine.Status().effective_master_volume == 0.0f && settings.master_volume == 0.4f,
+          "settings and combat pause changes cannot unmute background audio");
+    engine.SetBackgroundMuted(false);
+    Check(!engine.Status().background_muted && engine.Status().effective_master_volume == 0.4f,
+          "foreground restores the latest configured master volume");
+    engine.SetBackgroundMuted(true);
+    settings.master_volume = 0.0f;
+    engine.ApplySettings(settings);
+    engine.SetBackgroundMuted(false);
+    Check(engine.Status().effective_master_volume == 0.0f,
+          "returning to foreground preserves explicit user mute");
+
     hs::PresentationEvent missing_event;
     missing_event.kind = hs::PresentationKind::Audio;
     missing_event.asset = hs::MakeAssetId("audio.missing");

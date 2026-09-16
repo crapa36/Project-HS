@@ -133,6 +133,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return {initialized};
     }
 
+    // No window owns the foreground yet; suppress even the initial menu cue.
+    audio.SetBackgroundMuted(true);
+
     RuntimeChannels channels;
     channels.camera_zoom_percent.store(std::clamp(config.camera_zoom_percent, 15u, 120u));
     channels.best_level.store(profile.best_level, std::memory_order_relaxed);
@@ -1103,6 +1106,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             channels.stop_requested.store(true, std::memory_order_release);
             break;
         }
+        audio.SetBackgroundMuted(GetForegroundWindow() != window.Handle());
 #if defined(HS_DEVELOPMENT_TOOLS)
         if (std::chrono::steady_clock::now() >= next_hot_reload_check)
         {
