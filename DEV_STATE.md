@@ -20,20 +20,20 @@ Wheel zoom extends the authored range down to 15%; window ground-ray aiming and 
 
 Successful skills cancel only unreleased basic casts. Input observes the last completed simulation tick. A new press replaces previous buffered intent, instant skill release preserves the buffer, and charged release applies only to its original slot. Swept obstacle/actor contact ordering blocks both sides' projectiles; melee, AoE, and explosive derivatives use obstacle visibility. Applied damage-over-time remains active.
 
-### Environment v9
+### Environment
 
-Environment v9 is the active baseline: PCA Gaussianized terrain, BC7 linear Gaussian textures with per-mip inverse LUT, deterministic clustered grass, authored environment meshes with LODs, and a 32-bit position GBuffer. Detailed source/output constraints are in `Docs/ENVIRONMENT_V9_REPORT.md`.
+Environment v9 is the active baseline: PCA Gaussianized terrain, BC7 linear Gaussian textures with per-mip inverse LUT, deterministic clustered grass, authored environment meshes with LODs, and a 32-bit position GBuffer.
 
 ### Monster presentation
 
-All three normal-enemy roles use the authored SlimeFamily assets. Superseded BasicSlime, Cactus, Mushroom, Slime, Swarm08/09, and duplicate `SourceExport` sources are not part of the active content tree. Details of the active family are in `Docs/SLIME_FAMILY_REPORT.md`.
+All three normal-enemy roles use the authored SlimeFamily assets. Superseded BasicSlime, Cactus, Mushroom, Slime, Swarm08/09, and duplicate `SourceExport` sources are not part of the active content tree.
 
 Automated validation establishes only the checks it executes; do not infer presentation quality from process completion or zero D3D12 validation errors.
 
 ## Accepted baseline
 
 - Slime eye-socket repair is the current baseline.
-- The relic roster contains 20 relics; current tuning state is in `RELIC_BALANCING_PLAN.md`.
+- The relic roster contains 20 relics with no unresolved correctness hold.
 - Relic contribution is exposed in the character and result UI.
 - Current UI text measurement, clipping, card layout, relic display, bars, and combat-HUD fixes are integrated.
 
