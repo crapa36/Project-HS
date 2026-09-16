@@ -11,7 +11,7 @@ cbuffer FrameConstants : register(b0)
     float4 ShadowAtlasTexelSize;
     row_major float4x4 ArcherBones[128];
     uint4 MonsterAssetMeta[6];
-    uint4 MonsterClipMeta[6][5];
+    uint4 MonsterClipMeta[6][8];
     float4 RenderOptions;
     uint4 ParticleOptions;
     float4 GrassBenders[32];
@@ -180,55 +180,55 @@ void SkinMonster(inout float3 position, inout float3 normal, inout float3 tangen
 float3 ShapePlaceholder(float3 position, uint mesh)
 {
     // Runtime-only primitives: boxes, tapered boxes, wedges, and planes.
-    if (mesh == 2) // ranged enemy: narrow column
+    if (mesh == 2)
     {
         position.xz *= 0.72;
     }
-    else if (mesh == 3) // suicide enemy: tapered warning shape
+    else if (mesh == 3)
     {
         position.xz *= lerp(1.0, 0.28, saturate(position.y + 0.5));
     }
-    else if (mesh == 5) // projectiles: arrow-like wedge
+    else if (mesh == 5)
     {
         position.x *= lerp(0.25, 1.0, saturate(0.5 - position.z));
         position.y *= 0.55;
     }
-    else if (mesh == 7) // area: ground plane
+    else if (mesh == 7)
     {
         position.y *= 0.1;
     }
-    else if (mesh == 8) // pickup: tilted marker
+    else if (mesh == 8)
     {
         const float sine = 0.70710678;
         const float cosine = 0.70710678;
         position.xy = float2(position.x * cosine - position.y * sine,
                              position.x * sine + position.y * cosine);
     }
-    else if (mesh == 9) // test ground
+    else if (mesh == 9)
     {
         position.y *= 0.1;
     }
-    else if (mesh == 16) // faceted tree trunk
+    else if (mesh == 16)
     {
         position.xz *= lerp(0.72, 0.42, saturate(position.y + 0.5));
     }
-    else if (mesh == 17) // faceted tree canopy
+    else if (mesh == 17)
     {
         position.y = position.y * 0.72 + 0.55;
         position.xz *= lerp(0.95, 0.58, saturate(position.y));
     }
-    else if (mesh == 18) // low-poly rock
+    else if (mesh == 18)
     {
         position.y = (position.y + 0.5) * 0.62 - 0.5;
         position.xz *= lerp(0.82, 0.58, saturate(position.y + 0.5));
     }
-    else if (mesh == 19) // thin grass blade
+    else if (mesh == 19)
     {
         position.x *= 0.08;
         position.z *= 0.8;
         position.y = (position.y + 0.5) * 0.5 - 0.5;
     }
-    else if (mesh == 20) // dirt patch
+    else if (mesh == 20)
     {
         position.y *= 0.035;
     }
@@ -368,7 +368,7 @@ GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
     if (!front && input.Mesh != 17 && input.Mesh != 19) discard;
     float3 world_normal = normalize(input.WorldNormal);
     float roughness = 0.3;
-    if (input.Mesh == 6) discard; // gel projectiles use the transparent pass
+    if (input.Mesh == 6) discard;
     if (input.Mesh == 0 || (input.Mesh >= 10 && input.Mesh <= 12))
     {
         const bool family = input.Mesh >= 10;
@@ -381,7 +381,6 @@ GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
             : float4(SampleArcherNormal(input.Material, input.Uv), 0.3);
         roughness = normal_map.a;
         float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
-        // Blender +Y normals need a green flip after the cooker's UV.v flip.
         if (family) tangent_normal.y = -tangent_normal.y;
         const float3 tangent = normalize(input.WorldTangent.xyz -
             world_normal * dot(world_normal, input.WorldTangent.xyz));
@@ -448,7 +447,6 @@ FullScreenOutput FullScreenVS(uint vertex_id : SV_VertexID)
 float ShadowVisibility(float3 world)
 {
     float visibility = 1.0;
-    // Coarse coverage supplies the edge of each finer map, including the far fade.
     [unroll] for (int cascade = 2; cascade >= 0; --cascade)
     {
         float4 projected = mul(float4(world, 1.0), ShadowViewProjection[cascade]);
@@ -476,7 +474,6 @@ float ShadowVisibility(float3 world)
     return visibility;
 }
 
-// Shared lighting for opaque family features and transparent jelly bodies.
 float3 JellyLighting(float3 base, float3 normal, float3 world, float roughness, float charge)
 {
     const float3 view = normalize(CameraTime.xyz - world);
@@ -771,7 +768,6 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
         saturate(1.0 - particle.PositionLife.w / max(particle.InitialVelocityMaxLife.w, 0.0001));
     float size = lerp(particle.SizeRotation.x, particle.SizeRotation.y, progress);
     float elapsed = particle.InitialVelocityMaxLife.w - particle.PositionLife.w;
-    // Segment SizeRotation.zw carries authored UV repeat/scroll metadata, not rotation.
     float rotation = renderer == 2u ? 0.0 : particle.SizeRotation.z + particle.SizeRotation.w * elapsed;
     float sine;
     float cosine;
@@ -923,7 +919,7 @@ OitOutput SlimePS(SceneOutput input)
     {
         const float3 uv = float3(input.Uv, input.Mesh - 10);
         base = FamilyDiffuse.Sample(MaterialSampler, uv);
-        if (base.a >= 0.98) discard; // opaque eyes and ornaments wrote depth already
+        if (base.a >= 0.98) discard;
         const float4 normal_map = FamilyNormal.Sample(MaterialSampler, uv);
         roughness = normal_map.a;
         float3 tn = normal_map.xyz * 2.0 - 1.0;
@@ -941,7 +937,6 @@ OitOutput SlimePS(SceneOutput input)
     }
     clip(base.a - 0.001);
     const float3 color = JellyLighting(base.rgb, normal, input.WorldPosition, roughness, input.Charge);
-    // Keep authored opaque features in the depth pass; the jelly body transmits the floor.
     const float alpha = base.a * 0.45;
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
