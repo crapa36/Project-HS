@@ -55,16 +55,34 @@ class EnemyAnimationState
         Float3 direction{};
         Tick started{};
     };
+    struct PlayerHitPose
+    {
+        Tick started{};
+        CharacterAnimationClip clip{CharacterAnimationClip::HitBack};
+    };
+
     void Update(const GameReadModel &model, std::span<const DomainSignal> signals);
     [[nodiscard]] std::optional<Tick> RecoilStart(std::uint64_t id) const;
     [[nodiscard]] std::optional<Tick> ReleaseTick(std::uint64_t id) const;
     [[nodiscard]] std::optional<Float3> ReleaseDirection(std::uint64_t id) const;
+    [[nodiscard]] std::optional<Tick> PlayerStopStart() const noexcept
+    {
+        return player_stop_;
+    }
+    [[nodiscard]] std::optional<PlayerHitPose> PlayerHit() const noexcept
+    {
+        return player_hit_;
+    }
     [[nodiscard]] std::span<const DeathPose> DeathPoses() const { return deaths_; }
 
   private:
     struct LivingPose { std::int32_t health{}; std::optional<Tick> recoil; std::optional<Tick> release; Float3 release_direction{}; bool seen{}; };
     std::unordered_map<std::uint64_t, LivingPose> living_;
     std::vector<DeathPose> deaths_;
+    std::optional<Tick> player_stop_;
+    std::optional<PlayerHitPose> player_hit_;
+    float player_locomotion_blend_{};
+    bool player_was_forced_{};
     Tick tick_{};
     std::uint64_t seed_{};
     SessionPhase phase_{};
