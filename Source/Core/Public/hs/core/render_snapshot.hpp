@@ -166,6 +166,12 @@ class RenderSnapshotStorage
     [[nodiscard]] bool AddUi(const UiModel &ui);
     [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
     [[nodiscard]] std::size_t InstanceCount() const noexcept;
+    [[nodiscard]] AnimationPoseRef *MutablePose(std::uint32_t instance_index) noexcept
+    {
+        for (auto &pose : poses_)
+            if (pose.instance_index == instance_index) return &pose;
+        return nullptr;
+    }
     [[nodiscard]] RenderSnapshot View() const noexcept;
 
     RenderSnapshotHeader header{};

@@ -54,6 +54,7 @@ struct PlayerView
     std::array<SkillKind, 4> loadout{SkillKind::Count, SkillKind::Count,
                                      SkillKind::Count, SkillKind::Count};
     std::array<std::uint8_t, kCombatSkillCount> upgrades{};
+    SkillKind forced_move_skill{SkillKind::Count};
 };
 
 struct EnemyView
