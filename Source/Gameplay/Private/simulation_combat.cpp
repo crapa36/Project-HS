@@ -452,9 +452,7 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
     const auto &definition = rules.skills[skill_index];
     if (skill_index == 0 || skill_index >= kCombatSkillCount ||
         actors->player.cooldowns[cooldown_index] != 0 || actors->player.charging ||
-        actors->player.active_cast_tick > tick ||
-        (actors->player.basic_attack_cast_id != 0 && tick >= actors->player.basic_attack_release_tick &&
-         tick < actors->player.next_basic_attack) || tick < actors->player.retreat_until)
+        actors->player.active_cast_tick > tick || tick < actors->player.retreat_until)
     {
         return false;
     }
@@ -818,9 +816,7 @@ bool GameSimulation::SimulationWorld::TryBeginSkill(SkillKind skill)
     {
         const auto cooldown = static_cast<std::size_t>(skill) - 1;
         if (actors->player.cooldowns[cooldown] != 0 || actors->player.charging ||
-            actors->player.active_cast_tick > tick ||
-            (actors->player.basic_attack_cast_id != 0 && tick >= actors->player.basic_attack_release_tick &&
-             tick < actors->player.next_basic_attack) || tick < actors->player.retreat_until)
+            actors->player.active_cast_tick > tick || tick < actors->player.retreat_until)
         {
             return false;
         }
@@ -833,8 +829,8 @@ bool GameSimulation::SimulationWorld::TryBeginSkill(SkillKind skill)
             });
             actors->player.basic_attack_cast_id = 0;
             actors->player.basic_attack_release_tick = 0;
-            actors->player.basic_attack_animation_until = tick;
         }
+        actors->player.basic_attack_animation_until = tick;
         actors->player.charging = true;
         actors->player.charging_skill = skill;
         actors->player.charge_start = tick;

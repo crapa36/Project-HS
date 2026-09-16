@@ -404,12 +404,13 @@ void TestChargeBufferAndRecovery()
         }
         Check(simulation.Shutdown().Succeeded(), "charge cancel shutdown");
     }
-    // Once the basic projectile has left, an active skill must respect its remaining recovery.
+    // Skills cancel basic recovery while preserving the already released arrow.
+    for (const auto skill : {hs::SkillKind::PiercingShot, hs::SkillKind::ChargedShot})
     {
         hs::GameSimulation simulation;
         auto data = QuietGameData(); data.arena_obstacle_count = 0;
         Check(simulation.Initialize({0xC403u}, data).Succeeded(), "basic recovery initialize");
-        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(skill));
         hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
         (void)Tick(simulation, held); held.basic_attack_held = false;
         bool emitted{};
@@ -423,14 +424,26 @@ void TestChargeBufferAndRecovery()
               "basic emission precedes recovery boundary");
         hs::Sequence sequence{};
         (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
-        const auto skill_index = static_cast<std::size_t>(hs::SkillKind::PiercingShot);
-        Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
-              "skill press after basic emission cannot cancel recovery");
+        if (skill == hs::SkillKind::ChargedShot)
+            Check(player(simulation).charging, "charge cancels basic recovery immediately");
+        else
+            Check(simulation.GetObservation().balance.skill_uses[static_cast<std::size_t>(skill)] == 1,
+                  "instant skill cancels basic recovery immediately");
+        Check(player(simulation).basic_attack_animation_until <= simulation.GetObservation().tick,
+              "successful skill ends the basic animation");
+        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        bool basic_survives{};
+        for (const auto &shot : model.View().projectiles)
+            basic_survives |= shot.skill == hs::SkillKind::BasicAttack;
+        Check(basic_survives, "recovery cancel preserves the released basic arrow");
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        held.basic_attack_held = true;
+        const auto uses = simulation.GetObservation().balance.skill_uses[0];
         while (simulation.GetObservation().tick + 1 < recovery_end)
         {
             (void)Tick(simulation, held);
-            Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
-                  "buffered skill waits through basic recovery");
+            Check(simulation.GetObservation().balance.skill_uses[0] == uses,
+                  "skill cancel does not reset the basic attack rate limiter");
         }
         Check(simulation.Shutdown().Succeeded(), "basic recovery shutdown");
     }
