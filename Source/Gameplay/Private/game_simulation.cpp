@@ -368,7 +368,8 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                     impl_->actors->player.active_animation_until,
                     impl_->actors->player.retreat_until,
                     impl_->actors->player.loadout,
-                    impl_->actors->player.upgrades};
+                    impl_->actors->player.upgrades,
+                    impl_->actors->player.forced_move_skill};
     model.effective_attack = impl_->EffectiveAttack();
     model.effective_attack_speed = impl_->EffectiveAttackSpeed();
     model.effective_move_speed = impl_->EffectiveMoveSpeed();
