@@ -23,16 +23,10 @@ void AppendClipAlias(CharacterCookResult &character,
     if (first + transform_count > character.transforms.size())
         throw std::runtime_error("Character compatibility clip range is invalid");
 
-    const std::vector<hs::CharacterLocalTransform> copied(
-        character.transforms.begin() + static_cast<std::ptrdiff_t>(first),
-        character.transforms.begin() +
-            static_cast<std::ptrdiff_t>(first + transform_count));
     auto header = *found;
     header.clip = destination;
     header.looping = false;
-    header.first_transform = static_cast<std::uint32_t>(character.transforms.size());
     character.clips.push_back(header);
-    character.transforms.insert(character.transforms.end(), copied.begin(), copied.end());
 }
 
 } // namespace
@@ -51,7 +45,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
         {
             // The renderer keeps one fixed clip table for all skinned assets.
             // Monsters never select these player-only ids, so preserve that compact
-            // contract with aliases instead of expanding every monster source set.
+            // contract with shared-range aliases instead of expanding their source set.
             AppendClipAlias(character, hs::CharacterAnimationClip::Dive,
                             hs::CharacterAnimationClip::Run);
             AppendClipAlias(character, hs::CharacterAnimationClip::Stop,
