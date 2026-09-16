@@ -470,9 +470,9 @@ void TestMonsterVisualScalesAndAttackFacing()
                   instance->scale.z == expected,
               "monster visual scale is uniform and mesh-specific");
     };
-    check_scale(hs::RenderMesh::MonsterMelee, 1.50f);
-    check_scale(hs::RenderMesh::MonsterRanged, 2.00f);
-    check_scale(hs::RenderMesh::MonsterSuicide, 2.40f);
+    check_scale(hs::RenderMesh::MonsterMelee, 1.25f);
+    check_scale(hs::RenderMesh::MonsterRanged, 1.40625f);
+    check_scale(hs::RenderMesh::MonsterSuicide, 1.5625f);
     hs::GameReadModelStorage facing_model;
     hs::EnemyView ranged{};
     ranged.id = {4};
@@ -552,6 +552,94 @@ void TestEnemyAnimationStateSignals()
     Check(state.DeathPoses().empty(), "corpse expires after 48 ticks");
 }
 
+void TestSlimeAttackPoseTransitions()
+{
+    hs::GameReadModelStorage model;
+    hs::EnemyAnimationState state;
+    hs::EnemyView enemy{};
+    enemy.id = {91}; enemy.kind = hs::EnemyKind::Suicide;
+    enemy.health = enemy.max_health = 100;
+    enemy.attacking = true; enemy.attack_started = 10; enemy.attack_resolve = 70;
+    enemy.locked_aim = {1, 0};
+    float projected_yaw{};
+    const auto project = [&](hs::Tick tick, std::span<const hs::DomainSignal> signals = {}) {
+        model.Clear(); model.tick = tick; model.AddEnemy(enemy);
+        state.Update(model.View(), signals);
+        hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+              test_ui, hs::SettingsData{}, snapshot, 0xFF, &state), "slime state snapshot");
+        projected_yaw = snapshot.View().instances[snapshot.View().poses.back().instance_index].yaw;
+        if (state.CancelProgress(enemy.id.value))
+        {
+            const auto &pose = snapshot.View().poses.back();
+            const auto &instance = snapshot.View().instances[pose.instance_index];
+            Check(std::abs(instance.yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+                  "cancelled charge keeps its original attack facing");
+        }
+        return snapshot.View().poses.back();
+    };
+    const auto charging = project(39);
+    enemy.attacking = false; enemy.velocity = {0, 1};
+    const auto cancelled = project(40);
+    Check(cancelled.clip == hs::CharacterAnimationClip::Draw &&
+          std::abs(cancelled.normalized_time - 0.5f) < 0.0001f &&
+          cancelled.normalized_time >= charging.normalized_time,
+          "suicide cancellation starts at exact current charge progress");
+    const auto reversing = project(58);
+    Check(reversing.clip == hs::CharacterAnimationClip::Draw &&
+          std::abs(reversing.normalized_time - 0.25f) < 0.0001f,
+          "suicide cancellation reverses the original draw slowly");
+    Check(project(76).clip == hs::CharacterAnimationClip::Run,
+          "suicide cancellation returns to locomotion after 36 ticks");
+    enemy.attacking = true; enemy.attack_started = 80; enemy.attack_resolve = 140;
+    (void)project(90); enemy.attacking = false; (void)project(91);
+    enemy.attacking = true; enemy.attack_started = 92; enemy.attack_resolve = 152;
+    Check(project(92).normalized_time == 0.0f && !state.CancelProgress(91),
+          "new attack clears the old reversed charge");
+    enemy.kind = hs::EnemyKind::Ranged; enemy.attacking = false; enemy.velocity = {};
+    hs::DomainSignal release{}; release.kind = hs::DomainSignalKind::RangedEnemyReleased;
+    release.tick = 100; release.source_entity_id = 91; release.direction = {1, 0, 0};
+    const auto spit = project(100, std::span(&release, 1));
+    Check(spit.clip == hs::CharacterAnimationClip::Draw && spit.normalized_time == 1.0f,
+          "ranged release preserves fully inflated draw endpoint");
+    Check(project(101).clip == hs::CharacterAnimationClip::Recoil,
+          "ranged release proceeds into spit recovery");
+    Check(std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "stationary ranged spit retains release facing on the next tick");
+    Check(project(118).clip == hs::CharacterAnimationClip::Recoil &&
+              std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "ranged spit retains release facing through its final recovery tick");
+    Check(project(119).clip == hs::CharacterAnimationClip::Idle &&
+              !state.IsAttackRecoil(91) && std::abs(projected_yaw) < 0.0001f,
+          "ranged facing lock expires with attack recovery");
+    enemy.kind = hs::EnemyKind::Melee; enemy.attacking = true; enemy.velocity = {-1, 0};
+    enemy.attack_started = 120; enemy.attack_resolve = 130;
+    (void)project(129); enemy.attacking = false;
+    Check(project(130).normalized_time == 1.0f,
+          "melee resolve preserves headbutt endpoint");
+    Check(project(131).clip == hs::CharacterAnimationClip::Recoil,
+          "melee strike enters recovery after contact");
+    Check(std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "melee headbutt recovery retains attack facing against navigation velocity");
+    Check(project(148).clip == hs::CharacterAnimationClip::Recoil &&
+              std::abs(projected_yaw - std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "melee headbutt retains facing through its final recovery tick");
+    Check(project(149).clip == hs::CharacterAnimationClip::Run,
+          "melee recovery expires after 18 ticks");
+    Check(!state.IsAttackRecoil(91) && std::abs(projected_yaw + std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "melee resumes navigation facing after recovery");
+    enemy.attacking = true; enemy.attack_started = 150; enemy.attack_resolve = 153;
+    (void)project(152); enemy.attacking = false; (void)project(153); (void)project(154);
+    enemy.health = 90;
+    Check(project(155).clip == hs::CharacterAnimationClip::Recoil && !state.IsAttackRecoil(91) &&
+              std::abs(projected_yaw + std::numbers::pi_v<float> * 0.5f) < 0.0001f,
+          "damage recoil supersedes the attack facing lock");
+    enemy.attacking = true; enemy.attack_started = 160; enemy.attack_resolve = 190;
+    (void)project(170); enemy.attacking = false;
+    Check(project(171).clip == hs::CharacterAnimationClip::Run,
+          "interrupted melee windup does not invent a strike recovery");
+}
+
 void TestAuthoredEnvironmentProjection()
 {
     auto rules = QuietGameData();
@@ -588,8 +676,10 @@ void TestAuthoredEnvironmentProjection()
         if (item.mesh == hs::RenderMesh::Grass)
         {
             ++grass;
-            Check(item.environment_variant < 4 && item.scale.x == item.scale.y && item.scale.y == item.scale.z,
-                  "grass atlas aspect survives instance scaling");
+            Check(item.environment_variant < 4 && item.scale.x == item.scale.z &&
+                      item.scale.x >= 0.55f && item.scale.x <= 1.2f &&
+                      item.scale.y >= 0.18f && item.scale.y <= 0.4f,
+                  "grass retains dense horizontal coverage at the reduced meter-scale height");
         }
     }
     Check(trees > 0 && grass > 0 && ground > 0, "authored environment is present in normal gameplay");
@@ -670,6 +760,7 @@ void RunGameplayPresentationTests()
     TestMonsterVisualScalesAndAttackFacing();
     TestRelicTriggerProjection();
     TestEnemyAnimationStateSignals();
+    TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();
     TestDenseGrassProjection();
 }

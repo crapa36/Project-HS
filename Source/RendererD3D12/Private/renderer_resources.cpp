@@ -397,6 +397,17 @@ Result D3D12Renderer::Impl::CreateGpuData()
     {
         return loaded;
     }
+    archer_support_vertices.clear();
+    for (const auto &vertex : cooked_vertices)
+    {
+        if (vertex.position[1] > -archer_ground_offset + 0.12f) continue;
+        const auto duplicate = std::ranges::any_of(archer_support_vertices, [&](const auto &existing) {
+            return existing.position == vertex.position &&
+                   existing.bone_indices == vertex.bone_indices &&
+                   existing.bone_weights == vertex.bone_weights;
+        });
+        if (!duplicate) archer_support_vertices.push_back(vertex);
+    }
     archer_vertex_count = static_cast<std::uint32_t>(cooked_vertices.size());
     const auto archer_vertex_bytes = cooked_vertices.size() * sizeof(cooked_vertices.front());
     const auto archer_description = BufferDescription(archer_vertex_bytes);

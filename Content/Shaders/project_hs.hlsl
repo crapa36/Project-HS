@@ -118,6 +118,8 @@ struct SceneOutput
     nointerpolation float EnvironmentFade : TEXCOORD7;
     nointerpolation uint EnvironmentFlags : TEXCOORD8;
     float3 EnvironmentStableWorld : TEXCOORD9;
+    nointerpolation uint AnimationClip : TEXCOORD10;
+    nointerpolation float AnimationProgress : TEXCOORD11;
 };
 
 #include "environment.hlsli"
@@ -279,6 +281,16 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
     float3 local_tangent = input.Tangent.xyz;
     SkinArcher(local_position, local_normal, local_tangent, input, mesh);
     SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
+    // Sampling the charge timeline makes the bubbling reverse with a cancelled draw.
+    if (mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2)
+    {
+        const float progress = saturate(instance.Padding);
+        const float phase = progress * 48.0;
+        const float bubble = sin(input.Position.x * 43.0 + phase) *
+            sin(input.Position.y * 37.0 - phase * 0.73) *
+            sin(input.Position.z * 41.0 + phase * 0.61);
+        local_position += local_normal * (0.006 * progress * bubble);
+    }
     float sine_yaw;
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
@@ -309,6 +321,8 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
     output.EnvironmentFade = instance.Scale.w;
     output.EnvironmentFlags = instance.Mesh & 0x30000;
     output.EnvironmentStableWorld = stable_world;
+    output.AnimationClip = (instance.Mesh >> 8) & 0xff;
+    output.AnimationProgress = saturate(instance.Padding);
     output.Charge = mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2
         ? saturate(instance.Padding) : 0.0;
     return output;
@@ -359,6 +373,38 @@ float3 SampleMonsterPbr(float2 uv)
     return lit_base * metal_tint + emissive * 80.0;
 }
 
+// Both passes share the facial alpha mask: replaced eyes must not leave opaque
+// depth behind the jelly, and the new marks must stay solid in the depth pass.
+float4 SampleFamilyColor(SceneOutput input)
+{
+    float4 color = FamilyDiffuse.Sample(MaterialSampler, float3(input.Uv, input.Mesh - 10));
+    const bool dead = input.AnimationClip == 4;
+    const float strain = input.AnimationClip == 2
+        ? smoothstep(0.0, 0.35, input.AnimationProgress) : 0.0;
+    if (!dead && strain <= 0.0) return color;
+    const float2 authored_uv = float2((input.Uv.x - 0.015) / 0.72, 1.0 - input.Uv.y);
+    const bool left_eye = authored_uv.x < 0.5;
+    const float2 eye_center = float2(left_eye ? 0.434 : 0.566, 0.573);
+    const float2 eye = authored_uv - eye_center;
+    const float ellipse = length(eye / float2(0.0365, 0.081));
+    const float region_aa = max(fwidth(ellipse), 0.001);
+    const float region = 1.0 - smoothstep(1.0 - region_aa, 1.0 + region_aa, ellipse);
+    if (region <= 0.0) return color;
+    const float2 body_uv = float2((eye_center.x + (left_eye ? -0.09 : 0.09)) * 0.72 + 0.015,
+                                1.0 - eye_center.y);
+    float4 body = FamilyDiffuse.Sample(MaterialSampler, float3(body_uv, input.Mesh - 10));
+    body.a = 0.68;
+    const float2 q = eye / float2(0.032, 0.073);
+    // Normalized diagonal strokes stay within the original eye's UV island.
+    const float stroke_distance = dead ? min(abs(q.y - q.x), abs(q.y + q.x))
+        : abs(q.y - (left_eye ? -0.48 : 0.48) * q.x);
+    const float stroke_aa = max(fwidth(stroke_distance), 0.01);
+    const float stroke = (1.0 - smoothstep(0.15 - stroke_aa, 0.15 + stroke_aa, stroke_distance)) *
+        (1.0 - smoothstep(0.70, 0.90, max(abs(q.x), abs(q.y))));
+    const float4 expression = lerp(body, float4(0.009, 0.006, 0.012, 1.0), stroke);
+    return lerp(color, expression, region * (dead ? 1.0 : strain));
+}
+
 GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     EnvironmentLodClip(input);
@@ -373,7 +419,7 @@ GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
     {
         const bool family = input.Mesh >= 10;
         const float3 uv = float3(input.Uv, input.Mesh - 10);
-        const float4 base_color = family ? FamilyDiffuse.Sample(MaterialSampler, uv)
+        const float4 base_color = family ? SampleFamilyColor(input)
             : SampleArcherDiffuse(input.Material, input.Uv);
         clip(base_color.a - (family ? 0.98 : 0.2));
         output.BaseColor = float4(base_color.rgb, 1.0);
@@ -922,7 +968,7 @@ OitOutput SlimePS(SceneOutput input)
     if (input.Mesh != 6)
     {
         const float3 uv = float3(input.Uv, input.Mesh - 10);
-        base = FamilyDiffuse.Sample(MaterialSampler, uv);
+        base = SampleFamilyColor(input);
         if (base.a >= 0.98) discard; // opaque eyes and ornaments wrote depth already
         const float4 normal_map = FamilyNormal.Sample(MaterialSampler, uv);
         roughness = normal_map.a;
@@ -942,7 +988,7 @@ OitOutput SlimePS(SceneOutput input)
     clip(base.a - 0.001);
     const float3 color = JellyLighting(base.rgb, normal, input.WorldPosition, roughness, input.Charge);
     // Keep authored opaque features in the depth pass; the jelly body transmits the floor.
-    const float alpha = base.a * 0.45;
+    const float alpha = base.a * 0.52;
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
         1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);

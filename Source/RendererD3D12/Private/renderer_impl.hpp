@@ -690,6 +690,7 @@ struct D3D12Renderer::Impl
     std::vector<std::array<float, 16>> archer_inverse_bind_matrices;
     std::vector<CharacterLocalTransform> archer_transforms;
     std::vector<float> archer_upper_body_weights;
+    std::vector<SkinnedVertex> archer_support_vertices;
     std::uint32_t archer_vertex_count{};
     std::uint32_t archer_bone_count{};
     std::uint32_t archer_material_count{};

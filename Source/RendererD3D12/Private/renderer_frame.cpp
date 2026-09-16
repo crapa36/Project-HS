@@ -88,7 +88,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const auto rows = (count * 3 + columns - 1) / columns;
             const auto z = count == 1 ? 0.0f : (static_cast<float>(row) - (rows - 1) * 0.5f) * 1.1f;
             const auto kind = i % 3;
-            const auto scale = kind == 0 ? 1.5f : kind == 1 ? 2.0f : 2.4f;
+            const auto scale = kind == 0 ? 1.25f : kind == 1 ? 1.40625f : 1.5625f;
             render_instances.push_back({{x, 0.0f, z}, 0.0f, {scale, scale, scale},
                                          0xffffffffu, static_cast<RenderMesh>(10 + kind), 0, 0});
             if (kind == 2)
@@ -1095,6 +1095,28 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         DirectX::XMStoreFloat4x4(&constants->archer_bones[bone_index],
                                  DirectX::XMMatrixTranspose(skin));
     }
+    // Local-TRS blending changes foot height even when both clips are grounded.
+    // Correct the final skin pose before the instance ground offset. Death uses
+    // the cooker's whole-body grounding instead of the standing support surface.
+    if (pose.clip != CharacterAnimationClip::Death && !impl_->archer_support_vertices.empty())
+    {
+        float support_y = std::numeric_limits<float>::max();
+        for (const auto &vertex : impl_->archer_support_vertices)
+        {
+            float y = 0.0f;
+            for (std::size_t influence = 0; influence < vertex.bone_weights.size(); ++influence)
+            {
+                const auto &skin = constants->archer_bones[vertex.bone_indices[influence]];
+                y += vertex.bone_weights[influence] *
+                     (skin._21 * vertex.position[0] + skin._22 * vertex.position[1] +
+                      skin._23 * vertex.position[2] + skin._24);
+            }
+            support_y = std::min(support_y, y);
+        }
+        const float correction = -impl_->archer_ground_offset - support_y;
+        for (std::uint32_t bone = 0; bone < impl_->archer_bone_count; ++bone)
+            constants->archer_bones[bone]._24 += correction;
+    }
     constants->render_options = {
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
         impl_->config.outline ? 1.0f : 0.0f,
@@ -1165,7 +1187,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
         const auto vertical_offset = is_environment_mesh(source.mesh) ? 0.0f : source.mesh == RenderMesh::Archer
-                                         ? impl_->archer_ground_offset
+                                         ? impl_->archer_ground_offset * source.scale.y
                                          : is_monster(source.mesh)
                                              ? impl_->monster_assets[static_cast<std::size_t>(
                                                    static_cast<std::uint32_t>(source.mesh) -

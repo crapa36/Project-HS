@@ -56,10 +56,44 @@ void EnemyAnimationState::Update(const GameReadModel &model,
             enemy.id.value, LivingPose{enemy.max_health, {}, {}, {}, false});
         auto &pose = it->second;
         pose.seen = true;
-        if (enemy.health < pose.health && !enemy.attacking) pose.recoil = model.tick;
+        if (pose.attacking && !enemy.attacking)
+        {
+            if (enemy.kind == EnemyKind::Suicide)
+            {
+                pose.cancel_started = model.tick;
+                pose.cancel_progress = pose.attack_resolve > pose.attack_started
+                    ? std::clamp(static_cast<float>(model.tick - pose.attack_started) /
+                                 static_cast<float>(pose.attack_resolve - pose.attack_started), 0.0f, 1.0f)
+                    : 0.0f;
+            }
+            else if (enemy.kind == EnemyKind::Melee && model.tick >= pose.attack_resolve)
+            {
+                pose.release = model.tick;
+                pose.recoil = model.tick + 1;
+                pose.attack_recoil = true;
+            }
+        }
+        if (enemy.attacking)
+        {
+            pose.cancel_started.reset();
+            pose.attack_started = enemy.attack_started;
+            pose.attack_resolve = enemy.attack_resolve;
+            pose.release_direction = {enemy.locked_aim.x, 0.0f, enemy.locked_aim.y};
+        }
+        if (pose.cancel_started && model.tick - *pose.cancel_started >= 36)
+            pose.cancel_started.reset();
+        pose.attacking = enemy.attacking;
+        if (enemy.health < pose.health && !enemy.attacking)
+        {
+            pose.recoil = model.tick;
+            pose.attack_recoil = false;
+        }
         // An attack supersedes a hit reaction; it must not resume afterwards.
-        if (enemy.attacking || (pose.recoil && model.tick - *pose.recoil >= 18))
+        if (enemy.attacking || (pose.recoil && model.tick >= *pose.recoil && model.tick - *pose.recoil >= 18))
+        {
             pose.recoil.reset();
+            pose.attack_recoil = false;
+        }
         pose.health = enemy.health;
     }
     std::erase_if(living_, [&](const auto &entry) {
@@ -74,6 +108,7 @@ void EnemyAnimationState::Update(const GameReadModel &model,
                 it->second.release = signal.tick;
                 it->second.release_direction = signal.direction;
                 it->second.recoil = signal.tick + 1;
+                it->second.attack_recoil = true;
             }
             continue;
         }
@@ -95,6 +130,11 @@ std::optional<Tick> EnemyAnimationState::RecoilStart(std::uint64_t id) const
     const auto it = living_.find(id);
     return it == living_.end() ? std::nullopt : it->second.recoil;
 }
+bool EnemyAnimationState::IsAttackRecoil(std::uint64_t id) const
+{
+    const auto it = living_.find(id);
+    return it != living_.end() && it->second.attack_recoil;
+}
 std::optional<Tick> EnemyAnimationState::ReleaseTick(std::uint64_t id) const
 {
     const auto it = living_.find(id);
@@ -104,6 +144,14 @@ std::optional<Float3> EnemyAnimationState::ReleaseDirection(std::uint64_t id) co
 {
     const auto it = living_.find(id);
     return it == living_.end() ? std::nullopt : std::optional<Float3>{it->second.release_direction};
+}
+
+std::optional<float> EnemyAnimationState::CancelProgress(std::uint64_t id) const
+{
+    const auto it = living_.find(id);
+    if (it == living_.end() || !it->second.cancel_started) return std::nullopt;
+    return it->second.cancel_progress * std::clamp(
+        1.0f - static_cast<float>(tick_ - *it->second.cancel_started) / 36.0f, 0.0f, 1.0f);
 }
 
 bool ProjectRenderSnapshot(const GameReadModel &model,
@@ -123,7 +171,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     complete &= snapshot.AddInstance(
         {{model.player.position.x, 0.0f, model.player.position.y},
          std::atan2(model.player.facing.x, model.player.facing.y),
-         {1.0f, 1.0f, 1.0f}, 0xFFFFFFFFu, RenderMesh::Archer,
+         {0.97174913f, 0.97174913f, 0.97174913f}, 0xFFFFFFFFu, RenderMesh::Archer,
          kPlayerRenderId});
     AnimationPoseRef pose;
     pose.instance_index = 0;
@@ -225,8 +273,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              static_cast<std::uint32_t>(model.seed ^ (model.seed >> 32)), variant});
     };
     const auto add_tree = [&](Float2 position, std::uint32_t variation,
-                              float size_multiplier) {
-        const auto size = size_multiplier * (0.85f + EnvironmentUnit(variation) * 0.3f);
+                              float size_multiplier, bool fixed_scale = false) {
+        const auto size = size_multiplier * (fixed_scale ? 1.0f : 0.85f + EnvironmentUnit(variation) * 0.3f);
         const auto yaw = EnvironmentUnit(variation + 2) * 2.0f * kPi;
         const auto variant = variation % 3;
         add_environment({position.x, 0.0f, position.y}, yaw, {size, size, size},
@@ -276,10 +324,11 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 if (!ContainsArenaPoint(model.arena_boundary, position, 2.0f) ||
                     std::abs(position.x - path_center) < 4.8f || blocked)
                     continue;
-                const auto height = 0.55f + EnvironmentUnit(variation + 3) * 0.65f;
+                const auto height = 0.18f + EnvironmentUnit(variation + 3) * 0.22f;
+                const auto width = 0.55f + EnvironmentUnit(variation + 3) * 0.65f;
                 add_environment({position.x, 0.0f, position.y},
                                 EnvironmentUnit(variation + 4) * 2.0f * kPi,
-                                {height, height, height},
+                                {width, height, width},
                                 (variation & 1u) ? 0xFF4F873Du : 0xFF68A34Au,
                                 RenderMesh::Grass, variation % 4);
             }
@@ -293,10 +342,11 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                                0x524F434Bu);
         if (obstacle.kind == ArenaObstacleKind::Tree)
             add_tree(obstacle.center, variation,
-                     std::clamp(obstacle.radius * 0.62f, 0.65f, 1.45f));
+                     obstacle.radius / 1.0409733f, true);
         else
         {
-            const auto scale = obstacle.radius;
+            constexpr std::array rock_radius{1.202624f, 1.155475f, 1.373369f, 1.245674f};
+            const auto scale = obstacle.radius / rock_radius[variation % 4];
             add_environment({obstacle.center.x, 0.0f, obstacle.center.y},
                             EnvironmentUnit(variation + 3) * 2.0f * kPi,
                             {scale, scale, scale},
@@ -354,8 +404,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         const auto uniform_scale = enemy.boss == BossKind::Final ? 3.51f :
                                    enemy.boss == BossKind::TenMinute ? 4.71f :
                                    enemy.boss == BossKind::FiveMinute ? 4.23f :
-                                    enemy.kind == EnemyKind::Ranged ? 2.00f :
-                                    enemy.kind == EnemyKind::Suicide ? 2.40f : 1.50f;
+                                    enemy.kind == EnemyKind::Ranged ? 1.40625f :
+                                    enemy.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
         const Float3 scale{uniform_scale, uniform_scale, uniform_scale};
         std::uint32_t status_visual_mask{};
         if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Bleed))
@@ -369,9 +419,11 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         const auto instance_index = snapshot.InstanceCount();
         const auto release_tick = enemy_animations ? enemy_animations->ReleaseTick(enemy.id.value) : std::nullopt;
         const auto release_direction = enemy_animations ? enemy_animations->ReleaseDirection(enemy.id.value) : std::nullopt;
+        const auto cancel_progress = enemy_animations ? enemy_animations->CancelProgress(enemy.id.value) : std::nullopt;
         const auto facing = enemy.attacking && LengthSquared(enemy.locked_aim) > 0.0001f
                                 ? enemy.locked_aim
-                                : (release_tick && *release_tick == model.tick && release_direction
+                                : ((cancel_progress || (release_tick && *release_tick == model.tick) ||
+                                     (enemy_animations && enemy_animations->IsAttackRecoil(enemy.id.value))) && release_direction
                                        ? Float2{release_direction->x, release_direction->z} : enemy.velocity);
         complete &= snapshot.AddInstance(
             {{enemy.position.x, 0.0f, enemy.position.y},
@@ -403,12 +455,17 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             const auto until = boss_release_frame ? enemy.boss_action_until
                                : active_boss_action ? boss_action->execute_tick
                                                     : enemy.attack_resolve;
-            enemy_pose.normalized_time = until > start
+            enemy_pose.normalized_time = (release_tick && *release_tick == model.tick) ? 1.0f : until > start
                                              ? std::clamp(
                                                    static_cast<float>(model.tick - start) /
                                                        static_cast<float>(until - start),
                                                    0.0f, 1.0f)
                                              : 0.0f;
+        }
+        else if (cancel_progress)
+        {
+            enemy_pose.clip = CharacterAnimationClip::Draw;
+            enemy_pose.normalized_time = *cancel_progress;
         }
         else if (!enemy.boss && enemy_animations &&
                  enemy_animations->RecoilStart(enemy.id.value))
@@ -458,8 +515,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             const auto mesh = death.kind == EnemyKind::Ranged ? RenderMesh::MonsterRanged :
                               death.kind == EnemyKind::Suicide ? RenderMesh::MonsterSuicide :
                                                                  RenderMesh::MonsterMelee;
-            const auto scale_value = death.kind == EnemyKind::Ranged ? 2.00f :
-                                      death.kind == EnemyKind::Suicide ? 2.40f : 1.50f;
+            const auto scale_value = death.kind == EnemyKind::Ranged ? 1.40625f :
+                                      death.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
             const auto index = snapshot.InstanceCount();
             complete &= snapshot.AddInstance(
                 {death.position, std::atan2(death.direction.x, death.direction.z),
@@ -498,9 +555,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         const auto render_position = projectile.position;
         complete &= snapshot.AddInstance(
             {{render_position.x,
-              projectile.player_owned && projectile.skill == SkillKind::BasicAttack
-                  ? 1.05f
-                  : 0.25f,
+              projectile.player_owned ? 1.05f : 0.45f,
               render_position.y},
              std::atan2(projectile.velocity.x, projectile.velocity.y),
              scale, color,
@@ -520,7 +575,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 projectile.position,
                 Multiply(trail_direction, body_half_length + trail_length * 0.5f));
             const auto body_center_height =
-                (projectile.skill == SkillKind::BasicAttack ? 1.05f : 0.25f) +
+                1.05f +
                 scale.y * 0.5f;
             const auto trail_radius = projectile.skill == SkillKind::ChargedShot
                                           ? 0.035f

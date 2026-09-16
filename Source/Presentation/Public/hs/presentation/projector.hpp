@@ -57,12 +57,14 @@ class EnemyAnimationState
     };
     void Update(const GameReadModel &model, std::span<const DomainSignal> signals);
     [[nodiscard]] std::optional<Tick> RecoilStart(std::uint64_t id) const;
+    [[nodiscard]] bool IsAttackRecoil(std::uint64_t id) const;
     [[nodiscard]] std::optional<Tick> ReleaseTick(std::uint64_t id) const;
     [[nodiscard]] std::optional<Float3> ReleaseDirection(std::uint64_t id) const;
+    [[nodiscard]] std::optional<float> CancelProgress(std::uint64_t id) const;
     [[nodiscard]] std::span<const DeathPose> DeathPoses() const { return deaths_; }
 
   private:
-    struct LivingPose { std::int32_t health{}; std::optional<Tick> recoil; std::optional<Tick> release; Float3 release_direction{}; bool seen{}; };
+    struct LivingPose { std::int32_t health{}; std::optional<Tick> recoil; std::optional<Tick> release; Float3 release_direction{}; bool seen{}; bool attacking{}; Tick attack_started{}, attack_resolve{}; std::optional<Tick> cancel_started; float cancel_progress{}; bool attack_recoil{}; };
     std::unordered_map<std::uint64_t, LivingPose> living_;
     std::vector<DeathPose> deaths_;
     Tick tick_{};

@@ -261,11 +261,12 @@ def build():
     print(json.dumps({'scenes':scenes,'controls':list(CONTROLS)}))
 
 
-def pose(rig,frame,width=1,depth=1,height=1,hop=0,front=0,cheeks=0,mouth=1,strain=0,flower=0):
+def pose(rig,frame,width=1,depth=1,height=1,hop=0,front=0,cheeks=0,mouth=1,strain=0,flower=0,travel=0):
     for bone in rig.pose.bones:
         bone.location=(0,0,0); bone.rotation_mode='XYZ'; bone.rotation_euler=(0,0,0); bone.scale=(1,1,1)
     center=rig.pose.bones['body_center']; center.scale=(width,height,depth)
-    center.location=(0,.24*(height-1)+hop,0)
+    center.location=(0,.24*(height-1),travel)
+    rig.pose.bones['root'].location=(0,hop,0)
     rig.pose.bones['body_front'].location=(0,0,front)
     rig.pose.bones['body_top'].location=(0,0,front*.25)
     for name,sign in [('face_left',-1),('face_right',1)]:
@@ -285,18 +286,36 @@ def author_actions(scene,rig,variant):
     def action(name,keys):
         a=bpy.data.actions.new('Slime'+variant+'_'+name); a.use_fake_user=True
         rig.animation_data_create(); rig.animation_data.action=a
+        pose(rig,0) # Neutral FBX default transform, outside the exported frame range.
         for frame,kwargs in keys:pose(rig,frame,**kwargs)
         actions[name]=(a,keys[-1][0])
     action('Idle',[(1,{}),(31,dict(width=1.018,depth=1.018,height=.965,flower=.08)),(61,{}),(91,dict(width=.985,depth=.985,height=1.03,flower=-.05)),(121,{})])
     action('Run',[(1,dict(width=1.13,depth=1.1,height=.79)),(10,dict(width=.92,depth=.94,height=1.16,hop=.025,flower=-.4)),(23,dict(width=.965,depth=.98,height=1.06,hop=.085,flower=.25)),(37,dict(hop=.02,flower=.12)),(46,dict(width=1.13,depth=1.1,height=.79))])
     if variant=='Melee':
-        draw=[(1,{}),(8,dict(width=1.13,depth=1.06,height=.73,front=-.025)),(14,dict(width=1.16,depth=1.08,height=.68,front=-.035)),(18,dict(width=.97,depth=1.03,height=1.02,front=.15)),(20,dict(front=.07)),(22,{})]
+        draw=[(1,{}),
+              (8,dict(width=1.12,depth=1.16,height=.73,travel=-.07,strain=.65)),
+              (14,dict(width=1.17,depth=1.23,height=.62,travel=-.12,front=-.035,strain=1)),
+              (18,dict(width=.96,depth=1.10,height=1.05,hop=.13,travel=.08,front=.08,strain=.8)),
+              (22,dict(width=1.04,depth=1.12,height=.91,hop=.10,travel=.22,front=.12,strain=.7))]
+        recoil=[(1,dict(width=1.04,depth=1.12,height=.91,hop=.10,travel=.22,front=.12,strain=.7)),
+                (6,dict(width=1.14,depth=1.1,height=.76,travel=.15,strain=.3)),
+                (12,dict(width=.98,height=1.04,travel=.06)),(19,{})]
     elif variant=='Ranged':
-        draw=[(1,{}),(10,dict(width=1.035,height=.92,cheeks=.025,mouth=.85)),(23,dict(width=1.07,height=.88,cheeks=.075,mouth=.55,strain=.3)),(28,dict(width=1.05,height=.92,cheeks=.085,mouth=.46,strain=.35)),(31,dict(width=.98,height=1.02,front=.035,cheeks=.035,mouth=.62))]
+        draw=[(1,{}),(10,dict(width=1.035,height=.94,cheeks=.04,mouth=.85)),
+              (23,dict(width=1.07,height=.90,cheeks=.10,mouth=.50,strain=.3)),
+              (31,dict(width=1.08,height=.90,cheeks=.12,mouth=.38,strain=.4))]
+        recoil=[(1,dict(width=.97,height=1.06,front=.10,cheeks=.005,mouth=1.8,strain=.15)),
+                (5,dict(width=.96,depth=.94,height=1.04,front=.07,mouth=1.45)),
+                (12,dict(width=1.015,height=.97,mouth=.85)),(19,{})]
     else:
-        draw=[(1,{}),(10,dict(width=1.035,depth=1.03,height=.96,flower=.1)),(25,dict(width=1.12,depth=1.10,height=1.05,cheeks=.045,strain=.45,flower=-.16)),(40,dict(width=1.22,depth=1.20,height=1.16,cheeks=.07,strain=.8,flower=.2)),(49,dict(width=1.29,depth=1.27,height=1.22,cheeks=.09,strain=1,flower=-.2))]
+        draw=[(1,{}),(10,dict(width=1.015,depth=1.01,height=.98,cheeks=.025,strain=.3)),
+              (25,dict(width=1.045,depth=1.04,height=1.015,cheeks=.06,strain=.65,flower=-.12)),
+              (35,dict(width=1.07,depth=1.055,height=1.035,cheeks=.075,strain=.85,flower=.12)),
+              (42,dict(width=1.085,depth=1.07,height=1.045,cheeks=.09,strain=.95,flower=-.15)),
+              (49,dict(width=1.10,depth=1.08,height=1.055,cheeks=.10,strain=1,flower=.16))]
+        recoil=[(1,dict(width=1.07,height=.90)),(7,dict(width=.97,height=1.025)),(19,{})]
     action('Draw',draw)
-    action('Recoil',[(1,dict(height=.98,cheeks=.03 if variant=='Ranged' else 0)),(5,dict(width=1.09,depth=.92,height=.83,front=-.065,flower=-.3)),(12,dict(width=.98,depth=1.01,height=1.04,flower=.12)),(19,{})])
+    action('Recoil',recoil)
     action('Death',[(1,{}),(9,dict(width=1.10,depth=1.08,height=.70,flower=-.3)),(22,dict(width=1.31,depth=1.27,height=.27,flower=-1)),(39,dict(width=1.43,depth=1.40,height=.07,flower=-1.5)),(49,dict(width=1.43,depth=1.40,height=.07,flower=-1.5))])
     return actions
 
@@ -322,7 +341,7 @@ def export():
         if variant!='Projectile':
             actions=author_actions(scene,rig,variant); (ANIMS/variant).mkdir(parents=True,exist_ok=True)
             for name,(action,end) in actions.items():
-                rig.animation_data.action=action;scene.frame_start=1;scene.frame_end=end;scene.frame_set(1)
+                rig.animation_data.action=action;scene.frame_start=1;scene.frame_end=end;scene.frame_set(0)
                 fbx(ANIMS/variant/(name+'.fbx'),True)
             scene['actions']={name:action.name for name,(action,_) in actions.items()}
             rig.animation_data.action=actions['Idle'][0];scene.frame_start=1;scene.frame_end=121;scene.frame_set(1)

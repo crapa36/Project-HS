@@ -182,7 +182,7 @@ std::uint16_t PolygonMaterial(FbxMesh &mesh, int polygon,
 void GatherModel(FbxScene &scene, CharacterCookResult &output,
                  std::vector<BoneSource> &bones,
                  const std::filesystem::path &model_path,
-                 bool allow_missing_material_textures)
+                 bool allow_missing_material_textures, bool ground_archer)
 {
     FbxGeometryConverter converter(scene.GetFbxManager());
     if (!converter.Triangulate(&scene, true, false))
@@ -197,6 +197,23 @@ void GatherModel(FbxScene &scene, CharacterCookResult &output,
         auto *mesh = node->GetMesh();
         if (!mesh)
         {
+            return;
+        }
+        // This FBX has permuted node names: Arrow_Mesh is the clothed body,
+        // while Eyes_Mesh carries the independent arrow. Identify the arrow
+        // by its authored material, before collecting its skin-only bones.
+        bool arrow_only = ground_archer && node->GetMaterialCount() > 0;
+        for (int index = 0; index < node->GetMaterialCount(); ++index)
+        {
+            const auto *material = node->GetMaterial(index);
+            arrow_only = arrow_only && material &&
+                         std::string_view(material->GetName()) == "Arrow_MAT";
+        }
+        if (arrow_only)
+        {
+            std::cout << "content.archer_excluded_mesh node=" << node->GetName()
+                      << " material=Arrow_MAT control_points="
+                      << mesh->GetControlPointsCount() << '\n';
             return;
         }
         mesh_nodes.push_back(node);
@@ -665,7 +682,7 @@ FbxNode *FindBone(FbxScene &scene, std::string_view name)
 void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones,
                      hs::CharacterAnimationClip clip, bool looping,
                      CharacterCookResult &output,
-                     const std::filesystem::path &animation_path)
+                     const std::filesystem::path &animation_path, bool ground_archer)
 {
     auto *stack = scene.GetSrcObjectCount<FbxAnimStack>() > 0
                       ? scene.GetSrcObject<FbxAnimStack>(0)
@@ -772,6 +789,37 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
         }
     }
 
+    // Ground the retargeted archer using its skinned support surface, rather
+    // than the pelvis height. Do not apply this to authored slime hops.
+    std::vector<const hs::SkinnedVertex *> support_vertices;
+    double bind_floor = std::numeric_limits<double>::max();
+    if (ground_archer)
+    {
+        for (const auto &vertex : output.vertices)
+        {
+            const auto &material = output.materials[vertex.material_index].name;
+            if (material != "Bow_MAT" && material != "Arrow_MAT")
+                bind_floor = std::min(bind_floor, static_cast<double>(vertex.position[1]));
+        }
+        for (const auto &vertex : output.vertices)
+        {
+            const auto &material = output.materials[vertex.material_index].name;
+            if (material != "Bow_MAT" && material != "Arrow_MAT" &&
+                (clip == hs::CharacterAnimationClip::Death ||
+                 vertex.position[1] <= bind_floor + 0.12))
+                support_vertices.push_back(&vertex);
+        }
+        if (support_vertices.empty() || !std::isfinite(bind_floor))
+            throw std::runtime_error("Archer animation has no body support vertices");
+    }
+    std::vector<FbxAMatrix> inverse_bind;
+    for (const auto &bone : model_bones)
+        inverse_bind.push_back(bone.global_bind.Inverse());
+    std::vector<FbxAMatrix> skin_matrices(model_bones.size());
+    double minimum_support = std::numeric_limits<double>::max();
+    double maximum_support = std::numeric_limits<double>::lowest();
+    double minimum_correction = std::numeric_limits<double>::max();
+    double maximum_correction = std::numeric_limits<double>::lowest();
     std::vector<FbxAMatrix> current_globals(model_bones.size());
     std::vector<FbxAMatrix> target_globals(model_bones.size());
     std::vector<FbxAMatrix> corrected_globals(model_bones.size());
@@ -808,6 +856,34 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
         root_correction.SetT(FbxVector4(-root_delta[0], 0.0, -root_delta[2]));
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
             corrected_globals[bone_index] = root_correction * target_globals[bone_index];
+        if (ground_archer)
+        {
+            for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
+                skin_matrices[bone_index] = corrected_globals[bone_index] * inverse_bind[bone_index];
+            double support_y = std::numeric_limits<double>::max();
+            for (const auto *vertex : support_vertices)
+            {
+                const FbxVector4 rest(vertex->position[0], vertex->position[1],
+                                      vertex->position[2]);
+                double skinned_y = 0.0;
+                for (std::size_t influence = 0; influence < vertex->bone_indices.size(); ++influence)
+                    skinned_y += skin_matrices[vertex->bone_indices[influence]].MultT(rest)[1] *
+                                 vertex->bone_weights[influence];
+                support_y = std::min(support_y, skinned_y);
+            }
+            if (!std::isfinite(support_y))
+                throw std::runtime_error("Archer skinned support is non-finite");
+            const auto correction = bind_floor - support_y;
+            minimum_support = std::min(minimum_support, support_y);
+            maximum_support = std::max(maximum_support, support_y);
+            minimum_correction = std::min(minimum_correction, correction);
+            maximum_correction = std::max(maximum_correction, correction);
+            FbxAMatrix ground_correction;
+            ground_correction.SetIdentity();
+            ground_correction.SetT(FbxVector4(0.0, correction, 0.0));
+            for (auto &global : corrected_globals)
+                global = ground_correction * global;
+        }
         for (std::size_t bone_index = 0; bone_index < model_bones.size(); ++bone_index)
         {
             const auto parent = model_bones[bone_index].parent;
@@ -871,6 +947,14 @@ throw std::runtime_error(std::format(
             output.transforms.push_back(transform);
         }
     }
+    if (ground_archer)
+        std::cout << "content.archer_grounding clip=" << static_cast<int>(clip)
+                  << " support_vertices=" << support_vertices.size()
+                  << " bind_floor_m=" << bind_floor
+                  << " source_support_min_m=" << minimum_support
+                  << " source_support_max_m=" << maximum_support
+                  << " correction_min_m=" << minimum_correction
+                  << " correction_max_m=" << maximum_correction << '\n';
 }
 
 bool WriteCharacterAsset(const std::filesystem::path &path,
@@ -1045,8 +1129,9 @@ bool CookCharacterAsset(const std::filesystem::path &output,
     {
         auto *model = LoadFbx(*manager, source.model, source.diagnostic_name);
         std::vector<BoneSource> bones;
+        const bool ground_archer = source.model == std::filesystem::path(HS_CHARACTER_MODEL);
         GatherModel(*model, character, bones, source.model,
-                    source.allow_missing_material_textures);
+                    source.allow_missing_material_textures, ground_archer);
         if (source.seal_eye_socket)
             SealSlimeEyeSocket(character);
         character.upper_body_weights.resize(bones.size());
@@ -1082,7 +1167,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
              })
         {
             auto *animation = LoadFbx(*manager, animation_path, source.diagnostic_name);
-            GatherAnimation(*animation, bones, clip, looping, character, animation_path);
+            GatherAnimation(*animation, bones, clip, looping, character, animation_path, ground_archer);
             animation->Destroy();
         }
         if (!WriteCharacterAsset(output / (source.output_name + ".meshbin"), character,

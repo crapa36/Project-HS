@@ -21,6 +21,7 @@
   "entries": [
     {
       "id": "enemy.melee",
+      "collision_radius": 0.63,
       "display_name": "근접",
       "base_hp": 10,
       "movement_speed_mps": 1.5,
@@ -41,6 +42,7 @@
     },
     {
       "id": "enemy.ranged",
+      "collision_radius": 0.71,
       "display_name": "원거리",
       "base_hp": 5,
       "movement_speed_mps": 1.2,
@@ -64,6 +66,7 @@
     },
     {
       "id": "enemy.suicide",
+      "collision_radius": 0.79,
       "display_name": "자폭",
       "base_hp": 10,
       "movement_speed_mps": 3.8,

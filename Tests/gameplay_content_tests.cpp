@@ -152,16 +152,29 @@ void TestRelicDataIsCookedFromJson()
         slime.seekg(slime_header.transforms_offset).read(
             reinterpret_cast<char *>(slime_transforms.data()),
             static_cast<std::streamsize>(slime_transforms.size() * sizeof(slime_transforms.front())));
-    bool root_stationary = layout_valid && slime.good();
+    bool root_motion_valid = layout_valid && slime.good();
+    float draw_hop_height = 0.0f;
     for (const auto &clip : slime_clips)
-        for (std::uint32_t frame = 0; frame < clip.frame_count && root_stationary; ++frame) {
+        for (std::uint32_t frame = 0; frame < clip.frame_count && root_motion_valid; ++frame) {
             const auto index = static_cast<std::size_t>(clip.first_transform) +
                                static_cast<std::size_t>(frame) * slime_header.bone_count;
-            root_stationary = index < slime_transforms.size() &&
-                              std::ranges::all_of(slime_transforms[index].translation,
-                                                  [](float value) { return std::abs(value) < 0.0001f; });
+            if (index >= slime_transforms.size()) {
+                root_motion_valid = false;
+                break;
+            }
+            const auto &translation = slime_transforms[index].translation;
+            root_motion_valid = std::ranges::all_of(translation,
+                                                    [](float value) { return std::isfinite(value); }) &&
+                                std::abs(translation[0]) < 0.0001f &&
+                                std::abs(translation[2]) < 0.0001f &&
+                                translation[1] >= -0.0001f && translation[1] <= 0.2f;
+            if (clip.clip == hs::CharacterAnimationClip::Draw)
+                draw_hop_height = std::max(draw_hop_height, translation[1]);
         }
-    Check(root_stationary, "Slime family animation clips keep root motion stationary");
+    Check(root_motion_valid,
+          "Slime family root motion stays horizontally stationary with finite bounded vertical hops");
+    if (std::string_view(asset) == "enemy_melee")
+        Check(draw_hop_height > 0.1f, "melee attack retains its authored jump above the ground");
     for (const auto suffix : {"_diffuse_0.dds", "_normal_0.dds"})
     {
         const auto path = std::filesystem::current_path() / "Cooked" / (std::string(asset) + suffix);
@@ -200,6 +213,10 @@ void TestTypedSimulationRulesAreCookedFromJson()
           "upgrade fixed array is cooked from JSON");
     Check(std::abs(data.enemies[1].ranged_projectile_radius - 0.25f) < 0.0001f,
           "enemy parameter is cooked from JSON");
+    Check(std::abs(data.enemies[0].collision_radius - 0.63f) < 0.0001f &&
+              std::abs(data.enemies[1].collision_radius - 0.71f) < 0.0001f &&
+              std::abs(data.enemies[2].collision_radius - 0.79f) < 0.0001f,
+          "role-specific enemy collision radii use the authored meter scale");
     Check(std::abs(data.stats.allocations[1].amount_per_point - 0.1f) < 0.0001f &&
               data.progression.required_xp_base == 12.0f &&
               data.progression.boss_spawn_ticks[2] == 54'000,
