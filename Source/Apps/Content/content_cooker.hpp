@@ -77,13 +77,6 @@ struct CharacterCookResult
         std::numeric_limits<float>::lowest()};
 };
 
-struct AdditionalCharacterAnimationSource
-{
-    std::filesystem::path path;
-    hs::CharacterAnimationClip clip{};
-    bool looping{};
-};
-
 struct CharacterAssetSource
 {
     std::filesystem::path model;
@@ -93,7 +86,6 @@ struct CharacterAssetSource
     bool allow_missing_material_textures{};
     bool seal_eye_socket{};
     bool generate_material_mips{};
-    std::vector<AdditionalCharacterAnimationSource> additional_animations;
 };
 
 struct ParticleSpriteSource
