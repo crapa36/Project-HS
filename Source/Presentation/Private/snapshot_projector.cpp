@@ -17,6 +17,8 @@ constexpr Tick kRecoilClipTicks=41, kAnimationBlendOutTicks=6;
 constexpr float kPi=std::numbers::pi_v<float>;
 constexpr std::uint64_t kPlayerRenderId=1ull<<60,kEnemyRenderId=2ull<<60,kProjectileRenderId=3ull<<60,kAreaRenderId=4ull<<60,kPickupRenderId=5ull<<60;
 constexpr std::uint64_t kEnvironmentRenderId=6ull<<60;
+constexpr std::uint8_t kBossTelemetryBase =
+    static_cast<std::uint8_t>(EnemyKind::Suicide) + 1u;
 bool HasUpgrade(std::uint8_t m,std::uint8_t o) noexcept{return o&&(m&(1u<<(o-1)));}
 bool HasRelic(RelicMask m,RelicKind r) noexcept{return m&(RelicMask{1}<<static_cast<unsigned>(r));}
 Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtract(Float2 a,Float2 b) noexcept{return {a.x-b.x,a.y-b.y};} Float2 Multiply(Float2 v,float s) noexcept{return {v.x*s,v.y*s};}
@@ -165,9 +167,122 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
     snapshot.header.checksum = model.checksum;
+    snapshot.header.session_id = model.session_id;
     snapshot.camera.target = {model.player.position.x, 0.0f, model.player.position.y};
 
     bool complete = true;
+    if (model.player.revive_invulnerable_until > model.tick)
+    {
+        PersistentVfxVisual invulnerable{};
+        invulnerable.kind = PersistentVfxKind::PlayerInvulnerableLoop;
+        invulnerable.stable_id = kPlayerRenderId;
+        invulnerable.position = {model.player.position.x, 0.0f, model.player.position.y};
+        invulnerable.active_tick = model.player.revive_invulnerable_started;
+        invulnerable.expires = model.player.revive_invulnerable_until;
+        invulnerable.radius = 1.0f;
+        invulnerable.entity_render_id = kPlayerRenderId;
+        invulnerable.effect_asset = MakeAssetId("particle.player.invulnerable_loop");
+        complete &= snapshot.AddPersistentVfx(invulnerable);
+    }
+    if (model.player.max_health > 0 &&
+        static_cast<float>(std::max(model.player.health, 0)) /
+            static_cast<float>(model.player.max_health) <= 0.35f)
+    {
+        PersistentVfxVisual vignette{};
+        vignette.kind = PersistentVfxKind::PlayerLowHealthVignette;
+        vignette.stable_id = kPlayerRenderId | 1ull;
+        vignette.position = {model.player.position.x, 0.0f, model.player.position.y};
+        vignette.active_tick = model.tick;
+        vignette.expires = model.tick + 1;
+        vignette.entity_health_fraction = std::clamp(
+            static_cast<float>(std::max(model.player.health, 0)) /
+                static_cast<float>(model.player.max_health), 0.0f, 1.0f);
+        vignette.entity_render_id = kPlayerRenderId;
+        complete &= snapshot.AddPersistentVfx(vignette);
+    }
+    const auto add_player_attachment = [&](PersistentVfxKind kind,
+                                           std::string_view asset,
+                                           std::uint64_t activation,
+                                           std::uint64_t kind_tag,
+                                           Tick started, Tick expires,
+                                           SkillKind skill,
+                                           Tick source_horizon_tick,
+                                           float attachment_radius = 1.0f,
+                                           float charge_ratio = 0.0f,
+                                           std::uint8_t source_upgrade = 0xFF) {
+        PersistentVfxVisual visual{};
+        visual.kind = kind;
+        std::uint64_t identity = 14695981039346656037ull;
+        for (const auto value : {model.session_id, kind_tag, activation})
+            for (unsigned byte = 0; byte < 8; ++byte)
+            {
+                identity ^= (value >> (byte * 8)) & 255u;
+                identity *= 1099511628211ull;
+            }
+        visual.stable_id = identity ? identity : 1;
+        visual.position = {model.player.position.x, 0.0f, model.player.position.y};
+        visual.yaw = std::atan2(model.player.facing.x, model.player.facing.y);
+        visual.radius = attachment_radius;
+        visual.active_tick = started;
+        visual.expires = expires;
+        visual.source_horizon_tick = source_horizon_tick;
+        visual.skill = static_cast<std::uint8_t>(skill);
+        visual.source_upgrade = source_upgrade;
+        visual.charge_ratio = charge_ratio;
+        visual.entity_render_id = kPlayerRenderId;
+        visual.effect_asset = MakeAssetId(asset);
+        complete &= snapshot.AddPersistentVfx(visual);
+    };
+    if (model.player.basic_attack_cast_id != 0 &&
+        model.player.basic_attack_animation_start <= model.tick &&
+        model.tick < model.player.basic_attack_release_tick)
+        add_player_attachment(PersistentVfxKind::PlayerBowDraw,
+            "particle.player.bow_draw", model.player.basic_attack_cast_id, 1,
+            model.player.basic_attack_animation_start,
+            model.player.basic_attack_release_tick, SkillKind::BasicAttack,
+            model.player.basic_attack_release_tick);
+    if (model.player.charging &&
+        model.player.charging_skill == SkillKind::ChargedShot &&
+        model.player.charge_start <= model.tick)
+    {
+        // Live charge presence ends this draw; there is no scheduled release tick.
+        add_player_attachment(PersistentVfxKind::PlayerBowDraw,
+            "particle.player.bow_draw", model.player.charge_start, 2,
+            model.player.charge_start, 0, SkillKind::ChargedShot,
+            model.player.charge_full_ready_tick);
+        const auto ready = model.player.charge_full_ready_tick;
+        if (ready != 0 && ready <= model.tick &&
+            model.tick < ready + Seconds(0.55f))
+            add_player_attachment(PersistentVfxKind::ChargedFullReady,
+                "particle.upgrade.charged.full_ready", model.player.charge_start,
+                3, ready, ready + Seconds(0.55f), SkillKind::ChargedShot, 0);
+        if (HasUpgrade(model.player.upgrades[static_cast<std::size_t>(
+                SkillKind::ChargedShot)], 1) &&
+            model.charge_normal_ready_tick != 0 &&
+            model.charge_normal_ready_tick <= model.tick &&
+            model.player.charge_full_ready_tick > model.tick &&
+            model.player.charge_full_ready_tick > model.player.charge_start &&
+            std::isfinite(model.charge_ratio) && model.charge_ratio >= 0.0f &&
+            model.charge_ratio <= 1.0f && std::isfinite(model.charge_radius) &&
+            model.charge_radius > 0.0f)
+            add_player_attachment(PersistentVfxKind::ChargedOverchargeLoop,
+                "particle.upgrade.charged.overcharge_loop",
+                model.player.charge_start, 5, model.player.charge_start,
+                model.player.charge_full_ready_tick, SkillKind::ChargedShot,
+                model.player.charge_full_ready_tick, model.charge_radius,
+                model.charge_ratio, 0);
+    }
+    if (HasUpgrade(model.player.upgrades[static_cast<std::size_t>(
+            SkillKind::BasicAttack)], 8) &&
+        model.player.active_basic_empower_until != 0 &&
+        model.player.active_basic_empower_started <= model.tick &&
+        model.tick <= model.player.active_basic_empower_until)
+        add_player_attachment(PersistentVfxKind::EmpoweredReady,
+            "particle.upgrade.empowered_ready",
+            model.player.active_basic_empower_started, 4,
+            model.player.active_basic_empower_started,
+            model.player.active_basic_empower_until + 1, SkillKind::BasicAttack,
+            0);
     complete &= snapshot.AddInstance(
         {{model.player.position.x, 0.0f, model.player.position.y},
          std::atan2(model.player.facing.x, model.player.facing.y),
@@ -262,7 +377,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              std::atan2(model.player.aim.x, model.player.aim.y),
              model.charge_radius, guide_length,
              PersistentVfxKind::ChargeGuide,
-             kPlayerRenderId | static_cast<std::uint64_t>(SkillKind::ChargedShot)});
+             kPlayerRenderId | static_cast<std::uint64_t>(SkillKind::ChargedShot),
+             model.player.charge_start});
     }
 
     std::uint64_t environment_id = kEnvironmentRenderId;
@@ -429,6 +545,90 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             {{enemy.position.x, 0.0f, enemy.position.y},
              std::atan2(facing.x, facing.y), scale, color, mesh,
              kEnemyRenderId | enemy.id.value, status_visual_mask});
+        constexpr std::array status_kinds{PersistentVfxKind::EnemyBleedStatus, PersistentVfxKind::EnemyBurnStatus,
+            PersistentVfxKind::EnemySlowStatus, PersistentVfxKind::EnemyMarkStatus};
+        constexpr std::array status_names{"persistent.status.bleed", "persistent.status.burn", "persistent.status.slow", "persistent.status.mark"};
+        for(std::size_t i=0;i<enemy.status_episodes.size();++i) {
+            const auto &episode=enemy.status_episodes[i];
+            if(episode.generation==0||episode.started>model.tick||episode.expires<=model.tick||episode.expires<=episode.started||enemy.footprint_radius<=0) continue;
+            // Session, entity and activation distinguish repeated status episodes.
+            std::uint64_t identity=14695981039346656037ull;
+            for(const auto value:{model.session_id,enemy.id.value,static_cast<std::uint64_t>(i),episode.generation})
+                for(unsigned byte=0;byte<8;++byte){identity^=(value>>(byte*8))&255u;identity*=1099511628211ull;}
+            PersistentVfxVisual status;
+            status.position={enemy.position.x,0,enemy.position.y};status.yaw=std::atan2(facing.x,facing.y);
+            status.radius=enemy.footprint_radius;status.kind=status_kinds[i];status.stable_id=identity?identity:1;
+            status.status_episode_generation=episode.generation;
+            status.active_tick=episode.started;status.expires=episode.expires;status.effect_asset=MakeAssetId(status_names[i]);
+            status.entity_health_fraction=enemy.max_health>0?std::clamp(static_cast<float>(enemy.health)/enemy.max_health,0.0f,1.0f):0.0f;
+            status.entity_state_flags=1u<<i;
+            status.entity_render_id=kEnemyRenderId | enemy.id.value;
+            complete &= snapshot.AddPersistentVfx(status);
+        }
+        if (enemy.boss && enemy.footprint_radius > 0.0f)
+        {
+            const auto identity = [&](std::uint64_t kind, Tick started) {
+                std::uint64_t value = 14695981039346656037ull;
+                for (const auto part : {model.session_id, enemy.id.value, kind,
+                                        static_cast<std::uint64_t>(started)})
+                    for (unsigned byte = 0; byte < 8; ++byte)
+                    {
+                        value ^= (part >> (byte * 8)) & 255u;
+                        value *= 1099511628211ull;
+                    }
+                return value ? value : 1ull;
+            };
+            if (enemy.dash_started <= model.tick && model.tick < enemy.dash_until)
+            {
+                const Float2 delta{enemy.position.x - enemy.dash_origin.x,
+                                   enemy.position.y - enemy.dash_origin.y};
+                const float length = std::hypot(delta.x, delta.y);
+                if (length > 0.0001f)
+                {
+                    PersistentVfxVisual wake;
+                    wake.kind = PersistentVfxKind::BossDashWake;
+                    wake.position = {(enemy.dash_origin.x + enemy.position.x) * 0.5f,
+                                     0.025f,
+                                     (enemy.dash_origin.y + enemy.position.y) * 0.5f};
+                    wake.yaw = std::atan2(delta.x, delta.y);
+                    wake.radius = enemy.footprint_radius;
+                    wake.length = length;
+                    wake.active_tick = enemy.dash_started;
+                    wake.expires = enemy.dash_until;
+                    wake.stable_id = identity(0xD451u, enemy.dash_started);
+                    wake.effect_asset = MakeAssetId("persistent.boss.dash_wake");
+                    complete &= snapshot.AddPersistentVfx(wake);
+                }
+            }
+            if (enemy.boss == BossKind::Final && enemy.final_phase == 2 &&
+                enemy.phase2_started <= model.tick)
+            {
+                PersistentVfxVisual aura;
+                aura.kind = PersistentVfxKind::BossPhase2Aura;
+                aura.position = {enemy.position.x, 0.025f, enemy.position.y};
+                aura.yaw = std::atan2(facing.x, facing.y);
+                aura.radius = enemy.footprint_radius;
+                aura.active_tick = enemy.phase2_started;
+                aura.stable_id = identity(0xA2u, enemy.phase2_started);
+                aura.effect_asset = MakeAssetId("persistent.boss.phase2_aura");
+                aura.entity_health_fraction = enemy.max_health > 0
+                    ? std::clamp(static_cast<float>(enemy.health) / enemy.max_health,
+                                 0.0f, 1.0f) : 0.0f;
+                aura.entity_state_flags = 2;
+                aura.entity_render_id = kEnemyRenderId | enemy.id.value;
+                complete &= snapshot.AddPersistentVfx(aura);
+                if (model.tick < enemy.invulnerable_until)
+                {
+                    auto transition = aura;
+                    transition.kind = PersistentVfxKind::BossPhaseTransition;
+                    transition.expires = enemy.invulnerable_until;
+                    transition.stable_id = identity(0xA3u, enemy.phase2_started);
+                    transition.effect_asset = MakeAssetId("persistent.boss.phase_transition_invulnerable");
+                    transition.entity_state_flags = 3;
+                    complete &= snapshot.AddPersistentVfx(transition);
+                }
+            }
+        }
         AnimationPoseRef enemy_pose;
         enemy_pose.instance_index = static_cast<std::uint32_t>(instance_index);
         const auto boss_action = std::ranges::find_if(
@@ -488,7 +688,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 static_cast<float>((model.tick + enemy.id.value * 17) % 120) / 120.0f;
         }
         complete &= snapshot.AddPose(enemy_pose);
-        if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking)
+        if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking &&
+            model.tick < enemy.attack_resolve)
         {
             const auto range = enemy.warning_extent;
             const auto center = Add(enemy.position,
@@ -496,14 +697,39 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             complete &= snapshot.AddInstance(
                 {{center.x, 0.025f, center.y},
                  std::atan2(enemy.locked_aim.x, enemy.locked_aim.y),
-                 {0.16f, 0.03f, range}, 0xA03030FFu, RenderMesh::Area});
+                 {enemy.warning_half_width * 2.0f, 0.03f, range}, 0xA03030FFu,
+                 RenderMesh::Area, 0, 0, 0, 0, enemy.warning_sequence});
+            if (enemy.warning_sequence != 0)
+            {
+                PersistentVfxVisual warning{};
+                warning.position = {center.x, 0.025f, center.y};
+                warning.yaw = std::atan2(enemy.locked_aim.x, enemy.locked_aim.y);
+                warning.radius = enemy.warning_half_width;
+                warning.length = range;
+                warning.kind = PersistentVfxKind::RangedEnemyWarning;
+                warning.stable_id = enemy.warning_sequence;
+                warning.active_tick = enemy.attack_started;
+                warning.expires = enemy.attack_resolve;
+                complete &= snapshot.AddPersistentVfx(warning);
+            }
         }
         if (!enemy.boss && enemy.kind == EnemyKind::Suicide && enemy.attacking)
         {
             const auto radius = enemy.warning_extent;
             complete &= snapshot.AddInstance(
                 {{enemy.position.x, 0.025f, enemy.position.y}, 0.0f,
-                 {radius, 0.03f, radius}, 0x803030FFu, RenderMesh::Area});
+                 {radius, 0.03f, radius}, 0x803030FFu, RenderMesh::Area, 0, 0, 0, 0, enemy.warning_sequence});
+            if (enemy.warning_sequence != 0 && model.tick < enemy.attack_resolve)
+            {
+                PersistentVfxVisual warning{};
+                warning.kind = PersistentVfxKind::SuicideEnemyWarning;
+                warning.position = {enemy.position.x, 0.025f, enemy.position.y};
+                warning.radius = radius;
+                warning.stable_id = enemy.warning_sequence;
+                warning.active_tick = enemy.attack_started;
+                warning.expires = enemy.attack_resolve;
+                complete &= snapshot.AddPersistentVfx(warning);
+            }
         }
     }
     if (enemy_animations)
@@ -532,6 +758,23 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     for (const auto &projectile : model.projectiles)
     {
         if (projectile.dead) continue;
+        const auto owner_id = projectile.id.value;
+        const auto render_height = projectile.player_owned ? 1.05f : 0.45f;
+        const auto effect_asset = [&]() noexcept {
+            if (!projectile.player_owned)
+                return MakeAssetId(projectile.source_enemy != 0xFF &&
+                                   projectile.source_enemy >= kBossTelemetryBase
+                                       ? "persistent.boss.volley_projectile_visual"
+                                       : "persistent.enemy.projectile_visual");
+            switch (projectile.skill)
+            {
+            case SkillKind::ChargedShot: return MakeAssetId("particle.skill.charged_shot");
+            case SkillKind::ExplosiveArrow: return MakeAssetId("particle.skill.explosive_arrow");
+            case SkillKind::PiercingShot: return MakeAssetId("particle.skill.piercing_shot");
+            case SkillKind::RicochetArrow: return MakeAssetId("particle.skill.ricochet_arrow");
+            default: return MakeAssetId("particle.basic_attack");
+            }
+        }();
         auto scale = projectile.player_owned ? Float3{0.24f, 0.24f, 0.825f}
                                              : Float3{0.24f, 0.24f, 0.8f};
         auto color = projectile.player_owned ? 0xFF40E8FFu : 0xFF4040FFu;
@@ -561,7 +804,104 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              scale, color,
              projectile.player_owned ? RenderMesh::PlayerProjectile
                                       : RenderMesh::EnemyProjectile,
-             kProjectileRenderId | projectile.id.value});
+              kProjectileRenderId | projectile.id.value});
+        // The head is a persistent snapshot visual whose presence is exactly
+        // the actor's presence. Its owner POD is copied from gameplay so the
+        // runtime does not infer a future expiry or integrate cosmetic trail
+        // positions.
+        PersistentVfxVisual head;
+        head.position = {projectile.position.x, render_height, projectile.position.y};
+        head.yaw = std::atan2(projectile.velocity.x, projectile.velocity.y);
+        head.radius = projectile.radius;
+        head.kind = PersistentVfxKind::ProjectileHead;
+        head.stable_id = kProjectileRenderId | owner_id;
+        head.active_tick = projectile.spawned_tick;
+        head.effect_asset = effect_asset;
+        head.projectile_current_position = head.position;
+        head.projectile_previous_position = {projectile.previous_position.x, render_height,
+                                             projectile.previous_position.y};
+        head.projectile_velocity = {projectile.velocity.x, 0.0f, projectile.velocity.y};
+        head.projectile_hitbox_radius = projectile.radius;
+        head.projectile_spawned_tick = projectile.spawned_tick;
+        head.projectile_owner_id = owner_id;
+        head.projectile_state_flags = (projectile.returning ? 1u : 0u) |
+                                      (projectile.homing ? 2u : 0u);
+        complete &= snapshot.AddPersistentVfx(head);
+        const auto projectile_effect_id = [&](std::uint64_t effect_tag,
+                                              std::uint64_t episode) {
+            std::uint64_t identity = 14695981039346656037ull;
+            for (const auto value : {model.session_id, owner_id, effect_tag, episode})
+                for (unsigned byte = 0; byte < 8; ++byte)
+                {
+                    identity ^= (value >> (byte * 8)) & 255u;
+                    identity *= 1099511628211ull;
+                }
+            return identity ? identity : 1;
+        };
+        if (projectile.skill == SkillKind::MultiShot &&
+            projectile.origin == EffectOrigin::Derived &&
+            projectile.source_upgrade == 7 && projectile.homing &&
+            projectile.spawned_tick <= model.tick &&
+            model.tick - projectile.spawned_tick < 18)
+        {
+            // The derived child exists only after a real target was acquired
+            // and FireProjectile succeeded. Its birth is the retarget clock.
+            PersistentVfxVisual retarget = head;
+            retarget.kind = PersistentVfxKind::MultishotRetarget;
+            retarget.stable_id = projectile_effect_id(1, projectile.spawned_tick);
+            retarget.active_tick = projectile.spawned_tick;
+            retarget.expires = projectile.spawned_tick + 18;
+            retarget.skill = static_cast<std::uint8_t>(SkillKind::MultiShot);
+            retarget.source_upgrade = 7;
+            retarget.effect_asset = MakeAssetId("particle.upgrade.retarget");
+            complete &= snapshot.AddPersistentVfx(retarget);
+        }
+        if (projectile.skill == SkillKind::BasicAttack && projectile.returning &&
+            projectile.source_upgrade == 6 &&
+            projectile.return_started_tick <= model.tick &&
+            model.tick - projectile.return_started_tick < 30)
+        {
+            PersistentVfxVisual returning = head;
+            returning.kind = PersistentVfxKind::BasicArrowReturn;
+            returning.stable_id = projectile_effect_id(3, projectile.return_started_tick);
+            returning.active_tick = projectile.return_started_tick;
+            returning.expires = projectile.return_started_tick + 30;
+            returning.skill = static_cast<std::uint8_t>(SkillKind::BasicAttack);
+            returning.source_upgrade = 6;
+            returning.effect_asset = MakeAssetId("particle.upgrade.arrow.return");
+            returning.return_start_position =
+                {projectile.return_start_position.x, render_height,
+                 projectile.return_start_position.y};
+            complete &= snapshot.AddPersistentVfx(returning);
+        }
+        if (projectile.skill == SkillKind::RicochetArrow)
+        {
+            for (std::size_t episode = 0; episode < projectile.bleed_extend_ticks.size(); ++episode)
+            {
+                const auto started = projectile.bleed_extend_ticks[episode];
+                if (started > model.tick || model.tick - started >= 21) continue;
+                PersistentVfxVisual extend{};
+                extend.kind = PersistentVfxKind::RicochetBleedExtend;
+                extend.stable_id = projectile_effect_id(2, episode + 1);
+                extend.position = head.position;
+                extend.yaw = head.yaw;
+                extend.radius = projectile.radius;
+                extend.active_tick = started;
+                extend.expires = started + 21;
+                extend.skill = static_cast<std::uint8_t>(SkillKind::RicochetArrow);
+                extend.source_upgrade = 2;
+                extend.effect_asset = MakeAssetId("particle.upgrade.ricochet.bleed_extend");
+                extend.projectile_current_position = head.projectile_current_position;
+                extend.projectile_previous_position = head.projectile_previous_position;
+                extend.projectile_velocity = head.projectile_velocity;
+                extend.projectile_hitbox_radius = projectile.radius;
+                extend.projectile_spawned_tick = projectile.spawned_tick;
+                extend.projectile_owner_id = owner_id;
+                extend.projectile_state_flags = head.projectile_state_flags;
+                extend.entity_render_id = kProjectileRenderId | owner_id;
+                complete &= snapshot.AddPersistentVfx(extend);
+            }
+        }
         if (projectile.player_owned)
         {
             const auto speed = std::sqrt(LengthSquared(projectile.velocity));
@@ -583,23 +923,68 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                                 ? 0.05f
                                                 : std::min(0.06f,
                                                            projectile.radius * 0.35f);
-            complete &= snapshot.AddPersistentVfx(
-                {{trail_position.x, body_center_height, trail_position.y},
-                 std::atan2(projectile.velocity.x, projectile.velocity.y),
-                 trail_radius,
-                 trail_length,
-                 projectile.skill == SkillKind::RicochetArrow
-                     ? PersistentVfxKind::RicochetProjectileTrail
-                     : PersistentVfxKind::ProjectileTrail,
-                 kProjectileRenderId | projectile.id.value});
+            PersistentVfxVisual trail{
+                {trail_position.x, body_center_height, trail_position.y},
+                std::atan2(projectile.velocity.x, projectile.velocity.y), trail_radius,
+                trail_length,
+                projectile.skill == SkillKind::RicochetArrow
+                    ? PersistentVfxKind::RicochetProjectileTrail
+                    : PersistentVfxKind::ProjectileTrail,
+                kProjectileRenderId | owner_id};
+            trail.active_tick = projectile.spawned_tick;
+            trail.projectile_current_position = {projectile.position.x, render_height,
+                                                 projectile.position.y};
+            trail.projectile_previous_position = {projectile.previous_position.x,
+                                                  render_height,
+                                                  projectile.previous_position.y};
+            trail.projectile_velocity = {projectile.velocity.x, 0.0f, projectile.velocity.y};
+            trail.projectile_hitbox_radius = projectile.radius;
+            trail.projectile_spawned_tick = projectile.spawned_tick;
+            trail.projectile_owner_id = owner_id;
+            trail.projectile_state_flags = (projectile.returning ? 1u : 0u) |
+                                            (projectile.homing ? 2u : 0u);
+            complete &= snapshot.AddPersistentVfx(trail);
+            if (projectile.skill == SkillKind::RicochetArrow && projectile.returning &&
+                (projectile.upgrade_mask & std::uint8_t{1}) != 0)
+            {
+                PersistentVfxVisual returning_link{
+                    {projectile.position.x, render_height, projectile.position.y},
+                    std::atan2(model.player.position.x - projectile.position.x,
+                               model.player.position.y - projectile.position.y),
+                    std::max(0.01f, projectile.radius), 0.0f,
+                    PersistentVfxKind::RicochetReturnLink,
+                    (kProjectileRenderId | owner_id) ^ (1ull << 58)};
+                returning_link.active_tick = projectile.return_started_tick;
+                returning_link.expires = model.tick + 1;
+                returning_link.projectile_owner_id = owner_id;
+                returning_link.projectile_current_position =
+                    {projectile.position.x, render_height, projectile.position.y};
+                returning_link.projectile_previous_position =
+                    {projectile.previous_position.x, render_height, projectile.previous_position.y};
+                returning_link.link_target_position =
+                    {model.player.position.x, render_height, model.player.position.y};
+                returning_link.return_start_position =
+                    {projectile.return_start_position.x, render_height,
+                     projectile.return_start_position.y};
+                returning_link.link_width = std::max(0.01f, projectile.radius);
+                complete &= snapshot.AddPersistentVfx(returning_link);
+            }
             if (projectile.skill == SkillKind::ChargedShot)
             {
-                complete &= snapshot.AddPersistentVfx(
-                    {{trail_position.x, body_center_height, trail_position.y},
-                     std::atan2(projectile.velocity.x, projectile.velocity.y),
-                     0.075f, trail_length,
-                     PersistentVfxKind::ProjectileTrailOuter,
-                     (kProjectileRenderId | projectile.id.value) ^ (1ull << 59)});
+                PersistentVfxVisual outer{
+                    {trail_position.x, body_center_height, trail_position.y},
+                    std::atan2(projectile.velocity.x, projectile.velocity.y), 0.075f,
+                    trail_length, PersistentVfxKind::ProjectileTrailOuter,
+                    (kProjectileRenderId | owner_id) ^ (1ull << 59)};
+                outer.active_tick = projectile.spawned_tick;
+                outer.projectile_current_position = trail.projectile_current_position;
+                outer.projectile_previous_position = trail.projectile_previous_position;
+                outer.projectile_velocity = trail.projectile_velocity;
+                outer.projectile_hitbox_radius = projectile.radius;
+                outer.projectile_spawned_tick = projectile.spawned_tick;
+                outer.projectile_owner_id = owner_id;
+                outer.projectile_state_flags = trail.projectile_state_flags;
+                complete &= snapshot.AddPersistentVfx(outer);
             }
         }
     }
@@ -610,16 +995,29 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         // read model can briefly retain an actor on its expiry tick, so do not
         // let a stale AreaView render past its explicit end tick.
         if (area.expires != 0 && model.tick >= area.expires) continue;
+        const auto add_area_visual = [&](Float3 position, float yaw, float radius,
+                                         float length, PersistentVfxKind kind) {
+            PersistentVfxVisual visual{position, yaw, radius, length, kind,
+                                       kAreaRenderId | area.id.value};
+            visual.active_tick = area.active_tick;
+            visual.expires = area.expires;
+            visual.cast_id = area.cast_id;
+            visual.skill = static_cast<std::uint8_t>(area.skill);
+            visual.source_upgrade = area.source_upgrade;
+            visual.ring_inner_radius = area.ring_inner_radius;
+            visual.ring_outer_radius = area.ring_outer_radius;
+            visual.gap_count = area.safe_gap_count;
+            visual.gap_half_angle_degrees = area.safe_gap_degrees * 0.5f;
+            visual.gap_offset_degrees = static_cast<float>(area.cast_id % 360);
+            return snapshot.AddPersistentVfx(visual);
+        };
         if (area.kind == AreaViewKind::Trap)
         {
             const auto pending_kind = model.tick < area.active_tick
                                         ? PersistentVfxKind::TrapPending
                                         : PersistentVfxKind::TrapArmed;
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.025f, area.position.y}, 0.0f, area.radius,
-                 0.0f,
-                  pending_kind,
-                  kAreaRenderId | area.id.value});
+            complete &= add_area_visual({area.position.x, 0.025f, area.position.y},
+                                        0.0f, area.radius, 0.0f, pending_kind);
         }
         const auto fire_area = area.applies_burn ||
             (area.skill == SkillKind::ExplosiveArrow && area.source_upgrade == 3) ||
@@ -627,53 +1025,60 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             (area.skill == SkillKind::ArrowRain && area.source_upgrade == 3);
         if (fire_area && model.tick >= area.active_tick)
         {
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.02f, area.position.y}, 0.0f, area.radius,
-                 0.0f, PersistentVfxKind::FireArea,
-                 kAreaRenderId | area.id.value});
+            complete &= add_area_visual({area.position.x, 0.02f, area.position.y},
+                                        0.0f, area.radius, 0.0f,
+                                        PersistentVfxKind::FireArea);
         }
         if ((area.kind == AreaViewKind::Slow || area.applies_slow) &&
             area.half_length <= 0.0f &&
             model.tick >= area.active_tick)
         {
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.018f, area.position.y}, 0.0f, area.radius,
-                 0.0f, PersistentVfxKind::SlowArea,
-                 kAreaRenderId | area.id.value});
+            const bool upgrade_slow =
+                (area.skill == SkillKind::ArrowRain &&
+                 ((area.upgrade_mask & (1u << 5)) != 0 || area.source_upgrade == 7)) ||
+                (area.skill == SkillKind::Trap && area.source_upgrade == 1);
+            complete &= add_area_visual({area.position.x, 0.018f, area.position.y},
+                                        0.0f, area.radius, 0.0f,
+                                        upgrade_slow ? PersistentVfxKind::UpgradeSlowArea
+                                                     : PersistentVfxKind::SlowArea);
         }
         if (area.skill == SkillKind::ArrowRain)
         {
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.016f, area.position.y}, 0.0f, area.radius,
-                 0.0f, PersistentVfxKind::ArrowRainArea,
-                 kAreaRenderId | area.id.value});
+            complete &= add_area_visual({area.position.x, 0.016f, area.position.y},
+                                        0.0f, area.radius, 0.0f,
+                                        PersistentVfxKind::ArrowRainArea);
         }
         if (area.kind == AreaViewKind::Slow && area.half_length > 0.0f &&
             model.tick >= area.active_tick)
         {
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.014f, area.position.y},
-                 std::atan2(area.direction.x, area.direction.y), area.radius,
-                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail,
-                 kAreaRenderId | area.id.value});
+            complete &= add_area_visual(
+                {area.position.x, 0.014f, area.position.y},
+                std::atan2(area.direction.x, area.direction.y), area.radius,
+                area.half_length * 2.0f, PersistentVfxKind::DamageTrail);
         }
         // Trap and Arrow Rain keep one persistent visual across activation.
         // Other AreaActor visuals begin at active_tick.
         if (model.tick < area.active_tick) continue;
+        if (area.kind == AreaViewKind::EnemyDamage &&
+            area.ring_outer_radius <= 0.0f && area.safe_gap_count == 0)
+        {
+            complete &= add_area_visual({area.position.x, 0.025f, area.position.y},
+                                        0.0f, area.radius, 0.0f,
+                                        PersistentVfxKind::BossAreaActive);
+        }
         if (area.half_length > 0.0f && area.kind == AreaViewKind::Damage &&
             model.tick >= area.active_tick)
         {
-            complete &= snapshot.AddPersistentVfx(
-                {{area.position.x, 0.014f, area.position.y},
-                 std::atan2(area.direction.x, area.direction.y), area.radius,
-                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail,
-                 kAreaRenderId | area.id.value});
+            complete &= add_area_visual(
+                {area.position.x, 0.014f, area.position.y},
+                std::atan2(area.direction.x, area.direction.y), area.radius,
+                area.half_length * 2.0f, PersistentVfxKind::DamageTrail);
         }
         const auto particle_visual = area.kind == AreaViewKind::Slow ||
             area.kind == AreaViewKind::Trap ||
             area.kind == AreaViewKind::Damage;
         if (particle_visual) continue;
-        if (area.ring_outer_radius > 0.0f && area.safe_gap_count > 0)
+        if (area.ring_outer_radius > 0.0f)
         {
             const auto duration = std::max<Tick>(area.expires - area.active_tick, 1);
             const auto progress = std::clamp(
@@ -682,23 +1087,45 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 0.0f, 1.0f);
             const auto radius = std::lerp(area.ring_inner_radius,
                                           area.ring_outer_radius, progress);
+            if (area.kind == AreaViewKind::EnemyDamage)
+            {
+                PersistentVfxVisual wavefront{};
+                wavefront.position = {area.position.x, 0.03f, area.position.y};
+                wavefront.ring_inner_radius = std::max(0.0f, radius - area.ring_half_width);
+                wavefront.ring_outer_radius = radius + area.ring_half_width;
+                wavefront.radius = wavefront.ring_outer_radius;
+                wavefront.kind = PersistentVfxKind::BossShockwaveWavefront;
+                wavefront.stable_id = kAreaRenderId | area.id.value;
+                wavefront.active_tick = area.active_tick;
+                wavefront.expires = area.expires;
+                wavefront.cast_id = area.cast_id;
+                wavefront.gap_count = area.safe_gap_count;
+                wavefront.gap_half_angle_degrees = area.safe_gap_degrees * 0.5f;
+                wavefront.gap_offset_degrees = static_cast<float>(area.cast_id % 360);
+                complete &= snapshot.AddPersistentVfx(wavefront);
+            }
             constexpr std::uint32_t kSegments = 64;
             for (std::uint32_t index = 0; index < kSegments; ++index)
             {
                 const auto degrees = 360.0f * static_cast<float>(index) / kSegments;
-                const auto spacing = 360.0f / area.safe_gap_count;
-                const auto offset = static_cast<float>(area.cast_id % 360);
-                const auto nearest_gap =
-                    std::fmod(degrees - offset + spacing * 0.5f + 360.0f, spacing) -
-                    spacing * 0.5f;
-                if (std::abs(nearest_gap) <= area.safe_gap_degrees * 0.5f)
-                    continue;
-                const auto direction = Rotate({1.0f, 0.0f}, degrees);
+                if (area.safe_gap_count > 0)
+                {
+                    const auto spacing = 360.0f /
+                                         static_cast<float>(area.safe_gap_count);
+                    const auto offset = static_cast<float>(area.cast_id % 360);
+                    const auto nearest_gap =
+                        std::fmod(degrees - offset + spacing * 0.5f + 360.0f,
+                                  spacing) - spacing * 0.5f;
+                    if (std::abs(nearest_gap) <= area.safe_gap_degrees * 0.5f)
+                        continue;
+                }
+                const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(area.position, Multiply(direction, radius));
                 complete &= snapshot.AddInstance(
                     {{position.x, 0.03f, position.y}, -degrees * kPi / 180.0f,
                      {0.24f, 0.04f, std::max(0.35f, radius * 0.05f)},
-                     0xB04040FFu, RenderMesh::Area});
+                     0xB04040FFu, RenderMesh::Area, 0, 0, 0, 0,
+                     kAreaRenderId | area.id.value});
             }
         }
         else
@@ -715,6 +1142,47 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                  RenderMesh::Area, kAreaRenderId | area.id.value});
         }
     }
+    for (const auto &spawn : model.spawn_warnings)
+    {
+        if (spawn.owner_id == 0 || model.tick < spawn.started || model.tick >= spawn.expires) continue;
+        PersistentVfxVisual warning{};
+        warning.kind = spawn.boss ? PersistentVfxKind::BossSpawnWarning : PersistentVfxKind::EnemySpawnWarning;
+        warning.position = {spawn.position.x, 0.025f, spawn.position.y};
+        warning.radius = spawn.radius;
+        warning.stable_id = spawn.owner_id;
+        warning.active_tick = spawn.started;
+        warning.expires = spawn.expires;
+        complete &= snapshot.AddPersistentVfx(warning);
+    }
+    for (const auto &bomb : model.mini_bombs)
+    {
+        if (bomb.started > model.tick || bomb.expires <= model.tick) continue;
+        PersistentVfxVisual warning{};
+        warning.kind = PersistentVfxKind::MiniBombWarning;
+        warning.stable_id = bomb.owner_id; warning.cast_id = bomb.cast_id;
+        warning.position = {bomb.position.x, .025f, bomb.position.y};
+        warning.radius = bomb.radius; warning.active_tick = bomb.started; warning.expires = bomb.expires;
+        warning.skill = static_cast<std::uint8_t>(SkillKind::ExplosiveArrow); warning.source_upgrade = 1;
+        complete &= snapshot.AddPersistentVfx(warning);
+    }
+    for (const auto &link : model.visual_links)
+    {
+        if (link.started > model.tick || link.expires <= model.tick) continue;
+        PersistentVfxVisual visual{};
+        switch (link.kind)
+        {
+        case VisualLinkKind::Ricochet: visual.kind = PersistentVfxKind::RicochetLink; break;
+        case VisualLinkKind::BurnTransfer: visual.kind = PersistentVfxKind::BurnTransferLink; break;
+        case VisualLinkKind::RelicChain: visual.kind = PersistentVfxKind::RelicChainLink; break;
+        }
+        visual.stable_id = link.owner_id;
+        visual.position = link.source_position;
+        visual.link_target_position = link.target_position;
+        visual.link_width = link.width;
+        visual.active_tick = link.started;
+        visual.expires = link.expires;
+        complete &= snapshot.AddPersistentVfx(visual);
+    }
     for (const auto &action : model.boss_actions)
     {
         const auto boss = std::ranges::find_if(
@@ -724,6 +1192,59 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         if (boss == model.enemies.end())
             continue;
 
+        if (action.warning_sequence != 0 && model.tick < action.execute_tick &&
+            (action.kind == BossActionViewKind::Dash || action.kind == BossActionViewKind::Volley))
+        {
+            auto direction = LengthSquared(action.direction) > 0.0001f
+                ? Normalize(action.direction) : Normalize(Subtract(model.player.position,boss->position));
+            const bool volley = action.kind == BossActionViewKind::Volley;
+            if (volley) direction = Rotate(direction, -action.angle_offset * kPi / 180.0f);
+            PersistentVfxVisual warning;
+            warning.position = {boss->position.x,0.025f,boss->position.y};
+            warning.yaw = std::atan2(direction.x,direction.y);
+            warning.radius = volley ? action.volley_range : action.warning_half_width;
+            warning.length = volley ? 0.0f : action.distance;
+            if (!volley)
+            {
+                warning.position.x += direction.x * action.distance * 0.5f;
+                warning.position.z += direction.y * action.distance * 0.5f;
+            }
+            warning.kind = volley ? PersistentVfxKind::BossVolleyWarning : PersistentVfxKind::BossDashWarning;
+            warning.stable_id = action.warning_sequence;
+            warning.active_tick = action.warning_started;
+            warning.expires = action.execute_tick;
+            warning.cone_half_angle_degrees = action.arc_degrees * 0.5f;
+            complete &= snapshot.AddPersistentVfx(warning);
+        }
+        if (action.kind == BossActionViewKind::Area && action.warning_sequence != 0 &&
+            model.tick < action.execute_tick)
+        {
+            PersistentVfxVisual warning{};
+            warning.position = {action.position.x, 0.025f, action.position.y};
+            warning.kind = PersistentVfxKind::BossAreaWarning;
+            warning.radius = action.radius;
+            warning.stable_id = action.warning_sequence;
+            warning.active_tick = action.warning_started;
+            warning.expires = action.execute_tick;
+            complete &= snapshot.AddPersistentVfx(warning);
+        }
+        if (action.kind == BossActionViewKind::Shockwave && action.warning_sequence != 0 &&
+            model.tick < action.execute_tick)
+        {
+            PersistentVfxVisual warning{};
+            warning.position = {action.position.x, 0.025f, action.position.y};
+            warning.kind = PersistentVfxKind::BossShockwaveWarning;
+            warning.stable_id = action.warning_sequence;
+            warning.active_tick = action.warning_started;
+            warning.expires = action.execute_tick;
+            warning.ring_inner_radius = action.distance;
+            warning.ring_outer_radius = action.radius;
+            warning.radius = action.radius;
+            warning.gap_count = action.safe_gap_count;
+            warning.gap_half_angle_degrees = action.safe_gap_degrees * 0.5f;
+            warning.gap_offset_degrees = static_cast<float>(action.cast_id % 360);
+            complete &= snapshot.AddPersistentVfx(warning);
+        }
         const auto warning_color = 0xA03030FFu;
         if (action.kind == BossActionViewKind::Dash)
         {
@@ -739,7 +1260,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                             static_cast<float>(kMarkers)));
                 complete &= snapshot.AddInstance(
                     {{position.x, 0.025f, position.y}, 0.0f,
-                     {0.28f, 0.03f, 0.28f}, warning_color, RenderMesh::Area});
+                     {0.28f, 0.03f, 0.28f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
             }
         }
         else if (action.kind == BossActionViewKind::Volley)
@@ -752,21 +1273,21 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                     action.arc_degrees * 0.5f + action.angle_offset};
             for (const auto angle : angles)
             {
-                const auto edge = Rotate(direction, angle);
+                const auto edge = Rotate(direction, -angle * kPi / 180.0f);
+                const auto range = std::max(action.volley_range, 0.0f);
                 for (std::uint32_t index = 1; index <= 12; ++index)
                 {
                     const auto position = Add(boss->position,
-                        Multiply(edge, 24.0f * static_cast<float>(index) / 12.0f));
+                        Multiply(edge, range * static_cast<float>(index) / 12.0f));
                     complete &= snapshot.AddInstance(
                         {{position.x, 0.025f, position.y}, 0.0f,
-                         {0.22f, 0.03f, 0.22f}, warning_color, RenderMesh::Area});
+                         {0.22f, 0.03f, 0.22f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
                 }
             }
         }
         else
         {
-            const auto center = action.kind == BossActionViewKind::Shockwave
-                                    ? boss->position : action.position;
+            const auto center = action.position;
             const auto radius = action.radius;
             constexpr std::uint32_t kSegments = 48;
             for (std::uint32_t index = 0; index < kSegments; ++index)
@@ -774,27 +1295,32 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 const auto degrees = 360.0f * static_cast<float>(index) / kSegments;
                 if (action.kind == BossActionViewKind::Shockwave)
                 {
-                    constexpr auto kSpacing = 90.0f;
                     const auto offset = static_cast<float>(action.cast_id % 360);
-                    const auto nearest_gap =
-                        std::fmod(degrees - offset + kSpacing * 0.5f + 360.0f,
-                                  kSpacing) - kSpacing * 0.5f;
-                    if (std::abs(nearest_gap) <= 12.5f)
-                        continue;
+                    if (action.safe_gap_count != 0)
+                    {
+                        const auto spacing = 360.0f /
+                                             static_cast<float>(action.safe_gap_count);
+                        const auto nearest_gap =
+                            std::fmod(degrees - offset + spacing * 0.5f + 360.0f,
+                                      spacing) - spacing * 0.5f;
+                        if (std::abs(nearest_gap) <= action.safe_gap_degrees * 0.5f)
+                            continue;
+                    }
                 }
-                const auto direction = Rotate({1.0f, 0.0f}, degrees);
+                const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(center, Multiply(direction, radius));
                 complete &= snapshot.AddInstance(
                     {{position.x, 0.025f, position.y}, 0.0f,
-                     {0.24f, 0.03f, 0.24f}, warning_color, RenderMesh::Area});
+                     {0.24f, 0.03f, 0.24f}, warning_color, RenderMesh::Area, 0, 0, 0, 0,
+                     action.warning_sequence});
             }
         }
     }
     for (const auto &pickup : model.pickups)
     {
         if (pickup.dead) continue;
-        complete &= snapshot.AddInstance(
-            {{pickup.position.x, 0.32f, pickup.position.y},
+        const RenderInstance instance{
+            {pickup.position.x, 0.32f, pickup.position.y},
              pickup.kind == PickupKind::Experience ? 0.785398f : 0.0f,
              pickup.kind == PickupKind::Experience ? Float3{0.34f, 0.34f, 0.34f} :
              pickup.kind == PickupKind::Heal ? Float3{0.26f, 0.55f, 0.26f} :
@@ -803,7 +1329,34 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              pickup.kind == PickupKind::Experience ? 0xFFFFD040u :
              pickup.kind == PickupKind::Heal ? 0xFF40E060u :
              pickup.kind == PickupKind::Magnet ? 0xFFFF3030u : 0xFFE080FFu,
-             RenderMesh::Pickup, kPickupRenderId | pickup.id.value});
+             RenderMesh::Pickup, kPickupRenderId | pickup.id.value};
+        complete &= snapshot.AddInstance(instance);
+        constexpr std::array idle_kinds{
+            PersistentVfxKind::PickupXpIdle, PersistentVfxKind::PickupHealIdle,
+            PersistentVfxKind::PickupMagnetIdle, PersistentVfxKind::PickupRelicIdle};
+        constexpr std::array idle_assets{
+            "particle.pickup.xp.idle", "particle.pickup.heal.idle",
+            "particle.pickup.magnet.idle", "particle.pickup.relic_chest.idle"};
+        const auto kind_index = static_cast<std::size_t>(pickup.kind);
+        std::uint64_t identity = 14695981039346656037ull;
+        for (const auto value : {model.session_id, instance.stable_id,
+                                 static_cast<std::uint64_t>(pickup.spawned_tick)})
+            for (unsigned byte = 0; byte < 8; ++byte)
+            {
+                identity ^= (value >> (byte * 8)) & 255u;
+                identity *= 1099511628211ull;
+            }
+        PersistentVfxVisual idle{};
+        idle.kind = idle_kinds[kind_index];
+        idle.stable_id = identity ? identity : 1;
+        idle.position = instance.position;
+        idle.yaw = instance.yaw;
+        idle.radius = std::max(instance.scale.x, instance.scale.z);
+        idle.active_tick = pickup.spawned_tick;
+        idle.expires = 0;
+        idle.effect_asset = MakeAssetId(idle_assets[kind_index]);
+        idle.entity_render_id = instance.stable_id;
+        complete &= snapshot.AddPersistentVfx(idle);
     }
     complete &= snapshot.AddLight(
         {{-0.45f, -0.82f, 0.35f}, 3.0f, {1.0f, 0.92f, 0.78f}});

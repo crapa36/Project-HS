@@ -24,10 +24,16 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Renderer requires HWND.");
     }
+    if (!std::isfinite(config.distortion_coverage) || config.distortion_coverage < 0 || config.distortion_coverage > 1)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Distortion coverage budget must be finite and within 0..1.");
+    if (config.vfx_light_count > 32)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "VFX light budget exceeds 32.");
     if (auto result = impl_->CreateDevice(config); !result)
     {
         return result;
     }
+    for (auto &pool : impl_->transient_pools)
+        if (auto result = pool.Initialize(impl_->allocator); !result) return result;
     if (auto result = impl_->CreateSwapChainAndTargets(); !result)
     {
         return result;
@@ -143,6 +149,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         return result;
     }
 
+    for (auto &pool : impl_->transient_pools) pool.Clear();
     impl_->depth.Reset();
     impl_->shadow.Reset();
     for (auto &back_buffer : impl_->back_buffers)
@@ -190,9 +197,12 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     const auto shadow_resolution = std::clamp(options.shadow_resolution, 1024u, 2048u);
     const auto recreate_targets = render_scale != impl_->config.render_scale_percent ||
                                   shadow_resolution != impl_->config.shadow_resolution;
+    if (options.vfx_quality != impl_->config.vfx_quality)
+        impl_->temporal_history_valid = false;
     impl_->config.vsync = options.vsync;
     impl_->config.bloom = options.bloom;
     impl_->config.outline = options.outline;
+    impl_->config.vfx_quality = options.vfx_quality;
     impl_->config.render_scale_percent = render_scale;
     impl_->config.shadow_resolution = shadow_resolution;
     impl_->config.particle_percentage =
@@ -202,6 +212,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (auto result = impl_->WaitForGpu(); !result)
         return result;
 
+    for (auto &pool : impl_->transient_pools) pool.Clear();
     impl_->render_width = std::max(impl_->width * render_scale / 100u, 1u);
     impl_->render_height = std::max(impl_->height * render_scale / 100u, 1u);
     impl_->depth.Reset();
@@ -248,12 +259,14 @@ Result D3D12Renderer::Shutdown()
         frame.upload.Reset();
         frame.ui_upload.Reset();
     }
+    for (auto &pool : impl_->transient_pools) pool.Clear();
     impl_->depth.Reset();
     impl_->shadow.Reset();
     impl_->vertices.Reset();
     impl_->archer_vertices.Reset();
     impl_->gel_projectile_vertices.Reset();
     impl_->slime_pipeline.Reset();
+    impl_->vfx_distortion_pipeline.Reset();
     for (auto &asset : impl_->monster_assets)
         asset.vertices.Reset();
     impl_->monster_skin_matrices.Reset();
@@ -265,6 +278,23 @@ Result D3D12Renderer::Shutdown()
     impl_->family_diffuse.Reset();
     impl_->family_normal.Reset();
     impl_->vfx_masks.Reset();
+    impl_->ribbon_history.Reset();
+    impl_->ribbon_previous.Reset();
+    impl_->ribbon_arguments.Reset();
+    impl_->vfx_smoke_motion.Reset();
+    impl_->vfx_flow_curl.Reset();
+    impl_->vfx_stbn_scalar.Reset();
+    impl_->vfx_fracture_decals.Reset();
+    impl_->vfx_organic_decals.Reset();
+    impl_->vfx_smoke_neg.Reset();
+    impl_->vfx_smoke_pos.Reset();
+    impl_->vfx_curve_lut.Reset();
+    impl_->vfx_noise_basis.Reset();
+    impl_->vfx_authored_mask.Reset();
+    impl_->ribbon_detail.Reset();
+    impl_->vfx_gradient.Reset();
+    impl_->vfx_gradient_rows = 0;
+    impl_->vfx_mesh_atlas.Reset();
     impl_->particles.Reset();
     for (auto &alive : impl_->particle_alive)
     {
@@ -284,6 +314,11 @@ Result D3D12Renderer::Shutdown()
     impl_->oit_revealage.Reset();
     impl_->post_a.Reset();
     impl_->post_b.Reset();
+    for (auto &history : impl_->temporal_history) history.Reset();
+    impl_->temporal_history_valid = false;
+    impl_->bloom_half.Reset();
+    impl_->bloom_quarter.Reset();
+    impl_->bloom_half_combined.Reset();
     for (auto &texture : impl_->ui_textures)
     {
         texture.Reset();

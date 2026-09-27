@@ -34,6 +34,40 @@ enum class PersistentVfxKind : std::uint8_t
     ProjectileTrail,
     ProjectileTrailOuter,
     RicochetProjectileTrail,
+    BossAreaActive,
+    ProjectileHead,
+    BossDashWarning,
+    BossVolleyWarning,
+    RangedEnemyWarning,
+    BossShockwaveWavefront,
+    BossShockwaveWarning,
+    RicochetLink,
+    RicochetReturnLink,
+    BurnTransferLink,
+    RelicChainLink,
+    MiniBombWarning,
+    EnemySpawnWarning,
+    BossSpawnWarning,
+    BossAreaWarning,
+    SuicideEnemyWarning,
+    EnemyBleedStatus, EnemyBurnStatus, EnemySlowStatus, EnemyMarkStatus,
+    UpgradeSlowArea,
+    BossDashWake,
+    BossPhase2Aura,
+    BossPhaseTransition,
+    PlayerInvulnerableLoop,
+    PlayerLowHealthVignette,
+    PlayerBowDraw,
+    ChargedFullReady,
+    EmpoweredReady,
+    PickupXpIdle,
+    PickupHealIdle,
+    PickupMagnetIdle,
+    PickupRelicIdle,
+    MultishotRetarget,
+    BasicArrowReturn,
+    RicochetBleedExtend,
+    ChargedOverchargeLoop,
 };
 
 struct PersistentVfxVisual
@@ -44,6 +78,44 @@ struct PersistentVfxVisual
     float length{};
     PersistentVfxKind kind{};
     std::uint64_t stable_id{};
+    std::uint64_t status_episode_generation{};
+    Tick active_tick{};
+    // Area-owned presentation metadata. Keep these as low-level primitives so
+    // Core does not depend on GameDomain's enums or read model types.
+    Tick expires{};
+    // Draw progression target; it does not end a live owner when expires is 0.
+    Tick source_horizon_tick{};
+    std::uint64_t cast_id{};
+    std::uint8_t skill{};
+    std::uint8_t source_upgrade{0xFF};
+    // Wavefront visuals carry current annulus boundaries, not travel endpoints.
+    float ring_inner_radius{};
+    float ring_outer_radius{};
+    std::uint8_t gap_count{};
+    float gap_half_angle_degrees{};
+    float gap_offset_degrees{};
+    float cone_half_angle_degrees{};
+    // Authoritative charged-shot progression for charge-owned persistent VFX.
+    float charge_ratio{};
+    // Authoritative projectile ingress. These fields are populated from the
+    // live actor so path/head rendering never forecasts lifetime or integrates
+    // a cosmetic trail position.
+    AssetId effect_asset{};
+    Float3 projectile_current_position{};
+    Float3 projectile_previous_position{};
+    Float3 projectile_velocity{};
+    float projectile_hitbox_radius{};
+    Tick projectile_spawned_tick{};
+    std::uint64_t projectile_owner_id{};
+    std::uint32_t projectile_state_flags{};
+    // Captured link source uses position; target and full world width remain
+    // fixed until expires. active_tick is the emission tick.
+    Float3 link_target_position{};
+    float link_width{};
+    Float3 return_start_position{};
+    float entity_health_fraction{1.0f};
+    std::uint32_t entity_state_flags{};
+    std::uint64_t entity_render_id{};
 };
 
 enum class RenderMesh : std::uint8_t
@@ -82,6 +154,7 @@ struct RenderInstance
     std::uint32_t status_visual_mask{};
     std::uint32_t environment_seed{};
     std::uint32_t environment_variant{};
+    std::uint64_t vfx_owner_id{}; // Shared warning group; never used as interpolation identity.
 };
 
 struct AnimationPoseRef
@@ -140,6 +213,7 @@ struct RenderSnapshotHeader
     Tick tick{};
     std::chrono::nanoseconds simulation_time{};
     GameplayChecksum checksum{};
+    std::uint64_t session_id{};
 };
 
 struct RenderSnapshot

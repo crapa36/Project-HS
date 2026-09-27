@@ -27,6 +27,8 @@ struct CombatState
     std::vector<AreaHitRecord> area_hits;
     std::vector<CastRuntime> cast_runtimes;
     std::vector<DomainSignal> domain_signals;
+    // Presentation metadata only; intentionally excluded from the checksum.
+    std::vector<VisualLinkView> visual_links;
     EnemySpatialGrid enemy_grid;
     std::vector<std::size_t> collision_candidates;
 };

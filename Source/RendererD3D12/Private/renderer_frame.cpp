@@ -1,9 +1,11 @@
 #include "renderer_impl.hpp"
 #include <bit>
+#include <limits>
 
 #include <numbers>
 #include <ranges>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace hs
 {
@@ -12,6 +14,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                              std::span<const PresentationEvent> events,
                              std::span<const ParticleSpawnCommand> particle_spawns,
                              std::span<const VfxLineSpawnCommand> effect_lines,
+                             std::span<const VfxEventInput> typed_vfx_events,
+                             std::span<const VfxPersistentInput> typed_vfx_persistent,
+                             std::span<const VfxGroundSpawnInput> typed_ground_spawns,
+                             std::span<const VfxFlashSpawnInput> typed_flash_spawns,
+                             std::span<const VfxOwnedMeshInput> typed_mesh_spawns,
+                             std::span<const VfxFresnelInput> typed_fresnels,
+                             const VfxRibbonFrameInput &typed_ribbons,
+                             std::span<const VfxLightInput> typed_lights,
+                             std::span<const VfxDistortionInput> typed_distortions,
+                             std::span<const VfxDecalInput> typed_decals,
                              const DevToolsFrameData &devtools,
                              RendererFrameResult &frame_result)
 {
@@ -21,7 +33,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Renderer not initialized.");
     }
-
+    for (const auto &input : typed_vfx_events)
+        if (input.effect_handle == kInvalidVfxEffectHandle)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                   "Typed VFX event has an invalid effect handle.");
+    std::string vfx_error;
+    if (!impl_->typed_vfx_persistent_state.Update(typed_vfx_persistent, vfx_error))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error);
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (std::chrono::steady_clock::now() >= impl_->next_shader_check)
     {
@@ -47,11 +65,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         return result;
     }
+    auto &transient_pool = impl_->transient_pools[back_buffer_index];
+    transient_pool.ResetClaims();
 
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
+    const bool new_session = snapshot.header.session_id != impl_->render_session_id;
+    if (new_session)
+    {
+        impl_->render_session_id = snapshot.header.session_id;
+        impl_->particles_initialized = false;
+        impl_->temporal_history_valid = false;
+    }
+    const bool same_previous_session = snapshots.has_previous &&
+        snapshots.previous.header.session_id == snapshot.header.session_id;
     std::unordered_map<std::uint64_t, const RenderInstance *> previous_by_id;
     previous_by_id.reserve(snapshots.has_previous ? snapshots.previous.instances.size() : 0);
-    if (snapshots.has_previous)
+    if (same_previous_session)
         for (const auto &instance : snapshots.previous.instances)
             if (instance.stable_id != 0) previous_by_id.emplace(instance.stable_id, &instance);
     std::unordered_map<std::uint64_t, const AnimationPoseRef *> pose_by_id;
@@ -63,19 +92,50 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             if (stable_id != 0) pose_by_id.emplace(stable_id, &pose);
         }
     const auto now = std::chrono::steady_clock::now();
-    if (snapshot.header.tick != impl_->observed_snapshot_tick)
+    if (new_session || snapshot.header.tick != impl_->observed_snapshot_tick)
     {
         impl_->observed_snapshot_tick = snapshot.header.tick;
         impl_->snapshot_arrival = now;
     }
     const auto interpolation =
-        impl_->config.interpolate && snapshots.has_previous
+        impl_->config.interpolate && same_previous_session
             ? std::clamp(
                   std::chrono::duration<float>(now - impl_->snapshot_arrival).count() * 60.0f,
                   0.0f, 1.0f)
             : 1.0f;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
                                                   snapshot.instances.end());
+    // Replace the compatibility area body only when its authored fill is
+    // actually present. Other area shapes and their gameplay warnings remain.
+    if (impl_->config.slime_family_preview_count == 0)
+        std::erase_if(render_instances, [&](const RenderInstance &instance) {
+            return instance.mesh == RenderMesh::Area && instance.stable_id != 0 &&
+                std::ranges::any_of(typed_ground_spawns, [&](const VfxGroundSpawnInput &spawn) {
+                    return spawn.source_visual_kind != 0xff &&
+                        spawn.stable_id == instance.stable_id &&
+                        spawn.geometry.shape == VfxGroundShape::Circle &&
+                        spawn.command.primitive == VfxPrimitive::LowFrequencyFill;
+                });
+        });
+    if (impl_->config.slime_family_preview_count == 0)
+        std::erase_if(render_instances, [&](const RenderInstance &instance) {
+            return instance.mesh == RenderMesh::Area && instance.vfx_owner_id != 0 &&
+                std::ranges::any_of(typed_ground_spawns, [&](const VfxGroundSpawnInput &spawn) {
+                    return spawn.stable_id == instance.vfx_owner_id &&
+                        ((spawn.source_visual_kind == 0xff &&
+                          (spawn.geometry.shape == VfxGroundShape::LineBorder || spawn.geometry.shape == VfxGroundShape::ConeBorder)) ||
+                         spawn.geometry.shape == VfxGroundShape::RingGapsBorder ||
+                         spawn.geometry.shape == VfxGroundShape::RingGapsPreviewBorder ||
+                         spawn.geometry.shape == VfxGroundShape::CirclePreviewBorder);
+                });
+        });
+    if (impl_->config.slime_family_preview_count == 0)
+        std::erase_if(render_instances, [&](const RenderInstance &instance) {
+            return (instance.mesh == RenderMesh::PlayerProjectile || instance.mesh == RenderMesh::EnemyProjectile) &&
+                std::ranges::any_of(typed_mesh_spawns, [&](const VfxOwnedMeshInput &head) {
+                    return head.owner_id == instance.stable_id;
+                });
+        });
     if (const auto count = impl_->config.slime_family_preview_count; count != 0)
     {
         render_instances.clear();
@@ -200,6 +260,42 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         target, DirectX::XMVectorScale(direction, camera_distance));
     DirectX::XMFLOAT3 lod_eye{};
     DirectX::XMStoreFloat3(&lod_eye, eye);
+    const Float3 ribbon_eye{lod_eye.x, lod_eye.y, lod_eye.z};
+    if (new_session || impl_->frame_number == 0) impl_->previous_ribbon_eye = ribbon_eye;
+    if (!impl_->ribbon_state.Update(
+            impl_->config.slime_family_preview_count == 0 ? typed_ribbons.sources : std::span<const VfxRibbonSourceInput>{},
+            snapshot.header.tick, snapshot.header.session_id, typed_ribbons.catalog_generation,
+            impl_->config.ribbon_history_points, interpolation, impl_->previous_ribbon_eye, vfx_error))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error);
+    const auto ribbon_updates = impl_->ribbon_state.Updates();
+    const auto ribbon_outputs = impl_->ribbon_state.Outputs();
+    std::unordered_set<std::uint64_t> ribbon_head_ids;
+    for (const auto &source : typed_ribbons.sources) ribbon_head_ids.insert(source.owner_id);
+    std::unordered_set<std::uint64_t> ribbon_projectile_ids;
+    for (const auto &visual : snapshot.persistent_vfx)
+        if (visual.kind == PersistentVfxKind::ProjectileHead && ribbon_head_ids.contains(visual.stable_id))
+            ribbon_projectile_ids.insert(visual.projectile_owner_id);
+    const auto ribbon_history_bytes = static_cast<UINT64>(impl_->ribbon_state.Capacity()) * kRibbonHistoryStride;
+    const auto ribbon_args_bytes = std::max<std::size_t>(ribbon_outputs.size(), 1) * kRibbonArgumentStride;
+    if (!impl_->ribbon_history.resource || impl_->ribbon_history.resource->GetDesc().Width != ribbon_history_bytes ||
+        !impl_->ribbon_arguments.resource || impl_->ribbon_arguments.resource->GetDesc().Width < ribbon_args_bytes)
+    {
+        if (auto waited = impl_->WaitForGpu(); !waited) return waited;
+        D3D12MA::ALLOCATION_DESC allocation{};
+        allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        const auto allocate = [&](AllocationResource &resource, UINT64 bytes) {
+            resource.Reset();
+            return impl_->CreateAllocation(resource, allocation,
+                BufferDescription(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        };
+        if (!impl_->ribbon_history.resource || impl_->ribbon_history.resource->GetDesc().Width != ribbon_history_bytes)
+        {
+            if (auto allocated = allocate(impl_->ribbon_history, ribbon_history_bytes); !allocated) return allocated;
+            if (auto allocated = allocate(impl_->ribbon_previous, ribbon_history_bytes); !allocated) return allocated;
+        }
+        if (!impl_->ribbon_arguments.resource || impl_->ribbon_arguments.resource->GetDesc().Width < ribbon_args_bytes)
+            if (auto allocated = allocate(impl_->ribbon_arguments, ribbon_args_bytes); !allocated) return allocated;
+    }
     const auto is_environment_mesh = [](RenderMesh mesh) {
         return mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass;
     };
@@ -296,10 +392,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         projectile_range = {static_cast<std::size_t>(first - render_instances.begin()),
                             static_cast<std::size_t>(last - first)};
     }
-    std::vector<ParticleSpawnCommand> frame_particle_spawns(particle_spawns.begin(),
-                                                             particle_spawns.end());
-    if (impl_->config.slime_family_preview_count != 0) frame_particle_spawns.clear();
-    if (snapshot.header.tick != impl_->last_status_visual_tick)
+    const bool new_persistent_tick =
+        snapshot.header.tick != impl_->last_status_visual_tick;
+    std::vector<ParticleSpawnCommand> frame_particle_spawns;
+    frame_particle_spawns.reserve(particle_spawns.size());
+    if (impl_->config.slime_family_preview_count == 0)
+    {
+        frame_particle_spawns.insert(frame_particle_spawns.end(),
+                                     particle_spawns.begin(), particle_spawns.end());
+    }
+    if (new_persistent_tick)
     {
         impl_->last_status_visual_tick = snapshot.header.tick;
         for (const auto &source : snapshot.instances)
@@ -311,6 +413,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                         float size, Float4 color, std::uint32_t count) {
                 if ((source.status_visual_mask & static_cast<std::uint32_t>(status)) == 0)
                     return;
+                if (impl_->config.slime_family_preview_count == 0 &&
+                    (status == StatusVisual::Slow || status == StatusVisual::Mark))
+                {
+                    const auto kind = status == StatusVisual::Slow
+                        ? PersistentVfxKind::EnemySlowStatus
+                        : PersistentVfxKind::EnemyMarkStatus;
+                    const auto authored = std::ranges::any_of(snapshot.persistent_vfx,
+                        [&](const PersistentVfxVisual &visual) {
+                            return visual.kind == kind &&
+                                   visual.entity_render_id == source.stable_id &&
+                                   std::ranges::any_of(typed_ground_spawns,
+                                       [&](const VfxGroundSpawnInput &ground) {
+                                           return ground.geometry.shape == VfxGroundShape::PolarRune &&
+                                                  ground.stable_id == visual.stable_id &&
+                                                  ground.source_visual_kind ==
+                                                      static_cast<std::uint8_t>(kind);
+                                       });
+                        });
+                    if (authored) return;
+                }
                 const auto cadence = status == StatusVisual::Bleed ? 6u
                                    : status == StatusVisual::Burn ? 3u
                                                                   : 1u;
@@ -391,6 +513,45 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         for (const auto &visual : snapshot.persistent_vfx)
         {
+            // Boss areas use authored direct outputs rather than a legacy emitter.
+            if (visual.kind == PersistentVfxKind::BossAreaActive ||
+                visual.kind == PersistentVfxKind::ProjectileHead ||
+                visual.kind == PersistentVfxKind::BossDashWarning ||
+                visual.kind == PersistentVfxKind::BossVolleyWarning ||
+                visual.kind == PersistentVfxKind::RangedEnemyWarning ||
+                visual.kind == PersistentVfxKind::MiniBombWarning ||
+                visual.kind == PersistentVfxKind::EnemySpawnWarning ||
+                visual.kind == PersistentVfxKind::BossSpawnWarning ||
+                visual.kind == PersistentVfxKind::BossAreaWarning ||
+                visual.kind == PersistentVfxKind::SuicideEnemyWarning ||
+                visual.kind == PersistentVfxKind::BossShockwaveWavefront ||
+                visual.kind == PersistentVfxKind::BossShockwaveWarning ||
+                visual.kind == PersistentVfxKind::RicochetLink ||
+                visual.kind == PersistentVfxKind::BurnTransferLink ||
+                visual.kind == PersistentVfxKind::RelicChainLink) continue;
+            // The authored head recipe owns the shared history. Do not add the
+            // compatibility straight segment on top of the same projectile.
+            if ((visual.kind == PersistentVfxKind::ProjectileTrail ||
+                 visual.kind == PersistentVfxKind::ProjectileTrailOuter ||
+                 visual.kind == PersistentVfxKind::RicochetProjectileTrail) &&
+                ribbon_projectile_ids.contains(visual.projectile_owner_id)) continue;
+            if ((visual.kind == PersistentVfxKind::DamageTrail ||
+                 visual.kind == PersistentVfxKind::ChargeGuide) &&
+                std::ranges::any_of(typed_ground_spawns, [&](const VfxGroundSpawnInput &spawn) {
+                    return spawn.geometry.shape == VfxGroundShape::LineBorder &&
+                        spawn.stable_id == visual.stable_id &&
+                        spawn.source_visual_kind == static_cast<std::uint8_t>(visual.kind);
+                })) continue;
+            const bool authored_exact_ring =
+                impl_->config.slime_family_preview_count == 0 &&
+                std::ranges::any_of(
+                    typed_ground_spawns, [&visual](const VfxGroundSpawnInput &spawn) {
+                        return spawn.geometry.shape == VfxGroundShape::Circle &&
+                            spawn.command.primitive == VfxPrimitive::ExactRing &&
+                            spawn.stable_id == visual.stable_id &&
+                            spawn.source_visual_kind ==
+                                static_cast<std::uint8_t>(visual.kind);
+                    });
             auto position = visual.position;
             auto visual_yaw = visual.yaw;
             if (interpolation < 1.0f)
@@ -572,7 +733,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             {
                 command.count = 1;
                 command.seed = static_cast<std::uint32_t>(command.sequence);
-                frame_particle_spawns.push_back(command);
+                if (!authored_exact_ring) frame_particle_spawns.push_back(command);
                 constexpr auto notch_count = 4;
                 for (auto index = 0; index < notch_count; ++index)
                 {
@@ -595,7 +756,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
             command.count = 1;
             command.seed = static_cast<std::uint32_t>(command.sequence);
-            frame_particle_spawns.push_back(command);
+            if (!authored_exact_ring ||
+                (visual.kind != PersistentVfxKind::FireArea &&
+                 visual.kind != PersistentVfxKind::ArrowRainArea &&
+                 visual.kind != PersistentVfxKind::RangeIndicator))
+                frame_particle_spawns.push_back(command);
             if (visual.kind == PersistentVfxKind::ArrowRainArea)
             {
                 constexpr std::array marks{
@@ -655,6 +820,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     for (const auto &line : effect_lines)
     {
+        if (std::ranges::any_of(typed_ribbons.sources, [&](const VfxRibbonSourceInput &source) {
+            return source.analytic && source.owner_id == line.sequence;
+        })) continue;
         const auto dx = line.end.x - line.start.x;
         const auto dz = line.end.z - line.start.z;
         const auto length = std::hypot(dx, dz);
@@ -693,8 +861,77 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto particle_owner_data_offset =
         (particle_spawn_data_offset + sizeof(GpuParticleSpawnCommand) *
              std::max<std::size_t>(frame_particle_spawns.size(), 1) + 255u) & ~std::size_t{255u};
-    const auto required_upload_size = particle_owner_data_offset +
-        sizeof(std::uint32_t) * kParticleCount;
+    const auto ground_ring_data_offset =
+        (particle_owner_data_offset + sizeof(std::uint32_t) * kParticleCount + 255u) &
+        ~std::size_t{255u};
+    const auto flash_data_offset =
+        (ground_ring_data_offset + sizeof(GpuParticleSpawnCommand) *
+             std::max<std::size_t>(typed_ground_spawns.size(), 1) + 255u) &
+        ~std::size_t{255u};
+    if (typed_ground_spawns.size() > std::numeric_limits<UINT>::max() ||
+        std::max<std::size_t>(typed_ground_spawns.size(), 1) >
+            (std::numeric_limits<std::size_t>::max() - ground_ring_data_offset) /
+                sizeof(GpuParticleSpawnCommand))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Too many authored ground rings for frame upload.");
+    if (typed_flash_spawns.size() > std::numeric_limits<UINT>::max() ||
+        std::max<std::size_t>(typed_flash_spawns.size(), 1) >
+            (std::numeric_limits<std::size_t>::max() - flash_data_offset) /
+                sizeof(GpuParticleSpawnCommand))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Too many authored flashes for frame upload.");
+    const auto owner_mesh_data_offset = (flash_data_offset +
+        sizeof(GpuParticleSpawnCommand) * std::max<std::size_t>(typed_flash_spawns.size(), 1) + 255u) & ~std::size_t{255u};
+    if (typed_mesh_spawns.size() > std::numeric_limits<UINT>::max() ||
+        std::max<std::size_t>(typed_mesh_spawns.size(), 1) >
+            (std::numeric_limits<std::size_t>::max() - owner_mesh_data_offset) / sizeof(GpuParticleSpawnCommand))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Too many owner mesh commands.");
+    const auto ribbon_update_offset = (owner_mesh_data_offset +
+        sizeof(GpuParticleSpawnCommand) * std::max<std::size_t>(typed_mesh_spawns.size(), 1) + 255u) & ~std::size_t{255u};
+    const auto ribbon_output_offset = (ribbon_update_offset +
+        sizeof(GpuRibbonSourceUpdate) * std::max<std::size_t>(ribbon_updates.size(), 1) + 255u) & ~std::size_t{255u};
+    const auto ground_gap_offset = (ribbon_output_offset +
+        sizeof(GpuRibbonOutput) * std::max<std::size_t>(ribbon_outputs.size(), 1) + 255u) & ~std::size_t{255u};
+    std::size_t ground_gap_count{};
+    for (const auto &spawn : typed_ground_spawns)
+    {
+        if (spawn.geometry.gap_angles_radians.size() > std::numeric_limits<UINT>::max() - ground_gap_count)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Ground gap index overflow.");
+        ground_gap_count += spawn.geometry.gap_angles_radians.size();
+    }
+    for (const auto &distortion : typed_distortions)
+    {
+        if (distortion.shape != VfxDistortionShape::GappedAnnulus) continue;
+        if (distortion.gap_angles_degrees.size() > std::numeric_limits<UINT>::max() - ground_gap_count)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Distortion gap index overflow.");
+        ground_gap_count += distortion.gap_angles_degrees.size();
+    }
+    if (std::max<std::size_t>(ground_gap_count, 1) > (std::numeric_limits<std::size_t>::max() - ground_gap_offset) / sizeof(float))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Ground gap upload overflow.");
+    struct alignas(16) GpuDistortion
+    {
+        DirectX::XMFLOAT4 position_radius, direction_strength, phase_alpha_shape_seed, geometry;
+        DirectX::XMUINT4 gap_range;
+    };
+    static_assert(sizeof(GpuDistortion) == 80);
+    constexpr std::uint32_t kMaxDistortions = 32;
+    const auto distortion_data_offset = (ground_gap_offset + sizeof(float) * std::max<std::size_t>(ground_gap_count, 1) + 255u) & ~std::size_t{255u};
+    struct alignas(16) GpuDecal
+    {
+        DirectX::XMFLOAT4 position_radius, axis_alpha_age, color_hdr, fracture, slab;
+        DirectX::XMUINT4 metadata;
+    };
+    static_assert(sizeof(GpuDecal) == 96);
+    constexpr std::uint32_t kMaxDecals = 64;
+    const auto decal_data_offset = (distortion_data_offset + sizeof(GpuDistortion) * kMaxDistortions + 255u) & ~std::size_t{255u};
+    constexpr std::size_t kMaxFresnelShells = 32;
+    if (typed_fresnels.size() > kMaxFresnelShells)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Too many Fresnel shell commands.");
+    const auto fresnel_data_offset =
+        (decal_data_offset + sizeof(GpuDecal) * kMaxDecals + 255u) & ~std::size_t{255u};
+    const auto required_upload_size = fresnel_data_offset +
+        sizeof(GpuFresnelShell) * kMaxFresnelShells;
     if (required_upload_size > frame.upload_size)
     {
         std::size_t new_size = frame.upload_size;
@@ -717,6 +954,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (FAILED(mapped)) return HResultFailure("Map grown frame upload", mapped);
         frame.upload_size = new_size;
     }
+    if (!ribbon_updates.empty()) std::memcpy(frame.mapped + ribbon_update_offset, ribbon_updates.data(), ribbon_updates.size_bytes());
+    if (!ribbon_outputs.empty()) std::memcpy(frame.mapped + ribbon_output_offset, ribbon_outputs.data(), ribbon_outputs.size_bytes());
     std::uint8_t debug_command{};
     std::uint64_t debug_value{};
     std::uint32_t debug_secondary{};
@@ -839,24 +1078,546 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + particle_spawn_data_offset);
     auto *gpu_particle_owners =
         reinterpret_cast<std::uint32_t *>(frame.mapped + particle_owner_data_offset);
+    auto *gpu_ground_rings = reinterpret_cast<GpuParticleSpawnCommand *>(
+        frame.mapped + ground_ring_data_offset);
+    auto *gpu_flashes = reinterpret_cast<GpuParticleSpawnCommand *>(
+        frame.mapped + flash_data_offset);
+    auto *gpu_owner_meshes = reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + owner_mesh_data_offset);
+    auto *gpu_fresnels = reinterpret_cast<GpuFresnelShell *>(frame.mapped + fresnel_data_offset);
+    struct FresnelDraw
+    {
+        std::size_t instance_index{};
+        std::size_t asset_index{};
+        std::size_t command_index{};
+        bool archer{};
+    };
+    std::vector<FresnelDraw> fresnel_draws;
+    fresnel_draws.reserve(typed_fresnels.size());
+    std::unordered_set<std::uint64_t> fresnel_ids;
+    for (std::size_t index = 0; index < typed_fresnels.size(); ++index)
+    {
+        const auto &source = typed_fresnels[index];
+        const auto finite_transform = [](const VfxTransform &transform) {
+            return std::ranges::all_of(transform, [](float value) { return std::isfinite(value); });
+        };
+        const bool crown = source.kind == VfxFresnelShellKind::BossCrown;
+        const bool transition = source.kind == VfxFresnelShellKind::BossTransition;
+        const bool player = source.kind == VfxFresnelShellKind::PlayerInvulnerable;
+        if (source.render_instance_id == 0 || source.stable_id == 0 ||
+            source.effect_handle == kInvalidVfxEffectHandle ||
+            !fresnel_ids.insert(source.stable_id).second || (!crown && !transition && !player) ||
+            !finite_transform(source.current_transform) ||
+            !finite_transform(source.previous_transform) ||
+            !std::isfinite(source.footprint_radius) || source.footprint_radius <= 0.0f ||
+            !std::isfinite(source.source_progress) || source.source_progress < 0.0f ||
+            source.source_progress >= 1.0f ||
+            !std::isfinite(source.elapsed_seconds) || source.elapsed_seconds < 0.0f ||
+            !std::isfinite(source.color.x) || source.color.x < 0.0f ||
+            !std::isfinite(source.color.y) || source.color.y < 0.0f ||
+            !std::isfinite(source.color.z) || source.color.z < 0.0f ||
+            !std::isfinite(source.color.w) || source.color.w < 0.0f || source.color.w > 1.0f ||
+            !std::isfinite(source.hdr) || source.hdr <= 0.0f ||
+            source.gradient_row >= impl_->vfx_gradient_rows ||
+            !std::isfinite(source.motion_rate_hz) || source.motion_rate_hz < 0.0f ||
+            !std::isfinite(source.motion_amplitude) || source.motion_amplitude < 0.0f ||
+            source.motion_amplitude > 1.0f ||
+            !std::isfinite(source.motion_inset_fraction) ||
+            source.motion_inset_fraction < 0.0f || source.motion_inset_fraction > 1.0f ||
+            !std::isfinite(source.noise_amount) || source.noise_amount < 0.0f ||
+            source.noise_amount > 1.0f ||
+            (crown && (source.sector_count != 6 || !std::isfinite(source.rotation_hz) ||
+                       source.rotation_hz >= 0.0f || source.fresnel_power != 0.0f ||
+                       source.end_crack != 0 || source.noise_amount != 0.0f)) ||
+            (transition && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
+                            !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
+                            source.end_crack != 1 || source.noise_amount != 0.0f)) ||
+            (player && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
+                        !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
+                        source.end_crack != 0)))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                   "Invalid Fresnel shell command.");
+        const auto match = std::ranges::find_if(render_instances, [&](const RenderInstance &instance) {
+            return instance.stable_id == source.render_instance_id &&
+                   (player ? instance.mesh == RenderMesh::Archer :
+                    instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal);
+        });
+        if (match == render_instances.end()) continue;
+        const auto instance_index = static_cast<std::size_t>(match - render_instances.begin());
+        const auto asset_index = player ? 0 : static_cast<std::size_t>(match->mesh) -
+            static_cast<std::size_t>(RenderMesh::MonsterMelee);
+        auto &target = gpu_fresnels[index];
+        target.current_transform = source.current_transform;
+        target.previous_transform = source.previous_transform;
+        target.color = {source.color.x, source.color.y, source.color.z, source.color.w};
+        target.geometry = {source.footprint_radius, source.source_progress,
+                           source.elapsed_seconds, source.hdr};
+        target.motion = {source.motion_rate_hz, source.motion_amplitude,
+                         source.motion_inset_fraction, source.rotation_hz};
+        target.signature = {source.fresnel_power, source.noise_amount, 0.0f, 0.0f};
+        target.metadata = {static_cast<std::uint32_t>(source.kind), source.sector_count,
+                           source.end_crack, source.gradient_row};
+        target.identity = {static_cast<std::uint32_t>(source.render_instance_id),
+                           static_cast<std::uint32_t>(source.render_instance_id >> 32),
+                           static_cast<std::uint32_t>(source.stable_id),
+                           static_cast<std::uint32_t>(source.stable_id >> 32)};
+        fresnel_draws.push_back({instance_index, asset_index, index, player});
+    }
+    std::uint32_t owner_mesh_count{};
+    if (impl_->config.slime_family_preview_count == 0)
+        for (const auto &source : typed_mesh_spawns)
+        {
+            const auto finite = [](const Float3 &v) {
+                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+            };
+            if (source.mesh_index == 0 || source.mesh_index > 7 ||
+                source.gradient_row >= impl_->vfx_gradient_rows || !finite(source.position) ||
+                !finite(source.previous_position) || !finite(source.velocity) ||
+                !finite({source.color.x,source.color.y,source.color.z}) || !std::isfinite(source.color.w) ||
+                !std::isfinite(source.radius) || source.radius <= 0 ||
+                !std::isfinite(source.hdr) || source.hdr <= 0 ||
+                !std::isfinite(source.fresnel) || source.fresnel < 0 || source.fresnel > 1)
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid owner mesh command.");
+            auto &target_mesh = gpu_owner_meshes[owner_mesh_count++];
+            target_mesh = {};
+            target_mesh.position_lifetime_min = {
+                std::lerp(source.previous_position.x, source.position.x, interpolation),
+                std::lerp(source.previous_position.y, source.position.y, interpolation),
+                std::lerp(source.previous_position.z, source.position.z, interpolation),0};
+            target_mesh.direction_lifetime_max = {source.velocity.x,source.velocity.y,source.velocity.z,0};
+            const float transverse = source.radius / impl_->vfx_mesh_transverse_radii[source.mesh_index-1];
+            target_mesh.shape_extent_speed_min = {transverse,transverse,2.0f*source.radius,0};
+            target_mesh.start_color = {source.color.x,source.color.y,source.color.z,source.color.w};
+            target_mesh.size_range.y = source.hdr;
+            target_mesh.rotation_range.x = source.fresnel;
+            target_mesh.metadata.x = source.mesh_index;
+            target_mesh.metadata.y = source.gradient_row;
+        }
+    std::uint32_t flash_count{};
+    std::uint32_t flash_add_count{};
+    for (const bool oit_group : {false, true})
+    for (const auto &source : typed_flash_spawns)
+    {
+        if (source.oit != oit_group) continue;
+        const auto finite = std::isfinite(source.position.x) &&
+            std::isfinite(source.position.y) && std::isfinite(source.position.z) &&
+            std::isfinite(source.color.x) && std::isfinite(source.color.y) &&
+            std::isfinite(source.color.z) && std::isfinite(source.color.w) &&
+            std::isfinite(source.size) && source.size > 0.0f &&
+            std::isfinite(source.delay) && source.delay >= 0.0f &&
+            std::isfinite(source.lifetime) && source.lifetime > 0.0f &&
+            std::isfinite(source.hdr) && source.hdr > 0.0f &&
+            std::isfinite(source.normalized_age) && source.normalized_age >= 0.0f &&
+            source.normalized_age <= 1.0f && source.gradient_row < impl_->vfx_gradient_rows &&
+            static_cast<std::uint32_t>(source.shape) <= static_cast<std::uint32_t>(VfxImpactShape::Spark) &&
+            std::isfinite(source.direction.x) && std::isfinite(source.direction.y) && std::isfinite(source.direction.z) &&
+            std::isfinite(source.aspect) && source.aspect > 0 &&
+            (source.curve_row == 0xffffffffu || source.curve_row < 7) &&
+            (source.mask_slice == 0xffffffffu || source.mask_slice < 12) &&
+            std::isfinite(source.mask_strength) && source.mask_strength >= 0 && source.mask_strength <= 1 &&
+            std::isfinite(source.initial_offset.x) && std::isfinite(source.initial_offset.y) && std::isfinite(source.initial_offset.z) &&
+            std::isfinite(source.initial_velocity.x) && std::isfinite(source.initial_velocity.y) && std::isfinite(source.initial_velocity.z) &&
+            std::isfinite(source.orbit_radius) && source.orbit_radius >= 0 &&
+            std::isfinite(source.orbit_phase) && std::isfinite(source.orbit_rate) &&
+            std::isfinite(source.drag) && source.drag >= 0 &&
+            source.oit == (static_cast<std::uint32_t>(source.shape) >= 10 && static_cast<std::uint32_t>(source.shape) <= 12) &&
+            source.fbm_octaves > 0 && source.fbm_octaves <= 4 &&
+            std::isfinite(source.domain_warp) && source.domain_warp >= 0 &&
+            std::isfinite(source.opacity_scale) && source.opacity_scale > 0 &&
+            std::isfinite(source.motion_strength) && source.motion_strength >= 0 && source.motion_strength <= 1 &&
+            std::isfinite(source.smoke_fps) && source.smoke_fps >= 0 &&
+            (source.shape != VfxImpactShape::Smoke6Way ||
+             (source.smoke_frame_count > 0 && source.smoke_first_frame < 64 &&
+              source.smoke_frame_count <= 64 - source.smoke_first_frame && source.smoke_fps > 0));
+        const auto spark_speed = std::hypot(source.initial_velocity.x,
+                                            source.initial_velocity.y,
+                                            source.initial_velocity.z);
+        const auto spark_direction = std::hypot(source.direction.x,
+                                                source.direction.y,
+                                                source.direction.z);
+        const auto spark_alignment = source.direction.x * source.initial_velocity.x +
+            source.direction.y * source.initial_velocity.y +
+            source.direction.z * source.initial_velocity.z;
+        if (!finite || (source.shape == VfxImpactShape::Spark &&
+            (source.oit || source.ground_base_anchor || source.aspect != 1.0f ||
+             !std::isfinite(spark_speed) || spark_speed <= 0.0f ||
+             !std::isfinite(spark_direction) || std::abs(spark_direction - 1.0f) > 0.001f ||
+             spark_alignment < 0.999f * spark_speed)))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                   "Invalid authored flash command.");
+        if (!source.oit) ++flash_add_count;
+        auto &flash = gpu_flashes[flash_count++];
+        flash = {};
+        flash.position_lifetime_min = {source.position.x, source.position.y,
+                                       source.position.z, source.ground_base_anchor ? 1.0f : 0.0f};
+        flash.start_color = {source.color.x, source.color.y,
+                             source.color.z, source.color.w};
+        flash.size_range.x = source.size;
+        flash.size_range.y = source.hdr;
+        flash.size_range.z = source.normalized_age;
+        flash.metadata.y = source.gradient_row;
+        flash.metadata.x = static_cast<std::uint32_t>(source.shape);
+        flash.metadata.z = source.curve_row;
+        flash.metadata.w = source.mask_slice;
+        flash.direction_lifetime_max = {source.direction.x, source.direction.y, source.direction.z, source.lifetime};
+        flash.shape_extent_speed_min = {source.aspect, source.mask_strength, static_cast<float>(source.stable_seed & 65535u), source.opacity_scale};
+        flash.end_color = {source.initial_offset.x, source.initial_offset.y, source.initial_offset.z, source.drag};
+        flash.speed_cone_gravity_stretch = {source.initial_velocity.x, source.initial_velocity.y, source.initial_velocity.z, source.orbit_radius};
+        flash.rotation_range = {source.orbit_phase, source.orbit_rate, source.domain_warp, source.motion_strength};
+        flash.modes = {source.fbm_octaves, source.smoke_first_frame, source.smoke_frame_count, std::bit_cast<std::uint32_t>(source.smoke_fps)};
+    }
+    std::uint32_t ground_ring_count{};
+    std::uint32_t ground_add_count{};
+    auto *gpu_ground_gaps = reinterpret_cast<float *>(frame.mapped + ground_gap_offset);
+    gpu_ground_gaps[0] = 0.0f;
+    std::uint32_t gap_write_index{};
+    if (impl_->config.slime_family_preview_count == 0)
+    {
+        for (const auto &input : typed_ground_spawns)
+        {
+            const auto &source = input.command;
+            const auto &geometry = input.geometry;
+            const bool line = geometry.shape == VfxGroundShape::LineBorder ||
+                              geometry.shape == VfxGroundShape::LineHatch;
+            const bool cone = geometry.shape == VfxGroundShape::ConeBorder ||
+                              geometry.shape == VfxGroundShape::ConeHatch;
+            const bool safe_sector = geometry.shape == VfxGroundShape::SafeSectorMarker;
+            const bool hex = geometry.shape == VfxGroundShape::HexConstellation;
+            const bool cross_ring = geometry.shape == VfxGroundShape::CrossRing;
+            const bool broken_hex = geometry.shape == VfxGroundShape::BrokenHex;
+            const bool axial_fracture = geometry.shape == VfxGroundShape::AxialFracture;
+            const bool repeating_chevron = geometry.shape == VfxGroundShape::RepeatingChevron;
+            const bool broken_crown = geometry.shape == VfxGroundShape::BrokenCrown;
+            const bool closed_crown = geometry.shape == VfxGroundShape::ClosedCrownRing;
+            const bool state_ring = geometry.shape == VfxGroundShape::StateRing;
+            const bool polar_rune = geometry.shape == VfxGroundShape::PolarRune;
+            const bool authored_additive_shape = cross_ring || broken_hex || axial_fracture ||
+                repeating_chevron || broken_crown || closed_crown;
+            const bool circle_preview = geometry.shape == VfxGroundShape::CirclePreviewBorder || geometry.shape == VfxGroundShape::CirclePreviewTicks;
+            const bool preview = circle_preview || geometry.shape == VfxGroundShape::RingGapsPreviewBorder || geometry.shape == VfxGroundShape::RingGapsTicks;
+            const bool annulus = preview || geometry.shape == VfxGroundShape::RingGapsBorder || geometry.shape == VfxGroundShape::RingGapsFill;
+            const bool boss_signature = input.additive && geometry.animation_phase == 1.0f &&
+                (geometry.shape == VfxGroundShape::Circle ||
+                 geometry.shape == VfxGroundShape::ConeBorder ||
+                 geometry.shape == VfxGroundShape::RingGapsBorder);
+            if (preview && (!std::isfinite(geometry.progress) || geometry.progress < 0 || geometry.progress > 1 ||
+                !std::isfinite(geometry.animation_phase) || geometry.animation_phase < 0 ||
+                ((geometry.shape == VfxGroundShape::RingGapsTicks || geometry.shape == VfxGroundShape::CirclePreviewTicks) && geometry.tick_count == 0)))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored annulus preview timing.");
+            if (annulus && (!std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0 ||
+                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= geometry.inner_radius ||
+                !std::isfinite(geometry.edge_width) || geometry.edge_width < 0 ||
+                ((geometry.shape == VfxGroundShape::RingGapsBorder || geometry.shape == VfxGroundShape::RingGapsPreviewBorder || geometry.shape == VfxGroundShape::CirclePreviewBorder) && geometry.edge_width == 0) ||
+                (circle_preview && (geometry.inner_radius != 0 || !geometry.gap_angles_radians.empty() || geometry.gap_half_angle_radians != 0)) ||
+                !std::isfinite(geometry.gap_half_angle_radians) || geometry.gap_half_angle_radians < 0 ||
+                geometry.gap_half_angle_radians > std::numbers::pi_v<float> ||
+                std::ranges::any_of(geometry.gap_angles_radians, [](float angle) { return !std::isfinite(angle); })))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored annulus geometry.");
+            const float direction_length = std::hypot(geometry.direction.x, geometry.direction.z);
+            if (safe_sector && (!std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0 ||
+                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= geometry.inner_radius ||
+                !std::isfinite(geometry.half_angle_radians) || geometry.half_angle_radians <= 0 || geometry.half_angle_radians > std::numbers::pi_v<float> ||
+                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0 ||
+                !std::isfinite(geometry.animation_phase) || geometry.spokes == 0 || geometry.rings == 0 ||
+                !std::isfinite(direction_length) || direction_length < .999f || direction_length > 1.001f ||
+                !std::isfinite(geometry.direction.y) || geometry.direction.y != 0))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored safe-sector marker.");
+            if (hex && (!input.additive || source.primitive != VfxPrimitive::ExactRing ||
+                geometry.spokes != 6 || !std::isfinite(geometry.progress) ||
+                geometry.progress < 0.0f || geometry.progress >= 1.0f ||
+                (geometry.animation_phase != 0.0f && geometry.animation_phase != 1.0f) ||
+                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
+                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
+                !std::isfinite(source.start_size_min) ||
+                source.start_size_min < geometry.outer_radius + geometry.edge_width ||
+                (geometry.mask_slice != 0xffffffffu && geometry.mask_slice >= 12) ||
+                !std::isfinite(geometry.mask_strength) || geometry.mask_strength < 0.0f ||
+                geometry.mask_strength > 1.0f ||
+                (geometry.mask_slice == 0xffffffffu && geometry.mask_strength != 0.0f)))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored hex constellation.");
+            if (state_ring && (input.additive || source.primitive != VfxPrimitive::ExactRing ||
+                geometry.spokes < 3 || geometry.spokes > 64 ||
+                geometry.rings > 1 ||
+                !std::isfinite(geometry.progress) ||
+                geometry.progress < 0.0f || geometry.progress > 1.0f ||
+                !std::isfinite(geometry.animation_phase) || geometry.animation_phase < 0.0f ||
+                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
+                !std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0.0f ||
+                geometry.inner_radius >= geometry.outer_radius ||
+                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
+                std::abs(geometry.inner_radius -
+                         std::max(0.0f, geometry.outer_radius - geometry.edge_width)) > 0.0001f ||
+                !std::isfinite(source.start_size_min) ||
+                source.start_size_min <= 0.0f ||
+                std::abs(source.start_size_min -
+                         (geometry.outer_radius + geometry.edge_width)) > 0.0001f ||
+                !std::isfinite(source.stretch) ||
+                std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
+                geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
+                !geometry.gap_angles_radians.empty()))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored state ring.");
+            if (polar_rune && (input.additive || source.primitive != VfxPrimitive::ExactRing ||
+                geometry.spokes != 6 || geometry.rings != 2 ||
+                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
+                geometry.progress >= 1.0f || !std::isfinite(geometry.animation_phase) ||
+                geometry.animation_phase < 0.0f ||
+                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
+                !std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0.0f ||
+                geometry.inner_radius >= geometry.outer_radius ||
+                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
+                std::abs(geometry.inner_radius -
+                         std::max(0.0f, geometry.outer_radius - geometry.edge_width)) > 0.0001f ||
+                !std::isfinite(source.start_size_min) ||
+                std::abs(source.start_size_min -
+                         (geometry.outer_radius + geometry.edge_width)) > 0.0001f ||
+                !std::isfinite(source.stretch) ||
+                std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
+                geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
+                !geometry.gap_angles_radians.empty()))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored polar rune.");
+            const float authored_radius = geometry.outer_radius;
+            const float authored_edge = geometry.edge_width;
+            const float authored_extent = axial_fracture
+                ? std::max(geometry.range * 0.5f + authored_edge,
+                           std::max(authored_radius, authored_edge * 3.0f))
+                : repeating_chevron
+                    ? std::max(geometry.half_length, geometry.half_width) + authored_edge
+                    : authored_radius + authored_edge;
+            const float authored_direction_length = std::hypot(geometry.direction.x,
+                                                                geometry.direction.z);
+            const bool invalid_direction = (axial_fracture || repeating_chevron) &&
+                (!std::isfinite(authored_direction_length) ||
+                 authored_direction_length < 0.999f ||
+                 authored_direction_length > 1.001f ||
+                 !std::isfinite(geometry.direction.y) || geometry.direction.y != 0.0f);
+            const bool invalid_chevron = repeating_chevron &&
+                (!std::isfinite(geometry.half_width) || geometry.half_width <= 0.0f ||
+                 !std::isfinite(geometry.half_length) || geometry.half_length <= 0.0f ||
+                 !std::isfinite(geometry.spacing) || geometry.spacing <= 0.0f ||
+                 geometry.spokes != 7);
+            if (authored_additive_shape && (!input.additive ||
+                source.primitive != VfxPrimitive::ExactRing ||
+                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
+                geometry.progress >= 1.0f ||
+                !std::isfinite(geometry.animation_phase) ||
+                (!repeating_chevron && (!std::isfinite(authored_radius) ||
+                                        authored_radius <= 0.0f)) ||
+                !std::isfinite(authored_edge) || authored_edge <= 0.0f ||
+                !std::isfinite(authored_extent) ||
+                !std::isfinite(source.start_size_min) ||
+                source.start_size_min < authored_extent ||
+                (broken_hex && (!std::isfinite(geometry.gap_half_angle_radians) ||
+                    geometry.gap_half_angle_radians <= 0.0f ||
+                    geometry.gap_half_angle_radians >= std::numbers::pi_v<float> / 3.0f)) ||
+                (broken_crown && (!std::isfinite(geometry.inner_radius) ||
+                    geometry.inner_radius <= 0.0f ||
+                    geometry.inner_radius >= authored_radius)) ||
+                invalid_chevron || invalid_direction ||
+                (axial_fracture && (!std::isfinite(geometry.range) ||
+                    geometry.range <= 0.0f))))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored additive ground geometry.");
+            if (boss_signature && (source.primitive != VfxPrimitive::ExactRing ||
+                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
+                geometry.progress >= 1.0f || !std::isfinite(geometry.edge_width) ||
+                geometry.edge_width <= 0.0f ||
+                (geometry.shape == VfxGroundShape::Circle &&
+                 (!std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f)) ||
+                !std::isfinite(source.start_size_min) ||
+                source.start_size_min < (geometry.shape == VfxGroundShape::ConeBorder
+                    ? geometry.range : geometry.outer_radius) + geometry.edge_width))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored boss signature.");
+            if ((geometry.shape != VfxGroundShape::Circle && !line && !cone && !annulus && !safe_sector && !hex && !authored_additive_shape && !state_ring && !polar_rune) ||
+                ((line || cone) && (!std::isfinite(direction_length) || direction_length < 0.999f || direction_length > 1.001f ||
+                          !std::isfinite(geometry.direction.y) || geometry.direction.y != 0.0f ||
+                          (line && (!std::isfinite(geometry.half_width) || geometry.half_width <= 0.0f ||
+                                    !std::isfinite(geometry.half_length) || geometry.half_length <= 0.0f)) ||
+                          (cone && (!std::isfinite(geometry.range) || geometry.range <= 0.0f ||
+                                    !std::isfinite(geometry.half_angle_radians) || geometry.half_angle_radians <= 0.0f ||
+                                    geometry.half_angle_radians > std::numbers::pi_v<float>)) ||
+                          !std::isfinite(geometry.edge_width) || geometry.edge_width < 0.0f ||
+                          ((geometry.shape == VfxGroundShape::LineBorder || geometry.shape == VfxGroundShape::ConeBorder) && geometry.edge_width == 0.0f) ||
+                          !std::isfinite(geometry.spacing) || geometry.spacing <= 0.0f ||
+                          !std::isfinite(geometry.scroll))))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored line geometry.");
+            const auto finite_color = std::isfinite(source.start_color.x) &&
+                std::isfinite(source.start_color.y) &&
+                std::isfinite(source.start_color.z) &&
+                std::isfinite(source.start_color.w);
+            if (input.effect_handle == kInvalidVfxEffectHandle ||
+                source.renderer != VfxRenderer::Ground ||
+                (source.primitive != VfxPrimitive::ExactRing &&
+                 source.primitive != VfxPrimitive::LowFrequencyFill) || source.count != 1 ||
+                (input.additive && ((geometry.shape != VfxGroundShape::Circle && !hex && !boss_signature && !authored_additive_shape) ||
+                                    source.primitive != VfxPrimitive::ExactRing)) ||
+                (input.additive && geometry.shape == VfxGroundShape::Circle &&
+                 geometry.animation_phase != 0.0f && !boss_signature) ||
+                !std::isfinite(source.position.x) ||
+                !std::isfinite(source.position.y) ||
+                !std::isfinite(source.position.z) ||
+                !std::isfinite(source.start_size_min) ||
+                source.start_size_min <= 0.0f ||
+                !std::isfinite(source.stretch) ||
+                (!line && !cone && !annulus && !safe_sector && !axial_fracture &&
+                 !repeating_chevron &&
+                 source.primitive == VfxPrimitive::ExactRing &&
+                 (source.stretch <= 0.0f || source.stretch >= 1.0f)) ||
+                !finite_color || !std::isfinite(input.motion.rate_hz) ||
+                !std::isfinite(input.motion.amplitude) ||
+                !std::isfinite(input.motion.inset_fraction) ||
+                input.motion.rate_hz < 0.0f || input.motion.amplitude < 0.0f ||
+                input.motion.amplitude > 1.0f || input.motion.inset_fraction < 0.0f ||
+                input.motion.inset_fraction > 1.0f ||
+                !std::isfinite(input.hdr) || input.hdr < 0.0f ||
+                input.gradient_row >= impl_->vfx_gradient_rows)
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                       "Invalid authored ground command.");
+            // OIT commands grow from the front; additive rings grow from the
+            // back of the same upload allocation.
+            auto &gpu_ring = input.additive
+                ? gpu_ground_rings[typed_ground_spawns.size() - ++ground_add_count]
+                : gpu_ground_rings[ground_ring_count++];
+            gpu_ring = {};
+            gpu_ring.position_lifetime_min = {source.position.x, source.position.y,
+                                              source.position.z, 0.0f};
+            gpu_ring.speed_cone_gravity_stretch.w = source.stretch;
+            gpu_ring.start_color = {source.start_color.x, source.start_color.y,
+                                    source.start_color.z, source.start_color.w};
+            gpu_ring.size_range.x = source.start_size_min;
+            gpu_ring.size_range.y = input.hdr;
+            gpu_ring.metadata.x = static_cast<std::uint32_t>(source.primitive);
+            gpu_ring.metadata.y = input.gradient_row;
+            gpu_ring.rotation_range = {input.motion.rate_hz, input.motion.amplitude,
+                                       input.motion.inset_fraction, 0.0f};
+            if (line || cone)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.direction_lifetime_max = {geometry.direction.x, 0.0f, geometry.direction.z, 0.0f};
+                gpu_ring.shape_extent_speed_min = {cone ? geometry.range : geometry.half_width,
+                                                  cone ? geometry.half_angle_radians : geometry.half_length,
+                                                  geometry.edge_width, 0.0f};
+                gpu_ring.speed_cone_gravity_stretch = {geometry.spacing, geometry.scroll, 0.0f, 0.0f};
+            }
+            if (safe_sector)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.direction_lifetime_max = {geometry.direction.x, 0, geometry.direction.z, 0};
+                gpu_ring.shape_extent_speed_min = {geometry.inner_radius, geometry.outer_radius, geometry.edge_width, geometry.half_angle_radians};
+                gpu_ring.end_color = {0, geometry.animation_phase, 0, 0};
+                gpu_ring.modes.x = geometry.spokes;
+                gpu_ring.modes.y = geometry.rings;
+            }
+            if (hex)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.shape_extent_speed_min = {0.0f, geometry.outer_radius,
+                                                   geometry.edge_width, geometry.mask_strength};
+                gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
+                gpu_ring.modes.x = geometry.spokes;
+                gpu_ring.modes.y = geometry.mask_slice;
+            }
+            if (state_ring)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.shape_extent_speed_min = {geometry.inner_radius,
+                    geometry.outer_radius, geometry.edge_width, 0.0f};
+                gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
+                gpu_ring.modes.x = geometry.spokes;
+                gpu_ring.modes.y = geometry.rings;
+            }
+            if (polar_rune)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.shape_extent_speed_min = {geometry.inner_radius,
+                    geometry.outer_radius, geometry.edge_width, 0.0f};
+                gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
+                gpu_ring.modes.x = geometry.spokes;
+                gpu_ring.modes.y = geometry.rings;
+            }
+            if (authored_additive_shape)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.shape_extent_speed_min = {
+                    broken_crown ? geometry.inner_radius :
+                        (axial_fracture ? authored_radius :
+                         repeating_chevron ? geometry.half_width : 0.0f),
+                    axial_fracture ? geometry.range :
+                        (repeating_chevron ? geometry.half_length : authored_radius),
+                    authored_edge,
+                    broken_hex ? geometry.gap_half_angle_radians :
+                        (repeating_chevron ? geometry.spacing : 0.0f)};
+                gpu_ring.end_color = {geometry.progress, geometry.animation_phase, 0.0f, 0.0f};
+                if (axial_fracture || repeating_chevron)
+                    gpu_ring.direction_lifetime_max = {geometry.direction.x, 0.0f,
+                                                         geometry.direction.z, 0.0f};
+                if (repeating_chevron) gpu_ring.modes.x = geometry.spokes;
+            }
+            if (annulus)
+            {
+                gpu_ring.metadata.z = static_cast<std::uint32_t>(geometry.shape);
+                gpu_ring.shape_extent_speed_min = {geometry.inner_radius, geometry.outer_radius,
+                    geometry.edge_width, geometry.gap_half_angle_radians};
+                if (preview) gpu_ring.end_color = {geometry.progress, geometry.animation_phase,
+                    std::bit_cast<float>(geometry.tick_count), 0.0f};
+                gpu_ring.modes.x = gap_write_index;
+                gpu_ring.modes.y = static_cast<std::uint32_t>(geometry.gap_angles_radians.size());
+                for (float angle : geometry.gap_angles_radians) gpu_ground_gaps[gap_write_index++] = angle;
+            }
+            if (boss_signature)
+            {
+                gpu_ring.end_color = {geometry.progress, 1.0f, 0.0f, 0.0f};
+                if (geometry.shape == VfxGroundShape::Circle)
+                    gpu_ring.speed_cone_gravity_stretch.w =
+                        geometry.outer_radius / source.start_size_min;
+            }
+        }
+    }
     constexpr auto particle_capacity = kParticleCount;
     std::uint32_t gpu_particle_spawn_count{};
     std::uint32_t total_particles_to_spawn{};
     for (const auto &source : frame_particle_spawns)
     {
+        if (source.mesh_index > 7)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "VFX mesh selector exceeds atlas range");
+        if (source.authored_ballistic && (source.renderer != VfxRenderer::Mesh || source.mesh_index == 0 || source.count != 1 ||
+            !std::isfinite(source.position.x) || !std::isfinite(source.position.y) || !std::isfinite(source.position.z) ||
+            !std::isfinite(source.lifetime_min) || !std::isfinite(source.lifetime_max) || source.lifetime_min <= 0 || source.lifetime_max < source.lifetime_min ||
+            !std::isfinite(source.start_size_min) || !std::isfinite(source.start_size_max) || source.start_size_min <= 0 || source.start_size_max < source.start_size_min ||
+            !std::isfinite(source.end_size_min) || !std::isfinite(source.end_size_max) || source.end_size_min < 0 || source.end_size_max < source.end_size_min ||
+            !std::isfinite(source.start_color.x) || !std::isfinite(source.start_color.y) || !std::isfinite(source.start_color.z) || !std::isfinite(source.start_color.w) ||
+            !std::isfinite(source.end_color.x) || !std::isfinite(source.end_color.y) || !std::isfinite(source.end_color.z) || !std::isfinite(source.end_color.w) ||
+            !std::isfinite(source.rotation_min) || !std::isfinite(source.rotation_max) || !std::isfinite(source.angular_velocity_min) || !std::isfinite(source.angular_velocity_max) ||
+            !std::isfinite(source.authored_ground_y + source.authored_collision_radius) ||
+            !std::isfinite(source.authored_initial_velocity.x) || !std::isfinite(source.authored_initial_velocity.y) || !std::isfinite(source.authored_initial_velocity.z) ||
+            !std::isfinite(source.authored_drag) || source.authored_drag < 0 ||
+            !std::isfinite(source.authored_bounce) || source.authored_bounce < 0 || source.authored_bounce > 1 ||
+            !std::isfinite(source.authored_ground_y) || !std::isfinite(source.authored_collision_radius) || source.authored_collision_radius < 0 ||
+            !std::isfinite(source.authored_hdr) || source.authored_hdr <= 0 || source.authored_gradient_row >= impl_->vfx_gradient_rows ||
+            !std::isfinite(source.authored_birth_fraction) || source.authored_birth_fraction < 0 || source.authored_birth_fraction >= 1 ||
+            !std::isfinite(source.gravity)))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored ballistic command.");
+        if (source.authored_ballistic && (snapshot.header.tick < source.authored_birth_tick ||
+            (snapshot.header.tick == source.authored_birth_tick && source.authored_birth_fraction > 0))) continue;
         if (total_particles_to_spawn == particle_capacity)
         {
             break;
         }
         const auto age_ticks =
             snapshot.header.tick > source.tick ? snapshot.header.tick - source.tick : 0;
-        const auto age = static_cast<float>(age_ticks) / 60.0f;
+        const auto age = source.authored_ballistic
+            ? (static_cast<float>(snapshot.header.tick - source.authored_birth_tick) - source.authored_birth_fraction) / 60.0f
+            : static_cast<float>(age_ticks) / 60.0f;
         if (age >= source.lifetime_max || source.count == 0)
         {
             continue;
         }
         const auto count = std::min(source.count, particle_capacity - total_particles_to_spawn);
         auto &target_spawn = gpu_particle_spawns[gpu_particle_spawn_count++];
+        target_spawn = {};
+        if (source.authored_ballistic)
+        {
+            target_spawn.current_velocity_drag = {source.authored_initial_velocity.x, source.authored_initial_velocity.y, source.authored_initial_velocity.z, source.authored_drag};
+            target_spawn.collision_material = {source.authored_bounce, source.authored_ground_y, source.authored_collision_radius, source.authored_hdr};
+            target_spawn.authored = {1u, std::bit_cast<std::uint32_t>(source.authored_birth_fraction), static_cast<std::uint32_t>(source.authored_birth_tick), source.authored_gradient_row};
+        }
         target_spawn.position_lifetime_min = {source.position.x, source.position.y,
                                               source.position.z, source.lifetime_min};
         target_spawn.direction_lifetime_max = {source.direction.x, source.direction.y,
@@ -882,7 +1643,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                      (static_cast<std::uint32_t>(source.frame_rows) << 24u);
         const auto visual_metadata = static_cast<std::uint32_t>(source.facing) |
                                      (static_cast<std::uint32_t>(source.renderer) << 8u) |
-                                     (static_cast<std::uint32_t>(source.primitive) << 16u);
+                                     (static_cast<std::uint32_t>(source.primitive) << 16u) |
+                                     (static_cast<std::uint32_t>(source.mesh_index) << 24u);
         target_spawn.modes = {static_cast<std::uint32_t>(source.shape),
                               static_cast<std::uint32_t>(source.velocity_mode),
                               visual_metadata,
@@ -899,12 +1661,52 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             : 0;
     const auto view =
         DirectX::XMMatrixLookAtLH(eye, target, DirectX::XMVectorSet(0, 1, 0, 0));
+    const bool temporal_enabled = impl_->config.vfx_quality != VfxQuality::Low;
     const auto projection = DirectX::XMMatrixPerspectiveFovLH(
         DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees),
         static_cast<float>(impl_->render_width) / static_cast<float>(impl_->render_height), 500.0f,
         0.1f);
+    const auto halton = [](std::uint64_t index, std::uint32_t base) noexcept {
+        float value = 0.0f;
+        float scale = 1.0f / static_cast<float>(base);
+        while (index != 0)
+        {
+            value += static_cast<float>(index % base) * scale;
+            index /= base;
+            scale /= static_cast<float>(base);
+        }
+        return value;
+    };
+    const auto jitter_index = 1u + impl_->frame_number % 8u;
+    const auto jitter_x = temporal_enabled
+        ? (halton(jitter_index, 2) - 0.5f) * 2.0f /
+              static_cast<float>(impl_->render_width)
+        : 0.0f;
+    const auto jitter_y = temporal_enabled
+        ? (0.5f - halton(jitter_index, 3)) * 2.0f /
+              static_cast<float>(impl_->render_height)
+        : 0.0f;
+    const auto clip_matrix = view * projection *
+        DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f);
     DirectX::XMStoreFloat4x4(&constants->view_projection,
-                             DirectX::XMMatrixTranspose(view * projection));
+                             DirectX::XMMatrixTranspose(clip_matrix));
+    DirectX::XMStoreFloat4x4(&constants->previous_view_projection,
+                             impl_->temporal_history_valid
+                                 ? DirectX::XMLoadFloat4x4(&impl_->previous_view_projection)
+                                 : DirectX::XMMatrixTranspose(clip_matrix));
+    DirectX::XMFLOAT3 current_temporal_eye{};
+    DirectX::XMStoreFloat3(&current_temporal_eye, eye);
+    const auto camera_delta = std::hypot(
+        current_temporal_eye.x - impl_->temporal_previous_eye.x,
+        current_temporal_eye.y - impl_->temporal_previous_eye.y,
+        current_temporal_eye.z - impl_->temporal_previous_eye.z);
+    if (impl_->temporal_history_valid &&
+        (camera_delta > std::max(2.0f, camera_distance * 0.25f) ||
+         std::abs(snapshot.camera.vertical_fov_degrees - impl_->temporal_previous_fov) > 1.0f))
+        impl_->temporal_history_valid = false;
+    constants->temporal_options = {temporal_enabled ? 1.0f : 0.0f,
+                                   impl_->temporal_history_valid ? 1.0f : 0.0f,
+                                   0.0f, 0.0f};
     if (impl_->frame_number == 0)
     {
         DirectX::XMFLOAT3 projected_origin{};
@@ -939,6 +1741,163 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     DirectX::XMStoreFloat3(&camera_forward, direction);
     constants->camera_forward_softness = {camera_forward.x, camera_forward.y,
                                           camera_forward.z, 0.35f};
+    struct LightCandidate { const VfxLightInput *light; float screen_area; };
+    std::vector<LightCandidate> light_candidates;
+    for (const auto &source : typed_lights)
+    {
+        if (!std::isfinite(source.position.x) || !std::isfinite(source.position.y) || !std::isfinite(source.position.z) ||
+            !std::isfinite(source.radius) || source.radius <= 0 || !std::isfinite(source.intensity) || source.intensity < 0 ||
+            !std::isfinite(source.linear_rgb.x) || !std::isfinite(source.linear_rgb.y) || !std::isfinite(source.linear_rgb.z) ||
+            source.linear_rgb.x < 0 || source.linear_rgb.y < 0 || source.linear_rgb.z < 0 ||
+            static_cast<std::uint32_t>(source.quality) > 2)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored VFX light.");
+        if (source.quality == VfxQuality::Low || source.intensity == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        const auto world = DirectX::XMVectorSet(source.position.x, source.position.y, source.position.z, 1);
+        DirectX::XMFLOAT3 view_position;
+        DirectX::XMStoreFloat3(&view_position, DirectX::XMVector3TransformCoord(world, view));
+        if (view_position.z + source.radius <= .1f || view_position.z - source.radius >= 500.0f) continue;
+        const float distance = std::max(view_position.z, .1f);
+        const float tangent_y = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
+        const float tangent_x = tangent_y * static_cast<float>(impl_->render_width) / impl_->render_height;
+        // Sphere distance to each slanted frustum plane, not a box at center depth.
+        if (std::abs(view_position.x) - view_position.z * tangent_x > source.radius * std::sqrt(1.0f+tangent_x*tangent_x) ||
+            std::abs(view_position.y) - view_position.z * tangent_y > source.radius * std::sqrt(1.0f+tangent_y*tangent_y)) continue;
+        light_candidates.push_back({&source, std::min(1.0f, source.radius * source.radius / (distance * distance))});
+    }
+    std::sort(light_candidates.begin(), light_candidates.end(), [](const auto &a, const auto &b) {
+        if (a.light->importance != b.light->importance) return a.light->importance > b.light->importance;
+        if (a.screen_area != b.screen_area) return a.screen_area > b.screen_area;
+        return a.light->stable_id < b.light->stable_id;
+    });
+    constants->vfx_light_count = {};
+    for (const auto &candidate : light_candidates)
+    {
+        const auto &source = *candidate.light;
+        const auto limit = source.quality == VfxQuality::Medium ? impl_->config.vfx_light_count / 2 : impl_->config.vfx_light_count;
+        const auto index = constants->vfx_light_count.x;
+        if (index >= limit) continue;
+        constants->vfx_light_position_radius[index] = {source.position.x,source.position.y,source.position.z,source.radius};
+        constants->vfx_light_color_intensity[index] = {source.linear_rgb.x,source.linear_rgb.y,source.linear_rgb.z,source.intensity};
+        ++constants->vfx_light_count.x;
+    }
+    struct DistortionCandidate { const VfxDistortionInput *source; float area; };
+    std::vector<DistortionCandidate> distortion_candidates;
+    for (const auto &source : typed_distortions)
+    {
+        const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        if (!finite(source.position) || !finite(source.direction) || !std::isfinite(source.radius) || source.radius <= 0 ||
+            !std::isfinite(source.strength) || source.strength < 0 || !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 ||
+            !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1 ||
+            static_cast<std::uint32_t>(source.shape) > 6 || static_cast<std::uint32_t>(source.quality) > 2)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored distortion command.");
+        const bool cone = source.shape == VfxDistortionShape::ConeSector;
+        const bool annulus = source.shape == VfxDistortionShape::GappedAnnulus;
+        const float horizontal_direction = std::hypot(source.direction.x,source.direction.z);
+        if ((cone && (!std::isfinite(source.half_angle_degrees) || source.half_angle_degrees <= 0 ||
+                      source.half_angle_degrees > 180 || !std::isfinite(horizontal_direction) ||
+                      horizontal_direction <= .0001f || source.inner_radius != 0 ||
+                      source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())) ||
+            (annulus && (!std::isfinite(source.inner_radius) || source.inner_radius < 0 ||
+                         source.inner_radius >= source.radius || !std::isfinite(source.gap_half_width_degrees) ||
+                         source.gap_half_width_degrees < 0 || source.gap_half_width_degrees > 180 ||
+                         source.half_angle_degrees != 0 ||
+                         (!source.gap_angles_degrees.empty() && source.gap_half_width_degrees == 0) ||
+                         std::any_of(source.gap_angles_degrees.begin(),source.gap_angles_degrees.end(),
+                             [](float angle){return !std::isfinite(angle); }))) ||
+            (!cone && !annulus && (source.inner_radius != 0 || source.half_angle_degrees != 0 ||
+                                   source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid exact distortion geometry.");
+        if (source.quality == VfxQuality::Low || source.alpha == 0 || source.strength == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        DirectX::XMFLOAT3 center;
+        DirectX::XMStoreFloat3(&center, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y,source.position.z,1),view));
+        const float radius = source.radius;
+        if (center.z + radius <= .1f || center.z - radius >= 500) continue;
+        const float ty = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
+        const float tx = ty * static_cast<float>(impl_->render_width) / impl_->render_height;
+        if (std::abs(center.x) - center.z * tx > radius * std::sqrt(1 + tx*tx) ||
+            std::abs(center.y) - center.z * ty > radius * std::sqrt(1 + ty*ty)) continue;
+        const float distance = std::max(center.z - radius,.1f);
+        const float area = std::min(1.0f, 3.14159265f * radius * radius / (4 * distance * distance * tx * ty));
+        distortion_candidates.push_back({&source,area});
+    }
+    std::stable_sort(distortion_candidates.begin(),distortion_candidates.end(),[](const auto &a,const auto &b) {
+        if (a.source->importance != b.source->importance) return a.source->importance > b.source->importance;
+        if (a.area != b.area) return a.area > b.area;
+        if (a.source->stable_id != b.source->stable_id) return a.source->stable_id < b.source->stable_id;
+        return a.source->stable_seed < b.source->stable_seed;
+    });
+    auto *gpu_distortions = reinterpret_cast<GpuDistortion *>(frame.mapped + distortion_data_offset);
+    std::uint32_t distortion_count{};
+    float distortion_area{};
+    for (const auto &candidate : distortion_candidates)
+    {
+        const auto &source = *candidate.source;
+        const bool medium = source.quality == VfxQuality::Medium;
+        if (distortion_count >= (medium ? kMaxDistortions/2 : kMaxDistortions) ||
+            distortion_area + candidate.area > impl_->config.distortion_coverage * (medium ? .5f : 1.0f)) continue;
+        auto &gpu = gpu_distortions[distortion_count++];
+        gpu.position_radius = {source.position.x,source.position.y,source.position.z,source.radius};
+        gpu.direction_strength = {source.direction.x,source.direction.y,source.direction.z,source.strength};
+        gpu.phase_alpha_shape_seed = {source.normalized_age,source.alpha,static_cast<float>(source.shape),static_cast<float>(source.stable_seed & 0xffffu)};
+        gpu.geometry = {source.inner_radius,
+                        DirectX::XMConvertToRadians(source.half_angle_degrees),
+                        DirectX::XMConvertToRadians(source.gap_half_width_degrees),0.0f};
+        gpu.gap_range = {gap_write_index,static_cast<UINT>(source.gap_angles_degrees.size()),0,0};
+        for (const float degrees : source.gap_angles_degrees)
+            gpu_ground_gaps[gap_write_index++] = DirectX::XMConvertToRadians(degrees);
+        distortion_area += candidate.area;
+    }
+    struct DecalCandidate { const VfxDecalInput *source; float area; };
+    std::vector<DecalCandidate> decal_candidates;
+    for (const auto &source : typed_decals)
+    {
+        const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
+        const bool fracture = source.kind == VfxDecalKind::Fracture;
+        if (!finite(source.position) || !finite(source.direction) || !finite(source.linear_rgb) ||
+            source.linear_rgb.x < 0 || source.linear_rgb.y < 0 || source.linear_rgb.z < 0 ||
+            !std::isfinite(source.radius) || source.radius <= 0 || !std::isfinite(source.hdr) || source.hdr < 0 ||
+            !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 || !std::isfinite(source.normalized_age) ||
+            source.normalized_age < 0 || source.normalized_age > 1 || !std::isfinite(source.edge_glow) || source.edge_glow < 0 || source.edge_glow > 1 ||
+            source.gradient_row >= impl_->vfx_gradient_rows || source.texture_slice >= (fracture ? 4u : 8u) ||
+            static_cast<std::uint32_t>(source.kind) > 1 || static_cast<std::uint32_t>(source.quality) > 2 ||
+            (fracture && source.voronoi_cells == 0))
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Invalid authored projected decal.");
+        if (source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
+        // Ground-only projector slab follows its source anchor, including elevated death events.
+        DirectX::XMFLOAT3 center;
+        DirectX::XMStoreFloat3(&center,DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y-.825f,source.position.z,1),view));
+        const float radius = std::hypot(source.radius,1.175f);
+        const float ty = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees)*.5f);
+        const float tx = ty*static_cast<float>(impl_->render_width)/impl_->render_height;
+        if (center.z+radius <= .1f || center.z-radius >= 500 ||
+            std::abs(center.x)-center.z*tx > radius*std::sqrt(1+tx*tx) ||
+            std::abs(center.y)-center.z*ty > radius*std::sqrt(1+ty*ty)) continue;
+        const float distance = std::max(center.z,.1f);
+        decal_candidates.push_back({&source,std::min(1.0f,source.radius*source.radius/(distance*distance))});
+    }
+    std::stable_sort(decal_candidates.begin(),decal_candidates.end(),[](const auto &a,const auto &b) {
+        if(a.source->importance != b.source->importance) return a.source->importance > b.source->importance;
+        if(a.area != b.area) return a.area > b.area;
+        if(a.source->stable_id != b.source->stable_id) return a.source->stable_id < b.source->stable_id;
+        return a.source->stable_seed < b.source->stable_seed;
+    });
+    auto *gpu_decals = reinterpret_cast<GpuDecal *>(frame.mapped+decal_data_offset);
+    constants->vfx_decal_count = {};
+    for(const auto &candidate:decal_candidates)
+    {
+        const auto &source=*candidate.source;
+        const auto limit=source.quality==VfxQuality::Low?kMaxDecals/4:(source.quality==VfxQuality::Medium?kMaxDecals/2:kMaxDecals);
+        if(constants->vfx_decal_count.x>=limit) continue;
+        auto &gpu=gpu_decals[constants->vfx_decal_count.x++];
+        std::uint32_t hash=source.stable_seed*747796405u+2891336453u; hash=(hash^(hash>>16))*2246822519u;
+        const float angle=std::atan2(source.direction.z,source.direction.x)+static_cast<float>(hash&0x00ffffffu)*(6.283185307f/16777216.0f);
+        gpu.position_radius={source.position.x,source.position.y,source.position.z,source.radius};
+        gpu.axis_alpha_age={std::cos(angle),std::sin(angle),source.alpha,source.normalized_age};
+        gpu.color_hdr={source.linear_rgb.x,source.linear_rgb.y,source.linear_rgb.z,source.hdr};
+        gpu.fracture={source.edge_glow,static_cast<float>(source.voronoi_cells),0,0};
+        gpu.slab={source.position.y-2.0f,source.position.y+.35f,0,0};
+        gpu.metadata={source.gradient_row,source.texture_slice,static_cast<std::uint32_t>(source.kind),source.stable_seed};
+    }
     constexpr float cascade_extent[] = {18.0f, 48.0f, 160.0f};
     const auto base_shadow = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
     constants->shadow_atlas_texel_size = {1.0f / float(base_shadow * 5u), 1.0f / float(base_shadow * 4u), float(base_shadow * 5u), float(base_shadow * 4u)};
@@ -1121,6 +2080,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         static_cast<float>(particle_capacity), impl_->config.bloom ? 1.0f : 0.0f,
         impl_->config.outline ? 1.0f : 0.0f,
         static_cast<float>(particle_delta_ticks) / 60.0f};
+    constants->authored_particle_clock = {static_cast<std::uint32_t>(snapshot.header.tick), 0, 0, 0};
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
                                    total_particles_to_spawn,
                                    impl_->archer_material_count};
@@ -1287,16 +2247,59 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto post_a_rtv = rtv_at(kFrameCount + 6);
     const auto post_b_rtv = rtv_at(kFrameCount + 7);
     const auto gbuffer_material_rtv = rtv_at(kFrameCount + 8);
+    const auto distortion_rtv = rtv_at(12 + back_buffer_index);
+    const auto bloom_half_rtv = rtv_at(kBloomRtvOffset);
+    const auto bloom_quarter_rtv = rtv_at(kBloomRtvOffset + 1);
+    const auto bloom_half_combined_rtv = rtv_at(kBloomRtvOffset + 2);
+    const auto temporal_read_index = impl_->temporal_read_index;
+    const auto temporal_write_index = temporal_read_index ^ 1u;
+    const auto temporal_write_rtv = rtv_at(kTemporalRtvOffset + temporal_write_index);
     const auto dsv = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
     ID3D12DescriptorHeap *descriptor_heaps[] = {impl_->srv_heap.Get()};
     impl_->command_list->SetDescriptorHeaps(1, descriptor_heaps);
     auto texture_table = impl_->srv_heap->GetGPUDescriptorHandleForHeapStart();
     texture_table.ptr += static_cast<UINT64>(back_buffer_index) *
                          kTextureDescriptorCount * impl_->srv_stride;
+    auto distortion_table = texture_table;
+    distortion_table.ptr += 47ull * impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(26, distortion_table);
+    auto decal_table = texture_table;
+    decal_table.ptr += 50ull*impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(29,decal_table);
+    auto bloom_table = texture_table;
+    bloom_table.ptr += static_cast<UINT64>(kBloomTextureDescriptorOffset) * impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(30, bloom_table);
+    auto temporal_cpu = impl_->srv_heap->GetCPUDescriptorHandleForHeapStart();
+    temporal_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
+                         kTemporalTextureDescriptorOffset) * impl_->srv_stride;
+    D3D12_SHADER_RESOURCE_VIEW_DESC temporal_view{};
+    temporal_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    temporal_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    temporal_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    temporal_view.Texture2D.MipLevels = 1;
+    impl_->device->CreateShaderResourceView(
+        impl_->temporal_history[temporal_read_index].resource.Get(), &temporal_view,
+        temporal_cpu);
+    temporal_cpu.ptr += impl_->srv_stride;
+    impl_->device->CreateShaderResourceView(
+        impl_->temporal_history[temporal_write_index].resource.Get(), &temporal_view,
+        temporal_cpu);
+    auto temporal_table = texture_table;
+    temporal_table.ptr += static_cast<UINT64>(kTemporalTextureDescriptorOffset) *
+                          impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(32, temporal_table);
+    temporal_table.ptr += impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(33, temporal_table);
+    impl_->command_list->SetGraphicsRootShaderResourceView(28,frame.upload.resource->GetGPUVirtualAddress()+decal_data_offset);
     auto character_table = texture_table;
     character_table.ptr += static_cast<UINT64>(kPostTextureDescriptorCount) *
                            impl_->srv_stride;
     impl_->command_list->SetGraphicsRootDescriptorTable(13, character_table);
+    auto curve_table = character_table;
+    curve_table.ptr += static_cast<UINT64>(kCharacterDescriptorCount + kMonsterPbrDescriptorCount +
+        kEnvironmentDescriptorCount + kVfxGradientDescriptorCount + 3) * impl_->srv_stride;
+    impl_->command_list->SetGraphicsRootDescriptorTable(24, curve_table);
+    impl_->command_list->SetGraphicsRootShaderResourceView(25, frame.upload.resource->GetGPUVirtualAddress() + ground_gap_offset);
     impl_->command_list->SetGraphicsRootShaderResourceView(
         15, impl_->monster_skin_matrices.resource->GetGPUVirtualAddress());
     const auto draw_fullscreen =
@@ -1309,6 +2312,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         };
 
     impl_->graph.Reset();
+    const auto distortion_vectors = impl_->graph.CreateTexture(
+        {impl_->render_width,impl_->render_height,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET}, "VFX Distortion Vectors");
+    const auto ribbon_history = impl_->graph.ImportBuffer({impl_->ribbon_history.resource.Get()}, Access::UnorderedWrite, "RibbonHistory");
+    const auto ribbon_previous = impl_->graph.ImportBuffer({impl_->ribbon_previous.resource.Get()}, Access::UnorderedWrite, "RibbonPrevious");
+    const auto ribbon_arguments = impl_->graph.ImportBuffer({impl_->ribbon_arguments.resource.Get()}, Access::UnorderedWrite, "RibbonArguments");
+    const auto draw_ribbons = [&](bool oit) {
+        impl_->command_list->SetPipelineState(oit ? impl_->ribbon_oit_pipeline.Get() : impl_->ribbon_add_pipeline.Get());
+        impl_->command_list->SetGraphicsRootShaderResourceView(18, frame.upload.resource->GetGPUVirtualAddress() + ribbon_output_offset);
+        impl_->command_list->SetGraphicsRootShaderResourceView(19, impl_->ribbon_history.resource->GetGPUVirtualAddress());
+        impl_->command_list->SetGraphicsRootShaderResourceView(20, impl_->ribbon_previous.resource->GetGPUVirtualAddress());
+        const auto split = std::ranges::find_if(ribbon_outputs, [](const GpuRibbonOutput &output) {
+            return (output.metadata[3] & 1u) != 0;
+        });
+        const auto first = oit ? static_cast<std::size_t>(split - ribbon_outputs.begin()) : 0;
+        const auto count = oit ? ribbon_outputs.size() - first : static_cast<std::size_t>(split - ribbon_outputs.begin());
+        if (count != 0)
+            impl_->command_list->ExecuteIndirect(impl_->ribbon_draw_signature.Get(), static_cast<UINT>(count),
+                impl_->ribbon_arguments.resource.Get(), first * kRibbonArgumentStride, nullptr, 0);
+        impl_->command_list->SetGraphicsRoot32BitConstant(6, 0, 0);
+    };
     const auto particles = impl_->graph.ImportBuffer(
         {impl_->particles.resource.Get()}, Access::UnorderedWrite, "Particles");
     const auto particle_input_index = impl_->particle_input_is_a ? 0u : 1u;
@@ -1351,6 +2374,19 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {impl_->gbuffer_material.resource.Get()}, initial_color_access, "GBufferMaterial");
     const auto post_b = impl_->graph.ImportTexture(
         {impl_->post_b.resource.Get()}, initial_color_access, "PostB");
+    const auto temporal_read = impl_->graph.ImportTexture(
+        {impl_->temporal_history[temporal_read_index].resource.Get()},
+        initial_color_access, "TemporalHistoryRead");
+    const auto temporal_write = impl_->graph.ImportTexture(
+        {impl_->temporal_history[temporal_write_index].resource.Get()},
+        initial_color_access, "TemporalHistoryWrite");
+    const auto bloom_half = impl_->graph.ImportTexture(
+        {impl_->bloom_half.resource.Get()}, initial_color_access, "BloomHalf");
+    const auto bloom_quarter = impl_->graph.ImportTexture(
+        {impl_->bloom_quarter.resource.Get()}, initial_color_access, "BloomQuarter");
+    const auto bloom_half_combined = impl_->graph.ImportTexture(
+        {impl_->bloom_half_combined.resource.Get()}, initial_color_access,
+        "BloomHalfCombined");
     const auto ui = impl_->graph.ImportTexture(
         {ui_texture.resource.Get()}, Access::ShaderRead, "UiTexture");
     const auto back_buffer = impl_->graph.ImportTexture(
@@ -1363,9 +2399,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     particle_pass.ReadWrite(particle_dead, Access::UnorderedWrite);
     particle_pass.ReadWrite(particle_counters, Access::UnorderedWrite);
     particle_pass.ReadWrite(indirect_arguments, Access::UnorderedWrite);
+    particle_pass.ReadWrite(ribbon_history, Access::UnorderedWrite);
+    particle_pass.ReadWrite(ribbon_previous, Access::UnorderedWrite);
+    particle_pass.ReadWrite(ribbon_arguments, Access::UnorderedWrite);
     const auto initialize_particles = !impl_->particles_initialized;
     particle_pass.SetExecute([&](RenderPassContext &context) {
         impl_->command_list->SetPipelineState(impl_->particle_compute_pipeline.Get());
+        impl_->command_list->SetComputeRootShaderResourceView(16, impl_->vfx_mesh_atlas.resource->GetGPUVirtualAddress());
         impl_->command_list->SetComputeRootUnorderedAccessView(
             3, impl_->particles.resource->GetGPUVirtualAddress());
         impl_->command_list->SetComputeRootUnorderedAccessView(
@@ -1411,9 +2451,30 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             dispatch_phase(3, total_particles_to_spawn);
             synchronize_particle_state();
         }
-        dispatch_phase(4, 1);
+        dispatch_phase(4, particle_capacity);
+        context.UavBarrier(particle_alive_output);
+        context.UavBarrier(particle_counters);
+        dispatch_phase(5, 1);
         context.UavBarrier(particle_counters);
         context.UavBarrier(indirect_arguments);
+        impl_->command_list->SetComputeRootShaderResourceView(17, frame.upload.resource->GetGPUVirtualAddress() + ribbon_update_offset);
+        impl_->command_list->SetComputeRootShaderResourceView(18, frame.upload.resource->GetGPUVirtualAddress() + ribbon_output_offset);
+        impl_->command_list->SetComputeRootUnorderedAccessView(21, impl_->ribbon_history.resource->GetGPUVirtualAddress());
+        impl_->command_list->SetComputeRootUnorderedAccessView(22, impl_->ribbon_previous.resource->GetGPUVirtualAddress());
+        impl_->command_list->SetComputeRootUnorderedAccessView(23, impl_->ribbon_arguments.resource->GetGPUVirtualAddress());
+        if (!ribbon_updates.empty())
+        {
+            impl_->command_list->SetPipelineState(impl_->ribbon_update_pipeline.Get());
+            impl_->command_list->Dispatch(static_cast<UINT>(ribbon_updates.size()), 1, 1);
+            context.UavBarrier(ribbon_history);
+            context.UavBarrier(ribbon_previous);
+        }
+        if (!ribbon_outputs.empty())
+        {
+            impl_->command_list->SetPipelineState(impl_->ribbon_args_pipeline.Get());
+            impl_->command_list->Dispatch(static_cast<UINT>(ribbon_outputs.size()), 1, 1);
+            context.UavBarrier(ribbon_arguments);
+        }
     });
 
     const auto draw_character_instances = [&] {
@@ -1533,12 +2594,31 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->deferred_pipeline.Get(), hdr_rtv);
     });
 
-    auto transparent_pass = impl_->graph.AddPass(kRenderPassNames[4], QueueHint::Direct);
+    auto distortion_pass = impl_->graph.AddPass(kRenderPassNames[4], QueueHint::Direct);
+    distortion_pass.Read(gbuffer_position, Access::ShaderRead);
+    distortion_pass.Read(gbuffer_normal, Access::ShaderRead);
+    distortion_pass.Write(distortion_vectors, Access::RenderTarget);
+    distortion_pass.SetExecute([&](RenderPassContext &) {
+        constexpr float clear[] = {0,0,0,0};
+        impl_->command_list->ClearRenderTargetView(distortion_rtv,clear,0,nullptr);
+        if (distortion_count == 0) return;
+        impl_->command_list->OMSetRenderTargets(1,&distortion_rtv,FALSE,nullptr);
+        impl_->command_list->SetPipelineState(impl_->vfx_distortion_pipeline.Get());
+        impl_->command_list->SetGraphicsRootDescriptorTable(5,texture_table);
+        impl_->command_list->SetGraphicsRootShaderResourceView(27,frame.upload.resource->GetGPUVirtualAddress()+distortion_data_offset);
+        impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        impl_->command_list->DrawInstanced(6,distortion_count,0,0);
+    });
+
+    auto transparent_pass = impl_->graph.AddPass(kRenderPassNames[5], QueueHint::Direct);
     transparent_pass.Read(depth, Access::DepthRead);
     transparent_pass.Read(shadow, Access::ShaderRead);
     transparent_pass.Read(particles, Access::ShaderRead);
     transparent_pass.Read(particle_alive_output, Access::ShaderRead);
     transparent_pass.Read(indirect_arguments, Access::IndirectArgs);
+    transparent_pass.Read(ribbon_history, Access::ShaderRead);
+    transparent_pass.Read(ribbon_previous, Access::ShaderRead);
+    transparent_pass.Read(ribbon_arguments, Access::IndirectArgs);
     transparent_pass.Read(gbuffer_position, Access::ShaderRead);
     transparent_pass.Read(gbuffer_normal, Access::ShaderRead);
     transparent_pass.Write(oit_accumulation, Access::RenderTarget);
@@ -1554,16 +2634,52 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             oit_accumulation_rtv, oit_revealage_rtv};
         impl_->command_list->OMSetRenderTargets(2, targets, FALSE, &dsv);
         impl_->command_list->SetPipelineState(impl_->particle_pipeline.Get());
+        impl_->command_list->SetGraphicsRootShaderResourceView(16, impl_->vfx_mesh_atlas.resource->GetGPUVirtualAddress());
         impl_->command_list->SetGraphicsRootShaderResourceView(
             2, impl_->particles.resource->GetGPUVirtualAddress());
         impl_->command_list->SetGraphicsRootShaderResourceView(
             12,
             impl_->particle_alive[particle_output_index].resource->GetGPUVirtualAddress());
         impl_->command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        impl_->command_list->ExecuteIndirect(
-            impl_->draw_signature.Get(), 1, impl_->indirect_arguments.resource.Get(), 0, nullptr,
-            0);
+        for (UINT bin = 0; bin < 2; ++bin)
+        {
+            impl_->command_list->SetGraphicsRoot32BitConstant(6, bin, 0);
+            impl_->command_list->ExecuteIndirect(
+                impl_->draw_signature.Get(), 1, impl_->indirect_arguments.resource.Get(),
+                bin * sizeof(D3D12_DRAW_ARGUMENTS), nullptr, 0);
+        }
+        impl_->command_list->SetGraphicsRoot32BitConstant(6, 0, 0);
+        if (ground_ring_count != 0)
+        {
+            impl_->command_list->SetPipelineState(impl_->ground_ring_pipeline.Get());
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                11, frame.upload.resource->GetGPUVirtualAddress() +
+                        ground_ring_data_offset);
+            impl_->command_list->DrawInstanced(6, ground_ring_count, 0, 0);
+        }
 
+        if (owner_mesh_count != 0)
+        {
+            impl_->command_list->SetPipelineState(impl_->owner_mesh_pipeline.Get());
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                11, frame.upload.resource->GetGPUVirtualAddress() + owner_mesh_data_offset);
+            for (std::uint32_t index = 0; index < owner_mesh_count; ++index)
+            {
+                impl_->command_list->SetGraphicsRoot32BitConstant(6, index, 0);
+                impl_->command_list->DrawInstanced(
+                    impl_->vfx_mesh_vertex_counts[typed_mesh_spawns[index].mesh_index - 1], 1, 0, 0);
+            }
+            impl_->command_list->SetGraphicsRoot32BitConstant(6, 0, 0);
+        }
+
+        if (flash_count > flash_add_count)
+        {
+            impl_->command_list->SetPipelineState(impl_->vfx_sprite_oit_pipeline.Get());
+            impl_->command_list->SetGraphicsRootShaderResourceView(11,
+                frame.upload.resource->GetGPUVirtualAddress() + flash_data_offset + flash_add_count * sizeof(GpuParticleSpawnCommand));
+            impl_->command_list->DrawInstanced(6, flash_count - flash_add_count, 0, 0);
+        }
+        draw_ribbons(true);
         // Family bodies and gel projectiles use the weighted OIT mesh pipeline.
         impl_->command_list->SetPipelineState(impl_->slime_pipeline.Get());
         impl_->command_list->IASetVertexBuffers(0, 1, &impl_->monster_assets[0].vertex_view);
@@ -1585,36 +2701,146 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                          impl_->monster_assets[2].vertex_view, impl_->monster_assets[2].vertex_count);
         draw_slime_range(projectile_range,
                          impl_->gel_projectile_vertex_view, impl_->gel_projectile_vertex_count);
+        if (!fresnel_draws.empty())
+        {
+            impl_->command_list->SetPipelineState(impl_->fresnel_shell_pipeline.Get());
+            impl_->command_list->SetGraphicsRootDescriptorTable(5, texture_table);
+            for (const auto &draw : fresnel_draws)
+            {
+                impl_->command_list->SetGraphicsRootShaderResourceView(
+                    1, frame.upload.resource->GetGPUVirtualAddress() + kInstanceDataOffset +
+                           draw.instance_index * sizeof(GpuInstance));
+                impl_->command_list->SetGraphicsRootShaderResourceView(
+                    31, frame.upload.resource->GetGPUVirtualAddress() + fresnel_data_offset +
+                            draw.command_index * sizeof(GpuFresnelShell));
+                if (draw.archer)
+                {
+                    impl_->command_list->IASetVertexBuffers(0, 1, &impl_->archer_vertex_view);
+                    impl_->command_list->DrawInstanced(impl_->archer_vertex_count, 1, 0, 0);
+                }
+                else
+                {
+                    const auto &asset = impl_->monster_assets[draw.asset_index];
+                    impl_->command_list->IASetVertexBuffers(0, 1, &asset.vertex_view);
+                    impl_->command_list->DrawInstanced(asset.vertex_count, 1, 0, 0);
+                }
+            }
+        }
     });
 
-    auto composite_pass = impl_->graph.AddPass(kRenderPassNames[5], QueueHint::Direct);
+    auto composite_pass = impl_->graph.AddPass(kRenderPassNames[6], QueueHint::Direct);
     composite_pass.Read(hdr, Access::ShaderRead);
+    composite_pass.Read(distortion_vectors, Access::ShaderRead);
     composite_pass.Read(oit_accumulation, Access::ShaderRead);
     composite_pass.Read(oit_revealage, Access::ShaderRead);
+    composite_pass.Read(gbuffer_position, Access::ShaderRead);
+    composite_pass.Read(gbuffer_normal, Access::ShaderRead);
+    composite_pass.Read(ribbon_history, Access::ShaderRead);
+    composite_pass.Read(ribbon_previous, Access::ShaderRead);
+    composite_pass.Read(ribbon_arguments, Access::IndirectArgs);
+    composite_pass.Read(depth, Access::DepthRead);
     composite_pass.Write(post_a, Access::RenderTarget);
     composite_pass.SetExecute([&](RenderPassContext &) {
         constexpr float clear[] = {0, 0, 0, 0};
         impl_->command_list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
         draw_fullscreen(impl_->composite_pipeline.Get(), post_a_rtv);
+        if (flash_add_count != 0)
+        {
+            impl_->command_list->SetPipelineState(impl_->vfx_flash_pipeline.Get());
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                11, frame.upload.resource->GetGPUVirtualAddress() + flash_data_offset);
+            impl_->command_list->DrawInstanced(6, flash_add_count, 0, 0);
+        }
+        if (ground_add_count != 0)
+        {
+            impl_->command_list->OMSetRenderTargets(1, &post_a_rtv, FALSE, &dsv);
+            impl_->command_list->SetPipelineState(impl_->ground_add_pipeline.Get());
+            impl_->command_list->SetGraphicsRootShaderResourceView(
+                11, frame.upload.resource->GetGPUVirtualAddress() + ground_ring_data_offset +
+                        (typed_ground_spawns.size() - ground_add_count) *
+                            sizeof(GpuParticleSpawnCommand));
+            impl_->command_list->DrawInstanced(6, ground_add_count, 0, 0);
+        }
+        impl_->command_list->OMSetRenderTargets(1, &post_a_rtv, FALSE, &dsv);
+        draw_ribbons(false);
     });
 
-    auto bloom_pass = impl_->graph.AddPass(kRenderPassNames[6], QueueHint::Direct);
+    auto temporal_pass = impl_->graph.AddPass(kRenderPassNames[7], QueueHint::Direct);
+    temporal_pass.Read(post_a, Access::ShaderRead);
+    temporal_pass.Read(hdr, Access::ShaderRead);
+    temporal_pass.Read(gbuffer_position, Access::ShaderRead);
+    temporal_pass.Read(gbuffer_normal, Access::ShaderRead);
+    temporal_pass.Read(temporal_read, Access::ShaderRead);
+    temporal_pass.Write(temporal_write, Access::RenderTarget);
+    temporal_pass.SetExecute([&](RenderPassContext &) {
+        draw_fullscreen(impl_->temporal_pipeline.Get(), temporal_write_rtv);
+    });
+
+    const auto half_width = impl_->render_width / 2 + impl_->render_width % 2;
+    const auto half_height = impl_->render_height / 2 + impl_->render_height % 2;
+    const auto quarter_width = half_width / 2 + half_width % 2;
+    const auto quarter_height = half_height / 2 + half_height % 2;
+    const auto set_bloom_viewport = [&](std::uint32_t width, std::uint32_t height) {
+        const D3D12_VIEWPORT target_viewport{0.0f, 0.0f, static_cast<float>(width),
+                                            static_cast<float>(height), 0.0f, 1.0f};
+        const D3D12_RECT target_scissor{0, 0, static_cast<LONG>(width),
+                                       static_cast<LONG>(height)};
+        impl_->command_list->RSSetViewports(1, &target_viewport);
+        impl_->command_list->RSSetScissorRects(1, &target_scissor);
+    };
+    auto bloom_extract_pass = impl_->graph.AddPass(kRenderPassNames[8], QueueHint::Direct);
+    bloom_extract_pass.Read(post_a, Access::ShaderRead);
+    bloom_extract_pass.Read(temporal_write, Access::ShaderRead);
+    bloom_extract_pass.Write(bloom_half, Access::RenderTarget);
+    bloom_extract_pass.SetExecute([&](RenderPassContext &) {
+        constexpr float clear[] = {0, 0, 0, 0};
+        impl_->command_list->ClearRenderTargetView(bloom_half_rtv, clear, 0, nullptr);
+        set_bloom_viewport(half_width, half_height);
+        draw_fullscreen(impl_->bloom_extract_pipeline.Get(), bloom_half_rtv);
+    });
+
+    auto bloom_downsample_pass = impl_->graph.AddPass(kRenderPassNames[9], QueueHint::Direct);
+    bloom_downsample_pass.Read(bloom_half, Access::ShaderRead);
+    bloom_downsample_pass.Write(bloom_quarter, Access::RenderTarget);
+    bloom_downsample_pass.SetExecute([&](RenderPassContext &) {
+        constexpr float clear[] = {0, 0, 0, 0};
+        impl_->command_list->ClearRenderTargetView(bloom_quarter_rtv, clear, 0, nullptr);
+        set_bloom_viewport(quarter_width, quarter_height);
+        draw_fullscreen(impl_->bloom_downsample_pipeline.Get(), bloom_quarter_rtv);
+    });
+
+    auto bloom_upsample_pass = impl_->graph.AddPass(kRenderPassNames[10], QueueHint::Direct);
+    bloom_upsample_pass.Read(bloom_half, Access::ShaderRead);
+    bloom_upsample_pass.Read(bloom_quarter, Access::ShaderRead);
+    bloom_upsample_pass.Write(bloom_half_combined, Access::RenderTarget);
+    bloom_upsample_pass.SetExecute([&](RenderPassContext &) {
+        constexpr float clear[] = {0, 0, 0, 0};
+        impl_->command_list->ClearRenderTargetView(bloom_half_combined_rtv, clear, 0, nullptr);
+        set_bloom_viewport(half_width, half_height);
+        draw_fullscreen(impl_->bloom_upsample_pipeline.Get(), bloom_half_combined_rtv);
+    });
+
+    auto bloom_pass = impl_->graph.AddPass(kRenderPassNames[11], QueueHint::Direct);
     bloom_pass.Read(post_a, Access::ShaderRead);
+    bloom_pass.Read(temporal_write, Access::ShaderRead);
+    bloom_pass.Read(bloom_half_combined, Access::ShaderRead);
     bloom_pass.Write(post_b, Access::RenderTarget);
     bloom_pass.SetExecute([&](RenderPassContext &) {
         constexpr float clear[] = {0, 0, 0, 0};
         impl_->command_list->ClearRenderTargetView(post_b_rtv, clear, 0, nullptr);
+        impl_->command_list->RSSetViewports(1, &viewport);
+        impl_->command_list->RSSetScissorRects(1, &scissor);
         draw_fullscreen(impl_->bloom_pipeline.Get(), post_b_rtv);
     });
 
-    auto tone_map_pass = impl_->graph.AddPass(kRenderPassNames[7], QueueHint::Direct);
+    auto tone_map_pass = impl_->graph.AddPass(kRenderPassNames[12], QueueHint::Direct);
     tone_map_pass.Read(post_b, Access::ShaderRead);
     tone_map_pass.Write(post_a, Access::RenderTarget);
     tone_map_pass.SetExecute([&](RenderPassContext &) {
         draw_fullscreen(impl_->tone_map_pipeline.Get(), post_a_rtv);
     });
 
-    auto outline_pass = impl_->graph.AddPass(kRenderPassNames[8], QueueHint::Direct);
+    auto outline_pass = impl_->graph.AddPass(kRenderPassNames[13], QueueHint::Direct);
     outline_pass.Read(post_a, Access::ShaderRead);
     outline_pass.Read(gbuffer_position, Access::ShaderRead);
     outline_pass.Write(post_b, Access::RenderTarget);
@@ -1622,7 +2848,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->outline_pipeline.Get(), post_b_rtv);
     });
 
-    auto fxaa_pass = impl_->graph.AddPass(kRenderPassNames[9], QueueHint::Direct);
+    auto fxaa_pass = impl_->graph.AddPass(kRenderPassNames[14], QueueHint::Direct);
     fxaa_pass.Read(post_b, Access::ShaderRead);
     fxaa_pass.Write(back_buffer, Access::RenderTarget);
     fxaa_pass.SetExecute([&](RenderPassContext &) {
@@ -1631,7 +2857,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         draw_fullscreen(impl_->fxaa_pipeline.Get(), rtv);
     });
 
-    auto ui_pass = impl_->graph.AddPass(kRenderPassNames[10], QueueHint::Direct);
+    auto ui_pass = impl_->graph.AddPass(kRenderPassNames[15], QueueHint::Direct);
     ui_pass.Read(ui, Access::ShaderRead);
     ui_pass.ReadWrite(back_buffer, Access::RenderTarget);
     ui_pass.SetExecute([&](RenderPassContext &) {
@@ -1640,6 +2866,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     });
 
     impl_->graph.SetFinalAccess(particles, Access::UnorderedWrite);
+    impl_->graph.SetFinalAccess(ribbon_history, Access::UnorderedWrite);
+    impl_->graph.SetFinalAccess(ribbon_previous, Access::UnorderedWrite);
+    impl_->graph.SetFinalAccess(ribbon_arguments, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(particle_alive_input, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(particle_alive_output, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(particle_dead, Access::UnorderedWrite);
@@ -1656,12 +2885,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->graph.SetFinalAccess(oit_revealage, Access::ShaderRead);
     impl_->graph.SetFinalAccess(post_a, Access::ShaderRead);
     impl_->graph.SetFinalAccess(post_b, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(temporal_read, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(temporal_write, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(bloom_half, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(bloom_quarter, Access::ShaderRead);
+    impl_->graph.SetFinalAccess(bloom_half_combined, Access::ShaderRead);
 #if defined(HS_DEVELOPMENT_TOOLS)
     impl_->graph.SetFinalAccess(back_buffer, Access::RenderTarget);
 #else
     impl_->graph.SetFinalAccess(back_buffer, Access::Present);
 #endif
 
+    if (auto prepared = impl_->graph.Prepare(transient_pool); !prepared) return prepared;
+    auto *distortion_resource = static_cast<ID3D12Resource *>(impl_->graph.Resolve(distortion_vectors));
+    if (!distortion_resource) return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Prepared distortion resource is missing.");
+    D3D12_RENDER_TARGET_VIEW_DESC distortion_rtv_description{};
+    distortion_rtv_description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    distortion_rtv_description.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    impl_->device->CreateRenderTargetView(distortion_resource,&distortion_rtv_description,distortion_rtv);
+    D3D12_SHADER_RESOURCE_VIEW_DESC distortion_srv_description{};
+    distortion_srv_description.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    distortion_srv_description.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    distortion_srv_description.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    distortion_srv_description.Texture2D.MipLevels = 1;
+    auto distortion_cpu = impl_->srv_heap->GetCPUDescriptorHandleForHeapStart();
+    distortion_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index)*kTextureDescriptorCount+47)*impl_->srv_stride;
+    impl_->device->CreateShaderResourceView(distortion_resource,&distortion_srv_description,distortion_cpu);
     if (auto graph_result = impl_->graph.Execute(
             impl_->command_list.Get(), impl_->enhanced_command_list.Get(),
             impl_->enhanced ? BarrierMode::Enhanced : BarrierMode::Legacy,
@@ -1714,6 +2963,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return impl_->CheckDevice(result, "Signal frame fence");
     }
 
+    impl_->temporal_read_index = temporal_write_index;
+    impl_->temporal_history_valid = temporal_enabled;
+    impl_->previous_view_projection = constants->view_projection;
+    impl_->temporal_previous_eye = {current_temporal_eye.x,
+                                    current_temporal_eye.y,
+                                    current_temporal_eye.z};
+    impl_->temporal_previous_fov = snapshot.camera.vertical_fov_degrees;
     ++impl_->frame_number;
     frame_result = {impl_->frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1722,7 +2978,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 #else
                     false, false,
 #endif
-                    debug_command, debug_value, debug_secondary};
+                    debug_command, debug_value, debug_secondary,
+                    static_cast<std::uint32_t>(typed_vfx_events.size()),
+                    static_cast<std::uint32_t>(impl_->typed_vfx_persistent_state.Active().size()),
+                    ground_ring_count + ground_add_count, flash_count, owner_mesh_count,
+                    static_cast<std::uint32_t>(fresnel_draws.size()),
+                    static_cast<std::uint32_t>(ribbon_outputs.size()), impl_->ribbon_state.DroppedSources(), constants->vfx_light_count.x, distortion_count, constants->vfx_decal_count.x};
+    impl_->previous_ribbon_eye = ribbon_eye;
     impl_->CountValidationErrors();
     return Result::Success();
 }

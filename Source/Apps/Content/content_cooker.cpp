@@ -5,6 +5,8 @@
 #include "content_cooker.hpp"
 #include "environment_texture_cooker.hpp"
 #include "environment_mesh_cooker.hpp"
+#include "vfx_mesh_cooker.hpp"
+#include "vfx_runtime_cooker.hpp"
 
 #include <Windows.h>
 
@@ -104,6 +106,8 @@ int RunContent(std::string_view mode)
 {
         const auto environment_source = std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path() / "Textures/Environment";
         const auto environment_mesh_source = environment_source.parent_path().parent_path() / "Models/Environment/environment_meshes.json";
+        const auto vfx_mesh_source=std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path()/"VFX/Meshes/vfx_mesh_atlas.json";
+        ValidateVfxMeshAtlas(vfx_mesh_source);
         ValidateEnvironmentTextures(environment_source);
         ValidateEnvironmentMeshes(environment_mesh_source);
         const auto sources = LoadAndValidateSources();
@@ -125,6 +129,8 @@ int RunContent(std::string_view mode)
             throw std::runtime_error(output.string() + ": " + filesystem_error.message());
         }
 
+        CookVfxMeshAtlas(vfx_mesh_source, output/"vfx_mesh_atlas.hsbin");
+        CookVfxRuntimeContent(std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path().parent_path(),output);
         CookEnvironmentTextures(environment_source, output);
         CookEnvironmentMeshes(environment_mesh_source, output);
         const auto audio_output = output / "Audio";
@@ -281,7 +287,8 @@ int RunContent(std::string_view mode)
 
         constexpr std::string_view shaders[] = {
             "scene_vs.dxil",      "scene_ps.dxil", "slime_ps.dxil",    "shadow_vs.dxil", "shadow_ps.dxil",
-            "particle_vs.dxil",   "particle_ps.dxil", "particle_cs.dxil",
+            "particle_vs.dxil",   "ground_ring_vs.dxil", "vfx_flash_vs.dxil", "vfx_flash_ps.dxil",
+            "particle_ps.dxil", "particle_cs.dxil",
             "fullscreen_vs.dxil", "deferred_ps.dxil", "composite_ps.dxil",
             "bloom_ps.dxil",      "tonemap_ps.dxil",  "outline_ps.dxil",
             "fxaa_ps.dxil",       "ui_ps.dxil",

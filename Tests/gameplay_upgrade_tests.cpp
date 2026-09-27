@@ -416,6 +416,55 @@ void TestSelectiveUpgradeInheritance()
     Check(retreat_trap.Shutdown().Succeeded(), "retreat small trap shutdown");
 }
 
+void TestRetreatSlowTrailUsesPath()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1'000;
+    data.enemies[0].move_speed = 0.0f;
+    data.enemies[0].damage = 0;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({209}, data).Succeeded(),
+          "retreat slow trail initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot));
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot), 2);
+    hs::HeldInputState held;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                   sequence, held);
+    hs::GameReadModelStorage model;
+    simulation.WriteReadModel(model);
+    const auto areas = model.View().areas;
+    const auto trail = std::ranges::find_if(areas, [](const hs::AreaView &area) {
+        return area.skill == hs::SkillKind::RetreatShot &&
+               area.kind == hs::AreaViewKind::Slow && area.half_length > 0.0f;
+    });
+    Check(trail != areas.end(), "retreat cast did not create a line-shaped slow area");
+    const hs::Float2 end{trail->position.x + trail->direction.x * trail->half_length,
+                         trail->position.y + trail->direction.y * trail->half_length};
+    const hs::Float2 perpendicular{-trail->direction.y, trail->direction.x};
+    const hs::Float2 on_path{end.x + perpendicular.x * trail->radius * 0.5f,
+                             end.y + perpendicular.y * trail->radius * 0.5f};
+    const hs::Float2 off_path{end.x + perpendicular.x * (trail->radius + 2.0f),
+                              end.y + perpendicular.y * (trail->radius + 2.0f)};
+    Check(std::hypot(on_path.x - trail->position.x,
+                     on_path.y - trail->position.y) > trail->radius,
+          "retreat path probe remained inside the old center circle");
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, on_path);
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, off_path);
+    for (std::uint32_t step = 0; step < 35; ++step) (void)Tick(simulation, held);
+    simulation.WriteReadModel(model);
+    const auto enemies = model.View().enemies;
+    Check(enemies.size() == 2, "retreat path probes disappeared");
+    const auto slow = static_cast<std::uint8_t>(hs::StatusFlag::Slow);
+    Check((enemies[0].status_flags & slow) != 0 &&
+              (enemies[1].status_flags & slow) == 0,
+          "retreat slow did not follow its line-shaped gameplay area");
+    Check(simulation.Shutdown().Succeeded(), "retreat slow trail shutdown");
+}
+
 void TestHighFanoutChainsTerminate()
 {
     const auto run = [](hs::SkillKind skill, std::array<std::uint8_t, 4> upgrades,

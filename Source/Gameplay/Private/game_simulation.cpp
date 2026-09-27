@@ -61,6 +61,9 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
     }
     (void)fixed_delta;
     ++impl_->tick;
+    std::erase_if(impl_->combat_state->visual_links, [this](const VisualLinkView &link) {
+        return link.expires <= impl_->tick;
+    });
     impl_->RunPipeline();
     return {impl_->tick, impl_->checksum, impl_->session_phase};
 }
@@ -354,6 +357,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.checksum = impl_->checksum;
     model.seed = impl_->config.seed;
     model.session = GetSessionProbe();
+    model.session_id = impl_->session_id;
     model.player = {impl_->actors->player.position,
                     impl_->actors->player.aim,
                     impl_->actors->player.facing,
@@ -361,14 +365,27 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                     impl_->actors->player.charging,
                     impl_->actors->player.charging_skill,
                     impl_->actors->player.charge_start,
+                    Tick{},
                     impl_->actors->player.basic_attack_animation_start,
                     impl_->actors->player.basic_attack_animation_until,
+                    impl_->actors->player.basic_attack_release_tick,
+                    impl_->actors->player.basic_attack_cast_id,
+                    impl_->actors->player.active_basic_empower_until != 0
+                        ? impl_->actors->player.active_basic_empower_until -
+                              impl_->rules.upgrades.basic_attack.post_active_three_arrow
+                                  .activation_window_ticks
+                        : Tick{},
+                    impl_->actors->player.active_basic_empower_until,
                     impl_->actors->player.active_cast_tick,
                     impl_->actors->player.active_animation_start,
                     impl_->actors->player.active_animation_until,
                     impl_->actors->player.retreat_until,
                     impl_->actors->player.loadout,
-                    impl_->actors->player.upgrades};
+                     impl_->actors->player.upgrades,
+                     impl_->actors->player.health,
+                     impl_->actors->player.max_health,
+                     impl_->actors->player.revive_invulnerable_until,
+                     impl_->actors->player.revive_invulnerable_started};
     model.effective_attack = impl_->EffectiveAttack();
     model.effective_attack_speed = impl_->EffectiveAttackSpeed();
     model.effective_move_speed = impl_->EffectiveMoveSpeed();
@@ -377,6 +394,8 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     model.arena_boundary = impl_->rules.arena_boundary;
     model.arena_obstacle_count = impl_->rules.arena_obstacle_count;
     model.arena_obstacles = impl_->rules.arena_obstacles;
+    model.charge_normal_ready_tick = {};
+    model.charge_ratio = {};
     for (std::size_t index = 0; index < model.skills.size(); ++index)
     {
         const auto skill = static_cast<SkillKind>(index);
@@ -403,6 +422,20 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                                        ? upgrades.extended_full_charge_explosion
                                              .maximum_charge_time_ticks
                                        : definition.maximum_charge_time_ticks;
+        const auto ready_ticks = HasUpgrade(mask, 2)
+                                     ? static_cast<Tick>(std::ceil(
+                                           maximum_ticks * upgrades.faster_charge
+                                                               .charge_time_multiplier))
+                                     : maximum_ticks;
+        const auto normal_ready_ticks = HasUpgrade(mask, 2)
+                                            ? static_cast<Tick>(std::ceil(
+                                                  definition.maximum_charge_time_ticks *
+                                                  upgrades.faster_charge.charge_time_multiplier))
+                                            : definition.maximum_charge_time_ticks;
+        model.charge_normal_ready_tick =
+            impl_->actors->player.charge_start + normal_ready_ticks;
+        model.player.charge_full_ready_tick =
+            impl_->actors->player.charge_start + ready_ticks;
         auto elapsed = std::min(impl_->tick - impl_->actors->player.charge_start, maximum_ticks);
         if (HasUpgrade(mask, 2))
             elapsed = std::min(
@@ -411,6 +444,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                                   upgrades.faster_charge.charge_time_multiplier));
         const auto progress = static_cast<float>(elapsed) /
                               static_cast<float>(maximum_ticks);
+        model.charge_ratio = progress;
         model.charge_range = std::lerp(definition.minimum_range,
                                        definition.maximum_range, progress);
         model.charge_radius = std::lerp(definition.minimum_collision_radius,
@@ -426,6 +460,16 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                      impl_->Metrics().relic_kills,
                      impl_->Metrics().relic_effects};
 
+    for (const auto &pending : impl_->progression->pending_enemy_spawns_delayed)
+        if (pending.warning_sequence != 0 && pending.due > impl_->tick)
+            model.AddSpawnWarning({pending.warning_sequence, pending.position,
+                impl_->rules.enemies[static_cast<std::size_t>(pending.kind)].collision_radius,
+                pending.warning_started, pending.due, false});
+    for (const auto &pending : impl_->progression->pending_boss_spawns)
+        if (pending.warning_sequence != 0 && pending.due > impl_->tick)
+            model.AddSpawnWarning({pending.warning_sequence, pending.position, impl_->rules.boss_common.collision_radius,
+                pending.warning_started, pending.due, true});
+
     for (const auto &enemy : impl_->actors->enemies)
     {
         if (enemy.dead) continue;
@@ -439,6 +483,16 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
         if (enemy.marked_by_skill != SkillKind::Count &&
             enemy.mark_expires >= impl_->tick)
             statuses |= static_cast<std::uint8_t>(StatusFlag::Mark);
+        std::array<StatusEpisodeView, 4> episodes{};
+        for(std::size_t i=0;i<episodes.size();++i) {
+            episodes[i].started=enemy.status_visual_episodes[i].started;
+            episodes[i].generation=enemy.status_visual_episodes[i].generation;
+        }
+        for(std::size_t i=0;i<enemy.status.bleed_count;++i)
+            if(enemy.status.bleeds[i].expires>impl_->tick) episodes[0].expires=std::max(episodes[0].expires,enemy.status.bleeds[i].expires);
+        if(enemy.status.burn&&enemy.status.burn->expires>impl_->tick) episodes[1].expires=enemy.status.burn->expires;
+        for(const auto&slow:enemy.status.slows) if(slow.expires>impl_->tick) episodes[2].expires=std::max(episodes[2].expires,slow.expires);
+        if(enemy.marked_by_skill!=SkillKind::Count&&enemy.mark_expires>=impl_->tick) episodes[3].expires=enemy.mark_expires+1;
         model.AddEnemy({enemy.id,
                         enemy.kind,
                         enemy.boss,
@@ -456,7 +510,17 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                         enemy.max_health,
                         statuses,
                         enemy.attacking,
-                        false});
+                        false,
+                        enemy.warning_sequence,
+                        impl_->rules.enemies[static_cast<std::size_t>(enemy.kind)].ranged_projectile_radius,
+                        enemy.boss ? impl_->rules.boss_common.collision_radius : impl_->rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius,
+                        episodes,
+                        enemy.final_phase,
+                        enemy.phase2_started,
+                        enemy.invulnerable_until,
+                        enemy.dash_started,
+                        enemy.dash_until,
+                        enemy.dash_origin});
     }
     for (const auto &projectile : impl_->actors->projectiles)
     {
@@ -465,7 +529,18 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                              projectile.position, projectile.velocity,
                              projectile.spawned_tick, projectile.skill, false,
                              projectile.radius, projectile.charge_ratio,
-                             projectile.origin, projectile.source_upgrade});
+                             projectile.origin, projectile.source_upgrade,
+                             projectile.previous_position,
+                             projectile.remaining_range,
+                             projectile.cast_id,
+                              projectile.source_relic,
+                              projectile.source_enemy,
+                              projectile.returning,
+                              projectile.homing,
+                              projectile.return_started_tick,
+                              projectile.return_start_position,
+                              projectile.upgrade_mask,
+                              projectile.bleed_extend_ticks});
     }
     for (const auto &area : impl_->actors->areas)
     {
@@ -488,20 +563,40 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                        area.safe_gap_count,
                        area.applies_burn,
                        area.slow_reduction > 0.0f,
-                       false});
+                       false,
+                       area.ring_half_width,
+                       area.upgrade_mask});
     }
     for (const auto &pickup : impl_->actors->pickups)
     {
         if (!pickup.dead)
-            model.AddPickup({pickup.id, pickup.kind, pickup.position, false});
+            model.AddPickup({pickup.id, pickup.kind, pickup.position, false,
+                             pickup.spawned_tick});
     }
+    for (const auto &action : impl_->combat_state->scheduled_actions)
+        if (action.kind == ScheduledKind::Explosion && action.skill == SkillKind::ExplosiveArrow &&
+            action.source_upgrade == 1 && action.visual_owner_id != 0 && impl_->tick < action.due)
+            model.AddMiniBomb({action.visual_owner_id, action.cast_id, action.position, action.radius,
+                               action.visual_started, action.due});
+    for (const auto &link : impl_->combat_state->visual_links)
+        if (link.started <= impl_->tick && impl_->tick < link.expires)
+            model.AddVisualLink(link);
     for (const auto &action : impl_->combat_state->boss_actions)
     {
         model.AddBossAction({static_cast<BossActionViewKind>(action.kind),
                              action.boss_id, action.animation_started, action.due,
                              action.position,
                              action.direction, action.distance, action.arc_degrees,
-                             action.angle_offset, action.radius, action.cast_id});
+                             action.angle_offset, action.radius, action.cast_id,
+                             // Keep this aligned with enemy projectile spawn.
+                              impl_->rules.boss_common.projectile_range,
+                              action.safe_gap_count, action.safe_gap_degrees,
+                              action.half_width,
+                              action.warning_sequence, action.warning_started,
+                              action.kind == BossActionKind::Dash
+                                  ? impl_->rules.boss_common.collision_radius +
+                                        impl_->rules.stats.player_collision_radius
+                                  : 0.0f});
     }
 }
 

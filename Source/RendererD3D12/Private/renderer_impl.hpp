@@ -8,6 +8,9 @@
 
 #include "d3d12_resources.hpp"
 #include "renderer_diagnostics.hpp"
+#include "vfx_persistent_state.hpp"
+#include "vfx_ribbon_gpu.hpp"
+#include "vfx_ribbon_state.hpp"
 
 #include <D3D12MemAlloc.h>
 
@@ -71,10 +74,15 @@ constexpr std::uint32_t kCharacterDescriptorCount = 3;
 constexpr std::uint32_t kMonsterPbrDescriptorCount = 5;
 constexpr std::uint32_t kEnvironmentTextureCount = 20;
 constexpr std::uint32_t kEnvironmentDescriptorCount = 21;
+constexpr std::uint32_t kVfxGradientDescriptorCount = 1;
 constexpr std::uint32_t kCharacterTextureSize = 2'048;
 constexpr std::uint32_t kTextureDescriptorCount =
     kPostTextureDescriptorCount + kCharacterDescriptorCount + kMonsterPbrDescriptorCount +
-    kEnvironmentDescriptorCount;
+    kEnvironmentDescriptorCount + kVfxGradientDescriptorCount + 1 + 3 + 3 + 3 + 2 + 3 + 2;
+constexpr std::uint32_t kBloomTextureDescriptorOffset = kTextureDescriptorCount - 5;
+constexpr std::uint32_t kTemporalTextureDescriptorOffset = kTextureDescriptorCount - 2;
+constexpr std::uint32_t kBloomRtvOffset = 12 + kFrameCount;
+constexpr std::uint32_t kTemporalRtvOffset = kBloomRtvOffset + 3;
 constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
 constexpr std::uint32_t kTimestampCountPerFrame =
     static_cast<std::uint32_t>(kRenderPassCount * 2);
@@ -126,6 +134,19 @@ struct GpuInstance
 
 static_assert(sizeof(GpuInstance) == 48);
 
+struct alignas(16) GpuFresnelShell
+{
+    std::array<float, 16> current_transform{};
+    std::array<float, 16> previous_transform{};
+    DirectX::XMFLOAT4 color{};
+    DirectX::XMFLOAT4 geometry{}; // Footprint radius, source progress, elapsed seconds, HDR.
+    DirectX::XMFLOAT4 motion{};   // Rate, amplitude, inset fraction, crown rotation Hz.
+    DirectX::XMFLOAT4 signature{}; // Transition Fresnel power.
+    DirectX::XMUINT4 metadata{};  // Kind, sector count, end crack, gradient row.
+    DirectX::XMUINT4 identity{};  // Render-instance and effect stable IDs, split low/high.
+};
+static_assert(sizeof(GpuFresnelShell) == 224);
+
 struct MonsterAsset
 {
     AllocationResource vertices;
@@ -141,6 +162,8 @@ struct MonsterAsset
 struct FrameConstants
 {
     DirectX::XMFLOAT4X4 view_projection;
+    DirectX::XMFLOAT4X4 previous_view_projection;
+    DirectX::XMFLOAT4 temporal_options;
     DirectX::XMFLOAT4 camera_time;
     DirectX::XMFLOAT4 light_direction_intensity;
     DirectX::XMFLOAT4 light_color;
@@ -156,6 +179,11 @@ struct FrameConstants
     DirectX::XMUINT4 particle_options;
     DirectX::XMFLOAT4 grass_benders[32];
     DirectX::XMUINT4 grass_bender_count;
+    DirectX::XMUINT4 authored_particle_clock;
+    DirectX::XMFLOAT4 vfx_light_position_radius[32];
+    DirectX::XMFLOAT4 vfx_light_color_intensity[32];
+    DirectX::XMUINT4 vfx_light_count;
+    DirectX::XMUINT4 vfx_decal_count;
 };
 
 static_assert(sizeof(FrameConstants) <= kInstanceDataOffset);
@@ -169,8 +197,11 @@ struct GpuParticle
     DirectX::XMFLOAT4 end_color;
     DirectX::XMFLOAT4 size_rotation;
     DirectX::XMFLOAT4 physics_metadata;
+    DirectX::XMFLOAT4 current_velocity_drag;
+    DirectX::XMFLOAT4 collision_material;
+    DirectX::XMUINT4 authored;
 };
-static_assert(sizeof(GpuParticle) == 112);
+static_assert(sizeof(GpuParticle) == 160);
 
 struct GpuParticleSpawnCommand
 {
@@ -184,8 +215,11 @@ struct GpuParticleSpawnCommand
     DirectX::XMFLOAT4 rotation_range;
     DirectX::XMUINT4 modes;
     DirectX::XMUINT4 metadata;
+    DirectX::XMFLOAT4 current_velocity_drag;
+    DirectX::XMFLOAT4 collision_material;
+    DirectX::XMUINT4 authored;
 };
-static_assert(sizeof(GpuParticleSpawnCommand) == 160);
+static_assert(sizeof(GpuParticleSpawnCommand) == 208);
 
 
 struct UiCpuSurface
@@ -304,6 +338,42 @@ struct DdsHeaderDx10
     if (pixels.size() != expected)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "VFX mask DDS payload is invalid.");
+    return Result::Success();
+}
+
+[[nodiscard]] inline Result LoadVfxGradientDds(const std::filesystem::path &path,
+                                               std::uint32_t &width,
+                                               std::uint32_t &height,
+                                               std::span<const std::byte> &pixels,
+                                               std::vector<std::byte> &storage)
+{
+    if (auto loaded = ReadBinary(path, storage); !loaded) return loaded;
+    constexpr std::uint32_t dx10 = 0x30315844;
+    if (storage.size() < sizeof(kDdsMagic) + sizeof(DdsHeader) + sizeof(DdsHeaderDx10))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "VFX gradient DDS header is truncated.");
+    std::uint32_t magic{};
+    DdsHeader header{};
+    DdsHeaderDx10 extension{};
+    std::memcpy(&magic, storage.data(), sizeof(magic));
+    std::memcpy(&header, storage.data() + sizeof(magic), sizeof(header));
+    std::memcpy(&extension, storage.data() + sizeof(magic) + sizeof(header),
+                sizeof(extension));
+    const auto payload_offset = sizeof(magic) + sizeof(header) + sizeof(extension);
+    const auto payload_bytes = static_cast<std::uint64_t>(header.width) * header.height * 8u;
+    if (magic != kDdsMagic || header.size != 124 || header.pixel_format.size != 32 ||
+        header.pixel_format.four_cc != dx10 || header.width != 256 || header.height == 0 ||
+        header.mip_count != 1 || header.pitch != header.width * 8u ||
+        extension.format != DXGI_FORMAT_R16G16B16A16_FLOAT ||
+        extension.dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        extension.array_size != 1 || payload_bytes != storage.size() - payload_offset)
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "VFX gradient DDS layout is invalid.");
+    }
+    width = header.width;
+    height = header.height;
+    pixels = std::span(storage).subspan(payload_offset);
     return Result::Success();
 }
 
@@ -634,6 +704,23 @@ struct D3D12Renderer::Impl
     AllocationResource vfx_masks;
     std::uint32_t vfx_sprite_count{};
     Tick last_status_visual_tick{std::numeric_limits<Tick>::max()};
+    AllocationResource vfx_mesh_atlas;
+    std::array<std::uint32_t, 7> vfx_mesh_vertex_counts{};
+    std::array<float, 7> vfx_mesh_transverse_radii{};
+    AllocationResource vfx_gradient;
+    std::uint32_t vfx_gradient_rows{};
+    AllocationResource ribbon_history;
+    AllocationResource ribbon_previous;
+    AllocationResource ribbon_arguments;
+    AllocationResource ribbon_detail;
+    AllocationResource vfx_authored_mask;
+    AllocationResource vfx_noise_basis;
+    AllocationResource vfx_smoke_pos, vfx_smoke_neg, vfx_smoke_motion;
+    AllocationResource vfx_flow_curl, vfx_stbn_scalar;
+    AllocationResource vfx_fracture_decals, vfx_organic_decals;
+    AllocationResource vfx_curve_lut;
+    Float3 previous_ribbon_eye{};
+    VfxRibbonState ribbon_state;
     AllocationResource particles;
     std::array<AllocationResource, 2> particle_alive;
     AllocationResource particle_dead;
@@ -656,6 +743,15 @@ struct D3D12Renderer::Impl
     AllocationResource oit_revealage;
     AllocationResource post_a;
     AllocationResource post_b;
+    std::array<AllocationResource, 2> temporal_history;
+    bool temporal_history_valid{};
+    std::uint32_t temporal_read_index{};
+    DirectX::XMFLOAT4X4 previous_view_projection{};
+    Float3 temporal_previous_eye{};
+    float temporal_previous_fov{};
+    AllocationResource bloom_half;
+    AllocationResource bloom_quarter;
+    AllocationResource bloom_half_combined;
     std::array<AllocationResource, kFrameCount> ui_textures;
     std::array<UiCpuSurface, kFrameCount> ui_surfaces;
     ComPtr<IWICImagingFactory> ui_wic_factory;
@@ -673,16 +769,32 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> scene_pipeline;
     ComPtr<ID3D12PipelineState> shadow_pipeline;
     ComPtr<ID3D12PipelineState> particle_pipeline;
+    ComPtr<ID3D12PipelineState> ground_ring_pipeline;
+    ComPtr<ID3D12PipelineState> ground_add_pipeline;
+    ComPtr<ID3D12PipelineState> owner_mesh_pipeline;
+    ComPtr<ID3D12PipelineState> vfx_flash_pipeline;
+    ComPtr<ID3D12PipelineState> vfx_distortion_pipeline;
+    ComPtr<ID3D12PipelineState> vfx_sprite_oit_pipeline;
     ComPtr<ID3D12PipelineState> slime_pipeline;
+    ComPtr<ID3D12PipelineState> fresnel_shell_pipeline;
     ComPtr<ID3D12PipelineState> particle_compute_pipeline;
+    ComPtr<ID3D12PipelineState> ribbon_update_pipeline;
+    ComPtr<ID3D12PipelineState> ribbon_args_pipeline;
+    ComPtr<ID3D12PipelineState> ribbon_add_pipeline;
+    ComPtr<ID3D12PipelineState> ribbon_oit_pipeline;
     ComPtr<ID3D12PipelineState> deferred_pipeline;
     ComPtr<ID3D12PipelineState> composite_pipeline;
+    ComPtr<ID3D12PipelineState> temporal_pipeline;
+    ComPtr<ID3D12PipelineState> bloom_extract_pipeline;
+    ComPtr<ID3D12PipelineState> bloom_downsample_pipeline;
+    ComPtr<ID3D12PipelineState> bloom_upsample_pipeline;
     ComPtr<ID3D12PipelineState> bloom_pipeline;
     ComPtr<ID3D12PipelineState> tone_map_pipeline;
     ComPtr<ID3D12PipelineState> outline_pipeline;
     ComPtr<ID3D12PipelineState> fxaa_pipeline;
     ComPtr<ID3D12PipelineState> ui_pipeline;
     ComPtr<ID3D12CommandSignature> draw_signature;
+    ComPtr<ID3D12CommandSignature> ribbon_draw_signature;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_VERTEX_BUFFER_VIEW archer_vertex_view{};
     std::vector<CharacterClipHeader> archer_clips;
@@ -696,6 +808,7 @@ struct D3D12Renderer::Impl
     std::uint32_t archer_material_count{};
     float archer_ground_offset{};
     RenderGraphBuilder graph;
+    std::array<TransientResourcePool,kFrameCount> transient_pools;
     UINT rtv_stride{};
     UINT dsv_stride{};
     UINT srv_stride{};
@@ -733,7 +846,9 @@ struct D3D12Renderer::Impl
     std::filesystem::file_time_type shader_write{};
     std::chrono::steady_clock::time_point next_shader_check{};
 #endif
+    renderer_detail::VfxPersistentState typed_vfx_persistent_state;
     Tick last_particle_tick{};
+    std::uint64_t render_session_id{};
 };
 
 } // namespace hs

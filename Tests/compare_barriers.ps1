@@ -31,8 +31,8 @@ function Test-RenderArtifacts([string]$Directory, [int]$ParticleCapacity) {
         throw "DRED was not enabled before device creation."
     }
     $gpuRows = Import-Csv (Join-Path $Directory "gpu_passes.csv")
-    if ($gpuRows.Count -ne 11) {
-        throw "Expected 11 GPU pass timestamps, got $($gpuRows.Count)."
+    if ($gpuRows.Count -ne 15) {
+        throw "Expected 15 GPU pass timestamps, got $($gpuRows.Count)."
     }
     $particleStats = Get-Content (Join-Path $Directory "particle_stats.json") -Raw |
         ConvertFrom-Json
@@ -62,6 +62,66 @@ if ($legacyResult.checksum -ne $enhancedResult.checksum) {
 }
 
 Add-Type -AssemblyName System.Drawing
+if (-not ("BarrierCaptureComparer" -as [type])) {
+    Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+
+public static class BarrierCaptureComparer
+{
+    public static int[] Compare(Bitmap left, Bitmap right)
+    {
+        var bounds = new Rectangle(0, 0, left.Width, left.Height);
+        using (var leftArgb = left.Clone(bounds, PixelFormat.Format32bppArgb))
+        using (var rightArgb = right.Clone(bounds, PixelFormat.Format32bppArgb))
+        {
+            BitmapData leftData = null;
+            BitmapData rightData = null;
+            try
+            {
+                leftData = leftArgb.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                rightData = rightArgb.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                var rowBytes = left.Width * 4;
+                var leftRow = new byte[rowBytes];
+                var rightRow = new byte[rowBytes];
+                var changedPixels = 0;
+                var maximumDifference = 0;
+                for (var y = 0; y < left.Height; ++y)
+                {
+                    Marshal.Copy(IntPtr.Add(leftData.Scan0, y * leftData.Stride), leftRow, 0, rowBytes);
+                    Marshal.Copy(IntPtr.Add(rightData.Scan0, y * rightData.Stride), rightRow, 0, rowBytes);
+                    for (var offset = 0; offset < rowBytes; offset += 4)
+                    {
+                        var difference = Math.Max(
+                            Math.Max(Math.Abs(leftRow[offset] - rightRow[offset]), Math.Abs(leftRow[offset + 1] - rightRow[offset + 1])),
+                            Math.Max(Math.Abs(leftRow[offset + 2] - rightRow[offset + 2]), Math.Abs(leftRow[offset + 3] - rightRow[offset + 3])));
+                        if (difference != 0)
+                        {
+                            ++changedPixels;
+                            maximumDifference = Math.Max(maximumDifference, difference);
+                        }
+                    }
+                }
+                return new[] { changedPixels, maximumDifference };
+            }
+            finally
+            {
+                if (leftData != null)
+                {
+                    leftArgb.UnlockBits(leftData);
+                }
+                if (rightData != null)
+                {
+                    rightArgb.UnlockBits(rightData);
+                }
+            }
+        }
+    }
+}
+'@
+}
 $legacyPng = [System.Drawing.Bitmap]::new((Join-Path $legacy "capture_tick_180.png"))
 $enhancedPng = [System.Drawing.Bitmap]::new((Join-Path $enhanced "capture_tick_180.png"))
 try {
@@ -70,20 +130,9 @@ try {
     }
     $changedPixels = 0
     $maximumDifference = 0
-    for ($y = 0; $y -lt $legacyPng.Height; ++$y) {
-        for ($x = 0; $x -lt $legacyPng.Width; ++$x) {
-            $left = $legacyPng.GetPixel($x, $y)
-            $right = $enhancedPng.GetPixel($x, $y)
-            $difference = [Math]::Max(
-                [Math]::Max([Math]::Abs($left.R - $right.R), [Math]::Abs($left.G - $right.G)),
-                [Math]::Max([Math]::Abs($left.B - $right.B), [Math]::Abs($left.A - $right.A))
-            )
-            if ($difference -ne 0) {
-                ++$changedPixels
-                $maximumDifference = [Math]::Max($maximumDifference, $difference)
-            }
-        }
-    }
+    $comparison = [BarrierCaptureComparer]::Compare($legacyPng, $enhancedPng)
+    $changedPixels = $comparison[0]
+    $maximumDifference = $comparison[1]
     $allowedChangedPixels = [Math]::Ceiling($legacyPng.Width * $legacyPng.Height * 0.0001)
     if ($maximumDifference -gt 1 -or $changedPixels -gt $allowedChangedPixels) {
         throw "Barrier captures exceed tolerance: changed=$changedPixels, max=$maximumDifference."

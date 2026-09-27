@@ -26,6 +26,7 @@ struct RenderPorts
 {
     std::atomic<bool> &stop_requested;
     std::atomic<bool> &simulation_done;
+    const std::atomic<Tick> &completed_tick;
     std::atomic<bool> &render_ready;
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
@@ -141,7 +142,7 @@ struct RuntimeChannels
 
     [[nodiscard]] RenderPorts ForRender() noexcept
     {
-        return {stop_requested, simulation_done, render_ready, action_edges, snapshots,
+        return {stop_requested, simulation_done, completed_tick, render_ready, action_edges, snapshots,
                 presentation_events, audio_events, resize_commands, renderer_settings,
                 window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,

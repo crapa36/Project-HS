@@ -116,6 +116,28 @@ hs::ApplicationConfig ParseArguments(int argc, char **argv)
                 }
             }
         }
+        else if (argument.starts_with("--boss-vfx-capture="))
+        {
+            const auto value = argument.substr(std::string_view{"--boss-vfx-capture="}.size());
+            std::uint32_t boss{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), boss);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && boss < 3)
+            {
+                config.boss_vfx_capture = boss;
+                config.smoke = true;
+                config.visible = false;
+                config.vsync = false;
+                config.frame_cap = 0;
+            }
+        }
+        else if (argument == "--boss-phase2-capture")
+        {
+            config.boss_phase2_capture = true;
+            config.smoke = true;
+            config.visible = false;
+            config.vsync = false;
+            config.frame_cap = 0;
+        }
         else if (argument.starts_with("--slime-family-preview="))
         {
             const auto value = argument.substr(std::string_view{"--slime-family-preview="}.size());

@@ -1,17 +1,35 @@
 #include "vfx_catalog.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/renderer/vfx_program_loader.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <iostream>
+#include <string_view>
+#include <utility>
 
 namespace hs
 {
 namespace
 {
+constexpr std::uint32_t ShapeId(std::string_view name) noexcept
+{
+    std::uint32_t hash = 2166136261u;
+    for (const unsigned char character : name) { hash ^= character; hash *= 16777619u; }
+    return hash;
+}
+std::uint8_t MeshIndex(std::uint32_t shape) noexcept
+{
+    constexpr std::string_view names[]{"arrowhead_mesh", "shard_mesh", "debris_shard_mesh",
+        "small_shard_mesh", "enemy_thorn_mesh", "boss_crest_lance_mesh", "needle_shard_mesh"};
+    for (std::uint8_t index = 0; index < 7; ++index)
+        if (shape == ShapeId(names[index])) return index + 1;
+    return 0;
+}
 std::uint32_t SpawnSeed(Sequence sequence, std::uint32_t emitter) noexcept
 {
     auto value = sequence ^ (0x9e3779b97f4a7c15ull + emitter);
@@ -104,6 +122,63 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle sprite table is invalid.");
         previous = sprite.sprite_id;
     }
+    std::ifstream program_stream(path.parent_path() / "vfx_program.hsbin", std::ios::binary | std::ios::ate);
+    if (!program_stream)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program is missing.");
+    const auto program_size = program_stream.tellg();
+    if (program_size <= 0 || program_size > std::numeric_limits<std::uint32_t>::max())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program size is invalid.");
+    std::vector<std::byte> program_bytes(static_cast<std::size_t>(program_size));
+    program_stream.seekg(0);
+    if (!program_stream.read(reinterpret_cast<char *>(program_bytes.data()), program_size))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program cannot be read.");
+    VfxProgramData program;
+    std::string program_error;
+    if (!LoadVfxProgram(program_bytes, program, program_error))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program: " + program_error);
+    loaded.program_ = std::move(program);
+    const auto &cooked_program = loaded.program_;
+    loaded.authored_mesh_indices_.resize(loaded.emitters_.size());
+    std::uint32_t mapped{}, unmapped{};
+    for (const auto &definition : loaded.definitions_)
+    {
+        const auto lookup = std::find_if(cooked_program.effect_lookup.begin(), cooked_program.effect_lookup.end(),
+            [&](const auto &entry) { return entry.effect_id == definition.effect_id; });
+        for (std::uint32_t ei = definition.first_emitter; ei < definition.first_emitter + definition.emitter_count; ++ei)
+        {
+            const auto &emitter = loaded.emitters_[ei];
+            if (emitter.renderer != VfxRenderer::Mesh) continue;
+            std::uint8_t selected{};
+            bool ambiguous = false;
+            if (lookup != cooked_program.effect_lookup.end())
+            {
+                const auto &effect = cooked_program.effects[lookup->handle - 1];
+                for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
+                {
+                    const auto &source = cooked_program.sources[si];
+                    for (std::uint32_t oi = source.outputs.first; oi < source.outputs.first + source.outputs.count; ++oi)
+                    {
+                        const auto &output = cooked_program.outputs[oi];
+                        if (output.profile != VfxOutputProfile::MeshEmissiveOit) continue;
+                        const auto mesh = MeshIndex(output.shape);
+                        if (!mesh) continue;
+                        const bool compatible =
+                            (emitter.primitive == VfxPrimitive::Arrow && mesh == 1) ||
+                            (emitter.primitive == VfxPrimitive::Shard && (mesh == 2 || mesh == 3 || mesh == 4)) ||
+                            (emitter.primitive == VfxPrimitive::Ember && (mesh == 2 || mesh == 3 || mesh == 4)) ||
+                            (emitter.primitive == VfxPrimitive::Spike && (mesh == 5 || mesh == 6 || mesh == 7));
+                        if (!compatible) continue;
+                        if (selected && selected != mesh) ambiguous = true;
+                        selected = mesh;
+                    }
+                }
+            }
+            if (selected && !ambiguous) { loaded.authored_mesh_indices_[ei] = selected; ++mapped; }
+            else ++unmapped;
+        }
+    }
+    std::clog << "vfx.authored_mesh mapped_emitters=" << mapped << " unmapped_emitters=" << unmapped
+              << " policy=primitive_compatible_unique_shape motion=legacy\n";
     loaded.sprite_count_ = header.sprite_count;
     loaded.payload_hash_ = header.payload_hash;
     catalog = std::move(loaded);
@@ -134,7 +209,15 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
         return Result::Success();
     const auto *definition = FindEffect(event.asset);
     if (!definition)
+    {
+        // The legacy emitter catalog is only the compatibility path. New v4
+        // events are decoded by the typed program and need no legacy emitter.
+        if (std::ranges::any_of(program_.effect_lookup, [&](const VfxEffectLookupRecord &effect) {
+                return effect.effect_id == event.asset.value;
+            }))
+            return Result::Success();
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX effect ID is missing.");
+    }
     const auto parameters = DecodeVfxParameters(event.parameters);
     const auto direction_length = std::hypot(parameters.direction.x, parameters.direction.z);
     if (!std::isfinite(parameters.scale) || parameters.scale <= 0.0f || direction_length <= 0.0001f)
@@ -153,9 +236,19 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
                          definition->line_primitive});
         return Result::Success();
     }
+    // The legacy release ring expands across safe gaps and disagrees with the
+    // authoritative wavefront. Keep its other accents while the typed snapshot
+    // owns this boundary for the area's entire lifetime.
+    const bool typed_wavefront = event.asset.value == MakeAssetId("particle.boss.shockwave.release").value &&
+        event.geometry.kind == PresentationGeometryKind::RingGaps &&
+        std::ranges::any_of(program_.effect_lookup, [](const auto &effect) {
+            return effect.effect_id == MakeAssetId("particle.boss.shockwave.wavefront").value;
+        });
     for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
     {
         const auto &emitter = emitters_[definition->first_emitter + index];
+        if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
+            continue;
         const auto scaled = parameters.scale;
         ParticleSpawnCommand command;
         command.sequence = event.sequence;
@@ -167,6 +260,8 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
         command.velocity_mode = emitter.velocity;
         command.facing = emitter.facing;
         command.renderer = emitter.renderer;
+        if (emitter.renderer == VfxRenderer::Mesh)
+            command.mesh_index = authored_mesh_indices_[definition->first_emitter + index];
         command.primitive = emitter.primitive;
         command.sprite = emitter.sprite;
         command.frame_columns = emitter.frame_columns;

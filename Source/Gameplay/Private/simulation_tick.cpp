@@ -30,6 +30,7 @@ GameSimulation::SimulationWorld::SimulationWorld()
     telemetry->balance_observer.enemy_hit_casts.reserve(256);
     telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
+    combat_state->visual_links.reserve(64);
     combat_state->collision_candidates.reserve(128);
 }
 
@@ -110,6 +111,7 @@ void GameSimulation::SimulationWorld::EmitSignal(DomainSignalKind kind, Float2 p
     DomainSignal event;
     event.sequence = ++event_sequence;
     event.tick = tick;
+    event.session_id = session_id;
     event.kind = kind;
     event.position = {position.x, 0.2f, position.y};
     event.context = context;
@@ -118,7 +120,8 @@ void GameSimulation::SimulationWorld::EmitSignal(DomainSignalKind kind, Float2 p
 
 void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 position,
              Float2 direction, float scale,
-             float height, std::uint8_t context, std::uint64_t source_entity_id)
+             float height, std::uint8_t context, std::uint64_t source_entity_id,
+             DomainSignalGeometry geometry)
 {
     const auto length = std::hypot(direction.x, direction.y);
     if (length <= 0.0001f) direction = {0.0f, 1.0f};
@@ -126,12 +129,14 @@ void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 po
     DomainSignal event;
     event.sequence = ++event_sequence;
     event.tick = tick;
+    event.session_id = session_id;
     event.kind = effect;
     event.position = {position.x, height, position.y};
     event.direction = {direction.x, 0.0f, direction.y};
     event.scale = scale;
     event.context = context;
     event.source_entity_id = source_entity_id;
+    event.geometry = geometry;
     combat_state->domain_signals.push_back(event);
 }
 
@@ -141,11 +146,27 @@ void GameSimulation::SimulationWorld::EmitVfxLine(DomainSignalKind effect, Float
     DomainSignal event;
     event.sequence = ++event_sequence;
     event.tick = tick;
+    event.session_id = session_id;
     event.kind = effect;
     event.position = {start.x, height, start.y};
     event.target = {end.x, height, end.y};
     event.flags = static_cast<std::uint8_t>(DomainSignalFlag::HasTarget);
     combat_state->domain_signals.push_back(event);
+    VisualLinkKind kind{};
+    float width{};
+    Tick duration{};
+    // Preserve the existing authored cosmetic widths and round their lifetimes
+    // (.12/.18/.15 seconds) upward to this simulation's 60 Hz tick contract.
+    switch (effect)
+    {
+    case DomainSignalKind::RicochetLinked: kind = VisualLinkKind::Ricochet; width = .09f; duration = 8; break;
+    case DomainSignalKind::BurnTransferred: kind = VisualLinkKind::BurnTransfer; width = .12f; duration = 11; break;
+    case DomainSignalKind::RelicChainLinked: kind = VisualLinkKind::RelicChain; width = .10f; duration = 9; break;
+    default: return;
+    }
+    std::erase_if(combat_state->visual_links, [this](const VisualLinkView &link) { return link.expires <= tick; });
+    combat_state->visual_links.push_back({event.sequence, kind, event.position, event.target,
+                                        width, tick, tick + duration});
 }
 
 bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position,
@@ -194,9 +215,15 @@ void GameSimulation::SimulationWorld::QueueEnemySpawn(EnemyKind kind, std::uint6
         return;
     }
     progression->pending_enemy_spawns_delayed.push_back({kind, position, random_key,
-                                            tick + rules.spawn_placement.fallback_warning_ticks});
-    EmitSignal(DomainSignalKind::EnemySpawnWarning, position,
-               static_cast<std::uint8_t>(kind));
+                                            tick + rules.spawn_placement.fallback_warning_ticks, event_sequence + 1, tick});
+    DomainSignalGeometry geometry{};
+    geometry.kind = DomainSignalGeometryKind::Circle;
+    geometry.radius = rules.enemies[static_cast<std::size_t>(kind)].collision_radius;
+    geometry.start_tick = tick;
+    geometry.end_tick = progression->pending_enemy_spawns_delayed.back().due;
+    geometry.source_id = progression->pending_enemy_spawns_delayed.back().warning_sequence;
+    EmitVfx(DomainSignalKind::EnemySpawnWarning, position, {0.0f, 1.0f}, 1.0f, 0.025f,
+            static_cast<std::uint8_t>(kind), 0, geometry);
 }
 
 bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_ticks)
@@ -205,9 +232,15 @@ bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_tick
     const auto position = ClampToArena(rules.arena_boundary,
                                        actors->player.position.x >= 0.0f ? Float2{-edge, -edge}
                                                                  : Float2{edge, edge}, 1.0f);
-    progression->pending_boss_spawns.push_back({kind, position, tick + warning_ticks});
-    EmitSignal(DomainSignalKind::BossSpawnWarning, position,
-               static_cast<std::uint8_t>(kind));
+    progression->pending_boss_spawns.push_back({kind, position, tick + warning_ticks, event_sequence + 1, tick});
+    DomainSignalGeometry geometry{};
+    geometry.kind = DomainSignalGeometryKind::Circle;
+    geometry.radius = rules.boss_common.collision_radius;
+    geometry.start_tick = tick;
+    geometry.end_tick = tick + warning_ticks;
+    geometry.source_id = progression->pending_boss_spawns.back().warning_sequence;
+    EmitVfx(DomainSignalKind::BossSpawnWarning, position, {0.0f, 1.0f}, 1.0f, 0.025f,
+            static_cast<std::uint8_t>(kind), 0, geometry);
     return true;
 }
 
@@ -269,6 +302,7 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
 
 void GameSimulation::SimulationWorld::StartSession()
 {
+    ++session_id;
     session_phase = SessionPhase::Playing;
     InitializePlayerState();
     growth_ticks = boss_fight_ticks = tick = 0;
@@ -300,6 +334,7 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->area_hits.clear();
     combat_state->cast_runtimes.clear();
     combat_state->domain_signals.clear();
+    combat_state->visual_links.clear();
     progression->waves.clear();
     progression->cards = {};
     progression->card_count = 0;
@@ -518,6 +553,10 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
 {
     std::erase_if(actors->enemies, [](const EnemyActor &enemy) { return enemy.dead; });
     std::erase_if(actors->projectiles, [](const ProjectileActor &projectile) { return projectile.dead; });
+    actors->projectiles.insert(actors->projectiles.end(),
+        std::make_move_iterator(actors->pending_projectile_spawns.begin()),
+        std::make_move_iterator(actors->pending_projectile_spawns.end()));
+    actors->pending_projectile_spawns.clear();
     std::erase_if(actors->areas, [](const AreaActor &area) { return area.dead; });
     std::erase_if(actors->pickups, [](const PickupActor &pickup) { return pickup.dead; });
     std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
@@ -625,6 +664,9 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(actors->player.charging_skill);
     value(actors->player.charging_slot);
     value(actors->player.charge_start);
+    // Reserve checksum changes for an active charge that actually owns a cast ID.
+    if (actors->player.charge_cast_id != 0)
+        value(actors->player.charge_cast_id);
     value(actors->player.retreat_until);
     vector2(actors->player.retreat_velocity);
     value(actors->player.active_cast_tick);
@@ -964,10 +1006,6 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
     {
         cooldown -= cooldown != 0;
     }
-    if (actors->player.charging && (tick + kPlayerRenderId) % 6 == 0)
-        EmitVfx(DomainSignalKind::ChargedShotPulse,
-                Add(actors->player.position, Multiply(actors->player.aim, 0.65f)),
-                actors->player.aim, 1.0f, 1.1f);
     if (actors->player.charging)
     {
         const auto &definition = rules.skills[
@@ -979,6 +1017,34 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
                                        ? upgrades.extended_full_charge_explosion
                                              .maximum_charge_time_ticks
                                        : definition.maximum_charge_time_ticks;
+        if ((tick + kPlayerRenderId) % 6 == 0)
+        {
+            const bool faster_charge = HasUpgrade(mask, 2);
+            if (faster_charge && actors->player.charge_cast_id == 0)
+                actors->player.charge_cast_id = next_cast_id++;
+            auto elapsed = std::min(tick - actors->player.charge_start,
+                                    maximum_ticks);
+            if (faster_charge)
+                elapsed = std::min(maximum_ticks, static_cast<Tick>(
+                    elapsed / upgrades.faster_charge.charge_time_multiplier));
+            const float ratio = static_cast<float>(elapsed) /
+                static_cast<float>(maximum_ticks);
+            EmitVfx(DomainSignalKind::ChargedShotPulse,
+                    faster_charge ? actors->player.position :
+                        Add(actors->player.position,
+                            Multiply(actors->player.aim, 0.65f)),
+                    actors->player.aim, 1.0f, 1.1f);
+            if (faster_charge)
+            {
+                auto &pulse = combat_state->domain_signals.back();
+                pulse.vfx_ratio01 = ratio;
+                pulse.upgrade_skill = static_cast<std::uint8_t>(SkillKind::ChargedShot);
+                pulse.upgrade_index = 1;
+                pulse.upgrade_stage = UpgradeVisualStage::Spawn;
+                pulse.upgrade_cast_id = actors->player.charge_cast_id;
+                pulse.upgrade_owner_id = kPlayerRenderId;
+            }
+        }
         const auto ready_ticks = HasUpgrade(mask, 2)
                                      ? static_cast<Tick>(std::ceil(
                                            maximum_ticks * upgrades.faster_charge
@@ -1154,10 +1220,18 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     if (tick < boss.dash_until) return;
     if (boss.dash_until != 0)
     {
+        DomainSignalGeometry geometry{};
+        geometry.kind = DomainSignalGeometryKind::Circle;
+        // The dash sweeps this contact radius against the player's center.
+        // Its endpoint visual must not invent a larger explosion footprint.
+        geometry.radius = rules.boss_common.collision_radius + rules.stats.player_collision_radius;
+        geometry.start_tick = geometry.end_tick = tick;
+        geometry.source_id = boss.id.value;
         EmitVfx(DomainSignalKind::BossDashImpact, boss.position,
-                Normalize(boss.velocity), 1.0f, 0.15f);
+                Normalize(boss.velocity), 1.0f, 0.15f, 0, 0, geometry);
         boss.velocity = {};
         boss.dash_until = 0;
+        boss.dash_started = 0;
     }
     const auto kind = *boss.boss;
     const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
@@ -1241,6 +1315,8 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
                                    : previous->due == action.due
                                        ? previous->animation_started
                                        : previous->due;
+        action.warning_sequence = event_sequence + 1;
+        action.warning_started = tick;
         combat_state->boss_actions.push_back(action);
         const auto context = static_cast<std::uint8_t>(kind);
         const auto position = action.kind == BossActionKind::Dash ||
@@ -1253,7 +1329,62 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
                             : action.kind == BossActionKind::Area
                                 ? DomainSignalKind::BossAreaTelegraphed
                                 : DomainSignalKind::BossShockwaveTelegraphed;
-        EmitSignal(signal, position, context);
+        if (action.kind == BossActionKind::Dash)
+        {
+            const auto dash_direction = LengthSquared(action.direction) > 0.0001f
+                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.position));
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::Line;
+            geometry.width = 2.0f * (rules.boss_common.collision_radius +
+                                     rules.stats.player_collision_radius);
+            geometry.range = action.distance;
+            geometry.start_tick = tick;
+            geometry.end_tick = action.due;
+            geometry.source_id = action.warning_sequence;
+            const auto end = Add(boss.position, Multiply(dash_direction, action.distance));
+            geometry.end_position = {end.x, 0.025f, end.y};
+            EmitVfx(signal, boss.position, dash_direction, 1.0f, 0.025f,
+                    context, 0, geometry);
+        }
+        else if (action.kind == BossActionKind::Volley)
+        {
+            const auto aim_direction = LengthSquared(action.direction) > 0.0001f
+                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.position));
+            const auto volley_direction = Rotate(aim_direction, action.angle_offset);
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::Cone;
+            geometry.range = rules.boss_common.projectile_range;
+            geometry.half_angle_degrees = action.arc_degrees * 0.5f;
+            geometry.start_tick = tick;
+            geometry.end_tick = action.due;
+            geometry.source_id = action.warning_sequence;
+            EmitVfx(signal, boss.position, volley_direction, 1.0f, 0.025f,
+                    context, 0, geometry);
+        }
+        else if (action.kind == BossActionKind::Shockwave)
+        {
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::RingGaps;
+            geometry.inner_radius = action.distance;
+            geometry.outer_radius = action.radius;
+            geometry.start_tick = tick;
+            geometry.end_tick = action.due;
+            geometry.source_id = action.warning_sequence;
+            geometry.gap_count = action.safe_gap_count;
+            geometry.gap_half_width_degrees = action.safe_gap_degrees * 0.5f;
+            geometry.gap_offset_degrees = static_cast<float>(action.cast_id % 360);
+            EmitVfx(signal, action.position, {}, 1.0f, 0.025f, context, 0, geometry);
+        }
+        else
+        {
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::Circle;
+            geometry.radius = action.radius;
+            geometry.start_tick = action.warning_started;
+            geometry.end_tick = action.due;
+            geometry.source_id = action.warning_sequence;
+            EmitVfx(signal, position, {}, 1.0f, 0.025f, context, 0, geometry);
+        }
     };
     Tick last_due{};
     const auto &selected = *phase_patterns[pattern];
@@ -1469,8 +1600,12 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                 }
                 else if (distance <= definition.suicide_explosion_radius)
                 {
+                    DomainSignalGeometry explosion_geometry;
+                    explosion_geometry.kind = DomainSignalGeometryKind::Circle;
+                    explosion_geometry.radius = definition.suicide_explosion_radius;
                     EmitVfx(DomainSignalKind::SuicideEnemyExploded,
-                            enemy.position, {}, 1.0f, 0.15f);
+                            enemy.position, {}, 1.0f, 0.15f, 0, enemy.id.value,
+                            explosion_geometry);
                     if (SegmentClear2D(enemy.position, actors->player.position, 0.0f,
                                        rules.arena_boundary, ArenaObstacles()))
                         QueueDamage(0, enemy.damage, SkillKind::Count,
@@ -1496,11 +1631,44 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
             enemy.attack_resolve = tick + enemy.warning_ticks;
             enemy.locked_aim = attack_direction;
             if (enemy.kind == EnemyKind::Melee)
+            {
+                DomainSignalGeometry geometry{};
+                geometry.kind = DomainSignalGeometryKind::Circle;
+                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].attack_range;
+                geometry.start_tick = tick;
+                geometry.end_tick = enemy.attack_resolve;
+                geometry.source_id = enemy.attack_cast_id;
                 EmitVfx(DomainSignalKind::MeleeEnemyWindup, enemy.position,
-                        attack_direction, 1.0f, 0.1f);
+                        attack_direction, 1.0f, 0.1f, 0, enemy.id.value, geometry);
+            }
+            else if (enemy.kind == EnemyKind::Ranged)
+            {
+                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.kind)];
+                enemy.warning_sequence = event_sequence + 1;
+                DomainSignalGeometry geometry{};
+                geometry.kind = DomainSignalGeometryKind::Line;
+                geometry.width = 2.0f * definition.ranged_projectile_radius;
+                geometry.range = definition.projectile_range;
+                geometry.start_tick = tick;
+                geometry.end_tick = enemy.attack_resolve;
+                geometry.source_id = enemy.warning_sequence;
+                const auto end = Add(enemy.position, Multiply(enemy.locked_aim, geometry.range));
+                geometry.end_position = {end.x, 0.025f, end.y};
+                EmitVfx(DomainSignalKind::RangedEnemyTelegraphed, enemy.position,
+                        enemy.locked_aim, 1.0f, 0.025f, 0, enemy.id.value, geometry);
+            }
             else if (enemy.kind == EnemyKind::Suicide)
+            {
+                enemy.warning_sequence = event_sequence + 1;
+                DomainSignalGeometry geometry{};
+                geometry.kind = DomainSignalGeometryKind::Circle;
+                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].suicide_explosion_radius;
+                geometry.start_tick = tick;
+                geometry.end_tick = enemy.attack_resolve;
+                geometry.source_id = enemy.warning_sequence;
                 EmitVfx(DomainSignalKind::SuicideEnemyCharging, enemy.position,
-                        attack_direction, 1.0f, 0.15f);
+                        attack_direction, 1.0f, 0.15f, 0, enemy.id.value, geometry);
+            }
             continue;
         }
         if (enemy.kind == EnemyKind::Ranged)
