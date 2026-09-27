@@ -70,3 +70,7 @@ when Runtime, renderer, content cooking, assets, or integration behavior require
 Documentation-only changes do not require build/test execution unless they change an executable contract or validation input.
 
 Do not repeat a broader gate when an unchanged valid result still covers the relevant inputs. If an external prerequisite is unavailable, report it rather than weakening the check.
+
+## Development state records
+
+`DEV_STATE.md` is AI implementation continuity only. Record current technical state, contracts, verified checks, unresolved technical issues, and next implementation steps. Do not add user/manual acceptance, playtest, listening, visual inspection, or target-hardware checklists. Replace stale entries; do not accumulate history.
