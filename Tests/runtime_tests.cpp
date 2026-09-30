@@ -7,6 +7,16 @@
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
 #include "camera_pose.hpp"
+#include "vfx_session_state.hpp"
+#include "vfx_typed_ground_commands.hpp"
+#include "vfx_typed_flash_commands.hpp"
+#include "vfx_typed_ribbon_commands.hpp"
+#include "vfx_typed_ballistic_commands.hpp"
+#include "vfx_upgrade_dispatch.hpp"
+#include "vfx_typed_frame_adapter.hpp"
+#include "vfx_typed_light_commands.hpp"
+#include "vfx_typed_distortion_commands.hpp"
+#include "vfx_typed_decal_commands.hpp"
 
 #include <Windows.h>
 
@@ -16,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -176,12 +187,248 @@ void TestNamedPipeIdempotencyAndTargetTick()
           "accepted command executes once");
 }
 
+void TestProductionVfxDecoding()
+{
+    hs::VfxCatalog catalog;
+    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(), "production VFX catalog");
+    const auto &program = catalog.Program();
+    const auto handle = [&](std::string_view id) {
+        for (const auto &entry : program.effect_lookup)
+            if (entry.effect_id == hs::MakeAssetId(id).value) return entry.handle;
+        throw std::runtime_error("missing production VFX recipe");
+    };
+    hs::VfxEventInput warning;
+    warning.effect_handle = handle("particle.boss.shockwave.telegraph");
+    warning.geometry_owner_id = 17; warning.event_tick = warning.geometry_start_tick = 100;
+    warning.geometry_end_tick = 220;
+    hs::VfxRingGapsPayload ring;
+    ring.inner_radius = 2; ring.outer_radius = 9; ring.gap_half_width_degrees = 12;
+    ring.gap_angles_degrees = {23, 113, 203, 293}; warning.payload = ring;
+    const auto ground = hs::runtime_detail::BuildVfxTypedEventGroundCommands(program, std::span(&warning,1),160);
+    Check(ground.size() == 2, "both actual cooked shockwave preview outputs decode");
+    Check(ground[1].geometry.shape == hs::VfxGroundShape::RingGapsTicks && ground[1].geometry.tick_count == 12,
+          "actual cooked tick_count reaches geometry");
+    hs::VfxEventInput explosion;
+    explosion.effect_handle = handle("particle.common.explosion_large");
+    hs::VfxCirclePayload circle; circle.center = {1,.15f,2}; circle.radius = 3; explosion.payload = circle;
+    const auto sprites = hs::runtime_detail::BuildVfxTypedFlashCommands(program,std::span(&explosion,1));
+    bool flame = false, smoke = false, core = false;
+    for (const auto &sprite : sprites)
+    {
+        flame |= sprite.oit && sprite.shape == hs::VfxImpactShape::Flame;
+        core |= !sprite.oit && sprite.shape == hs::VfxImpactShape::NoiseDisc && sprite.size == circle.radius;
+        smoke |= sprite.oit && sprite.shape == hs::VfxImpactShape::Smoke6Way &&
+            sprite.smoke_frame_count == 32 && sprite.smoke_fps > 0;
+    }
+    Check(flame && smoke && core, "actual cooked explosion decodes authoritative-size core, flame and six-way smoke");
+    const auto shards=hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&explosion,1));
+    Check(shards.size()==8,"actual cooked explosion preserves ballistic burst count");
+    for(const auto &shard:shards)
+        Check(shard.authored_ballistic && shard.count==1 && shard.mesh_index==3 &&
+              shard.authored_bounce==.2f && shard.gravity<0 && shard.authored_hdr>0,
+              "actual cooked debris physics and material reach GPU transport");
+    const auto hash32=[](std::string_view value){std::uint32_t h=2166136261u;for(unsigned char c:value){h^=c;h*=16777619u;}return h;};
+    std::size_t ballistic_outputs=0;
+    for(const auto &effect:program.effects)
+    {
+        if(effect.input_mode!=0||effect.timing_kind!=0)continue;
+        hs::VfxEventInput event;event.effect_handle=effect.handle;
+        if(effect.payload_kind==hash32("PointEventPayload"))event.payload=hs::VfxPointPayload{};
+        else if(effect.payload_kind==hash32("PresentationContextPayload"))event.payload=hs::VfxContextPayload{};
+        else if(effect.payload_kind==hash32("CircleAreaPayload")){hs::VfxCirclePayload geometry;geometry.radius=2;event.payload=geometry;}
+        else continue;
+        std::size_t expected=0;
+        for(const auto &source:std::span(program.sources).subspan(effect.sources.first,effect.sources.count))
+        {
+            if(source.type!=hs::VfxSourceType::BallisticCollision)continue;
+            std::uint32_t count=0;
+            for(const auto &parameter:std::span(program.parameters).subspan(source.parameters.first,source.parameters.count))
+                if(parameter.key==hash32("count")&&parameter.type==hs::VfxParameterType::Int)count=parameter.bits;
+            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+                if(output.profile==hs::VfxOutputProfile::MeshEmissiveOit){expected+=count;++ballistic_outputs;}
+        }
+        if(expected) Check(hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&event,1)).size()==expected,
+            "production ballistic recipe rejected: handle "+std::to_string(effect.handle));
+    }
+    Check(ballistic_outputs==56,"production ballistic coverage inventory changed");
+    std::size_t light_outputs=0;
+    for (const auto &effect:program.effects)
+    {
+        std::size_t expected=0;
+        for(const auto &source:std::span(program.sources).subspan(effect.sources.first,effect.sources.count))
+            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+                expected+=output.profile==hs::VfxOutputProfile::Light;
+        if(!expected)continue;
+        hs::VfxEventInput input;input.effect_handle=effect.handle;input.sequence=71;
+        if(effect.payload_kind==hash32("PointEventPayload"))input.payload=hs::VfxPointPayload{};
+        else if(effect.payload_kind==hash32("PresentationContextPayload"))input.payload=hs::VfxContextPayload{};
+        else if(effect.payload_kind==hash32("CircleAreaPayload")){hs::VfxCirclePayload p;p.radius=2;input.payload=p;}
+        else if(effect.payload_kind==hash32("RingWithGapsPayload")){hs::VfxRingGapsPayload p;p.inner_radius=1;p.outer_radius=3;input.payload=p;}
+        else if(effect.payload_kind==hash32("ConePayload")){hs::VfxConePayload p;p.direction={0,0,1};p.range=3;p.half_angle_degrees=40;input.payload=p;}
+        std::size_t decoded=0;
+        for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
+            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedLightCommands(program,std::span(&input,1),tick).size());
+        Check(decoded==expected,"actual cooked VFX light recipe rejected: handle "+std::to_string(effect.handle));
+        light_outputs+=decoded;
+    }
+    Check(light_outputs==17,"production light coverage inventory changed");
+    std::size_t distortion_inventory=0;
+    for(const auto &output:program.outputs) distortion_inventory+=output.profile==hs::VfxOutputProfile::Distortion;
+    Check(distortion_inventory==38,"full authored distortion inventory changed");
+    // RingGaps and Cone remain outside this radial renderer slice.
+    std::size_t distortion_outputs=0;
+    for(const auto &effect:program.effects)
+    {
+        if(effect.input_mode!=0 || effect.timing_kind!=0) continue;
+        hs::VfxEventInput input;input.effect_handle=effect.handle;input.sequence=72;
+        if(effect.payload_kind==hash32("PointEventPayload")) input.payload=hs::VfxPointPayload{};
+        else if(effect.payload_kind==hash32("PresentationContextPayload")) input.payload=hs::VfxContextPayload{};
+        else if(effect.payload_kind==hash32("CircleAreaPayload")){hs::VfxCirclePayload p;p.radius=2;input.payload=p;}
+        else if(effect.payload_kind==hash32("ProjectilePayload")){hs::VfxProjectilePayload p;p.velocity={0,0,5};p.hitbox_radius=.25f;input.payload=p;}
+        else continue;
+        std::size_t expected=0;
+        for(const auto &source:std::span(program.sources).subspan(effect.sources.first,effect.sources.count))
+            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+                expected+=output.profile==hs::VfxOutputProfile::Distortion;
+        if(!expected)continue;
+        std::size_t decoded=0;
+        for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
+            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDistortionCommands(program,std::span(&input,1),{},tick).size());
+        Check(decoded==expected,"actual cooked distortion recipe rejected: handle "+std::to_string(effect.handle));
+        distortion_outputs+=decoded;
+    }
+    Check(distortion_outputs==35,"supported fixed distortion coverage inventory changed");
+    for(const auto &effect:program.effects)
+    {
+        if(effect.input_mode!=1 || effect.payload_kind!=hash32("ProjectilePayload"))continue;
+        std::size_t expected=0;
+        for(const auto &source:std::span(program.sources).subspan(effect.sources.first,effect.sources.count))
+            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+                expected+=output.profile==hs::VfxOutputProfile::Distortion;
+        if(!expected)continue;
+        hs::VfxPersistentInput input;input.stable_id=73;input.effect_handle=effect.handle;
+        hs::VfxProjectilePayload payload;payload.velocity={0,0,5};payload.hitbox_radius=.25f;input.payload=payload;
+        Check(hs::runtime_detail::BuildVfxTypedDistortionCommands(program,{},std::span(&input,1),10).size()==expected,
+            "actual live projectile distortion recipe rejected");
+        distortion_outputs+=expected;
+    }
+    Check(distortion_outputs==36,"supported distortion coverage inventory changed");
+    std::size_t decal_outputs=0;
+    for(const auto &effect:program.effects)
+    {
+        std::size_t expected=0;
+        for(const auto &source:std::span(program.sources).subspan(effect.sources.first,effect.sources.count))
+            for(const auto &output:std::span(program.outputs).subspan(source.outputs.first,source.outputs.count))
+                expected+=output.profile==hs::VfxOutputProfile::Decal;
+        if(!expected)continue;
+        std::size_t decoded=0;
+        if(effect.input_mode==0)
+        {
+            hs::VfxEventInput input;input.effect_handle=effect.handle;input.sequence=74;
+            if(effect.payload_kind==hash32("PointEventPayload"))input.payload=hs::VfxPointPayload{};
+            else if(effect.payload_kind==hash32("PresentationContextPayload"))input.payload=hs::VfxContextPayload{};
+            else if(effect.payload_kind==hash32("CircleAreaPayload")){hs::VfxCirclePayload p;p.radius=2;input.payload=p;}
+            else Check(false,"unexpected authored decal payload");
+            for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
+                decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedDecalCommands(program,std::span(&input,1),{},tick).size());
+        }
+        else
+        {
+            hs::VfxPersistentInput input;input.effect_handle=effect.handle;input.stable_id=75;input.normalized_age=.5f;
+            hs::VfxCirclePayload p;p.radius=2;input.payload=p;
+            decoded=hs::runtime_detail::BuildVfxTypedDecalCommands(program,{},std::span(&input,1),30).size();
+        }
+        Check(decoded==expected,"actual cooked decal recipe rejected: handle "+std::to_string(effect.handle));
+        decal_outputs+=decoded;
+    }
+    Check(decal_outputs==15,"production decal coverage inventory changed");
+    hs::PresentationEvent mini;
+    mini.kind=hs::PresentationKind::Vfx; mini.sequence=902; mini.tick=100;
+    mini.upgrade_skill=4; mini.upgrade_index=1; mini.upgrade_stage=2;
+    mini.upgrade_cast_id=91; mini.upgrade_owner_id=901;
+    mini.geometry.kind=hs::PresentationGeometryKind::Circle; mini.geometry.radius=1.6f;
+    mini.geometry.source_id=901; mini.geometry.start_tick=100; mini.geometry.end_tick=160;
+    mini.parameters=hs::EncodeVfxParameters({});
+    std::vector<hs::PresentationEvent> dispatched;
+    Check(hs::runtime_detail::DispatchVfxUpgradeEvents(program,std::span(&mini,1),dispatched).Succeeded(),
+          "actual cooked mini-bomb stage dispatch");
+    auto typed_mini=hs::runtime_detail::BuildVfxTypedFrameInputs(program,dispatched,{}, {},130);
+    Check(typed_mini.events.size()==1 && typed_mini.unsupported_effect_ids.empty(),"mini-bomb Circle owner ingress");
+    hs::PersistentVfxVisual mini_owner; mini_owner.kind=hs::PersistentVfxKind::MiniBombWarning;
+    mini_owner.stable_id=901; mini_owner.active_tick=100; mini_owner.expires=160; mini_owner.radius=1.6f;
+    hs::runtime_detail::RefreshVfxGroundEventOwners(typed_mini.events,std::span(&mini_owner,1),130);
+    Check(typed_mini.events.size()==1,"mini-bomb warning survives owner refresh");
+    const auto mini_ground=hs::runtime_detail::BuildVfxTypedEventGroundCommands(program,typed_mini.events,130);
+    Check(mini_ground.size()==2 && mini_ground[0].stable_id==901 &&
+          mini_ground[0].geometry.shape==hs::VfxGroundShape::CirclePreviewBorder &&
+          mini_ground[0].geometry.outer_radius==1.6f && mini_ground[1].geometry.tick_count==12,
+          "actual cooked mini-bomb boundary and ticks follow gameplay radius");
+    hs::runtime_detail::RefreshVfxGroundEventOwners(typed_mini.events,{},131);
+    Check(typed_mini.events.empty(),"cancelled mini-bomb warning disappears with owner");
+    struct UpgradeFixture { std::uint8_t skill; std::uint8_t index; std::uint8_t stage; const char *effect; bool circle; };
+    for (const auto fixture : std::array{
+             UpgradeFixture{4, 2, 1, "particle.upgrade.explosive.shard_radial", false},
+             UpgradeFixture{4, 4, 3, "particle.upgrade.explosive.blood_burst", false},
+             UpgradeFixture{3, 0, 3, "particle.upgrade.charged.end_explosion", true},
+             UpgradeFixture{3, 6, 3, "particle.upgrade.charged.burn_explosion", true}})
+    {
+        hs::PresentationEvent event;
+        event.kind=hs::PresentationKind::Vfx; event.sequence=903; event.tick=101;
+        event.session_id=11; event.position={2,1.05f,-3}; event.asset=hs::MakeAssetId("particle.common.explosion_large");
+        event.upgrade_skill=fixture.skill; event.upgrade_index=fixture.index; event.upgrade_stage=fixture.stage;
+        event.upgrade_cast_id=92; event.upgrade_owner_id=902;
+        if (fixture.circle)
+        {
+            event.geometry.kind=hs::PresentationGeometryKind::Circle;
+            event.geometry.radius=2.5f; event.geometry.source_id=902;
+        }
+        std::vector<hs::PresentationEvent> mapped;
+        Check(hs::runtime_detail::DispatchVfxUpgradeEvents(program,std::span(&event,1),mapped).Succeeded() &&
+              mapped.size()==1 && mapped.front().asset.value==hs::MakeAssetId(fixture.effect).value,
+              std::string("actual cooked upgrade ingress mapping: ")+fixture.effect);
+    }
+    for (const auto id : {"particle.enemy.ranged.impact", "particle.boss.volley.projectile_impact", "particle.skill.charged_shot.impact"})
+    {
+        hs::VfxEventInput contact; contact.effect_handle=handle(id);
+        contact.world_transform[12]=1; contact.world_transform[13]=.45f;
+        hs::VfxProjectilePayload geometry; geometry.velocity={12,0,0}; geometry.hitbox_radius=.2f;
+        geometry.hitbox_half_extents={.2f,.2f,.2f}; contact.payload=geometry;
+        const auto flash=hs::runtime_detail::BuildVfxTypedFlashCommands(program,std::span(&contact,1));
+        Check(flash.size()==1 && flash[0].size==.2f && flash[0].direction.x==1 && flash[0].position.x==1,
+              "actual cooked projectile contact preserves hitbox and velocity");
+        const auto debris=hs::runtime_detail::BuildVfxTypedBallisticCommands(program,std::span(&contact,1));
+        const std::size_t expected=std::string_view(id)=="particle.enemy.ranged.impact" ? 5 :
+            (std::string_view(id)=="particle.skill.charged_shot.impact" ? 7 : 0);
+        Check(debris.size()==expected,"actual cooked projectile ballistic fan count");
+    }
+    for (const auto id : {"particle.line.ricochet", "particle.line.burn_transfer", "particle.line.relic_chain"})
+    {
+        hs::VfxPersistentInput owner;owner.stable_id=71;owner.effect_handle=handle(id);owner.normalized_age=.5f;
+        hs::VfxLinkPayload link;link.source_position={0,.7f,0};link.target_position={3,.7f,4};link.width=.1f;link.lifetime01=.5f;owner.payload=link;
+        const auto ribbons=hs::runtime_detail::BuildVfxTypedRibbonInputs(program,std::span(&owner,1));
+        Check(ribbons.size()==1&&ribbons[0].analytic&&ribbons[0].outputs.size()==2,
+              "actual cooked link yields one analytic source with both outputs");
+    }
+}
+
 void TestVfxCatalog()
 {
     hs::VfxCatalog catalog;
     Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(),
           "load cooked VFX catalog");
     Check(catalog.SpriteCount() == 39, "load data-driven VFX sprite registry");
+    const auto fixture = TestDirectory() / "vfx_required_program";
+    std::filesystem::create_directories(fixture);
+    std::filesystem::copy_file("Cooked/particle_effects.hsbin", fixture / "particle_effects.hsbin",
+                               std::filesystem::copy_options::overwrite_existing);
+    hs::VfxCatalog rejected;
+    Check(!hs::VfxCatalog::Load(fixture / "particle_effects.hsbin", rejected).Succeeded(),
+          "missing compiled v4 program rejects runtime catalog");
+    WriteCorrupt(fixture / "vfx_program.hsbin");
+    Check(!hs::VfxCatalog::Load(fixture / "particle_effects.hsbin", rejected).Succeeded(),
+          "corrupt compiled v4 program rejects runtime catalog");
+    std::filesystem::remove(fixture / "vfx_program.hsbin");
+
 
     hs::PresentationEvent event;
     event.sequence = 42;
@@ -197,6 +444,13 @@ void TestVfxCatalog()
     std::vector<hs::ParticleSpawnCommand> full;
     std::vector<hs::ParticleSpawnCommand> half;
     std::vector<hs::VfxLineSpawnCommand> lines;
+    auto typed_only = event;
+    typed_only.asset = hs::MakeAssetId("particle.player.arrow_release");
+    Check(catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded() && full.empty() && lines.empty(),
+          "typed-only event must not require a legacy emitter");
+    typed_only.asset = hs::MakeAssetId("particle.invalid.not_in_either_catalog");
+    Check(!catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded(),
+          "unknown VFX event must still fail catalog dispatch");
     Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && !full.empty(),
           "expand full-quality VFX");
     Check(std::ranges::any_of(full, [](const auto &command) {
@@ -208,6 +462,20 @@ void TestVfxCatalog()
                          command.primitive == hs::VfxPrimitive::Ember;
               }),
           "hit VFX samples its slash mask and keeps a small spark secondary");
+    Check(std::ranges::any_of(full, [](const auto &command) {
+              return command.renderer == hs::VfxRenderer::Mesh && command.mesh_index == 2;
+          }), "real hit event selects compiled v4 authored shard mesh");
+    event.asset = hs::MakeAssetId("particle.basic_attack");
+    std::vector<hs::ParticleSpawnCommand> basic_mesh;
+    std::vector<hs::VfxLineSpawnCommand> basic_lines;
+    Check(catalog.ExpandEvent(event, 100, basic_mesh, basic_lines).Succeeded(), "basic VFX event expands");
+    Check(std::ranges::all_of(basic_mesh, [](const auto &command) {
+        return command.renderer != hs::VfxRenderer::Mesh || command.primitive != hs::VfxPrimitive::Ember || command.mesh_index != 1;
+    }), "basic ember must not become authored arrowhead");
+    event.asset = hs::MakeAssetId("particle.common.hit");
+    Check(std::ranges::all_of(full, [](const auto &command) {
+              return command.renderer == hs::VfxRenderer::Mesh || command.mesh_index == 0;
+          }), "authored mesh selection leaves sprite and ground outputs unchanged");
     Check(catalog.ExpandEvent(event, 50, half, lines).Succeeded() && half.size() == full.size(),
           "expand half-quality VFX");
       for (std::size_t index = 0; index < full.size(); ++index)
@@ -251,6 +519,14 @@ void TestVfxCatalog()
                 "new VFX expands into particles");
       }
 
+    event.asset = hs::MakeAssetId("particle.boss.shockwave.release");
+    event.geometry.kind = hs::PresentationGeometryKind::RingGaps;
+    std::vector<hs::ParticleSpawnCommand> shockwave_accents;
+    Check(catalog.ExpandEvent(event, 100, shockwave_accents, lines).Succeeded() &&
+        !shockwave_accents.empty() && std::ranges::none_of(shockwave_accents, [](const auto &command) {
+            return command.renderer == hs::VfxRenderer::Ground && command.primitive == hs::VfxPrimitive::Ring;
+        }), "authoritative wavefront replaces only legacy ring that crosses safe gaps");
+    event.geometry = {};
       event.asset = hs::MakeAssetId("particle.line.ricochet");
     Check(!catalog.ExpandEvent(event, 100, full, lines).Succeeded(), "line target required");
     parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
@@ -423,6 +699,27 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
     Check(status.loaded_cues == 1 && status.loaded_files == 0,
           "preload false leaves PCM payload unloaded");
 
+    settings.master_volume = 0.7f;
+    engine.ApplySettings(settings);
+    engine.SetBackgroundMuted(true);
+    Check(engine.Status().background_muted && engine.Status().effective_master_volume == 0.0f,
+          "background mute silences the master bus including UI and music");
+    settings.master_volume = 0.4f;
+    engine.ApplySettings(settings);
+    engine.PauseCombat();
+    engine.ResumeCombat();
+    Check(engine.Status().effective_master_volume == 0.0f && settings.master_volume == 0.4f,
+          "settings and combat pause changes cannot unmute background audio");
+    engine.SetBackgroundMuted(false);
+    Check(!engine.Status().background_muted && engine.Status().effective_master_volume == 0.4f,
+          "foreground restores the latest configured master volume");
+    engine.SetBackgroundMuted(true);
+    settings.master_volume = 0.0f;
+    engine.ApplySettings(settings);
+    engine.SetBackgroundMuted(false);
+    Check(engine.Status().effective_master_volume == 0.0f,
+          "returning to foreground preserves explicit user mute");
+
     hs::PresentationEvent missing_event;
     missing_event.kind = hs::PresentationKind::Audio;
     missing_event.asset = hs::MakeAssetId("audio.missing");
@@ -568,9 +865,52 @@ void TestCameraPoseContinuity()
           "close camera reaches third person endpoint");
 }
 
+void TestVfxSessionReset()
+{
+    hs::runtime_detail::VfxSessionState state;
+    hs::PresentationEvent old_event;
+    old_event.session_id = 1;
+    old_event.tick = 100;
+    old_event.sequence = 9;
+    auto next_event = old_event;
+    next_event.session_id = 2;
+    next_event.tick = 2;
+    next_event.sequence = 10;
+    state.pending_events = {old_event, next_event};
+    Check(state.Synchronize(1), "first VFX session begins");
+    Check(state.TakeReady(99).empty(), "future tick or session event played early");
+    const auto first = state.TakeReady(100);
+    Check(first.size() == 1 && first[0].sequence == 9, "current VFX event was lost");
+    Check(state.MarkPersistentBurst(77, 3), "first persistent burst was lost");
+    state.ClearDecoded(); // A successful catalog reload retains semantic episode history.
+    Check(!state.MarkPersistentBurst(77, 3) && state.MarkPersistentBurst(77, 4),
+          "catalog reload replayed an active burst or merged distinct visual kinds");
+    state.flashes.emplace_back();
+    state.ground_events.emplace_back();
+    state.ribbon_events.emplace_back();
+    state.light_events.emplace_back();
+    state.distortion_events.emplace_back();
+    state.decal_events.emplace_back();
+    state.particle_spawns.emplace_back();
+    state.effect_lines.emplace_back();
+    Check(state.Synchronize(2) && state.flashes.empty() && state.ground_events.empty() &&
+              state.particle_spawns.empty() && state.effect_lines.empty() && state.ribbon_events.empty() && state.light_events.empty() && state.distortion_events.empty() && state.decal_events.empty(),
+          "session restart retained an old visual");
+    Check(state.MarkPersistentBurst(77, 3),
+          "new simulation session retained an old burst episode");
+    state.pending_events.push_back(old_event); // Delayed cross-thread delivery.
+    Check(state.TakeReady(1).empty(), "reset clock replayed an old/future event");
+    const auto second = state.TakeReady(2);
+    Check(second.size() == 1 && second[0].sequence == 10,
+          "event arriving before its session snapshot was dropped");
+    Check(!state.Synchronize(2) && state.TakeReady(100).empty(),
+          "old VFX replayed when the next session caught up to its tick");
+}
+
 void TestSessionProbeUiBridge()
 {
-    hs::RuntimeChannels channels;
+    auto channel_storage = std::make_unique<hs::RuntimeChannels>();
+    auto &channels = *channel_storage;
     hs::SessionProbe published;
     published.phase = hs::SessionPhase::Paused;
     published.skill_levels[1] = 2;
@@ -594,6 +934,7 @@ int main()
     try
     {
         TestVfxCatalog();
+        TestProductionVfxDecoding();
         TestSaveRecovery(root);
         TestSettingsPersistence(root);
         TestAudioCatalogValidation(root);
@@ -603,6 +944,7 @@ int main()
         TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
         TestSessionProbeUiBridge();
+        TestVfxSessionReset();
         TestCameraPoseContinuity();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";

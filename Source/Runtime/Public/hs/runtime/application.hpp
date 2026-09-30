@@ -34,6 +34,8 @@ struct ApplicationConfig
     bool character_preview{};
     bool mute_audio{};
     std::uint32_t monster_preview_asset{0xFFFFFFFFu};
+    std::uint32_t boss_vfx_capture{0xFFFFFFFFu};
+    bool boss_phase2_capture{};
     std::uint32_t slime_family_preview_count{};
     bool environment_preview{};
     std::uint32_t monster_preview_clip{};

@@ -14,6 +14,8 @@ GameReadModelStorage::GameReadModelStorage(std::size_t enemy_capacity,
     areas_.reserve(area_capacity);
     pickups_.reserve(pickup_capacity);
     boss_actions_.reserve(boss_action_capacity);
+    visual_links_.reserve(64);
+    mini_bombs_.reserve(32);
 }
 
 void GameReadModelStorage::Clear() noexcept
@@ -23,6 +25,9 @@ void GameReadModelStorage::Clear() noexcept
     areas_.clear();
     pickups_.clear();
     boss_actions_.clear();
+    visual_links_.clear();
+    mini_bombs_.clear();
+    spawn_warnings_.clear();
 }
 
 void GameReadModelStorage::AddEnemy(const EnemyView &value) { enemies_.push_back(value); }
@@ -36,6 +41,11 @@ void GameReadModelStorage::AddBossAction(const BossActionView &value)
 {
     boss_actions_.push_back(value);
 }
+
+void GameReadModelStorage::AddVisualLink(const VisualLinkView &value) { visual_links_.push_back(value); }
+
+void GameReadModelStorage::AddSpawnWarning(const SpawnWarningView &value) { spawn_warnings_.push_back(value); }
+void GameReadModelStorage::AddMiniBomb(const MiniBombView &value) { mini_bombs_.push_back(value); }
 
 GameReadModel GameReadModelStorage::View() const noexcept
 {
@@ -55,12 +65,17 @@ GameReadModel GameReadModelStorage::View() const noexcept
             effective_magnet_radius,
             arena_half_extent,
             arena_boundary,
-            std::span<const ArenaObstacle2D>(arena_obstacles.data(), arena_obstacle_count),
-            charge_range,
-            charge_radius,
-            skills,
+             std::span<const ArenaObstacle2D>(arena_obstacles.data(), arena_obstacle_count),
+             charge_range,
+             charge_radius,
+             charge_normal_ready_tick,
+             charge_ratio,
+             skills,
             waves,
-            summary};
+            summary,
+            session_id,
+            visual_links_,
+            mini_bombs_, spawn_warnings_};
 }
 
 } // namespace hs

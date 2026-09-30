@@ -33,7 +33,11 @@ enum class VfxPrimitive : std::uint8_t
     RelicChain,
     DashWake,
     Flame,
+    ExactRing,
+    LowFrequencyFill,
 };
+static_assert(static_cast<std::uint8_t>(VfxPrimitive::ExactRing) == 18);
+static_assert(static_cast<std::uint8_t>(VfxPrimitive::LowFrequencyFill) == 19);
 using ParticleSprite = std::uint16_t;
 enum class VfxDefinitionKind : std::uint8_t { Particles, Line };
 

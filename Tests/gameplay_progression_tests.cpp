@@ -156,12 +156,27 @@ void TestStartingEnemyBalanceAndBoundary()
            "normal enemy fallback warning projects to a visible world effect");
     Check(std::hypot(parameters.direction.x, parameters.direction.z) > 0.0001f,
           "spawn warning VFX projection carries a valid direction");
+    hs::GameReadModelStorage spawn_model; fallback.WriteReadModel(spawn_model);
+    Check(warning != fallback.PendingDomainSignals().end() &&
+        warning->geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+        warning->geometry.radius == fallback_rules.enemies[warning->context].collision_radius &&
+        warning->geometry.source_id == warning->sequence &&
+        warning->geometry.end_tick - warning->geometry.start_tick == 30,
+        "fallback spawn carries actual footprint and authored warning clock");
+    const auto spawn_owner = warning != fallback.PendingDomainSignals().end() ? warning->sequence : 0;
+    Check(std::ranges::any_of(spawn_model.View().spawn_warnings, [&](const auto &owner) {
+        return owner.owner_id == spawn_owner && !owner.boss && owner.expires == warning->geometry.end_tick &&
+            owner.radius == warning->geometry.radius;
+    }), "fallback pending spawn publishes authoritative warning owner");
     for (std::uint32_t tick = 0; tick < 29; ++tick) (void)Tick(fallback);
     Check(fallback.GetObservation().normal_enemy_count == 0,
           "normal enemy fallback remains absent during its warning window");
     (void)Tick(fallback);
     Check(fallback.GetObservation().normal_enemy_count == 1,
           "normal enemy fallback commits after the authored warning duration");
+    fallback.WriteReadModel(spawn_model);
+    Check(std::ranges::none_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.owner_id==spawn_owner;}),
+        "committed fallback spawn warning owner expires");
     Check(fallback.Shutdown().Succeeded(), "spawn fallback shutdown");
 }
 
@@ -321,6 +336,73 @@ void TestExperienceAttractSpeed()
     Check(simulation.Shutdown().Succeeded(), "experience speed shutdown");
 }
 
+void TestPickupCollectionTargetsCurrentPlayer()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1;
+    data.growth.utility_pickup_base_chance = 1.0f;
+    data.growth.heal_pickup_chance_multiplier = 1.0f;
+    data.growth.magnet_pickup_chance_multiplier = 1.0f;
+    data.relic_drop.healing_pickup_probability = 1.0f;
+    data.relic_drop.normal_enemy_base_probability = 1.0f;
+    data.relic_drop.normal_enemy_probability_cap = 1.0f;
+
+    hs::SimulationConfig config{121, true};
+    config.scenario.player_stationary = true;
+    config.scenario.auto_collect_progression = true;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize(config, data).Succeeded(), "pickup endpoint initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {1.0f, 0.0f});
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    std::array<bool, 4> collected{};
+    hs::GameReadModelStorage before;
+    for (std::uint32_t tick = 0; tick < 180 &&
+         !std::ranges::all_of(collected, [](bool found) { return found; }); ++tick)
+    {
+        simulation.WriteReadModel(before);
+        simulation.ClearDomainSignals();
+        (void)Tick(simulation, held);
+        const auto player = simulation.GetObservation().player_position;
+        for (const auto &signal : simulation.PendingDomainSignals())
+        {
+            hs::PickupKind kind{};
+            switch (signal.kind)
+            {
+            case hs::DomainSignalKind::ExperienceCollected: kind = hs::PickupKind::Experience; break;
+            case hs::DomainSignalKind::HealCollected: kind = hs::PickupKind::Heal; break;
+            case hs::DomainSignalKind::MagnetCollected: kind = hs::PickupKind::Magnet; break;
+            case hs::DomainSignalKind::RelicCollected: kind = hs::PickupKind::RelicChest; break;
+            default: continue;
+            }
+            const auto index = static_cast<std::size_t>(kind);
+            collected[index] = true;
+            const auto height = kind == hs::PickupKind::Experience ? 0.2f : 0.3f;
+            Check(signal.flags == static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget) &&
+                      signal.target.x == player.x && signal.target.y == height &&
+                      signal.target.z == player.y && signal.position.y == height,
+                  "pickup signal carries the current player endpoint at its source height");
+            if (kind == hs::PickupKind::Heal || kind == hs::PickupKind::Magnet)
+            {
+                const auto prior = std::ranges::find_if(before.View().pickups,
+                    [kind](const hs::PickupView &pickup) { return pickup.kind == kind; });
+                Check(prior != before.View().pickups.end(),
+                      "utility pickup exists before collection tick");
+                Check(signal.position.x == prior->position.x -
+                          data.growth.experience_pickup_speed * (1.0f / 60.0f) &&
+                          signal.position.z == prior->position.y,
+                      "utility collection source is the pickup's moved position");
+            }
+        }
+        if (simulation.GetObservation().kills != 0) held.basic_attack_held = false;
+    }
+    Check(std::ranges::all_of(collected, [](bool found) { return found; }),
+          std::format("pickup collection signals XP={} heal={} magnet={} relic={}",
+                      collected[0], collected[1], collected[2], collected[3]));
+    Check(simulation.Shutdown().Succeeded(), "pickup endpoint shutdown");
+}
+
 void TestMagnetPickupCollectsAllExperience()
 {
     auto data = QuietGameData();
@@ -422,10 +504,22 @@ void TestTimedBossEventsAndSpawnStop()
     Check(simulation.GetObservation().boss_count == 0 &&
               HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
           "5-minute boss warning");
+    const auto boss_warning=std::ranges::find_if(simulation.PendingDomainSignals(),[](const auto &signal){return signal.kind==hs::DomainSignalKind::BossSpawnWarning;});
+    Check(boss_warning!=simulation.PendingDomainSignals().end()&&boss_warning->geometry.kind==hs::DomainSignalGeometryKind::Circle&&
+        boss_warning->geometry.radius==hs::SimulationRules::Defaults().boss_common.collision_radius&&
+        boss_warning->geometry.source_id==boss_warning->sequence&&boss_warning->geometry.end_tick-boss_warning->geometry.start_tick==90,
+        "boss spawn warning uses actual footprint and schedule");
+    hs::GameReadModelStorage spawn_model; simulation.WriteReadModel(spawn_model);
+    const auto boss_owner=boss_warning!=simulation.PendingDomainSignals().end()?boss_warning->sequence:0;
+    Check(std::ranges::any_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.boss&&owner.owner_id==boss_owner;}),
+        "pending boss spawn publishes warning owner");
     for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 0, "5-minute warning window");
     (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 1, "5-minute boss event");
+    simulation.WriteReadModel(spawn_model);
+    Check(std::ranges::none_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.owner_id==boss_owner;}),
+        "boss spawn commit removes warning owner");
 
     Debug(simulation, hs::DebugCommandKind::SetGrowthTick, 10 * kTicksPerMinute - 2);
     (void)Tick(simulation);
@@ -721,6 +815,7 @@ void RunGameplayProgressionTests()
     TestLevelUpSelectionInputGuard();
     TestExperiencePickupDoesNotExpire();
     TestExperienceAttractSpeed();
+    TestPickupCollectionTargetsCurrentPlayer();
     TestMagnetPickupCollectsAllExperience();
     TestUtilityPickupMissChanceGrowth();
     TestTimedBossEventsAndSpawnStop();

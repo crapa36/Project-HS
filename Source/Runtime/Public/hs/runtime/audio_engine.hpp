@@ -40,6 +40,8 @@ struct AudioStatus
 {
     AudioDeviceState device_state{AudioDeviceState::Uninitialized};
     bool combat_paused{};
+    bool background_muted{};
+    float effective_master_volume{1.0f};
     std::uint32_t active_source_voices{};
     std::uint64_t skipped_missing_cues{};
     std::uint64_t skipped_load_failures{};
@@ -66,6 +68,7 @@ class AudioEngine
                                     const std::filesystem::path &audio_directory);
     void Shutdown() noexcept;
     void ApplySettings(const SettingsData &settings) noexcept;
+    void SetBackgroundMuted(bool muted) noexcept;
 
     void Play(const PresentationEvent &event) noexcept;
     void Stop(AssetId cue) noexcept;

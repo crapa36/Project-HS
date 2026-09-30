@@ -32,6 +32,7 @@ struct DamageCommand
     std::array<std::uint8_t, 3> amplified_upgrades{};
     std::array<std::int32_t, 3> amplified_damage{};
     std::uint8_t amplified_count{};
+    std::uint64_t originating_area_id{};
 };
 
 enum class ProcPermission : std::uint8_t

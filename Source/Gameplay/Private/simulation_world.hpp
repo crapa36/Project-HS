@@ -57,6 +57,7 @@ constexpr Tick AnimationMarkerTicks(Tick source_marker, Tick playback_ticks) noe
 
 constexpr float kPi = std::numbers::pi_v<float>;
 constexpr std::uint8_t kNoTelemetrySource = 0xFF;
+constexpr std::uint8_t kBossTelemetryBase = 3;
 constexpr std::uint64_t kPlayerRenderId = 1ull << 60;
 constexpr std::uint64_t kEnemyRenderId = 2ull << 60;
 constexpr std::uint64_t kProjectileRenderId = 3ull << 60;
@@ -110,6 +111,7 @@ struct PlayerState
     Tick bleed_heal_ready{};
     std::uint32_t revives_used{};
     Tick revive_invulnerable_until{};
+    Tick revive_invulnerable_started{};
     std::uint32_t kill_cooldown_progress{};
     std::uint32_t combat_hit_progress{};
     std::uint32_t projectile_cadence_progress{};
@@ -122,6 +124,7 @@ struct PlayerState
     SkillKind charging_skill{SkillKind::Count};
     std::uint8_t charging_slot{0xFF};
     Tick charge_start{};
+    std::uint64_t charge_cast_id{};
     Tick retreat_until{};
     Float2 retreat_velocity{};
     Tick active_cast_tick{};
@@ -140,6 +143,8 @@ struct PlayerState
     Tick buffered_skill_expires{};
     std::uint8_t buffered_skill_slot{0xFF};
 };
+
+struct StatusVisualEpisode { Tick started{}; std::uint64_t generation{}; };
 
 struct EnemyActor
 {
@@ -168,16 +173,23 @@ struct EnemyActor
     bool boss_action_recoil{};
     std::uint64_t attack_cast_id{};
     Float2 locked_aim{};
+    Sequence warning_sequence{};
     Tick pattern_ready{};
     std::uint8_t last_pattern{255};
     std::uint8_t repeat_count{};
     std::uint8_t final_phase{1};
     Tick invulnerable_until{};
+    // Presentation clocks; presence remains governed by the live enemy.
+    Tick phase2_started{};
+    Tick dash_started{};
+    Float2 dash_origin{};
     Tick dash_until{};
     std::int32_t dash_damage{};
     bool dash_hit{};
     std::uint8_t phase_pattern_count{};
     StatusState status;
+    // Presentation episode metadata; excluded from authoritative checksum.
+    std::array<StatusVisualEpisode, 4> status_visual_episodes{};
     SkillKind last_damage_skill{SkillKind::Count};
     EffectOrigin last_damage_origin{EffectOrigin::Original};
     std::uint64_t last_damage_cast{};
@@ -218,6 +230,8 @@ struct ProjectileActor
     std::uint8_t bounce_remaining{};
     std::uint32_t hit_count{};
     std::vector<std::uint64_t> hit_ids;
+    // Each successful bleed extension is a separate short-lived visual episode.
+    std::vector<Tick> bleed_extend_ticks;
     float explosion_radius{};
     std::int32_t explosion_damage{};
     std::uint8_t explosion_source_upgrade{kNoTelemetrySource};
@@ -226,6 +240,8 @@ struct ProjectileActor
     bool slow{};
     bool returning{};
     bool homing{};
+    Tick return_started_tick{};
+    Float2 return_start_position{};
     std::uint64_t homing_target{};
     bool full_charge{};
     float charge_ratio{};
@@ -312,6 +328,11 @@ struct ScheduledAction
     std::uint64_t cast_id{};
     std::uint8_t source_upgrade{kNoTelemetrySource};
     std::uint8_t source_relic{kNoTelemetrySource};
+    // Cosmetic schedule identity, excluded from the deterministic checksum.
+    std::uint64_t visual_owner_id{};
+    Tick visual_started{};
+    // Scheduled member angle used to recover the frozen fan center at release.
+    float visual_fan_angle{};
 };
 
 enum class BossActionKind : std::uint8_t
@@ -343,6 +364,9 @@ struct BossAction
     float safe_gap_degrees{};
     std::uint64_t cast_id{};
     float half_width{};
+    // Presentation metadata for the warning signal emitted when this action is scheduled.
+    Sequence warning_sequence{};
+    Tick warning_started{};
 };
 
 struct CastHitRecord
@@ -386,6 +410,9 @@ struct PendingBossSpawn
     BossKind kind{};
     Float2 position{};
     Tick due{};
+    // Presentation ownership; excluded from simulation checksum.
+    Sequence warning_sequence{};
+    Tick warning_started{};
 };
 
 struct PendingEnemySpawn
@@ -394,6 +421,9 @@ struct PendingEnemySpawn
     Float2 position{};
     std::uint64_t random_key{};
     Tick due{};
+    // Presentation ownership; excluded from simulation checksum.
+    Sequence warning_sequence{};
+    Tick warning_started{};
 };
 
 inline float LengthSquared(Float2 value) noexcept
@@ -534,6 +564,7 @@ struct GameSimulation::SimulationWorld
     std::unique_ptr<TelemetryState> telemetry;
     InputFrame current_input{};
     Tick tick{};
+    std::uint64_t session_id{};
     Tick growth_ticks{};
     Tick boss_fight_ticks{};
     Sequence event_sequence{};
@@ -593,9 +624,15 @@ struct GameSimulation::SimulationWorld
     void EmitVfx(DomainSignalKind effect, Float2 position,
                  Float2 direction = {0.0f, 1.0f}, float scale = 1.0f,
                  float height = 0.3f, std::uint8_t context = 0,
-                 std::uint64_t source_entity_id = 0);
+                 std::uint64_t source_entity_id = 0,
+                 DomainSignalGeometry geometry = {});
     void EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                      float height = 0.75f);
+    void EmitUpgradeVisual(SkillKind skill, std::uint8_t ordinal,
+                           UpgradeVisualStage stage, Float2 position,
+                           Float2 direction, std::uint64_t cast_id,
+                           std::uint64_t owner_id,
+                           DomainSignalGeometry geometry = {});
     bool SpawnEnemy(EnemyKind kind, Float2 position,
                     std::uint64_t random_key = 0);
     void QueueEnemySpawn(EnemyKind kind, std::uint64_t random_key);
@@ -629,13 +666,15 @@ struct GameSimulation::SimulationWorld
                     float slow = 0.0f, Tick slow_duration = 0,
                     std::uint8_t source_upgrade = kNoTelemetrySource,
                     std::uint8_t source_relic = kNoTelemetrySource,
-                    std::uint8_t source_enemy = kNoTelemetrySource);
+                    std::uint8_t source_enemy = kNoTelemetrySource,
+                    std::uint64_t originating_area_id = 0);
     void QueueAreaDamage(Float2 position, float radius, std::int32_t damage, SkillKind skill,
                     EffectOrigin origin, std::uint64_t cast_id,
                     std::uint8_t bleed = 0, bool burn = false,
                     float slow = 0.0f, Tick slow_duration = 0,
                     std::uint8_t source_upgrade = kNoTelemetrySource,
-                    std::uint8_t source_relic = kNoTelemetrySource);
+                    std::uint8_t source_relic = kNoTelemetrySource,
+                    std::uint64_t originating_area_id = 0);
     void StartSession();
     void ProcessInput();
     void CastBasicAttack();
@@ -655,7 +694,8 @@ struct GameSimulation::SimulationWorld
     std::uint8_t IncrementCastHit(std::uint64_t cast, std::uint64_t target);
     std::uint8_t IncrementAreaHit(std::uint64_t area, std::uint64_t target);
     CastRuntime &FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill);
-    void OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy);
+    void OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
+                         Float2 contact_position);
     void ExplodeProjectile(ProjectileActor &projectile);
     void CollisionHitPhase();
     void ApplyBleed(EnemyActor &enemy, float attack, std::uint8_t stacks,

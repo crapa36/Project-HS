@@ -7,6 +7,12 @@ using namespace gameplay_detail;
 
 void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
 {
+    const auto target_collected_signal = [this]() {
+        auto &signal = combat_state->domain_signals.back();
+        signal.target = {actors->player.position.x, signal.position.y,
+                         actors->player.position.y};
+        signal.flags |= static_cast<std::uint8_t>(DomainSignalFlag::HasTarget);
+    };
     pickup.dead = true;
     for (const auto &rule : combat_state->relic_rules.RulesFor(RelicRuleHook::OnPickup))
         if (rule.handler == RelicRuleHandlerId::PickupReward)
@@ -21,11 +27,13 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
             DomainSignalKind::MagnetCollected,
             DomainSignalKind::RelicCollected};
         EmitVfx(effects[static_cast<std::size_t>(pickup.kind)], pickup.position);
+        target_collected_signal();
     }
     if (pickup.kind == PickupKind::Experience)
     {
         actors->player.experience += pickup.value;
         EmitSignal(DomainSignalKind::ExperienceCollected, pickup.position);
+        target_collected_signal();
     }
     else if (pickup.kind == PickupKind::Heal)
     {

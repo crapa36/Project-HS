@@ -432,6 +432,52 @@ void TestArrowRainPulseAudioProjection()
           "every arrow rain pulse projects falling and impact audio");
 }
 
+void TestAuthoritativeCombatGeometryEmission()
+{
+    hs::SimulationConfig config{0x47454F4Du};
+    config.scenario = {.player_stationary = true, .player_invulnerable = true,
+                       .progression_enabled = false};
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize(config, QuietGameData()).Succeeded(),
+          "geometry emission initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::FiveMinute));
+    Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+          static_cast<std::uint64_t>(hs::BossKind::TenMinute));
+    for (std::uint32_t tick = 0; tick < 2'400; ++tick) (void)Tick(simulation);
+
+    bool saw_cone = false;
+    bool saw_circle = false;
+    bool saw_ring = false;
+    for (const auto &signal : simulation.PendingDomainSignals())
+    {
+        if (signal.kind == hs::DomainSignalKind::BossVolleyReleased)
+        {
+            saw_cone = signal.geometry.kind == hs::DomainSignalGeometryKind::Cone &&
+                signal.geometry.range > 0.0f && signal.geometry.half_angle_degrees > 0.0f &&
+                signal.geometry.source_id != 0 &&
+                std::abs(std::sqrt(signal.direction.x * signal.direction.x +
+                                   signal.direction.z * signal.direction.z) - 1.0f) < 0.001f;
+        }
+        else if (signal.kind == hs::DomainSignalKind::BossAreaActivated)
+        {
+            saw_circle = signal.geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+                signal.geometry.radius > 0.0f &&
+                signal.geometry.end_tick > signal.geometry.start_tick;
+        }
+        else if (signal.kind == hs::DomainSignalKind::BossShockwaveReleased)
+        {
+            saw_ring = signal.geometry.kind == hs::DomainSignalGeometryKind::RingGaps &&
+                signal.geometry.inner_radius < signal.geometry.outer_radius &&
+                signal.geometry.gap_offset_degrees ==
+                    static_cast<float>(signal.geometry.source_id % 360);
+        }
+    }
+    Check(saw_cone && saw_circle && saw_ring,
+          "boss combat signals lost authoritative geometry");
+    Check(simulation.Shutdown().Succeeded(), "geometry emission shutdown");
+}
+
 void TestEnemyDisplacementInterpolates()
 {
     auto data = QuietGameData();
@@ -579,6 +625,12 @@ void TestProjectileAndAreaVisualTruth()
     area.expires = 120;
     area.skill = hs::SkillKind::ArrowRain;
     area.origin = hs::EffectOrigin::Derived;
+    area.cast_id = 1234;
+    area.source_upgrade = 5;
+    area.ring_inner_radius = 2.0f;
+    area.ring_outer_radius = 4.0f;
+    area.safe_gap_count = 3;
+    area.safe_gap_degrees = 18.0f;
     area.applies_slow = true;
     model.AddArea(area);
 
@@ -617,6 +669,18 @@ void TestProjectileAndAreaVisualTruth()
               return visual.kind == hs::PersistentVfxKind::ArrowRainArea &&
                      std::abs(visual.radius - 3.0f) < 0.0001f;
           }), "derived arrow rain keeps its actual three-metre boundary");
+    Check(std::ranges::any_of(snapshot.View().persistent_vfx, [](const hs::PersistentVfxVisual &visual) {
+              return visual.kind == hs::PersistentVfxKind::ArrowRainArea &&
+                     visual.active_tick == 20 && visual.expires == 120 &&
+                     visual.cast_id == 1234 &&
+                     visual.skill == static_cast<std::uint8_t>(hs::SkillKind::ArrowRain) &&
+                     visual.source_upgrade == 5 &&
+                     std::abs(visual.ring_inner_radius - 2.0f) < 0.0001f &&
+                     std::abs(visual.ring_outer_radius - 4.0f) < 0.0001f &&
+                     visual.gap_count == 3 &&
+                     std::abs(visual.gap_half_angle_degrees - 9.0f) < 0.0001f &&
+                     std::abs(visual.gap_offset_degrees - 154.0f) < 0.0001f;
+          }), "area visual preserves lifetime, source, and ring gap metadata");
     Check(std::ranges::any_of(snapshot.View().persistent_vfx,
                               [](const hs::PersistentVfxVisual &visual) {
               return visual.kind == hs::PersistentVfxKind::SlowArea &&
@@ -665,6 +729,38 @@ void TestProjectileAndAreaVisualTruth()
                   return instance.stable_id == (4ull << 60u | 901ull);
               }),
           "ordinary area stays hidden before its active tick");
+    Check(std::ranges::none_of(
+              snapshot.View().persistent_vfx,
+              [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::BossAreaActive;
+              }),
+          "boss area boundary stays hidden before activation");
+
+    model.tick = 25;
+    snapshot.Clear();
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot) &&
+              std::ranges::any_of(snapshot.View().persistent_vfx,
+                                  [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::BossAreaActive &&
+                         std::abs(visual.radius - 2.0f) < 0.0001f &&
+                         visual.active_tick == 20 && visual.expires == 40;
+              }),
+          "active boss area projects authoritative radius and lifetime");
+
+    model.Clear();
+    snapshot.Clear();
+    model.tick = 25;
+    preactive_area.ring_outer_radius = 5.0f;
+    preactive_area.safe_gap_count = 2;
+    model.AddArea(preactive_area);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, settings, snapshot) &&
+              std::ranges::none_of(snapshot.View().persistent_vfx,
+                                   [](const hs::PersistentVfxVisual &visual) {
+                  return visual.kind == hs::PersistentVfxKind::BossAreaActive;
+              }),
+          "gapped shockwave is not projected as a solid boss area boundary");
 
     model.Clear();
     snapshot.Clear();
@@ -676,7 +772,7 @@ void TestProjectileAndAreaVisualTruth()
                                     test_ui, settings, snapshot) &&
               std::ranges::any_of(snapshot.View().persistent_vfx,
                                   [](const hs::PersistentVfxVisual &visual) {
-                  return visual.kind == hs::PersistentVfxKind::SlowArea;
+                  return visual.kind == hs::PersistentVfxKind::UpgradeSlowArea;
               }) &&
               std::ranges::any_of(snapshot.View().persistent_vfx,
                                   [](const hs::PersistentVfxVisual &visual) {
@@ -730,8 +826,14 @@ void TestProjectileAndAreaVisualTruth()
 
 void TestMultiShotCastVfxIsPerFan()
 {
+    auto data = QuietGameData();
+    auto &multishot = data.skills[static_cast<std::size_t>(hs::SkillKind::MultiShot)];
+    multishot.range = 23.0f;
+    multishot.fan_angle_degrees = 14.0f;
+    data.upgrades.multishot.two_additional_outer_arrows.additional_projectiles = 2;
+    data.upgrades.multishot.two_additional_outer_arrows.outer_angles_degrees = {-31.0f, 27.0f};
     hs::GameSimulation simulation;
-    Check(simulation.Initialize({0x564658u}, QuietGameData()).Succeeded(),
+    Check(simulation.Initialize({0x564658u}, data).Succeeded(),
           "multishot VFX initialize");
     Debug(simulation, hs::DebugCommandKind::GrantSkill,
           static_cast<std::uint64_t>(hs::SkillKind::MultiShot));
@@ -739,6 +841,8 @@ void TestMultiShotCastVfxIsPerFan()
           static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 0);
     Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
           static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 3);
+    Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::MultiShot), 6);
     hs::HeldInputState held;
     held.aim_world = {20.0f, 0.0f, 0.0f};
     hs::Sequence sequence{};
@@ -753,10 +857,34 @@ void TestMultiShotCastVfxIsPerFan()
     }
     Check(original_fan_casts == 1,
           "multishot emits exactly one cast for the original fan");
+    const auto &signal = *std::ranges::find_if(
+        simulation.PendingDomainSignals(), [](const hs::DomainSignal &event) {
+            return event.kind == hs::DomainSignalKind::MultiShotCast;
+        });
+    Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Cone &&
+              std::abs(signal.geometry.range - 23.0f) < 0.0001f &&
+              std::abs(signal.geometry.half_angle_degrees - 31.0f) < 0.0001f &&
+              signal.geometry.source_id != 0 && signal.geometry.start_tick == signal.tick &&
+              signal.geometry.end_tick == signal.tick,
+          "multishot cone geometry follows the effective fan and skill range");
+    hs::GameReadModelStorage release_model;
+    simulation.WriteReadModel(release_model);
+    const auto has_outer_angle = [&release_model](float expected) {
+        return std::ranges::any_of(release_model.View().projectiles,
+                                   [expected](const hs::ProjectileView &projectile) {
+            if (projectile.skill != hs::SkillKind::MultiShot || !projectile.player_owned)
+                return false;
+            const auto angle = std::atan2(-projectile.velocity.y, projectile.velocity.x) *
+                               180.0f / 3.14159265358979323846f;
+            return std::abs(angle - expected) < 0.001f;
+        });
+    };
+    Check(has_outer_angle(-31.0f) && has_outer_angle(27.0f),
+          "multishot outer arrow directions match the authored upgrade angles");
     for (std::uint32_t tick = 0; tick < 30; ++tick) (void)Tick(simulation, held);
     Check(CountVfx(simulation, hs::DomainSignalKind::MultiShotCast) == 1,
           "derived multishot volleys do not emit a cast VFX");
-    Check(simulation.GetObservation().player_projectile_count == 17,
+    Check(simulation.GetObservation().player_projectile_count == 19,
           "multishot VFX deduplication does not change projectile count");
     Check(simulation.Shutdown().Succeeded(), "multishot VFX shutdown");
 }

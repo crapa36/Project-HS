@@ -34,6 +34,12 @@ try {
     }
     $env:VSLANG = '1033'
     $cmake = (Get-Command cmake -ErrorAction Stop).Source
+    if (!(Get-Command ninja -ErrorAction SilentlyContinue)) {
+        $bundledNinja = Join-Path $installation 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe'
+        if (Test-Path -LiteralPath $bundledNinja) {
+            $env:PATH = (Split-Path $bundledNinja -Parent) + [IO.Path]::PathSeparator + $env:PATH
+        }
+    }
     if ($Target) {
         $ctest = (Get-Command (Join-Path (Split-Path $cmake -Parent) 'ctest.exe') -ErrorAction Stop).Source
     }

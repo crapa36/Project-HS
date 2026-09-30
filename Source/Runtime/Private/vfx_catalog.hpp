@@ -4,6 +4,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/result.hpp>
 #include <hs/renderer/vfx_spawn_command.hpp>
+#include <hs/renderer/vfx_program_loader.hpp>
 
 #include <filesystem>
 #include <span>
@@ -25,11 +26,14 @@ class VfxCatalog
                                 std::vector<VfxLineSpawnCommand> &lines) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return payload_hash_; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return sprite_count_; }
+    [[nodiscard]] const VfxProgramData &Program() const noexcept { return program_; }
 
   private:
     std::vector<CookedVfxDefinition> definitions_;
     std::vector<CookedParticleEmitter> emitters_;
     std::vector<CookedParticleSprite> sprites_;
+    std::vector<std::uint8_t> authored_mesh_indices_;
+    VfxProgramData program_;
     std::uint32_t sprite_count_{};
     std::uint64_t payload_hash_{};
 };

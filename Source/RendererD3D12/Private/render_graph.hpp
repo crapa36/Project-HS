@@ -8,6 +8,8 @@
 #include <memory>
 #include <string_view>
 
+namespace D3D12MA { class Allocator; }
+
 namespace hs
 {
 
@@ -23,6 +25,7 @@ enum class Access : std::uint8_t
     Undefined,
     Common,
     ShaderRead,
+    ComputeRead,
     RenderTarget,
     DepthRead,
     DepthWrite,
@@ -76,6 +79,23 @@ struct ExternalTexture
 struct ExternalBuffer
 {
     void *native_resource{};
+};
+
+// One pool per frame slot. ResetClaims/Clear require that slot's GPU work to be complete.
+class TransientResourcePool
+{
+  public:
+    TransientResourcePool();
+    ~TransientResourcePool();
+    TransientResourcePool(const TransientResourcePool &) = delete;
+    TransientResourcePool &operator=(const TransientResourcePool &) = delete;
+    [[nodiscard]] Result Initialize(D3D12MA::Allocator *allocator);
+    void ResetClaims() noexcept;
+    void Clear() noexcept;
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    friend class RenderGraphBuilder;
 };
 
 class RenderPassContext
@@ -135,6 +155,8 @@ class RenderGraphBuilder
     [[nodiscard]] PassBuilder AddPass(std::string_view name, QueueHint queue);
     void SetFinalAccess(ResourceHandle resource, Access access);
 
+    [[nodiscard]] Result Prepare(TransientResourcePool &pool);
+    [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
     [[nodiscard]] Result Execute(void *native_command_list, void *enhanced_command_list,
                                  BarrierMode barriers, void *timestamp_query_heap = nullptr,
                                  void *timestamp_readback = nullptr,

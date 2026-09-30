@@ -303,6 +303,7 @@
       "additionalProperties": false,
       "required": ["id", "display_name", "base_hp", "movement_speed_mps", "xp_reward", "mesh_asset_id", "material_id", "logic_id", "parameters", "rules"],
       "properties": {
+        "collision_radius": {"type": "number", "exclusiveMinimum": 0},
         "id": {"$ref": "#/$defs/stable_id"},
         "display_name": {"type": "string", "minLength": 1},
         "base_hp": {"type": "integer", "minimum": 1},

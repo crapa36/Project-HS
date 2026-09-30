@@ -89,9 +89,10 @@ void TestRelicDataIsCookedFromJson()
     Check(slime && valid_magic && slime_header.version == hs::kCharacterAssetVersion,
           "Slime family cooked mesh has a valid character header");
     const bool is_projectile = std::string_view(asset) == "enemy_gel_projectile";
-    Check(slime_header.bone_count == (is_projectile ? 1u : 14u) && slime_header.clip_count == 5 &&
+    Check(slime_header.bone_count == (is_projectile ? 1u : 14u) &&
+              slime_header.clip_count == static_cast<std::uint32_t>(hs::CharacterAnimationClip::Count) &&
               slime_header.material_count == 1,
-          "Slime family keeps the required rig controls, five animation slots, and one material");
+          "Slime family keeps the required rig controls, fixed clip table, and one material");
 
     std::vector<hs::SkinnedVertex> slime_vertices(slime_header.vertex_count);
     std::vector<hs::CharacterClipHeader> slime_clips(slime_header.clip_count);
@@ -137,6 +138,19 @@ void TestRelicDataIsCookedFromJson()
               return clip.frame_count >= 2 && clip.duration_seconds > 0.0f;
           }),
           "Slime family cooks every animation slot with playable frames");
+    for (const auto [destination, source] : std::array{
+             std::pair{hs::CharacterAnimationClip::Dive, hs::CharacterAnimationClip::Run},
+             std::pair{hs::CharacterAnimationClip::Stop, hs::CharacterAnimationClip::Idle},
+             std::pair{hs::CharacterAnimationClip::Hit, hs::CharacterAnimationClip::Recoil}})
+    {
+        const auto alias = std::ranges::find(slime_clips, destination, &hs::CharacterClipHeader::clip);
+        const auto original = std::ranges::find(slime_clips, source, &hs::CharacterClipHeader::clip);
+        Check(alias != slime_clips.end() && original != slime_clips.end() &&
+                  alias->first_transform == original->first_transform &&
+                  alias->frame_count == original->frame_count &&
+                  alias->duration_seconds == original->duration_seconds && !alias->looping,
+              "player-only compatibility slots reuse authored monster transforms");
+    }
 
     const auto transform_prefix = slime_header.transforms_offset >= sizeof(slime_header)
                                       ? slime_header.transforms_offset - sizeof(slime_header)
@@ -152,16 +166,29 @@ void TestRelicDataIsCookedFromJson()
         slime.seekg(slime_header.transforms_offset).read(
             reinterpret_cast<char *>(slime_transforms.data()),
             static_cast<std::streamsize>(slime_transforms.size() * sizeof(slime_transforms.front())));
-    bool root_stationary = layout_valid && slime.good();
+    bool root_motion_valid = layout_valid && slime.good();
+    float draw_hop_height = 0.0f;
     for (const auto &clip : slime_clips)
-        for (std::uint32_t frame = 0; frame < clip.frame_count && root_stationary; ++frame) {
+        for (std::uint32_t frame = 0; frame < clip.frame_count && root_motion_valid; ++frame) {
             const auto index = static_cast<std::size_t>(clip.first_transform) +
                                static_cast<std::size_t>(frame) * slime_header.bone_count;
-            root_stationary = index < slime_transforms.size() &&
-                              std::ranges::all_of(slime_transforms[index].translation,
-                                                  [](float value) { return std::abs(value) < 0.0001f; });
+            if (index >= slime_transforms.size()) {
+                root_motion_valid = false;
+                break;
+            }
+            const auto &translation = slime_transforms[index].translation;
+            root_motion_valid = std::ranges::all_of(translation,
+                                                    [](float value) { return std::isfinite(value); }) &&
+                                std::abs(translation[0]) < 0.0001f &&
+                                std::abs(translation[2]) < 0.0001f &&
+                                translation[1] >= -0.0001f && translation[1] <= 0.2f;
+            if (clip.clip == hs::CharacterAnimationClip::Draw)
+                draw_hop_height = std::max(draw_hop_height, translation[1]);
         }
-    Check(root_stationary, "Slime family animation clips keep root motion stationary");
+    Check(root_motion_valid,
+          "Slime family root motion stays horizontally stationary with finite bounded vertical hops");
+    if (std::string_view(asset) == "enemy_melee")
+        Check(draw_hop_height > 0.1f, "melee attack retains its authored jump above the ground");
     for (const auto suffix : {"_diffuse_0.dds", "_normal_0.dds"})
     {
         const auto path = std::filesystem::current_path() / "Cooked" / (std::string(asset) + suffix);
@@ -200,6 +227,10 @@ void TestTypedSimulationRulesAreCookedFromJson()
           "upgrade fixed array is cooked from JSON");
     Check(std::abs(data.enemies[1].ranged_projectile_radius - 0.25f) < 0.0001f,
           "enemy parameter is cooked from JSON");
+    Check(std::abs(data.enemies[0].collision_radius - 0.63f) < 0.0001f &&
+              std::abs(data.enemies[1].collision_radius - 0.71f) < 0.0001f &&
+              std::abs(data.enemies[2].collision_radius - 0.79f) < 0.0001f,
+          "role-specific enemy collision radii use the authored meter scale");
     Check(std::abs(data.stats.allocations[1].amount_per_point - 0.1f) < 0.0001f &&
               data.progression.required_xp_base == 12.0f &&
               data.progression.boss_spawn_ticks[2] == 54'000,

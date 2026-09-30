@@ -18,6 +18,7 @@ struct ParticleSpawnCommand
     ParticleFacing facing{};
     VfxRenderer renderer{VfxRenderer::Sprite};
     VfxPrimitive primitive{VfxPrimitive::Soft};
+    std::uint8_t mesh_index{}; // 0: generic shard; 1..7: authored atlas mesh.
     ParticleSprite sprite{};
     std::uint8_t frame_columns{1};
     std::uint8_t frame_rows{1};
@@ -44,6 +45,13 @@ struct ParticleSpawnCommand
     float scroll_speed{};
     std::uint32_t count{1};
     std::uint32_t seed{};
+    // Authored cosmetic physics: immutable initial conditions, exact 60 Hz birth clock.
+    bool authored_ballistic{};
+    Float3 authored_initial_velocity{};
+    float authored_drag{}, authored_bounce{}, authored_ground_y{}, authored_collision_radius{};
+    float authored_hdr{}, authored_birth_fraction{};
+    Tick authored_birth_tick{};
+    std::uint32_t authored_gradient_row{};
 };
 
 struct VfxLineSpawnCommand

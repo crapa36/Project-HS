@@ -209,6 +209,9 @@ add_library(
     Source/RendererD3D12/Private/renderer.cpp
     Source/RendererD3D12/Private/renderer_capture.cpp
     Source/RendererD3D12/Private/renderer_device.cpp
+    Source/RendererD3D12/Private/vfx_persistent_state.cpp
+    Source/RendererD3D12/Private/vfx_ribbon_state.cpp
+    Source/RendererD3D12/Private/vfx_program_loader.cpp
     Source/RendererD3D12/Private/renderer_frame.cpp
     Source/RendererD3D12/Private/renderer_pipeline.cpp
     Source/RendererD3D12/Private/renderer_resources.cpp
@@ -257,6 +260,18 @@ add_library(
     Source/Runtime/Private/playtest_recording.cpp
     Source/Runtime/Private/save_store.cpp
     Source/Runtime/Private/vfx_catalog.cpp
+    Source/Runtime/Private/vfx_typed_frame_adapter.cpp
+    Source/Runtime/Private/vfx_upgrade_dispatch.cpp
+    Source/Runtime/Private/vfx_typed_decal_commands.cpp
+    Source/Runtime/Private/vfx_typed_distortion_commands.cpp
+    Source/Runtime/Private/vfx_typed_light_commands.cpp
+    Source/Runtime/Private/vfx_typed_ballistic_commands.cpp
+    Source/Runtime/Private/vfx_typed_mote_commands.cpp
+    Source/Runtime/Private/vfx_typed_flash_commands.cpp
+    Source/Runtime/Private/vfx_typed_ground_commands.cpp
+    Source/Runtime/Private/vfx_typed_mesh_commands.cpp
+    Source/Runtime/Private/vfx_typed_fresnel_commands.cpp
+    Source/Runtime/Private/vfx_typed_ribbon_commands.cpp
     Source/Runtime/Private/window.cpp
 )
 target_sources(
@@ -296,6 +311,7 @@ function(hs_compile_shader output entry profile)
             "${HS_DXC}" -nologo -WX -O3 -Ges -E "${entry}" -T "${profile}"
             -Fo "${HS_SHADER_DIRECTORY}/${output}" "${HS_SHADER_SOURCE}"
         DEPENDS "${HS_SHADER_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         VERBATIM
     )
     set(HS_SHADER_OUTPUTS ${HS_SHADER_OUTPUTS} "${HS_SHADER_DIRECTORY}/${output}" PARENT_SCOPE)
@@ -307,11 +323,31 @@ hs_compile_shader(slime_ps.dxil SlimePS ps_6_6)
 hs_compile_shader(shadow_vs.dxil ShadowVS vs_6_0)
 hs_compile_shader(shadow_ps.dxil ShadowPS ps_6_0)
 hs_compile_shader(particle_vs.dxil ParticleVS vs_6_0)
+hs_compile_shader(ground_ring_vs.dxil GroundRingVS vs_6_0)
+hs_compile_shader(ground_add_ps.dxil GroundAddPS ps_6_0)
+hs_compile_shader(owner_mesh_vs.dxil OwnerMeshVS vs_6_0)
+hs_compile_shader(owner_mesh_ps.dxil OwnerMeshPS ps_6_0)
+hs_compile_shader(fresnel_shell_vs.dxil FresnelShellVS vs_6_0)
+hs_compile_shader(fresnel_shell_ps.dxil FresnelShellPS ps_6_0)
+hs_compile_shader(vfx_distortion_vs.dxil VfxDistortionVS vs_6_0)
+hs_compile_shader(vfx_distortion_ps.dxil VfxDistortionPS ps_6_0)
+hs_compile_shader(vfx_flash_vs.dxil VfxFlashVS vs_6_0)
+hs_compile_shader(vfx_flash_ps.dxil VfxFlashPS ps_6_0)
+hs_compile_shader(vfx_sprite_oit_ps.dxil VfxSpriteOitPS ps_6_0)
 hs_compile_shader(particle_ps.dxil ParticlePS ps_6_0)
 hs_compile_shader(particle_cs.dxil ParticleCS cs_6_0)
+hs_compile_shader(ribbon_update_cs.dxil RibbonUpdateCS cs_6_0)
+hs_compile_shader(ribbon_args_cs.dxil RibbonArgsCS cs_6_0)
+hs_compile_shader(ribbon_vs.dxil RibbonVS vs_6_0)
+hs_compile_shader(ribbon_add_ps.dxil RibbonAddPS ps_6_0)
+hs_compile_shader(ribbon_oit_ps.dxil RibbonOitPS ps_6_0)
 hs_compile_shader(fullscreen_vs.dxil FullScreenVS vs_6_0)
+hs_compile_shader(temporal_ps.dxil TemporalPS ps_6_0)
 hs_compile_shader(deferred_ps.dxil DeferredPS ps_6_0)
 hs_compile_shader(composite_ps.dxil CompositePS ps_6_0)
+hs_compile_shader(bloom_extract_ps.dxil BloomExtractPS ps_6_0)
+hs_compile_shader(bloom_downsample_ps.dxil BloomDownsamplePS ps_6_0)
+hs_compile_shader(bloom_upsample_ps.dxil BloomUpsamplePS ps_6_0)
 hs_compile_shader(bloom_ps.dxil BloomPS ps_6_0)
 hs_compile_shader(tonemap_ps.dxil ToneMapPS ps_6_0)
 hs_compile_shader(outline_ps.dxil OutlinePS ps_6_0)
@@ -410,6 +446,21 @@ set_target_properties(
     IMPORTED_LOCATION_DEBUG "${HS_FBX_SDK_ROOT}/lib/x64/debug/zlib-mt.lib"
 )
 
+add_library(hs_vfx_authoring STATIC
+    Source/Apps/Content/vfx_spec_validation.cpp
+    Source/Apps/Content/vfx_texture_validation.cpp
+    Source/Apps/Content/vfx_gradient_cooker.cpp
+    Source/Apps/Content/vfx_program_cooker.cpp
+    Source/Apps/Content/vfx_runtime_cooker.cpp
+)
+target_link_libraries(hs_vfx_authoring PRIVATE nlohmann_json::nlohmann_json DirectXTex)
+target_include_directories(hs_vfx_authoring PUBLIC Source/RendererD3D12/Public)
+hs_configure_target(hs_vfx_authoring)
+add_executable(hs_vfx_prepare Source/Apps/Content/vfx_prepare_main.cpp)
+target_link_libraries(hs_vfx_prepare PRIVATE hs_vfx_authoring nlohmann_json::nlohmann_json)
+target_compile_definitions(hs_vfx_prepare PRIVATE HS_VFX_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+hs_configure_target(hs_vfx_prepare)
+
 add_executable(
     hs_content
     Source/Apps/Content/main.cpp
@@ -421,11 +472,12 @@ add_executable(
     Source/Apps/Content/content_source_inventory.cpp
     Source/Apps/Content/game_data_cooker.cpp
     Source/Apps/Content/game_data_validation.cpp
+    Source/Apps/Content/vfx_mesh_cooker.cpp
     Source/Apps/Content/particle_effect_cooker.cpp
 )
 target_link_libraries(
     hs_content
-    PRIVATE hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json
+    PRIVATE hs_vfx_authoring hs_core hs_game_rules hs_presentation nlohmann_json::nlohmann_json
             DirectXTex fbxsdk fbx_xml fbx_zlib ws2_32 windowscodecs d3d11
 )
 add_dependencies(hs_content hs_shaders)
@@ -467,6 +519,9 @@ file(GLOB_RECURSE HS_ENVIRONMENT_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/*.json"
 )
 file(GLOB HS_VFX_TEXTURE_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/VFX/Meshes/*.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/VFX/*.json"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX/*.dds"
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/VFX/*.png"
 )
 file(GLOB HS_ARCHER_TEXTURE_SOURCES CONFIGURE_DEPENDS
@@ -538,47 +593,53 @@ foreach(group trunk leaf rock grass)
         endforeach()
     endforeach()
 endforeach()
+set(HS_COOKED_CONTENT_BYPRODUCTS
+    ${HS_ENVIRONMENT_COOKED}
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_diffuse_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_normal_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_diffuse_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_normal_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_diffuse_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_normal_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_diffuse_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_normal_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_5m.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_10m.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_final.meshbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_1.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_2.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_3.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_4.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_5.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_0.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_1.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_2.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_3.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_basecolor.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_emissive.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_ram.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/simulation_rules.hsbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_mesh_atlas.hsbin"
+    "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_program.hsbin"
+)
 add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     COMMAND "$<TARGET_FILE:hs_content>" --cook
+    COMMAND ${CMAKE_COMMAND} -E touch_nocreate ${HS_COOKED_CONTENT_BYPRODUCTS}
     DEPENDS hs_content hs_shaders "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json" ${HS_ENVIRONMENT_SOURCES} ${HS_GAME_DATA_SOURCES} ${HS_AUDIO_SOURCES} ${HS_VFX_TEXTURE_SOURCES} ${HS_ARCHER_ASSET_SOURCES} ${HS_MONSTER_ASSET_SOURCES} ${HS_MONSTER_TEXTURE_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/game.schema.json"
     BYPRODUCTS
-        ${HS_ENVIRONMENT_COOKED}
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_diffuse_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_melee_normal_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_diffuse_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_ranged_normal_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_diffuse_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_suicide_normal_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_diffuse_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/enemy_gel_projectile_normal_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_5m.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_10m.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/boss_final.meshbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_1.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_2.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_3.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_4.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_diffuse_5.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_0.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_1.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_2.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_3.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_4.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/archer_normal_5.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_basecolor.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_emissive.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/monster_ram.dds"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/simulation_rules.hsbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
-        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
+        ${HS_COOKED_CONTENT_BYPRODUCTS}
     VERBATIM
 )
 add_custom_target(
@@ -656,6 +717,17 @@ if(HS_BUILD_TESTS)
     add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.validate COMMAND hs_content --validate-only)
+    add_test(NAME content.vfx-v4 COMMAND hs_vfx_prepare --validate-only)
+    add_executable(hs_vfx_authoring_tests Tests/vfx_authoring_tests.cpp
+        Source/RendererD3D12/Private/vfx_program_loader.cpp)
+    target_link_libraries(hs_vfx_authoring_tests PRIVATE hs_vfx_authoring nlohmann_json::nlohmann_json)
+    target_include_directories(hs_vfx_authoring_tests PRIVATE Source/Apps/Content)
+    target_compile_definitions(hs_vfx_authoring_tests PRIVATE HS_VFX_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+    hs_configure_target(hs_vfx_authoring_tests)
+    add_dependencies(hs_vfx_authoring_tests hs_vfx_prepare)
+    add_test(NAME content.vfx-v4-protect-source COMMAND hs_vfx_prepare --prepare "${CMAKE_CURRENT_SOURCE_DIR}/contentsource/vfx-invalid-output")
+    set_tests_properties(content.vfx-v4-protect-source PROPERTIES WILL_FAIL TRUE)
+    add_test(NAME content.vfx-v4-contract COMMAND hs_vfx_authoring_tests)
     if(TARGET hs_content_tools)
     add_test(NAME tools.content-status COMMAND hs_content_tools status)
     endif()
@@ -692,6 +764,11 @@ if(HS_BUILD_TESTS)
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/experiment
     )
     set_tests_properties(experiment.offscreen PROPERTIES TIMEOUT 120)
+    # These tests create D3D12 devices. Keep GPU captures serialized while
+    # independent CPU validation runs alongside them under parallel CTest.
+    set_tests_properties(
+        integration.render-smoke vfx.showcase rendering.barriers experiment.offscreen
+        PROPERTIES RESOURCE_LOCK projecths_d3d12)
     endif()
 
     if(HS_BUILD_CONTENT_TOOLS)
@@ -748,6 +825,104 @@ if(HS_BUILD_TESTS)
     endif()
 
     if(HS_BUILD_RUNTIME)
+    add_executable(hs_vfx_persistent_tests
+        Tests/vfx_persistent_state_tests.cpp
+        Source/RendererD3D12/Private/vfx_persistent_state.cpp)
+    target_link_libraries(hs_vfx_persistent_tests PRIVATE hs_core)
+    target_include_directories(hs_vfx_persistent_tests PRIVATE
+        Source/RendererD3D12/Public Source/RendererD3D12/Private)
+    hs_configure_target(hs_vfx_persistent_tests)
+    add_test(NAME rendering.vfx-persistent-lifetime COMMAND hs_vfx_persistent_tests)
+    add_executable(hs_vfx_typed_frame_tests Tests/vfx_typed_frame_adapter_tests.cpp)
+    target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_frame_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_frame_tests)
+    add_test(NAME runtime.vfx-typed-frame COMMAND hs_vfx_typed_frame_tests)
+    add_executable(hs_vfx_typed_flash_tests Tests/vfx_typed_flash_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_flash_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_flash_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_flash_tests)
+    add_dependencies(hs_vfx_typed_flash_tests hs_cooked_content)
+    add_test(NAME runtime.vfx-typed-flash COMMAND hs_vfx_typed_flash_tests)
+
+    add_executable(hs_vfx_typed_decal_tests Tests/vfx_typed_decal_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_decal_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_decal_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_decal_tests)
+    add_test(NAME runtime.vfx-typed-decal COMMAND hs_vfx_typed_decal_tests)
+
+    add_executable(hs_vfx_typed_distortion_tests Tests/vfx_typed_distortion_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_distortion_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_distortion_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_distortion_tests)
+    add_test(NAME runtime.vfx-typed-distortion COMMAND hs_vfx_typed_distortion_tests)
+
+    add_executable(hs_vfx_typed_light_tests Tests/vfx_typed_light_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_light_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_light_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_light_tests)
+    add_test(NAME runtime.vfx-typed-light COMMAND hs_vfx_typed_light_tests)
+
+    add_executable(hs_vfx_typed_ballistic_tests Tests/vfx_typed_ballistic_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_ballistic_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_ballistic_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_ballistic_tests)
+    add_dependencies(hs_vfx_typed_ballistic_tests hs_cooked_content)
+    add_test(NAME runtime.vfx-typed-ballistic COMMAND hs_vfx_typed_ballistic_tests)
+
+    add_executable(hs_vfx_typed_mote_tests Tests/vfx_typed_mote_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_mote_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_mote_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_mote_tests)
+    add_dependencies(hs_vfx_typed_mote_tests hs_cooked_content)
+    add_test(NAME runtime.vfx-typed-mote COMMAND hs_vfx_typed_mote_tests)
+    add_executable(hs_render_graph_tests Tests/render_graph_tests.cpp)
+    target_link_libraries(hs_render_graph_tests PRIVATE hs_renderer_d3d12 D3D12MemoryAllocator d3d12 dxgi)
+    target_include_directories(hs_render_graph_tests PRIVATE Source/RendererD3D12/Private)
+    target_compile_definitions(hs_render_graph_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    hs_configure_target(hs_render_graph_tests)
+    add_test(NAME rendering.transient-graph COMMAND hs_render_graph_tests)
+    set_tests_properties(rendering.transient-graph PROPERTIES TIMEOUT 45
+        RESOURCE_LOCK projecths_d3d12)
+    add_executable(hs_vfx_upgrade_dispatch_tests Tests/vfx_upgrade_dispatch_tests.cpp)
+    target_link_libraries(hs_vfx_upgrade_dispatch_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_upgrade_dispatch_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public Source/Presentation/Public)
+    hs_configure_target(hs_vfx_upgrade_dispatch_tests)
+    add_test(NAME runtime.vfx-upgrade-dispatch COMMAND hs_vfx_upgrade_dispatch_tests)
+    add_executable(hs_vfx_typed_ground_tests Tests/vfx_typed_ground_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_ground_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_ground_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_ground_tests)
+    add_dependencies(hs_vfx_typed_ground_tests hs_cooked_content)
+    add_test(NAME runtime.vfx-typed-ground COMMAND hs_vfx_typed_ground_tests)
+    add_executable(hs_vfx_typed_mesh_tests
+        Tests/vfx_typed_mesh_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_mesh_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_mesh_tests PRIVATE
+        Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_mesh_tests)
+    add_test(NAME runtime.vfx-typed-mesh COMMAND hs_vfx_typed_mesh_tests)
+    add_executable(hs_vfx_typed_fresnel_tests Tests/vfx_typed_fresnel_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_fresnel_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_fresnel_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_fresnel_tests)
+    add_test(NAME runtime.vfx-typed-fresnel COMMAND hs_vfx_typed_fresnel_tests)
+    add_executable(hs_vfx_typed_ribbon_tests
+        Tests/vfx_typed_ribbon_commands_tests.cpp)
+    target_link_libraries(hs_vfx_typed_ribbon_tests PRIVATE hs_runtime)
+    target_include_directories(hs_vfx_typed_ribbon_tests PRIVATE
+        Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_typed_ribbon_tests)
+    add_dependencies(hs_vfx_typed_ribbon_tests hs_cooked_content)
+    add_test(NAME runtime.vfx-typed-ribbon COMMAND hs_vfx_typed_ribbon_tests)
+    add_executable(hs_vfx_ribbon_state_tests
+        Tests/vfx_ribbon_state_tests.cpp
+        Source/RendererD3D12/Private/vfx_ribbon_state.cpp)
+    target_link_libraries(hs_vfx_ribbon_state_tests PRIVATE hs_core)
+    target_include_directories(hs_vfx_ribbon_state_tests PRIVATE
+        Source/RendererD3D12/Public Source/RendererD3D12/Private)
+    hs_configure_target(hs_vfx_ribbon_state_tests)
+    add_test(NAME runtime.vfx-ribbon-state COMMAND hs_vfx_ribbon_state_tests)
     add_executable(hs_runtime_tests Tests/runtime_tests.cpp)
     target_link_libraries(hs_runtime_tests PRIVATE hs_runtime)
     target_include_directories(hs_runtime_tests PRIVATE
@@ -781,7 +956,8 @@ if(HS_BUILD_TESTS)
                 -Shader "${CMAKE_CURRENT_BINARY_DIR}/Shaders/scene_ps.dxil"
                 -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/shader-hot-reload"
         )
-        set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 45)
+        set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 45
+            RESOURCE_LOCK projecths_d3d12)
     endif()
     endif()
 endif()
@@ -826,6 +1002,8 @@ install(
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/presentation_catalog.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/particle_effects.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_masks.dds"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_mesh_atlas.hsbin"
+        "${CMAKE_CURRENT_BINARY_DIR}/Cooked/vfx_program.hsbin"
         "${CMAKE_CURRENT_BINARY_DIR}/Cooked/manifest.txt"
     DESTINATION Cooked
     COMPONENT Runtime
@@ -835,6 +1013,21 @@ install(
     DESTINATION Cooked
     COMPONENT Runtime
     FILES_MATCHING PATTERN "archer_*.dds"
+)
+install(
+    DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Cooked/Content/Textures/VFX/"
+    DESTINATION Cooked/Content/Textures/VFX
+    COMPONENT Runtime
+    FILES_MATCHING PATTERN "*.dds"
+)
+install(
+    DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Cooked/"
+    DESTINATION Cooked
+    COMPONENT Runtime
+    FILES_MATCHING
+        PATTERN "*.meshbin" PATTERN "*.dds" PATTERN "*.hsbin"
+        PATTERN "*.json" PATTERN "*.txt"
+        PATTERN "Audio" EXCLUDE
 )
 install(
     DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/Cooked/Audio/"

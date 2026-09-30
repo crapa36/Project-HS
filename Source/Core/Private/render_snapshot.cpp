@@ -50,7 +50,6 @@ bool RenderSnapshotStorage::AddUi(const UiModel &ui)
 
 bool RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
 {
-    if (persistent_vfx_.size() == persistent_vfx_.capacity()) return false;
     persistent_vfx_.push_back(visual);
     return true;
 }

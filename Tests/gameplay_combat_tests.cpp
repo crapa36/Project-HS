@@ -17,6 +17,7 @@ namespace gameplay_test
 {
 
 void TestCombatVfxCoverage();
+void TestArrowReleaseCarriesAuthoritativeDirection();
 void TestAttackStopsMovementAndFacesAim();
 void TestBasicAttackStopsAtFirstEnemy();
 void TestQwerInputBuffer();
@@ -28,6 +29,7 @@ void TestChargedShotCancelsForLevelSelection();
 void TestCombatPresentationContracts();
 void TestAttackSpeedAnimationRate();
 void TestArrowRainPulseAudioProjection();
+void TestAuthoritativeCombatGeometryEmission();
 void TestEnemyDisplacementInterpolates();
 void TestArrowRainTrackingProjectileMoves();
 void TestProjectileAndAreaVisualTruth();
@@ -41,6 +43,7 @@ void TestCombatUpgradeCombinations();
 void TestUpgradeDamageAttribution();
 void TestSelectiveUpgradeInheritance();
 void TestHighFanoutChainsTerminate();
+void TestRetreatSlowTrailUsesPath();
 void TestRelicCombinations();
 void TestAlternatingSkillRelicTelemetry();
 void TestRemadeRelics();
@@ -60,6 +63,14 @@ void TestCombatVfxCoverage()
               HasVfx(enemy, hs::DomainSignalKind::MeleeEnemyHit) &&
               HasVfx(enemy, hs::DomainSignalKind::PlayerDamaged),
           "melee windup, melee hit, and player hit effects are connected");
+    for (const auto &signal : enemy.PendingDomainSignals())
+        if (signal.kind == hs::DomainSignalKind::MeleeEnemyWindup)
+            Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+                      signal.geometry.radius == data.enemies[0].attack_range &&
+                      signal.geometry.start_tick == signal.tick &&
+                      signal.geometry.end_tick > signal.geometry.start_tick && signal.geometry.source_id != 0 &&
+                      signal.scale == 1.0f,
+                  "melee warning carries its actual attack range and resolve interval");
     Debug(enemy, hs::DebugCommandKind::DamagePlayer, 1'000);
     (void)Tick(enemy);
     Check(HasVfx(enemy, hs::DomainSignalKind::PlayerDied),
@@ -82,8 +93,44 @@ void TestCombatVfxCoverage()
           "ranged attack VFX initialize");
     Debug(ranged, hs::DebugCommandKind::SpawnEnemy,
           static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {5.0f, 0.0f});
-    Check(emitted_during(ranged, hs::DomainSignalKind::RangedEnemyReleased, 90),
-          "ranged enemy release effect is connected");
+    bool ranged_release{};
+    std::size_t ranged_impacts{};
+    std::vector<std::uint64_t> ranged_projectile_ids;
+    std::vector<hs::Sequence> ranged_seen_sequences;
+    for (std::uint32_t tick = 0; tick < 90; ++tick)
+    {
+        (void)Tick(ranged);
+        const auto signals = ranged.PendingDomainSignals();
+        std::size_t tick_impacts{};
+        for (const auto &signal : signals)
+        {
+            ranged_release |= signal.kind == hs::DomainSignalKind::RangedEnemyReleased;
+            if (signal.kind == hs::DomainSignalKind::EnemyRangedProjectileImpact)
+            {
+                if (std::ranges::find(ranged_seen_sequences, signal.sequence) !=
+                    ranged_seen_sequences.end())
+                    continue;
+                ranged_seen_sequences.push_back(signal.sequence);
+                ++tick_impacts;
+                Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Projectile &&
+                          signal.geometry.source_id != 0 &&
+                          std::ranges::find(ranged_projectile_ids,
+                                            signal.geometry.source_id) ==
+                              ranged_projectile_ids.end() &&
+                          signal.geometry.radius > 0.0f &&
+                          std::abs(signal.geometry.velocity.z) +
+                                  std::abs(signal.geometry.velocity.x) > 0.0001f &&
+                          std::abs(signal.position.y - 0.45f) < 0.0001f,
+                      "ranged projectile impact lost real contact payload");
+                ranged_projectile_ids.push_back(signal.geometry.source_id);
+            }
+        }
+        Check(tick_impacts <= 1, "ranged projectile emitted duplicate actor impact");
+        ranged_impacts += tick_impacts;
+    }
+    Check(ranged_release && ranged_impacts == ranged_projectile_ids.size() &&
+              ranged_impacts > 0,
+          "ranged projectile did not produce one impact per actual projectile");
     Check(ranged.Shutdown().Succeeded(), "ranged attack VFX shutdown");
 
     hs::GameSimulation suicide;
@@ -98,6 +145,12 @@ void TestCombatVfxCoverage()
         (void)Tick(suicide);
         charged |= HasVfx(suicide, hs::DomainSignalKind::SuicideEnemyCharging);
         exploded |= HasVfx(suicide, hs::DomainSignalKind::SuicideEnemyExploded);
+        for (const auto &signal : suicide.PendingDomainSignals())
+            if (signal.kind == hs::DomainSignalKind::SuicideEnemyExploded)
+                Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+                          std::abs(signal.geometry.radius - data.enemies[static_cast<std::size_t>(hs::EnemyKind::Suicide)].suicide_explosion_radius) < .0001f &&
+                          signal.scale == 1.0f,
+                      "suicide explosion carries authoritative radius and preserves legacy scale");
     }
     Check(charged && exploded, "suicide charge and explosion effects are connected");
     Check(suicide.Shutdown().Succeeded(), "suicide attack VFX shutdown");
@@ -119,7 +172,40 @@ void TestCombatVfxCoverage()
               HasVfx(bosses, hs::DomainSignalKind::BossAreaActivated) &&
               HasVfx(bosses, hs::DomainSignalKind::BossShockwaveReleased),
           "every boss attack family emits its dedicated effect");
+    for (const auto &signal : bosses.PendingDomainSignals())
+        if (signal.kind == hs::DomainSignalKind::BossDashImpact)
+            Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+                      signal.geometry.radius == bosses.Rules().boss_common.collision_radius + bosses.Rules().stats.player_collision_radius &&
+                      signal.geometry.start_tick == signal.tick && signal.geometry.end_tick == signal.tick &&
+                      signal.geometry.source_id != 0 && signal.scale == 1.0f,
+                  "boss dash endpoint carries its actual swept contact radius");
     Check(bosses.Shutdown().Succeeded(), "boss VFX shutdown");
+}
+
+void TestArrowReleaseCarriesAuthoritativeDirection()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0x4152524F57u}, QuietGameData()).Succeeded(),
+          "arrow release geometry initialize");
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    const hs::DomainSignal *release = nullptr;
+    for (std::uint32_t tick = 0; tick < 30 && release == nullptr; ++tick)
+    {
+        (void)Tick(simulation, held);
+        const auto signals = simulation.PendingDomainSignals();
+        const auto found = std::ranges::find_if(
+            signals, [](const hs::DomainSignal &signal) {
+                return signal.kind == hs::DomainSignalKind::ArrowReleased;
+            });
+        if (found != signals.end()) release = &*found;
+    }
+    Check(release != nullptr && std::abs(release->direction.x - 1.0f) < 0.0001f &&
+              std::abs(release->direction.z) < 0.0001f &&
+              std::abs(release->position.y - 1.05f) < 0.0001f,
+          "arrow release keeps normalized aim direction and release height");
+    Check(simulation.Shutdown().Succeeded(), "arrow release geometry shutdown");
 }
 
 void TestAttackStopsMovementAndFacesAim()
@@ -404,12 +490,13 @@ void TestChargeBufferAndRecovery()
         }
         Check(simulation.Shutdown().Succeeded(), "charge cancel shutdown");
     }
-    // Once the basic projectile has left, an active skill must respect its remaining recovery.
+    // Skills cancel basic recovery while preserving the already released arrow.
+    for (const auto skill : {hs::SkillKind::PiercingShot, hs::SkillKind::ChargedShot})
     {
         hs::GameSimulation simulation;
         auto data = QuietGameData(); data.arena_obstacle_count = 0;
         Check(simulation.Initialize({0xC403u}, data).Succeeded(), "basic recovery initialize");
-        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot));
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(skill));
         hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
         (void)Tick(simulation, held); held.basic_attack_held = false;
         bool emitted{};
@@ -423,14 +510,26 @@ void TestChargeBufferAndRecovery()
               "basic emission precedes recovery boundary");
         hs::Sequence sequence{};
         (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
-        const auto skill_index = static_cast<std::size_t>(hs::SkillKind::PiercingShot);
-        Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
-              "skill press after basic emission cannot cancel recovery");
+        if (skill == hs::SkillKind::ChargedShot)
+            Check(player(simulation).charging, "charge cancels basic recovery immediately");
+        else
+            Check(simulation.GetObservation().balance.skill_uses[static_cast<std::size_t>(skill)] == 1,
+                  "instant skill cancels basic recovery immediately");
+        Check(player(simulation).basic_attack_animation_until <= simulation.GetObservation().tick,
+              "successful skill ends the basic animation");
+        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        bool basic_survives{};
+        for (const auto &shot : model.View().projectiles)
+            basic_survives |= shot.skill == hs::SkillKind::BasicAttack;
+        Check(basic_survives, "recovery cancel preserves the released basic arrow");
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Released, sequence, held);
+        held.basic_attack_held = true;
+        const auto uses = simulation.GetObservation().balance.skill_uses[0];
         while (simulation.GetObservation().tick + 1 < recovery_end)
         {
             (void)Tick(simulation, held);
-            Check(simulation.GetObservation().balance.skill_uses[skill_index] == 0,
-                  "buffered skill waits through basic recovery");
+            Check(simulation.GetObservation().balance.skill_uses[0] == uses,
+                  "skill cancel does not reset the basic attack rate limiter");
         }
         Check(simulation.Shutdown().Succeeded(), "basic recovery shutdown");
     }
@@ -532,13 +631,178 @@ void TestSuccessfulInputReplacesOldBuffer()
     Check(simulation.Shutdown().Succeeded(), "buffer replacement shutdown");
 }
 
+void TestExplosionEventsCarryDamageRadius()
+{
+    for (const auto skill : {hs::SkillKind::ExplosiveArrow, hs::SkillKind::Trap})
+    {
+        auto data = QuietGameData(); data.arena_obstacle_count = 0;
+        data.enemies[0].health = 10000; data.enemies[0].move_speed = 0; data.enemies[0].damage = 0;
+        const auto skill_index = static_cast<std::size_t>(skill);
+        data.skills[skill_index].area_radius = 6.25f;
+        data.upgrades.explosive_arrow.delayed_reexplosion.radius = 4.75f;
+        data.upgrades.explosive_arrow.three_delayed_satellite_bombs.explosion_radius = 2.25f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xE6E0u}, data).Succeeded(), "explosion geometry initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(skill));
+        if (skill == hs::SkillKind::ExplosiveArrow)
+        {
+            Debug(simulation, hs::DebugCommandKind::GrantUpgrade, static_cast<std::uint64_t>(skill), 0);
+            Debug(simulation, hs::DebugCommandKind::GrantUpgrade, static_cast<std::uint64_t>(skill), 1);
+        }
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+              skill == hs::SkillKind::Trap ? hs::Float2{.5f,0} : hs::Float2{5,0});
+        hs::HeldInputState held; held.aim_world = {20,0,0}; hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        bool saw_mini_owner=false;
+        for (int i=0;i<240;++i)
+        {
+            (void)Tick(simulation,held);
+            hs::GameReadModelStorage model;simulation.WriteReadModel(model);
+            for(const auto &bomb:model.View().mini_bombs)
+            {
+                saw_mini_owner=true;
+                Check(bomb.owner_id!=0&&bomb.cast_id!=0&&bomb.radius==2.25f&&bomb.started<=model.tick&&model.tick<bomb.expires,
+                      "mini-bomb snapshot owns its real scheduled interval and radius");
+                const auto signal=std::ranges::find_if(simulation.PendingDomainSignals(),[&](const auto &v){
+                    return v.upgrade_owner_id==bomb.owner_id&&v.upgrade_stage==hs::UpgradeVisualStage::Telegraph;
+                });
+                Check(signal!=simulation.PendingDomainSignals().end()&&signal->geometry.start_tick==bomb.started&&
+                    signal->geometry.end_tick==bomb.expires&&signal->position.x==bomb.position.x&&signal->position.z==bomb.position.y,
+                    "warning event and scheduled owner disagree");
+            }
+        }
+        if(skill==hs::SkillKind::ExplosiveArrow)
+        {
+            Check(saw_mini_owner,"mini-bomb schedules never published owners");
+            hs::GameReadModelStorage model;simulation.WriteReadModel(model);
+            Check(model.View().mini_bombs.empty(),"resolved mini bombs retained warning owners");
+            std::size_t births=0,warnings=0,resolves=0;
+            for(const auto &signal:simulation.PendingDomainSignals())
+            {
+                if(signal.upgrade_index!=1)continue;
+                births+=signal.upgrade_stage==hs::UpgradeVisualStage::Spawn;
+                warnings+=signal.upgrade_stage==hs::UpgradeVisualStage::Telegraph;
+                resolves+=signal.upgrade_stage==hs::UpgradeVisualStage::Resolve;
+                Check(signal.upgrade_skill==static_cast<std::uint8_t>(skill)&&signal.upgrade_owner_id!=0&&signal.upgrade_cast_id!=0,
+                      "mini-bomb activation loses upgrade identity");
+            }
+            Check(births==data.upgrades.explosive_arrow.three_delayed_satellite_bombs.bomb_count&&births==warnings&&births==resolves,
+                  "mini-bomb stages must occur once per actual scheduled bomb");
+        }
+        bool main=false,secondary=false,satellite=false,trap=false;
+        for (const auto &signal : simulation.PendingDomainSignals())
+        {
+            float expected=0,scale=0;
+            switch(signal.kind)
+            {
+            case hs::DomainSignalKind::ExplosiveArrowMain: main=true;expected=6.25f;scale=expected/3;break;
+            case hs::DomainSignalKind::ExplosiveArrowSecondary: secondary=true;expected=4.75f;scale=expected/3;break;
+            case hs::DomainSignalKind::SmallExplosion: satellite=true;expected=2.25f;scale=expected;break;
+            case hs::DomainSignalKind::TrapTriggered: trap=true;expected=6.25f;scale=expected;break;
+            default:continue;
+            }
+            Check(signal.geometry.kind == hs::DomainSignalGeometryKind::Circle &&
+                      std::abs(signal.geometry.radius-expected)<.0001f && std::abs(signal.scale-scale)<.0001f,
+                  "explosion geometry uses exact damage radius without changing legacy scale");
+        }
+        Check(skill == hs::SkillKind::Trap ? trap : (main&&secondary&&satellite),
+              "requested authoritative explosion events were exercised");
+        Check(simulation.Shutdown().Succeeded(), "explosion geometry shutdown");
+    }
+}
+
+void TestVisualLinksRetainCapturedEndpoints()
+{
+    auto data = QuietGameData(); data.arena_obstacle_count = 0;
+    data.enemies[0].health = 10000; data.enemies[0].move_speed = 1.0f; data.enemies[0].damage = 0;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0x11ABu},data).Succeeded(), "visual link initialize");
+    Debug(simulation,hs::DebugCommandKind::GrantSkill,static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+    Debug(simulation,hs::DebugCommandKind::GrantUpgrade,static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow),3);
+    Debug(simulation,hs::DebugCommandKind::SpawnEnemy,0,0,{4,0});
+    Debug(simulation,hs::DebugCommandKind::SpawnEnemy,0,0,{7,0});
+    Debug(simulation,hs::DebugCommandKind::SpawnEnemy,0,0,{6,2});
+    hs::HeldInputState held;held.aim_world={20,0,0};hs::Sequence sequence{};
+    (void)TickEdge(simulation,hs::GameAction::SkillQ,hs::EdgeKind::Pressed,sequence,held);
+    hs::GameReadModelStorage model;
+    std::vector<hs::VisualLinkView> captured;
+    for(int i=0;i<90 && captured.empty();++i)
+    {
+        (void)Tick(simulation,held);simulation.WriteReadModel(model);
+        if(model.View().visual_links.size()>=2)
+            captured.assign(model.View().visual_links.begin(),model.View().visual_links.end());
+    }
+    Check(captured.size()>=2,"actual ricochet and burn transfer create visual owners");
+    if(captured.size()>=2)
+    {
+        Check(captured[0].owner_id!=captured[1].owner_id,"simultaneous links have distinct sequence owners");
+        for(const auto &link:captured)
+        {
+            const bool burn=link.kind==hs::VisualLinkKind::BurnTransfer;
+            Check(link.expires-link.started==(burn?11u:8u) && std::abs(link.width-(burn?.12f:.09f))<.0001f,
+                  "visual link uses explicit cosmetic width and tick lifetime");
+            const auto signal=std::ranges::find_if(simulation.PendingDomainSignals(),[&](const auto &event){return event.sequence==link.owner_id;});
+            Check(signal!=simulation.PendingDomainSignals().end() && signal->position.x==link.source_position.x &&
+                      signal->position.z==link.source_position.z && signal->target.x==link.target_position.x && signal->target.z==link.target_position.z,
+                  "link endpoints and owner match the emitted domain event");
+        }
+        const auto checksum=simulation.ComputeChecksum();simulation.WriteReadModel(model);
+        Check(simulation.ComputeChecksum()==checksum,"visual publication does not mutate gameplay checksum");
+        (void)Tick(simulation,held);simulation.WriteReadModel(model);
+        for(const auto &original:captured)
+        {
+            const auto current=std::ranges::find_if(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;});
+            Check(current!=model.View().visual_links.end() && current->started==original.started && current->expires==original.expires &&
+                      current->source_position.x==original.source_position.x && current->source_position.z==original.source_position.z &&
+                      current->target_position.x==original.target_position.x && current->target_position.z==original.target_position.z,
+                  "moving enemies do not retarget captured link endpoints or restart lifetime");
+        }
+        const auto last_expiry=std::ranges::max(captured,{},&hs::VisualLinkView::expires).expires;
+        while(simulation.GetObservation().tick<last_expiry) (void)Tick(simulation,held);
+        simulation.WriteReadModel(model);
+        for(const auto &original:captured)
+            Check(std::ranges::none_of(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;}),
+                  "visual link expires at its exact end tick");
+    }
+    Debug(simulation,hs::DebugCommandKind::StartSession);
+    simulation.WriteReadModel(model);
+    Check(model.View().visual_links.empty(),"session reset clears visual links");
+    Check(simulation.Shutdown().Succeeded(),"visual link shutdown");
+}
+
+void TestSkillUnlockProjectsVfxAndAudio()
+{
+    hs::DomainSignal signal;
+    signal.kind = hs::DomainSignalKind::SkillUnlocked;
+    signal.context = static_cast<std::uint8_t>(hs::SkillKind::ExplosiveArrow);
+    signal.sequence = 87; signal.tick = 145; signal.session_id = 9;
+    signal.position = {3,.2f,-4};
+    std::array<hs::PresentationEvent,4> events{};
+    const auto count = hs::ProjectDomainSignal(signal,events);
+    Check(count==2,"skill unlock projects one VFX and existing audio");
+    bool visual=false,audio=false;
+    for(std::size_t i=0;i<count;++i)
+    {
+        const auto &event=events[i];
+        visual |= event.kind==hs::PresentationKind::Vfx && event.asset.value==hs::MakeAssetId("particle.player.skill_unlock").value;
+        audio |= event.kind==hs::PresentationKind::Audio && event.asset.value==hs::MakeAssetId("audio.ui.unlock").value;
+        Check(event.sequence==87 && event.tick==145 && event.session_id==9 && event.position.x==3 && event.position.z==-4,
+              "unlock projection preserves event identity and player anchor");
+    }
+    Check(visual&&audio,"unlock projection uses authored context recipe and retains audio");
+}
+
 void RunGameplayCombatTests()
 {
+    TestSkillUnlockProjectsVfxAndAudio();
+    TestVisualLinksRetainCapturedEndpoints();
+    TestExplosionEventsCarryDamageRadius();
     TestExplosionUpgradesRespectTerrain();
     TestSuccessfulInputReplacesOldBuffer();
     TestAttacksRespectTerrain();
     TestChargeBufferAndRecovery();
     TestCombatVfxCoverage();
+    TestArrowReleaseCarriesAuthoritativeDirection();
     TestAttackStopsMovementAndFacesAim();
     TestSkillMovementPauseAndResume();
     TestBasicAttackStopsAtFirstEnemy();
@@ -552,6 +816,7 @@ void RunGameplayCombatTests()
     TestChargedShotCancelsForLevelSelection();
     TestCombatPresentationContracts();
     TestArrowRainPulseAudioProjection();
+    TestAuthoritativeCombatGeometryEmission();
     TestAttackSpeedAnimationRate();
     TestArrowRainTrackingProjectileMoves();
     TestProjectileAndAreaVisualTruth();
@@ -568,6 +833,7 @@ void RunGameplayCombatTests()
     TestUpgradeDamageAttribution();
     TestSelectiveUpgradeInheritance();
     TestHighFanoutChainsTerminate();
+    TestRetreatSlowTrailUsesPath();
 }
 
 } // namespace gameplay_test

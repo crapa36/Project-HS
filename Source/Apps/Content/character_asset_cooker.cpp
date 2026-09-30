@@ -69,7 +69,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
             CharacterCookResult scratch;
             std::vector<BoneSource> bones;
             GatherModel(*model, scratch, bones, source.model,
-                        source.allow_missing_material_textures);
+                        source.allow_missing_material_textures, true);
             model->Destroy();
 
             const auto directory = std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY);
@@ -86,7 +86,7 @@ bool CookCharacterAsset(const std::filesystem::path &output,
                 auto *animation = LoadFbx(*manager, animation_path,
                                           source.diagnostic_name);
                 GatherAnimation(*animation, bones, clip, looping, character,
-                                animation_path);
+                                animation_path, true);
                 animation->Destroy();
             }
             if (!WriteCharacterAsset(output / (source.output_name + ".meshbin"),
