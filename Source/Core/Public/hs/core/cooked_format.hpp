@@ -17,7 +17,7 @@ namespace hs
 
 inline constexpr std::uint16_t kCookedFormatVersion = 1;
 inline constexpr std::uint16_t kLittleEndianMarker = 0x4C45;
-inline constexpr std::uint32_t kCharacterAssetVersion = 6;
+inline constexpr std::uint32_t kCharacterAssetVersion = 7;
 inline constexpr std::uint32_t kMaxCharacterBones = 128;
 inline constexpr std::uint32_t kMaxCharacterMaterials = 8;
 
@@ -28,6 +28,9 @@ enum class CharacterAnimationClip : std::uint8_t
     Draw,
     Recoil,
     Death,
+    Dive,
+    Stop,
+    Hit,
     Count,
 };
 

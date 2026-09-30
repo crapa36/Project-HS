@@ -382,6 +382,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                     impl_->actors->player.retreat_until,
                     impl_->actors->player.loadout,
                      impl_->actors->player.upgrades,
+                     impl_->actors->player.forced_move_skill,
                      impl_->actors->player.health,
                      impl_->actors->player.max_health,
                      impl_->actors->player.revive_invulnerable_until,

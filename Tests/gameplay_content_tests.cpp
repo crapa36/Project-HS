@@ -89,9 +89,10 @@ void TestRelicDataIsCookedFromJson()
     Check(slime && valid_magic && slime_header.version == hs::kCharacterAssetVersion,
           "Slime family cooked mesh has a valid character header");
     const bool is_projectile = std::string_view(asset) == "enemy_gel_projectile";
-    Check(slime_header.bone_count == (is_projectile ? 1u : 14u) && slime_header.clip_count == 5 &&
+    Check(slime_header.bone_count == (is_projectile ? 1u : 14u) &&
+              slime_header.clip_count == static_cast<std::uint32_t>(hs::CharacterAnimationClip::Count) &&
               slime_header.material_count == 1,
-          "Slime family keeps the required rig controls, five animation slots, and one material");
+          "Slime family keeps the required rig controls, fixed clip table, and one material");
 
     std::vector<hs::SkinnedVertex> slime_vertices(slime_header.vertex_count);
     std::vector<hs::CharacterClipHeader> slime_clips(slime_header.clip_count);
@@ -137,6 +138,19 @@ void TestRelicDataIsCookedFromJson()
               return clip.frame_count >= 2 && clip.duration_seconds > 0.0f;
           }),
           "Slime family cooks every animation slot with playable frames");
+    for (const auto [destination, source] : std::array{
+             std::pair{hs::CharacterAnimationClip::Dive, hs::CharacterAnimationClip::Run},
+             std::pair{hs::CharacterAnimationClip::Stop, hs::CharacterAnimationClip::Idle},
+             std::pair{hs::CharacterAnimationClip::Hit, hs::CharacterAnimationClip::Recoil}})
+    {
+        const auto alias = std::ranges::find(slime_clips, destination, &hs::CharacterClipHeader::clip);
+        const auto original = std::ranges::find(slime_clips, source, &hs::CharacterClipHeader::clip);
+        Check(alias != slime_clips.end() && original != slime_clips.end() &&
+                  alias->first_transform == original->first_transform &&
+                  alias->frame_count == original->frame_count &&
+                  alias->duration_seconds == original->duration_seconds && !alias->looping,
+              "player-only compatibility slots reuse authored monster transforms");
+    }
 
     const auto transform_prefix = slime_header.transforms_offset >= sizeof(slime_header)
                                       ? slime_header.transforms_offset - sizeof(slime_header)

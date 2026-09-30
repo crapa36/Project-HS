@@ -4,6 +4,20 @@ Record only information the AI needs to implement or resume work: current code s
 
 ## Current technical state
 
+### Player presentation
+
+The Archer cooks the five base clips plus `DiveForward`, `RunForwardStop`, and `ReactBack`. Trap forward-roll movement uses `DiveForward` as a full-body clip. Locomotion deceleration uses `RunForwardStop`. Player damage uses `ReactBack` through the existing upper-body mask so lower-body locomotion can continue.
+
+`ReactFront`, `ReactRight`, and `WalkForward` are intentionally excluded from cooking and live under `ContentSource/Unused/Animations/Characters/Archer/`.
+
+All skinned assets retain one fixed cooked clip table. Non-player assets provide compatibility aliases for the three player-only clip ids; monster runtime selection still uses its existing five authored combat clips.
+
+### Monster presentation
+
+All three normal-enemy roles use the authored SlimeFamily assets. Superseded BasicSlime, Cactus, Mushroom, Slime, Swarm08/09, and duplicate `SourceExport` sources are not part of the active content tree.
+
+Automated validation establishes only the checks it executes; do not infer presentation quality from process completion or zero D3D12 validation errors.
+
 ### VFX v4 runtime execution (2026-09-27)
 
 Authoritative inputs: `ContentSource/VFX/production_spec.v4.json` (196 effects, 534 outputs, 72 upgrade bindings), 13 original DDS and seven authored meshes. The source archive lacks the v3 `components[]` schema, so truthful v3 migration remains unavailable. Cooked format 5/schema 4 loads 75 motion opcodes, but `runtime_ready=false` must remain until every production output and live binding is executable. Recipe/decoder support alone does not prove live ingress.

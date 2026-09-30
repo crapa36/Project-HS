@@ -102,7 +102,7 @@ ContentSourceInventory LoadContentSourceInventory()
         sources.all_source_bytes.append(name);
         sources.all_source_bytes.push_back('\0');
         sources.all_source_bytes.append(text);
-                             sources.all_source_bytes.push_back('\0');
+        sources.all_source_bytes.push_back('\0');
     };
     const auto append_presentation_asset = [&](const std::string_view name,
                                                const std::filesystem::path &path) {
@@ -120,6 +120,12 @@ ContentSourceInventory LoadContentSourceInventory()
     append_asset("character/archer/draw", animation_root / "DrawArrow.fbx");
     append_asset("character/archer/recoil", animation_root / "AimRecoil.fbx");
     append_asset("character/archer/death", animation_root / "DeathBackward.fbx");
+    append_presentation_asset("character/archer/dive",
+                              animation_root / "DiveForward.fbx");
+    append_presentation_asset("character/archer/stop",
+                              animation_root / "RunForwardStop.fbx");
+    append_presentation_asset("character/archer/hit",
+                              animation_root / "ReactBack.fbx");
 
     const auto monster_models = std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY);
     const auto monster_animations = std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY);
