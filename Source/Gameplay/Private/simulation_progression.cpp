@@ -45,6 +45,13 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
         for (auto &experience : actors->pickups)
             if (!experience.dead && experience.kind == PickupKind::Experience)
                 experience.globally_attracted = true;
+        DomainSignalGeometry geometry{};
+        geometry.kind = DomainSignalGeometryKind::Circle;
+        geometry.radius = rules.arena_half_extent * 3.0f;
+        geometry.source_id = pickup.id.value;
+        geometry.start_tick = geometry.end_tick = tick;
+        EmitVfx(DomainSignalKind::MagnetActivated, actors->player.position, {},
+                1.0f, 0.025f, 0, 0, geometry);
     }
     else
     {
@@ -290,6 +297,8 @@ void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
     }
     ++actors->player.stats[index];
     --actors->player.pending_stat_points;
+    EmitSignal(DomainSignalKind::PlayerStatAllocated, actors->player.position,
+               static_cast<std::uint8_t>(stat));
     if (stat == StatKind::MaxHealth)
     {
         const auto &allocation = rules.stats.allocations[index];
@@ -363,6 +372,17 @@ void GameSimulation::SimulationWorld::XpCardPhase()
                 LengthSquared(delta) > rules.stats.base_magnet_radius_m *
                                                rules.stats.base_magnet_radius_m)
                 pickup.attracted_by_magnet_stat = true;
+            if (pickup.kind == PickupKind::Experience && LengthSquared(delta) > 0.0f &&
+                rules.growth.experience_pickup_speed > 0.0f)
+            {
+                if (pickup.visual_motion_started == 0 ||
+                    pickup.visual_motion_updated + 1 != tick)
+                {
+                    pickup.visual_motion_started = tick;
+                    pickup.visual_motion_initial_distance = Length(delta);
+                }
+                pickup.visual_motion_updated = tick;
+            }
             pickup.position = Add(pickup.position,
                                   Multiply(Normalize(delta),
                                            rules.growth.experience_pickup_speed *
@@ -381,6 +401,7 @@ void GameSimulation::SimulationWorld::XpCardPhase()
         actors->player.experience -= ExperienceForLevel(rules, actors->player.level);
         ++actors->player.level;
         ++actors->player.pending_levels;
+        EmitSignal(DomainSignalKind::PlayerLevelUp, actors->player.position);
     }
     if (actors->player.pending_levels > 0 && session_phase == SessionPhase::Playing)
     {

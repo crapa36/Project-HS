@@ -63,6 +63,11 @@ struct PlayerView
     std::int32_t max_health{};
     Tick revive_invulnerable_until{};
     Tick revive_invulnerable_started{};
+    // Actual successful forced-move owner; active_animation_start is its cast
+    // start for Trap's forward roll. RetreatShot remains a backward retreat.
+    SkillKind forced_move_skill{SkillKind::Count};
+    Tick movement_stopped_tick{};
+    bool locomotion_moving{};
 };
 
 struct StatusEpisodeView
@@ -161,6 +166,9 @@ struct PickupView
     Float2 position{};
     bool dead{};
     Tick spawned_tick{};
+    Tick motion_started{};
+    bool moving_to_player{};
+    float motion_initial_distance{};
 };
 
 struct BossActionView
@@ -198,6 +206,10 @@ struct VisualLinkView
     Float3 source_position{}, target_position{};
     float width{};
     Tick started{}, expires{};
+    // Presentation provenance; never participates in simulation checksums.
+    std::uint64_t cast_id{};
+    SkillKind skill{SkillKind::Count};
+    std::uint8_t source_upgrade{0xFF};
 };
 
 struct SpawnWarningView
@@ -215,6 +227,31 @@ struct MiniBombView
     Float2 position{};
     float radius{};
     Tick started{}, expires{};
+};
+
+// A pending area delivery is the actual admitted scheduled action, not an
+// additional damage projectile. Presentation may show its approach to the
+// landing circle; only Gameplay resolves the action into an AreaActor.
+struct ScheduledAreaDeliveryView
+{
+    std::uint64_t owner_id{}, cast_id{};
+    Float2 position{};
+    float landing_radius{};
+    Tick scheduled_tick{}, resolve_tick{};
+    SkillKind skill{SkillKind::Count};
+    std::uint8_t source_upgrade{0xFF};
+};
+
+// Uses the existing 64-owner cosmetic budget. Capture is authoritative data;
+// Presentation resolves the actual asset/pose through its normal enemy path.
+inline constexpr std::size_t kCosmeticOwnerCapacity = 64;
+struct BossDeathVisualView
+{
+    Sequence sequence{};
+    Tick tick{};
+    EnemyView enemy;
+    bool has_action{};
+    BossActionView action;
 };
 
 struct SkillRuntimeView
@@ -281,6 +318,8 @@ struct GameReadModel
     std::span<const VisualLinkView> visual_links;
     std::span<const MiniBombView> mini_bombs;
     std::span<const SpawnWarningView> spawn_warnings;
+    std::span<const ScheduledAreaDeliveryView> scheduled_area_deliveries;
+    std::span<const BossDeathVisualView> boss_death_visuals;
 };
 
 class GameReadModelStorage
@@ -301,6 +340,8 @@ class GameReadModelStorage
     void AddVisualLink(const VisualLinkView &value);
     void AddMiniBomb(const MiniBombView &value);
     void AddSpawnWarning(const SpawnWarningView &value);
+    void AddScheduledAreaDelivery(const ScheduledAreaDeliveryView &value);
+    void AddBossDeathVisual(const BossDeathVisualView &value);
     [[nodiscard]] GameReadModel View() const noexcept;
 
     Tick tick{};
@@ -334,6 +375,8 @@ class GameReadModelStorage
     std::vector<VisualLinkView> visual_links_;
     std::vector<MiniBombView> mini_bombs_;
     std::vector<SpawnWarningView> spawn_warnings_;
+    std::vector<ScheduledAreaDeliveryView> scheduled_area_deliveries_;
+    std::vector<BossDeathVisualView> boss_death_visuals_;
 };
 
 } // namespace hs

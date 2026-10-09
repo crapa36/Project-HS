@@ -55,7 +55,12 @@ events.ndjson
 *.tmp
 
 # Local planning documents
-/Docs/
+/Docs/*
+!/Docs/Plans/
+/Docs/Plans/*
+!/Docs/Plans/ENGINE_RENDERER_V7.md
+!/Docs/Plans/CONTENT_GENERATION_DIRECTIVE.md
+!/Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md
 
 # Operating system files
 .DS_Store

@@ -5,17 +5,21 @@ evidence are isolated under ignored `Build/tooling`; none is a game dependency.
 
 ## C++ navigation: adopted
 
-`hs_lsp` is registered in repo-local `.codex/config.toml` and starts
-`node Tools/tooling/lsp-server.mjs`. The launcher discovers Visual Studio clangd
-and uses `Build/msvc-core/compile_commands.json`. Run `Tools/verify.ps1` first if
-that database is absent. A newly started Codex session loads this registration.
+`hs_lsp` is registered in repo-local `.codex/config.toml` with an explicit project
+working directory and repository-relative launcher path. The launcher itself also
+derives the repository root from `import.meta.url`, so it does not depend on a
+user-specific checkout path.
+discovers Visual Studio clangd and prefers `Build/msvc-validation/compile_commands.json`
+for Runtime/renderer diagnostics, falling back to `Build/msvc-core/compile_commands.json`
+for a core-only checkout. Run `Tools/verify.ps1` first if neither database exists.
+A newly started Codex session loads the registration for the active worktree.
 
 - Use `goto_definition` for symbol identity, `symbols` for a bounded outline,
   and `diagnostics` for an edited file. Use `rg` for literals and file discovery.
 - MCP positions: line is 1-based; character is 0-based. Inspect rename scope before
   applying edits. No post-edit blocking hook is enabled.
 - Core compilation data does not cover Runtime/renderer targets. For those tasks,
-  use their actual compile database before trusting semantic diagnostics.
+  create the validation database before trusting semantic diagnostics.
 - Background indexing is enabled in the persistent server; wait for indexing
   before interpreting an empty cross-file reference result as absence.
 
@@ -146,6 +150,33 @@ Evidence: `Build/tooling/renderdoc/doctor.log`; portable package SHA-256:
 Upstreams: https://renderdoc.org/builds and https://github.com/BANANASJIM/rdc-cli
 
 ## Build and experiment loop
+
+For a cohesive implementation batch, name the exact native CMake targets and/or
+Action IDs before invoking one partial build. Preview that same list first:
+
+```powershell
+Tools/hs_dev.ps1 -Command build -Target 'hs_renderer_d3d12,hs_render_test_runner,render.shader.runtime.geometry' -DryRun
+Tools/hs_dev.ps1 -Command build -Target 'hs_renderer_d3d12,hs_render_test_runner,render.shader.runtime.geometry'
+```
+
+`build` requires a nonempty comma-separated `-Target` list and a configured Ninja
+build tree. `-BuildRoot` selects another configured tree; the default is
+`Build/msvc-validation`. `-DryRun -Json` returns the same plan as structured data.
+Dry runs query metadata without building or bootstrapping CMake. The plan lists
+every requested name, its resolved target, and the CMake argument array; execution
+passes that array once to the pinned `Tools/cmake.ps1 --build ... --target ...`
+wrapper. Use an MSVC developer environment for native Windows builds.
+
+Native names must be configured CMake target aliases. Known Action IDs resolve
+through their ActionResult namespace to `Actions/<namespace>/result.json`, then
+the configured Ninja output graph validates the result. This works before a
+Generation is composed and does not load its pointer. If an ActionResult does
+not exist yet, use its exact native producer target for the first build; no
+namespace is guessed from an ID. Duplicate resolved targets are built once.
+Empty names, CLI flags, raw paths, and broad administrative targets such as
+`all` or `clean` are rejected. There is no working-tree inference or default
+all-target build. Existing `why`, `deps`, `rdeps`, and `affected` queries keep
+their current meaning. A partial build is not a verification receipt.
 
 Default: rg discovery -> persistent hs_lsp symbol lookup -> smallest edit ->
 targeted MSVC build/test -> required full workflow after stabilization.

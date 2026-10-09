@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "units": "metres_scene_linear_rec709",
+  "volumes": [
+    {
+      "id": "arena.atmosphere",
+      "generation": 1,
+      "shape": "global",
+      "world_to_local": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1],
+      "density": 1.0,
+      "extinction_per_metre": 0.002,
+      "scattering_per_metre": [0.0018,0.0018,0.0018],
+      "phase_g": 0.0
+    }
+  ]
+}

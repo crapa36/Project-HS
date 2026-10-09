@@ -98,6 +98,7 @@ struct VfxFlashSpawnInput
     bool ground_base_anchor{}; // Circle burst support rests above its authoritative base.
     std::uint32_t fbm_octaves{4}, smoke_first_frame{}, smoke_frame_count{};
     float domain_warp{}, smoke_fps{}, opacity_scale{1}, motion_strength{};
+    float procedural_flow_speed{0.85f};
 };
 struct VfxPersistentInput
 {

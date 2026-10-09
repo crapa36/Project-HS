@@ -2,7 +2,9 @@
 
 #include <taskflow/taskflow.hpp>
 
+#if defined(_WIN32)
 #include <Windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -56,6 +58,7 @@ struct TaskSystem::Impl
 
     void NameWorkerThread() const noexcept
     {
+#if defined(_WIN32)
         if (!executor || executor->this_worker() == nullptr)
         {
             return;
@@ -71,6 +74,7 @@ struct TaskSystem::Impl
         const auto name = std::format(L"HS Worker {}", worker_id);
         SetThreadDescription(GetCurrentThread(), name.c_str());
         named_by = this;
+#endif
     }
 
     std::size_t worker_count{};

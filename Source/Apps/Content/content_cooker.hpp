@@ -7,6 +7,7 @@
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/presentation/presentation_catalog.hpp>
 
+
 #include <nlohmann/json.hpp>
 
 #include <array>
@@ -21,18 +22,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#ifndef HS_SCHEMA_FILE
-#define HS_SCHEMA_FILE "Schemas/game.schema.json"
-#endif
-
-#ifndef HS_VFX_TEXTURE_DIRECTORY
-#define HS_VFX_TEXTURE_DIRECTORY "ContentSource/Textures/VFX"
-#endif
-
-#ifndef HS_MONSTER_TEXTURE_DIRECTORY
-#define HS_MONSTER_TEXTURE_DIRECTORY "ContentSource/Textures/Monsters/PBR"
-#endif
 
 namespace hs::content
 {
@@ -49,43 +38,6 @@ struct BuiltGameData
 {
     hs::SimulationRules simulation_rules{};
     hs::PresentationCatalog presentation{};
-};
-
-struct CharacterCookResult
-{
-    struct Material
-    {
-        std::filesystem::path diffuse;
-        std::filesystem::path normal;
-        std::string name;
-    };
-
-    std::vector<hs::SkinnedVertex> vertices;
-    std::vector<hs::CharacterClipHeader> clips;
-    std::vector<std::uint16_t> parents;
-    std::vector<std::array<float, 16>> inverse_bind_matrices;
-    std::vector<hs::CharacterLocalTransform> transforms;
-    std::vector<float> upper_body_weights;
-    std::uint32_t mesh_count{};
-    std::uint32_t bone_count{};
-    std::vector<Material> materials;
-    std::array<float, 3> bounds_min{
-        std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-        std::numeric_limits<float>::max()};
-    std::array<float, 3> bounds_max{
-        std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
-        std::numeric_limits<float>::lowest()};
-};
-
-struct CharacterAssetSource
-{
-    std::filesystem::path model;
-    std::array<std::filesystem::path, 5> animations;
-    std::string output_name;
-    std::string diagnostic_name;
-    bool allow_missing_material_textures{};
-    bool seal_eye_socket{};
-    bool generate_material_mips{};
 };
 
 struct ParticleSpriteSource
@@ -133,7 +85,10 @@ void RequirePositive(Number value, std::string_view file, std::string_view path)
 }
 
 ContentSources LoadAndValidateSources();
+ContentSources LoadAndValidateGameDataDocuments();
+ContentSources LoadScopedGameDataSources(std::span<const std::string_view> names);
 BuiltGameData BuildGameData(const ContentSources &sources);
+hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources);
 
 bool AtomicWrite(const std::filesystem::path &path, std::span<const std::byte> bytes,
                  std::string &error_message);
@@ -145,16 +100,9 @@ bool WriteVfxMaskArray(const std::filesystem::path &path,
                        std::span<const ParticleSpriteSource> sprites,
                        std::string &error_message);
 
-bool CookCharacterAsset(const std::filesystem::path &output,
-                        CharacterCookResult &character,
-                        std::string &error_message);
-bool CookCharacterAsset(const std::filesystem::path &output,
-                        CharacterCookResult &character,
-                        std::string &error_message,
-                        const CharacterAssetSource &source);
 bool CookMonsterMaterialTextures(const std::filesystem::path &output,
                                  std::string &error_message);
 
-int RunContent(std::string_view mode);
+int RunContent(std::string_view mode, const std::filesystem::path &output_root);
 
 } // namespace hs::content

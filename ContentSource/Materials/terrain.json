@@ -1,0 +1,448 @@
+{
+  "id": "terrain",
+  "version": 6,
+  "domain": "surface",
+  "shading_model": "metallic_roughness",
+  "parameters": [
+    {
+      "id": "metallic",
+      "type": "float",
+      "default": 0.0
+    },
+    {
+      "id": "roughness_scale",
+      "type": "float",
+      "default": 1.0
+    },
+    {
+      "id": "tint",
+      "type": "float3",
+      "default": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "id": "gaussian",
+      "product_id": "render/texture/environment_terrain_gaussian.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "gaussian"
+    },
+    {
+      "id": "surface",
+      "product_id": "render/texture/environment_terrain_surface.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "surface"
+    },
+    {
+      "id": "normal",
+      "product_id": "render/texture/environment_terrain_normal.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "normal"
+    },
+    {
+      "id": "detail",
+      "product_id": "render/texture/environment_terrain_detail.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "detail"
+    },
+    {
+      "id": "height",
+      "product_id": "render/texture/environment_terrain_height.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "height"
+    },
+    {
+      "id": "histogram",
+      "product_id": "render/texture/environment_terrain_histogram.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "histogram"
+    }
+  ],
+  "samplers": [
+    {
+      "id": "environment_sampler",
+      "profile": "environment_anisotropic_wrap"
+    },
+    {
+      "id": "histogram_sampler",
+      "profile": "linear_clamp"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "world",
+      "op": "context",
+      "type": "float3",
+      "name": "actual_world_position"
+    },
+    {
+      "id": "world_dx",
+      "op": "context",
+      "type": "float3",
+      "name": "d_actual_world_dx"
+    },
+    {
+      "id": "world_dy",
+      "op": "context",
+      "type": "float3",
+      "name": "d_actual_world_dy"
+    },
+    {
+      "id": "mesh",
+      "op": "context",
+      "type": "uint",
+      "name": "mesh"
+    },
+    {
+      "id": "seed",
+      "op": "context",
+      "type": "uint",
+      "name": "seed"
+    },
+    {
+      "id": "view_direction",
+      "op": "context",
+      "type": "float3",
+      "name": "view_direction"
+    },
+    {
+      "id": "eye_distance",
+      "op": "context",
+      "type": "float",
+      "name": "eye_distance"
+    },
+    {
+      "id": "gaussian_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "gaussian"
+    },
+    {
+      "id": "surface_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "surface"
+    },
+    {
+      "id": "normal_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "normal"
+    },
+    {
+      "id": "detail_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "detail"
+    },
+    {
+      "id": "height_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "height"
+    },
+    {
+      "id": "histogram_ref",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "histogram"
+    },
+    {
+      "id": "environment_sampler_ref",
+      "op": "sampler_ref",
+      "type": "sampler_ref",
+      "declaration": "environment_sampler"
+    },
+    {
+      "id": "histogram_sampler_ref",
+      "op": "sampler_ref",
+      "type": "sampler_ref",
+      "declaration": "histogram_sampler"
+    },
+    {
+      "id": "terrain_result",
+      "op": "terrain_stochastic",
+      "type": "terrain_result",
+      "textures": [
+        {
+          "node": "gaussian_ref",
+          "type": "texture_ref"
+        },
+        {
+          "node": "surface_ref",
+          "type": "texture_ref"
+        },
+        {
+          "node": "normal_ref",
+          "type": "texture_ref"
+        },
+        {
+          "node": "detail_ref",
+          "type": "texture_ref"
+        },
+        {
+          "node": "height_ref",
+          "type": "texture_ref"
+        },
+        {
+          "node": "histogram_ref",
+          "type": "texture_ref"
+        }
+      ],
+      "samplers": [
+        {
+          "node": "environment_sampler_ref",
+          "type": "sampler_ref"
+        },
+        {
+          "node": "histogram_sampler_ref",
+          "type": "sampler_ref"
+        }
+      ],
+      "world": {
+        "node": "world",
+        "type": "float3"
+      },
+      "world_dx": {
+        "node": "world_dx",
+        "type": "float3"
+      },
+      "world_dy": {
+        "node": "world_dy",
+        "type": "float3"
+      },
+      "mesh": {
+        "node": "mesh",
+        "type": "uint"
+      },
+      "seed": {
+        "node": "seed",
+        "type": "uint"
+      },
+      "view_direction": {
+        "node": "view_direction",
+        "type": "float3"
+      },
+      "eye_distance": {
+        "node": "eye_distance",
+        "type": "float"
+      }
+    },
+    {
+      "id": "terrain_base_color",
+      "op": "terrain_field",
+      "type": "float3",
+      "input": {
+        "node": "terrain_result",
+        "type": "terrain_result"
+      },
+      "field": "base_color"
+    },
+    {
+      "id": "terrain_normal",
+      "op": "terrain_field",
+      "type": "float3",
+      "input": {
+        "node": "terrain_result",
+        "type": "terrain_result"
+      },
+      "field": "normal"
+    },
+    {
+      "id": "terrain_detail",
+      "op": "terrain_field",
+      "type": "float3",
+      "input": {
+        "node": "terrain_result",
+        "type": "terrain_result"
+      },
+      "field": "detail"
+    },
+    {
+      "id": "terrain_roughness",
+      "op": "terrain_field",
+      "type": "float",
+      "input": {
+        "node": "terrain_result",
+        "type": "terrain_result"
+      },
+      "field": "roughness"
+    },
+    {
+      "id": "roughness_scale",
+      "op": "parameter",
+      "type": "float",
+      "name": "roughness_scale"
+    },
+    {
+      "id": "roughness_product",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "terrain_roughness",
+        "type": "float"
+      },
+      "b": {
+        "node": "roughness_scale",
+        "type": "float"
+      }
+    },
+    {
+      "id": "roughness_final",
+      "op": "saturate",
+      "type": "float",
+      "input": {
+        "node": "roughness_product",
+        "type": "float"
+      }
+    },
+    {
+      "id": "terrain_ao",
+      "op": "terrain_field",
+      "type": "float",
+      "input": {
+        "node": "terrain_result",
+        "type": "terrain_result"
+      },
+      "field": "ao"
+    },
+    {
+      "id": "normal_rnm",
+      "op": "normal_rnm",
+      "type": "float3",
+      "a": {
+        "node": "terrain_normal",
+        "type": "float3"
+      },
+      "b": {
+        "node": "terrain_detail",
+        "type": "float3"
+      }
+    },
+    {
+      "id": "normal_x",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "normal_rnm",
+        "type": "float3"
+      },
+      "component": 0
+    },
+    {
+      "id": "normal_y",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "normal_rnm",
+        "type": "float3"
+      },
+      "component": 1
+    },
+    {
+      "id": "normal_z",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "normal_rnm",
+        "type": "float3"
+      },
+      "component": 2
+    },
+    {
+      "id": "normal_xzy",
+      "op": "construct",
+      "type": "float3",
+      "components": [
+        {
+          "node": "normal_x",
+          "type": "float"
+        },
+        {
+          "node": "normal_z",
+          "type": "float"
+        },
+        {
+          "node": "normal_y",
+          "type": "float"
+        }
+      ]
+    },
+    {
+      "id": "material_tint",
+      "op": "parameter",
+      "name": "tint",
+      "type": "float3"
+    },
+    {
+      "id": "material_tinted_base",
+      "op": "multiply",
+      "type": "float3",
+      "a": {
+        "node": "terrain_base_color",
+        "type": "float3"
+      },
+      "b": {
+        "node": "material_tint",
+        "type": "float3"
+      }
+    },
+    {
+      "id": "material_opaque_opacity",
+      "op": "constant",
+      "type": "float",
+      "value": 1.0
+    },
+    {
+      "id": "material_metallic_param",
+      "op": "parameter",
+      "name": "metallic",
+      "type": "float"
+    },
+    {
+      "id": "material_closure",
+      "op": "metallic_roughness_closure",
+      "type": "surface_closure",
+      "base_color": {
+        "node": "material_tinted_base",
+        "type": "float3"
+      },
+      "normal": {
+        "node": "normal_xzy",
+        "type": "float3"
+      },
+      "roughness": {
+        "node": "roughness_final",
+        "type": "float"
+      },
+      "metallic": {
+        "node": "material_metallic_param",
+        "type": "float"
+      },
+      "ao": {
+        "node": "terrain_ao",
+        "type": "float"
+      },
+      "opacity": {
+        "node": "material_opaque_opacity",
+        "type": "float"
+      }
+    }
+  ],
+  "outputs": {
+    "surface": "typed_closure",
+    "closure": {
+      "node": "material_closure",
+      "type": "surface_closure"
+    },
+    "normal_space": "world"
+  },
+  "render_flags": {
+    "two_sided": false,
+    "alpha_mode": "opaque"
+  }
+}

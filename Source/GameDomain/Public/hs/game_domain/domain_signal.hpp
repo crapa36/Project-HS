@@ -100,6 +100,19 @@ enum class DomainSignalKind : std::uint8_t
     EnemyRangedProjectileImpact,
     BossVolleyProjectileImpact,
     ChargedShotProjectileImpact,
+    PickupSpawned,
+    PlayerLevelUp,
+    PlayerStatAllocated,
+    ChargedShotCancelled,
+    SessionVictory,
+    SessionDefeat,
+    BossDashRetargeted,
+    BossVolleyOffsetTelegraphed,
+    BossAreaTicked,
+    BossShockwaveContact,
+    MagnetActivated,
+    PlayerHitDirection,
+    WaveStarted,
     Count,
 };
 
@@ -116,6 +129,7 @@ enum class DomainSignalGeometryKind : std::uint8_t
     Cone,
     RingGaps,
     Projectile,
+    EntityAttachment,
 };
 
 // Authoritative gameplay geometry carried alongside a signal.  The legacy

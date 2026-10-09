@@ -1,10 +1,15 @@
 #pragma once
 
+#include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
+#include <hs/game_domain/game_types.hpp>
+#include "vfx_typed_entity_surface_commands.hpp"
 #include <hs/renderer/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_spawn_command.hpp>
 
 #include <algorithm>
+#include <limits>
+#include <optional>
 #include <unordered_set>
 #include <vector>
 
@@ -30,6 +35,9 @@ struct VfxSessionState
         }
     };
     std::uint64_t session_id{};
+    std::optional<Tick> terminal_clock_source_tick;
+    std::optional<SessionPhase> terminal_clock_phase;
+    std::optional<FixedStepClock::Clock::time_point> terminal_clock_started_at;
     std::vector<PresentationEvent> pending_events;
     std::vector<ParticleSpawnCommand> particle_spawns;
     std::vector<VfxLineSpawnCommand> effect_lines;
@@ -39,6 +47,11 @@ struct VfxSessionState
     std::vector<VfxEventInput> light_events;
     std::vector<VfxEventInput> distortion_events;
     std::vector<VfxEventInput> decal_events;
+    std::vector<VfxEventInput> volume_events;
+    std::vector<VfxEventInput> screen_events;
+    std::vector<VfxEventInput> entity_surface_events;
+    std::vector<VfxEntitySurfaceEventCapture> entity_surface_captures;
+    std::vector<VfxEventInput> point_rate_events;
     std::unordered_set<PersistentBurstKey, PersistentBurstHash> seen_persistent_bursts;
 
     bool MarkPersistentBurst(std::uint64_t stable_id, std::uint8_t visual_kind)
@@ -57,12 +70,69 @@ struct VfxSessionState
         light_events.clear();
         distortion_events.clear();
         decal_events.clear();
+        volume_events.clear();
+        screen_events.clear();
+        entity_surface_events.clear();
+        entity_surface_captures.clear();
+        point_rate_events.clear();
+    }
+
+    // Publish a prepared catalog's decoded retention without changing the
+    // session clock, pending stable-identity events, or burst tombstones.
+    void SwapDecoded(VfxSessionState &prepared) noexcept
+    {
+        particle_spawns.swap(prepared.particle_spawns);
+        effect_lines.swap(prepared.effect_lines);
+        flashes.swap(prepared.flashes);
+        ground_events.swap(prepared.ground_events);
+        ribbon_events.swap(prepared.ribbon_events);
+        light_events.swap(prepared.light_events);
+        distortion_events.swap(prepared.distortion_events);
+        decal_events.swap(prepared.decal_events);
+        volume_events.swap(prepared.volume_events);
+        screen_events.swap(prepared.screen_events);
+        entity_surface_events.swap(prepared.entity_surface_events);
+        entity_surface_captures.swap(prepared.entity_surface_captures);
+        point_rate_events.swap(prepared.point_rate_events);
+    }
+
+    // Terminal simulation stops advancing after the final boss transition.
+    // Keep only this presentation clock on real time; all other VFX clocks
+    // remain tied to the authoritative snapshot tick.
+    Tick UpdateTerminalClock(Tick snapshot_tick, SessionPhase phase,
+                             FixedStepClock::Clock::time_point now) noexcept
+    {
+        const bool terminal = phase == SessionPhase::Victory || phase == SessionPhase::Defeat;
+        if (!terminal)
+        {
+            terminal_clock_source_tick.reset();
+            terminal_clock_phase.reset();
+            terminal_clock_started_at.reset();
+            return snapshot_tick;
+        }
+        if (!terminal_clock_source_tick || !terminal_clock_phase || !terminal_clock_started_at ||
+            *terminal_clock_source_tick != snapshot_tick || *terminal_clock_phase != phase)
+        {
+            terminal_clock_source_tick = snapshot_tick;
+            terminal_clock_phase = phase;
+            terminal_clock_started_at = now;
+            return snapshot_tick;
+        }
+        if (now <= *terminal_clock_started_at) return *terminal_clock_source_tick;
+        const auto elapsed_ticks = (now - *terminal_clock_started_at) / FixedStepClock::kFixedStep;
+        if (elapsed_ticks <= 0) return *terminal_clock_source_tick;
+        const auto advance = static_cast<Tick>(elapsed_ticks);
+        const auto remaining = std::numeric_limits<Tick>::max() - *terminal_clock_source_tick;
+        return *terminal_clock_source_tick + std::min(advance, remaining);
     }
 
     bool Synchronize(std::uint64_t current_session)
     {
         if (session_id == current_session) return false;
         session_id = current_session;
+        terminal_clock_source_tick.reset();
+        terminal_clock_phase.reset();
+        terminal_clock_started_at.reset();
         ClearDecoded();
         seen_persistent_bursts.clear();
         std::erase_if(pending_events, [&](const PresentationEvent &event) {

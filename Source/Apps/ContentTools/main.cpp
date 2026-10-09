@@ -3,7 +3,9 @@
 #endif
 
 #include "../Content/content_source_inventory.hpp"
+#include "../Content/content_paths.hpp"
 
+#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/windows_command_line.hpp>
 
 #include <nlohmann/json.hpp>
@@ -24,29 +26,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-#ifndef HS_CONTENT_EXECUTABLE
-#define HS_CONTENT_EXECUTABLE "hs_content.exe"
-#endif
-
-#ifndef HS_PROJECT_EXECUTABLE
-#define HS_PROJECT_EXECUTABLE "ProjectHS.exe"
-#endif
-
-#ifndef HS_COOKED_DIRECTORY
-#define HS_COOKED_DIRECTORY "Cooked"
-#endif
-
-#ifndef HS_CMAKE_EXECUTABLE
-#define HS_CMAKE_EXECUTABLE "cmake"
-#endif
-
-#ifndef HS_BINARY_DIRECTORY
-#define HS_BINARY_DIRECTORY "."
-#endif
-
-#define HS_WIDEN_IMPL(value) L##value
-#define HS_WIDEN(value) HS_WIDEN_IMPL(value)
 
 namespace
 {
@@ -108,30 +87,38 @@ DWORD RunProcess(const std::filesystem::path &executable,
     return exit_code;
 }
 
+DWORD BuildTarget(std::wstring_view target);
+
 DWORD RunContentCooker(std::wstring_view mode)
 {
-    const std::array arguments{mode};
-    return RunProcess(HS_CONTENT_EXECUTABLE, arguments);
+    if (BuildTarget(L"hs_game_data") != 0)
+        return 1;
+    const auto source_root = hs::content::paths::SourceRoot().wstring();
+    const auto build_root = hs::content::paths::BuildRoot().wstring();
+    const std::array<std::wstring_view, 5> arguments{
+        mode, L"--source-root", source_root, L"--build-root", build_root};
+    return RunProcess(hs::content::paths::BuildRoot() / "hs_game_data.exe", arguments);
 }
 
-std::uint64_t ReadCookedSourceHash()
+DWORD BuildTarget(std::wstring_view target)
 {
-    const auto manifest = hs::content::ReadRequiredText(
-        std::filesystem::path(HS_COOKED_DIRECTORY) / "manifest.txt");
-    constexpr std::string_view prefix = "source_hash=";
-    const auto start = manifest.find(prefix);
-    if (start == std::string::npos)
-        throw std::runtime_error("Cook manifest has no source_hash");
-    const auto value_start = start + prefix.size();
-    const auto value_end = manifest.find_first_of("\r\n", value_start);
-    std::uint64_t value{};
-    const auto text = std::string_view(manifest).substr(
-        value_start, value_end == std::string::npos ? std::string_view::npos
-                                                    : value_end - value_start);
-    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (error != std::errc{} || end != text.data() + text.size())
-        throw std::runtime_error("Cook manifest source_hash is invalid");
-    return value;
+    const auto build_root = hs::content::paths::BuildRoot().wstring();
+    const std::array<std::wstring_view, 4> arguments{
+        L"--build", build_root, L"--target", target};
+    return RunProcess(hs::content::paths::CMakeExecutable(), arguments);
+}
+
+hs::SelectedGeneration LoadCurrentGeneration()
+{
+    const auto pointer_path =
+        hs::content::paths::BuildRoot() / "GenerationState/runtime-full.json";
+    hs::SelectedGeneration generation;
+    if (auto loaded = hs::LoadSelectedGeneration(pointer_path, generation); !loaded)
+    {
+        throw std::runtime_error(pointer_path.string() + ": " +
+                                 std::string(loaded.Message()));
+    }
+    return generation;
 }
 
 void PrintCategoryEntryIds(const Json &document, std::string_view category)
@@ -451,7 +438,7 @@ void SetGameDataParameter(std::string_view category, std::string_view entry_id,
                                  ": validation failed and rollback failed with Win32 error " +
                                  std::to_string(GetLastError()));
     }
-    throw std::runtime_error("hs_content validation failed; source restored");
+    throw std::runtime_error("hs_game_data validation failed; source restored");
 }
 
 void PrintUsage()
@@ -485,7 +472,7 @@ int main(int argc, char **argv)
             const auto exit_code = RunContentCooker(L"--validate-only");
             if (exit_code != 0)
             {
-                std::cerr << "tools.error hs_content validation exit=" << exit_code << '\n';
+                std::cerr << "tools.error hs_game_data validation exit=" << exit_code << '\n';
                 return 1;
             }
             std::cout << "tools.validated documents=" << hs::content::kDocumentNames.size()
@@ -494,10 +481,11 @@ int main(int argc, char **argv)
         }
         if (command == "cook" && argc == 2)
         {
-            const auto exit_code = RunContentCooker(L"--cook");
+            const auto exit_code = BuildTarget(L"hs_content_generation");
             if (exit_code != 0)
             {
-                std::cerr << "tools.error hs_content Cook exit=" << exit_code << '\n';
+                std::cerr << "tools.error hs_content_generation build exit=" << exit_code
+                          << '\n';
                 return 1;
             }
             std::cout << "tools.cooked\n";
@@ -505,32 +493,32 @@ int main(int argc, char **argv)
         }
         if (command == "status" && argc == 2)
         {
-            const auto source = hs::content::ComputeContentSourceHash(
-                hs::content::LoadContentSourceInventory());
-            const auto cooked = ReadCookedSourceHash();
-            std::cout << "tools.status source_hash=" << source
-                      << " cooked_hash=" << cooked
-                      << " synchronized=" << (source == cooked ? "true" : "false")
-                      << '\n';
-            return source == cooked ? 0 : 1;
+            const auto generation = LoadCurrentGeneration();
+            std::cout << "tools.status generation_id=" << generation.id
+                      << " scope=" << generation.scope
+                      << " product_count=" << generation.product_paths.size() << '\n';
+            return 0;
         }
         if (command == "hot-reload" && argc == 2)
         {
-            const auto exit_code = RunContentCooker(L"--cook");
+            const auto exit_code = BuildTarget(L"hs_content_generation");
             if (exit_code != 0)
                 return 1;
-            std::cout << "tools.hot_reload requested; running game applies it only at main menu\n";
+            const auto generation = LoadCurrentGeneration();
+            std::cout << "tools.hot_reload published generation_id=" << generation.id
+                      << " scope=" << generation.scope
+                      << " product_count=" << generation.product_paths.size()
+                      << "; development renderer validates and atomically adopts compatible shader changes;"
+                         " resident content changes require resource preparation\n";
             return 0;
         }
         if (command == "shader-reload" && argc == 2)
         {
-            constexpr std::array<std::wstring_view, 4> arguments{
-                L"--build", HS_WIDEN(HS_BINARY_DIRECTORY), L"--target",
-                L"hs_runtime_assets"};
-            const auto exit_code = RunProcess(HS_CMAKE_EXECUTABLE, arguments);
+            const auto exit_code = BuildTarget(L"hs_content_generation");
             if (exit_code != 0)
                 return 1;
-            std::cout << "tools.shader_reload requested; running Debug game swaps valid PSOs\n";
+            std::cout << "tools.shader_reload published; development game prepares PSOs and LUT"
+                         " before Generation adoption\n";
             return 0;
         }
         if (command == "list" && argc == 3)
@@ -547,9 +535,11 @@ int main(int argc, char **argv)
         }
         if (command == "preview" && argc == 2)
         {
+            if (BuildTarget(L"ProjectHS") != 0)
+                return 1;
             std::cout << "tools.preview authored archer with procedural combat placeholders\n";
             const std::span<const std::wstring_view> no_arguments;
-            return RunProcess(HS_PROJECT_EXECUTABLE, no_arguments) == 0 ? 0 : 1;
+            return RunProcess(hs::content::paths::BuildRoot() / "ProjectHS.exe", no_arguments) == 0 ? 0 : 1;
         }
         PrintUsage();
         return 2;

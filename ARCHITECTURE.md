@@ -8,8 +8,10 @@ This document describes the module graph enforced by the current build and `Test
                          Core
               ┌──────────┼───────────────┐
               ▼          ▼               ▼
-            Jobs     GameDomain      RendererD3D12
-                         │
+            Jobs     GameDomain       RenderData
+                         │                │
+                         │                ▼
+                         │           RendererD3D12
                  ┌───────┴────────┐
                  ▼                ▼
              GameRules       Presentation
@@ -23,13 +25,15 @@ Runtime composes Core, Jobs, Gameplay, Presentation, and RendererD3D12. Apps are
 | Module | Responsibility | Allowed Project HS dependencies |
 |---|---|---|
 | Core | Foundation types and shared low-level contracts | none |
+| AssetManifest | Selected Generation manifest parsing and product path lookup | Core |
+| RenderData | Versioned CPU render packages and material metadata | Core |
 | Jobs | Task-system integration | Core |
 | GameDomain | Stable domain/read-model contracts | Core |
 | GameRules | Rules independent of mutable simulation state | Core, GameDomain |
 | Gameplay | Deterministic mutable simulation | Core, GameDomain, GameRules |
 | Presentation | Domain/read-model projection | Core, GameDomain |
-| RendererD3D12 | Concrete Windows/D3D12 backend | Core |
-| Runtime | Concrete subsystem composition and orchestration | Core, Jobs, Gameplay, Presentation, RendererD3D12 |
+| RendererD3D12 | Concrete Windows/D3D12 backend | Core, RenderData |
+| Runtime | Concrete subsystem composition and orchestration | Core, Jobs, Gameplay, Presentation, AssetManifest, RendererD3D12 |
 | Apps | Argument handling and entry-point composition | approved public libraries |
 
 ## Forbidden dependencies
@@ -40,6 +44,8 @@ Runtime composes Core, Jobs, Gameplay, Presentation, and RendererD3D12. Apps are
 - GameRules must not depend on Jobs, Gameplay, Presentation, RendererD3D12, or Runtime.
 - Gameplay must not depend on Jobs, Presentation, RendererD3D12, or Runtime.
 - Presentation must not depend on Jobs, GameRules, Gameplay, RendererD3D12, or Runtime.
+- AssetManifest must not depend on Jobs, game, presentation, RenderData, renderer, or runtime modules.
+- RenderData must not depend on Jobs, game, presentation, renderer, or runtime modules.
 - RendererD3D12 must not depend on Jobs, game, presentation, or runtime modules.
 - Production modules must not include another module's `Private` headers.
 
@@ -71,6 +77,15 @@ Each module's `Public` directory is its supported cross-module API. `Private` is
 
 ## Build isolation
 
+`hs_environment_layout` is an internal Presentation target that compiles the
+existing environment builder once. `hs_presentation` exposes it transitively;
+layout-only scene producers link it directly. `hs_generation_lock` similarly
+compiles AssetManifest publication locking once and is exposed by
+`hs_asset_manifest`. Action producers link this narrow locking target; consumers
+that parse selected manifests still link `hs_asset_manifest`. These targets retain
+their module ownership and normal compiler dependency authentication, so unrelated
+presentation or selected-manifest edits do not invalidate producer recipes.
+
 The low-level configuration is:
 
 ```text
@@ -78,7 +93,26 @@ HS_BUILD_RUNTIME=OFF
 HS_BUILD_CONTENT_TOOLS=OFF
 ```
 
-It builds Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, and their low-level tests without ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex, or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`.
+It builds Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, and their low-level tests without AssetManifest, RenderData, ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex, or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`.
+
+## Portable verification
+
+`cmake --workflow --preset verify-core-linux` builds the platform-independent
+libraries and runs their low-level tests with GCC/Clang strict floating-point
+options. The Windows process APIs and MSVC `/fp:strict` path remain intact.
+Linux verification does not stand in for MSVC, D3D12, or GPU execution.
+
+`HS_BUILD_RENDER_DATA_TESTS=ON` explicitly opts into CPU RenderData, selected
+Generation, character-interchange, and the private production FrameGraph range
+compiler checks without enabling the runtime or
+FBX/DXC content tooling. This option defaults to OFF, so the ordinary low-level
+configuration retains its dependency isolation. The real asset-action scheduler
+regression additionally uses Python when available with the Ninja generator.
+
+`HS_BUILD_ASSET_PIPELINE_TESTS=ON` separately opts into the real portable Audio
+and Generation executables plus publication fixtures. Core owns shared streaming
+SHA-256; RenderData retains its public wrapper. Neither opt-in enables D3D12 or
+content SDK dependencies. Both remain OFF by default.
 
 ## Mechanical enforcement
 

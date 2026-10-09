@@ -1,3 +1,4 @@
+#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/process_info.hpp>
@@ -18,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <ranges>
 #include <set>
 #include <span>
@@ -1489,6 +1491,7 @@ int main(int argc, char **argv)
         std::filesystem::path progression_suite_path;
         std::filesystem::path relic_balance_suite_path;
         std::filesystem::path output_directory;
+        std::optional<std::filesystem::path> generation_pointer;
         bool validate_only = false;
         for (int index = 1; index < argc; ++index)
         {
@@ -1499,14 +1502,17 @@ int main(int argc, char **argv)
             else if (argument.starts_with("--relic-balance-suite="))
                 relic_balance_suite_path = argument.substr(argument.find('=') + 1);
             else if (argument.starts_with("--output=")) output_directory = argument.substr(9);
+            else if (argument.starts_with("--generation=") && !generation_pointer)
+                generation_pointer = argument.substr(13);
             else if (argument == "--validate-only") validate_only = true;
             else throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--validate-only]");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--generation=POINTER] [--validate-only]");
         }
         if ((!validate_only && output_directory.empty()) ||
-            (suite_path.empty() + progression_suite_path.empty() + relic_balance_suite_path.empty()) != 2)
+            (suite_path.empty() + progression_suite_path.empty() + relic_balance_suite_path.empty()) != 2 ||
+            (generation_pointer && generation_pointer->empty()))
             throw std::runtime_error(
-                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--validate-only]");
+                "Usage: hs_combat_sim (--suite=FILE | --progression-suite=FILE | --relic-balance-suite=FILE) --output=DIR [--generation=POINTER] [--validate-only]");
 
         if (validate_only)
         {
@@ -1535,10 +1541,21 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        const auto executable = std::filesystem::absolute(argv[0]);
+        const auto executable = hs::CurrentExecutablePath();
+        const auto pointer_path = generation_pointer
+            ? std::filesystem::absolute(*generation_pointer)
+            : executable.parent_path() / "GenerationState/runtime-full.json";
+        hs::SelectedGeneration selected_generation;
+        if (auto loaded = hs::LoadSelectedGeneration(pointer_path, selected_generation);
+            !loaded)
+            throw std::runtime_error(std::string(loaded.Message()));
+        std::filesystem::path simulation_rules_path;
+        if (auto resolved = selected_generation.Require(
+                "game-data/simulation-rules", simulation_rules_path);
+            !resolved)
+            throw std::runtime_error(std::string(resolved.Message()));
         hs::SimulationRules rules;
-        if (auto loaded = hs::LoadSimulationRules(
-                executable.parent_path() / "Cooked" / "simulation_rules.hsbin", rules);
+        if (auto loaded = hs::LoadSimulationRules(simulation_rules_path, rules);
             !loaded)
             throw std::runtime_error(std::string(loaded.Message()));
         if (!progression_suite_path.empty())

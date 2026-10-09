@@ -16,7 +16,7 @@ hs::VfxProgramData Program()
  hs::VfxSourceRecord s;s.effect=1;s.stable_id=Hash("light_pulse");s.type=hs::VfxSourceType::Direct;s.knot_count=2;s.knots={.25f,.75f,0,0};s.outputs={0,1};p.sources.push_back(s);
  p.parameters={{Hash("radius"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(5.5f)},{Hash("intensity_curve_ref"),hs::VfxParameterType::CurveRow,0}};
  p.curves.push_back({1,Hash("normalized_age"),{0,2}});p.curve_keys={{0,1},{1,0}};
- hs::VfxOutputRecord o;o.source=0;o.profile=hs::VfxOutputProfile::Light;o.motion=hs::VfxMotionKind::SingleCappedLightPulse;o.parameters={0,2};o.rgba={.5f,.8f,1,.8f};o.hdr=3;p.outputs.push_back(o);return p;
+  hs::VfxOutputRecord o;o.source=0;o.profile=hs::VfxOutputProfile::Light;o.motion=hs::VfxMotionKind::SingleCappedLightPulse;o.parameters={0,2};o.rgba={.5f,.8f,1,.8f};o.hdr=3;o.min_quality=static_cast<std::uint32_t>(hs::VfxQuality::Medium);p.outputs.push_back(o);return p;
 }
 hs::VfxEventInput Input(){hs::VfxEventInput in;in.effect_handle=1;in.event_tick=100;in.sequence=77;in.payload=hs::VfxPointPayload{{1,2,3},{},{},9};return in;}
 auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick t){return hs::runtime_detail::BuildVfxTypedLightCommands(p,std::span(&i,1),t);}
@@ -55,6 +55,7 @@ void TypedCentersAndHero()
 void QualityAndInvalidInputs()
 {
  auto p=Program();auto i=Input();i.quality=hs::VfxQuality::Low;Check(Run(p,i,145).empty(),"low quality retained decorative light");
+ p.outputs[0].min_quality=static_cast<std::uint32_t>(hs::VfxQuality::Low);Check(Run(p,i,145).size()==1,"explicit Low-minimum fixture light was not preserved at Low quality");
  i.quality=hs::VfxQuality::Medium;p.outputs[0].min_quality=2;Check(Run(p,i,145).empty(),"output minimum quality ignored");
  i=Input();p=Program();p.curves[0].interpolation=2;Check(Run(p,i,145).empty(),"unsupported curve interpolation approximated");
  p=Program();p.curve_keys[1].time=0;Check(Run(p,i,145).empty(),"duplicate curve keys accepted");

@@ -27,6 +27,7 @@ enum class PresentationGeometryKind : std::uint8_t
     Cone,
     RingGaps,
     Projectile,
+    EntityAttachment,
 };
 
 // Explicit gameplay shape, kept outside the retained 32-byte event payload.

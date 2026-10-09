@@ -1,0 +1,104 @@
+#pragma once
+
+#include "renderer_local_probe.hpp"
+#include <hs/render_data/geometry_package.hpp>
+#include <hs/render_data/material_schema.hpp>
+#include <hs/renderer/renderer.hpp>
+#include <D3D12MemAlloc.h>
+#include <wrl/client.h>
+
+#include <string>
+
+namespace hs
+{
+namespace renderer_detail { struct FrameConstants; }
+class RendererPipelineCache;
+
+// One complete conventional page per authored environment/terrain material.
+// Use an actual complete resident source/fallback page, never a selected main
+// camera cluster/HLOD cut. Retain both native resource and allocator leases.
+struct LocalProbeCapturePage
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> vertices, indices;
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> vertex_allocation, index_allocation;
+    ResourceVersion vertex_version, index_version;
+    D3D12_VERTEX_BUFFER_VIEW vertex_view{};
+    D3D12_INDEX_BUFFER_VIEW index_view{};
+    std::uint32_t first_index{}, index_count{}, generation{}, page_slot{};
+    std::int32_t base_vertex{};
+    render_data::GeometryBounds bounds; // Exact complete page.metadata.bounds.
+    bool complete{};
+};
+
+struct LocalProbeRuntimeFrameInputs
+{
+    std::shared_ptr<const StaticRenderScene> scene;
+    std::span<const LightView> lights; // Same authoritative static lights bound below.
+    std::uint32_t static_instance_generation{};
+    std::uint64_t material_parameter_revision{}, pipeline_revision{};
+    float foliage_density{};
+    const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
+    Microsoft::WRL::ComPtr<ID3D12Resource> static_instances;
+    Microsoft::WRL::ComPtr<D3D12MA::Allocation> static_allocation;
+    ResourceVersion static_version;
+    // b0 lives inside root table32. Each face gets a private immutable copy of
+    // the frame descriptor prefix with its own CBV; never rewrite the main b0.
+    // Bank6 is a separate immutable static-shadow camera/constants/table slot.
+    // frame_srv_heap retains the original nonvisible CPU descriptor owner.
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> frame_srv_heap, sampler_heap;
+    D3D12_CPU_DESCRIPTOR_HANDLE frame_srv_base{}; // First texture descriptor of this frame.
+    D3D12_GPU_DESCRIPTOR_HANDLE sampler_table{};
+    // Exactly kAuthoredMaterialNames order: fourteen environment variants, terrain.
+    std::span<const LocalProbeCapturePage> pages;
+    // All actual texture/material/light/shadow/environment/LTC/LUT/frame binding
+    // reads. Native vertex/index/static table and private constants are appended.
+    std::span<const LocalProbeSceneRead> scene_reads;
+    // Bind the existing common root signature, descriptor heaps/tables and all
+    // shared material/texture/light/shadow SRVs. Restore the main view bindings
+    // and viewport/targets after each capture, including a callback error.
+    std::function<void(ID3D12GraphicsCommandList *)> bind_graphics, restore_graphics;
+    // Additional owners for resources read through the shared binding tables.
+    std::vector<std::shared_ptr<const void>> binding_owners;
+    CompletionSet completed;
+    std::uint32_t max_cube_views{6};
+    std::function<void(PassBuilder &)> declare_material_sampling, declare_shadow_sampling;
+};
+
+struct LocalProbeCaptureState;
+class LocalProbeRuntimeCandidate
+{
+  private:
+    LocalProbeCandidate service_;
+    std::shared_ptr<LocalProbeCaptureState> capture_;
+    bool prepared_{};
+    friend class LocalProbeRuntime;
+};
+
+// Concrete native adapter. Root owns its Impl member and lifecycle/frame hooks;
+// this adapter owns actual static capture commands, PSOs and immutable uploads.
+class LocalProbeRuntime
+{
+  public:
+    LocalProbeRuntime();
+    ~LocalProbeRuntime();
+    LocalProbeRuntime(const LocalProbeRuntime &) = delete;
+    LocalProbeRuntime &operator=(const LocalProbeRuntime &) = delete;
+    [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *, ID3D12RootSignature *,
+        const RendererConfig &, LocalProbeRuntimeCandidate &, RendererPipelineCache *) const;
+    [[nodiscard]] Result Commit(LocalProbeRuntimeCandidate &&, const CompletionSet &completed);
+    [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
+        render_data::SceneProbeRevisions &) const;
+    [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeRuntimeFrameInputs &, LocalProbeOutputs &);
+    [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success,
+        const std::shared_ptr<const StaticRenderScene> &, render_data::SceneProbeRevisions);
+    [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
+    [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
+    [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
+    [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+    // Called only after all old submissions have reliably completed.
+    void SwapState(LocalProbeRuntime &other) noexcept { impl_.swap(other.impl_); }
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+} // namespace hs

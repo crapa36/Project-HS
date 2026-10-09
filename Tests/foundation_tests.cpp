@@ -2,6 +2,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
+#include <hs/core/process_info.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/windows_command_line.hpp>
 #include <hs/jobs/task_system.hpp>
@@ -256,6 +257,16 @@ void TestCookedHeaderValidation()
     std::filesystem::remove(path);
 }
 
+void TestProcessInfo()
+{
+    const auto executable = hs::CurrentExecutablePath();
+    Check(executable.is_absolute() && std::filesystem::is_regular_file(executable),
+          "current executable path");
+    Check(hs::CurrentExecutableDirectory() == executable.parent_path(),
+          "current executable directory");
+    Check(hs::CurrentProcessWorkingSetBytes() > 0, "current process working set");
+}
+
 void TestWindowsCommandLineQuoting()
 {
     Check(hs::QuoteWindowsCommandLineArgument(L"") == L"\"\"", "empty argument quote");
@@ -287,6 +298,7 @@ int main(int argc, char **argv)
             TestVfxEventParameters();
             TestCookedHeaderValidation();
             TestWindowsCommandLineQuoting();
+            TestProcessInfo();
         }
         if (group == "all" || group == "jobs") TestTaskSystem();
         Check(group == "all" || group == "foundation" || group == "jobs",

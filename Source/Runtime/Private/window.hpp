@@ -11,9 +11,18 @@
 #include <cstdint>
 #include <optional>
 #include <functional>
+#include <vector>
 
 namespace hs
 {
+
+// Desktop placement only: IDs and physical rectangles are valid; native HDR
+// and presentation modes are queried by the initialized renderer separately.
+// This Win32 query does not create a DXGI object before vendor initialization.
+[[nodiscard]] Result EnumerateWindowDisplayPlacements(std::vector<RendererDisplayOutput> &);
+// Current active CCD timing for the HWND's actual monitor. This read-only Win32
+// query does not create DXGI objects or substitute an assumed refresh frequency.
+[[nodiscard]] Result QueryWindowDisplayRefresh(HWND window, double &refresh_hz);
 
 class Window
 {
@@ -36,6 +45,10 @@ class Window
     [[nodiscard]] bool ConsumeReboundSkillKeys(
         std::array<std::uint16_t, 4> &keys) noexcept;
     [[nodiscard]] Result SetBorderless(bool borderless);
+    // UI/window owner thread; complete placement before renderer request publication.
+    [[nodiscard]] Result ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borderless,
+                                               std::uint32_t client_width,
+                                               std::uint32_t client_height);
     void SetUiClickHandler(std::function<void(Float2)> handler);
     void SetUiHoverHandler(std::function<void(Float2)> handler);
 

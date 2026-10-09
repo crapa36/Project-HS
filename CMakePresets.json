@@ -1,8 +1,8 @@
 {
   "version": 9,
   "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 30,
+    "major": 4,
+    "minor": 4,
     "patch": 0
   },
   "configurePresets": [
@@ -16,7 +16,11 @@
       },
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "HS_BUILD_TESTS": "ON"
+        "HS_BUILD_TESTS": "ON",
+        "HS_BUILD_RUNTIME": "ON",
+        "HS_BUILD_CONTENT_TOOLS": "ON",
+        "HS_ENABLE_VALIDATION": "OFF",
+        "HS_ENABLE_GPU_VALIDATION": "OFF"
       }
     },
     {
@@ -69,6 +73,23 @@
         "HS_BUILD_TESTS": "OFF",
         "HS_ENABLE_VALIDATION": "OFF"
       }
+    },
+    {
+      "name": "linux-core",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "HS_BUILD_TESTS": "ON",
+        "HS_BUILD_RUNTIME": "OFF",
+        "HS_BUILD_CONTENT_TOOLS": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -79,7 +100,10 @@
         "hs_tests",
         "hs_gameplay_internal_tests",
         "hs_navigation_tests",
-        "hs_simulation_tests"
+        "hs_simulation_tests",
+        "hs_graphics_settings_tests",
+        "hs_sha256_tests",
+        "hs_simulation_rules_serialization_tests"
       ]
     },
     {
@@ -104,6 +128,10 @@
     {
       "name": "msvc-release",
       "configurePreset": "msvc-release"
+    },
+    {
+      "name": "linux-core",
+      "configurePreset": "linux-core"
     }
   ],
   "testPresets": [
@@ -112,7 +140,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core)$)"
+          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {
@@ -154,6 +182,13 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "linux-core",
+      "configurePreset": "linux-core",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ],
   "workflowPresets": [
@@ -188,6 +223,23 @@
         {
           "type": "test",
           "name": "msvc-validation"
+        }
+      ]
+    },
+    {
+      "name": "verify-core-linux",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-core"
+        },
+        {
+          "type": "build",
+          "name": "linux-core"
+        },
+        {
+          "type": "test",
+          "name": "linux-core"
         }
       ]
     }

@@ -8,10 +8,14 @@
 #include <hs/game_domain/game_types.hpp>
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/renderer/renderer.hpp>
+#include <hs/presentation/projector.hpp>
+
+#include "graphics_settings_commit.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <memory>
 
 namespace hs
 {
@@ -33,7 +37,8 @@ struct RenderPorts
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
     BoundedSpscQueue<PresentationEvent, 1024> &audio_events;
     BoundedSpscQueue<ResizeCommand, 64> &resize_commands;
-    BoundedSpscQueue<SettingsData, 8> &renderer_settings;
+    BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> &renderer_settings;
+    BoundedSpscQueue<GraphicsSettingsAck, 8> &renderer_settings_acks;
     BoundedSpscQueue<NativeWindowMessage, 256> &window_messages;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
     std::atomic<std::uint64_t> &rendered_frames;
@@ -42,6 +47,9 @@ struct RenderPorts
     std::atomic<std::uint64_t> &dropped_presentation_events;
     std::atomic<bool> &devtools_capture_mouse;
     std::atomic<bool> &devtools_capture_keyboard;
+    std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &renderer_graphics_ui;
+    const std::atomic<std::uint8_t> &session_phase;
+    const std::atomic<std::uint8_t> &ui_page;
 };
 
 struct SimulationPorts
@@ -74,6 +82,9 @@ struct SimulationPorts
     std::atomic<std::uint64_t> &completed_run_kills;
     std::atomic<std::uint64_t> &completed_run_wins;
     std::atomic<std::uint64_t> &dropped_presentation_events;
+    std::atomic<std::uint8_t> &settings_group;
+    std::atomic<std::uint8_t> &settings_page;
+    std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &presentation_graphics_ui;
 
     void PublishSessionProbe(const SessionProbe &probe)
     {
@@ -84,7 +95,7 @@ struct SimulationPorts
 
 struct RuntimeChannels
 {
-    RuntimeChannels() : snapshots(10'000, 8, 4, 32)
+    RuntimeChannels() : snapshots(10'000, 8, 4, kGraphicsUiSnapshotReserve)
     {
     }
 
@@ -101,7 +112,11 @@ struct RuntimeChannels
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
     BoundedSpscQueue<PresentationEvent, 1024> audio_events;
     BoundedSpscQueue<ResizeCommand, 64> resize_commands;
-    BoundedSpscQueue<SettingsData, 8> renderer_settings;
+    // Requests carry a pointer to the commit owner's immutable in-flight graphics
+    // snapshot. Release/acquire queue publication and the acknowledgment queue
+    // protect it until the render consumer finishes; Runtime joins before teardown.
+    BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> renderer_settings;
+    BoundedSpscQueue<GraphicsSettingsAck, 8> renderer_settings_acks;
     BoundedSpscQueue<SimulationRules, 2> simulation_rules_updates;
     BoundedSpscQueue<SettingsData, 8> presentation_settings;
     BoundedSpscQueue<UiAction, 64> ui_actions;
@@ -127,6 +142,13 @@ struct RuntimeChannels
     std::atomic<std::uint64_t> dropped_presentation_events{};
     std::atomic<bool> devtools_capture_mouse{};
     std::atomic<bool> devtools_capture_keyboard{};
+    std::atomic<std::uint8_t> settings_group{};
+    std::atomic<std::uint8_t> settings_page{};
+    // A renderer receipt is published at initialization/apply/reload boundaries
+    // and for completed native telemetry while a settings page is open.
+    // Main combines it with validated requested intent; simulation only reads it.
+    std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> renderer_graphics_ui;
+    std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> presentation_graphics_ui;
 
     void PublishSessionProbe(const SessionProbe &probe)
     {
@@ -144,9 +166,9 @@ struct RuntimeChannels
     {
         return {stop_requested, simulation_done, completed_tick, render_ready, action_edges, snapshots,
                 presentation_events, audio_events, resize_commands, renderer_settings,
-                window_messages, debug_commands, rendered_frames, rendered_particles,
+                renderer_settings_acks, window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
-                devtools_capture_keyboard};
+                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page};
     }
 
     [[nodiscard]] SimulationPorts ForSimulation() noexcept
@@ -159,7 +181,8 @@ struct RuntimeChannels
                 session_probe_mutex, session_probe, ui_page,
                 collection_skill, character_skill, loadout_source,
                 pending_rebind_slot, best_level, completed_run_kills,
-                completed_run_wins, dropped_presentation_events};
+                completed_run_wins, dropped_presentation_events,
+                settings_group, settings_page, presentation_graphics_ui};
     }
 };
 

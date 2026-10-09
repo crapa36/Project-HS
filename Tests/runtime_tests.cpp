@@ -8,6 +8,7 @@
 #include "runtime_channels.hpp"
 #include "camera_pose.hpp"
 #include "vfx_session_state.hpp"
+#include "test_generation_paths.hpp"
 #include "vfx_typed_ground_commands.hpp"
 #include "vfx_typed_flash_commands.hpp"
 #include "vfx_typed_ribbon_commands.hpp"
@@ -61,7 +62,10 @@ void TestSaveRecovery(const std::filesystem::path &root)
 
     auto second = first;
     second.best_level = 11;
-    Check(store.SaveProfile(second).Succeeded(), "second profile save");
+    const auto second_save = store.SaveProfile(second);
+    if (!second_save.Succeeded())
+        throw std::runtime_error("second profile save: " +
+                                 std::string(second_save.Message()));
     Check(std::filesystem::is_regular_file(root / "profile.json.bak"),
           "atomic replacement retains backup");
 
@@ -190,7 +194,10 @@ void TestNamedPipeIdempotencyAndTargetTick()
 void TestProductionVfxDecoding()
 {
     hs::VfxCatalog catalog;
-    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(), "production VFX catalog");
+    Check(hs::VfxCatalog::Load(
+              test_generation::ProductPath("vfx/particle_effects.hsbin"),
+              test_generation::ProductPath("vfx/vfx_program.hsbin"), catalog).Succeeded(),
+          "production VFX catalog");
     const auto &program = catalog.Program();
     const auto handle = [&](std::string_view id) {
         for (const auto &entry : program.effect_lookup)
@@ -414,12 +421,14 @@ void TestProductionVfxDecoding()
 void TestVfxCatalog()
 {
     hs::VfxCatalog catalog;
-    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(),
-          "load cooked VFX catalog");
+    const auto particle_path = test_generation::ProductPath("vfx/particle_effects.hsbin");
+    const auto program_path = test_generation::ProductPath("vfx/vfx_program.hsbin");
+    Check(hs::VfxCatalog::Load(particle_path, program_path, catalog).Succeeded(),
+          "load selected VFX catalog");
     Check(catalog.SpriteCount() == 39, "load data-driven VFX sprite registry");
     const auto fixture = TestDirectory() / "vfx_required_program";
     std::filesystem::create_directories(fixture);
-    std::filesystem::copy_file("Cooked/particle_effects.hsbin", fixture / "particle_effects.hsbin",
+    std::filesystem::copy_file(particle_path, fixture / "particle_effects.hsbin",
                                std::filesystem::copy_options::overwrite_existing);
     hs::VfxCatalog rejected;
     Check(!hs::VfxCatalog::Load(fixture / "particle_effects.hsbin", rejected).Succeeded(),
@@ -446,12 +455,12 @@ void TestVfxCatalog()
     std::vector<hs::VfxLineSpawnCommand> lines;
     auto typed_only = event;
     typed_only.asset = hs::MakeAssetId("particle.player.arrow_release");
-    Check(catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded() && full.empty() && lines.empty(),
+    Check(catalog.ExpandEvent(typed_only, 1.0f, full, lines).Succeeded() && full.empty() && lines.empty(),
           "typed-only event must not require a legacy emitter");
     typed_only.asset = hs::MakeAssetId("particle.invalid.not_in_either_catalog");
-    Check(!catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded(),
+    Check(!catalog.ExpandEvent(typed_only, 1.0f, full, lines).Succeeded(),
           "unknown VFX event must still fail catalog dispatch");
-    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && !full.empty(),
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded() && !full.empty(),
           "expand full-quality VFX");
     Check(std::ranges::any_of(full, [](const auto &command) {
               return command.renderer == hs::VfxRenderer::Sprite &&
@@ -468,7 +477,7 @@ void TestVfxCatalog()
     event.asset = hs::MakeAssetId("particle.basic_attack");
     std::vector<hs::ParticleSpawnCommand> basic_mesh;
     std::vector<hs::VfxLineSpawnCommand> basic_lines;
-    Check(catalog.ExpandEvent(event, 100, basic_mesh, basic_lines).Succeeded(), "basic VFX event expands");
+    Check(catalog.ExpandEvent(event, 1.0f, basic_mesh, basic_lines).Succeeded(), "basic VFX event expands");
     Check(std::ranges::all_of(basic_mesh, [](const auto &command) {
         return command.renderer != hs::VfxRenderer::Mesh || command.primitive != hs::VfxPrimitive::Ember || command.mesh_index != 1;
     }), "basic ember must not become authored arrowhead");
@@ -476,7 +485,7 @@ void TestVfxCatalog()
     Check(std::ranges::all_of(full, [](const auto &command) {
               return command.renderer == hs::VfxRenderer::Mesh || command.mesh_index == 0;
           }), "authored mesh selection leaves sprite and ground outputs unchanged");
-    Check(catalog.ExpandEvent(event, 50, half, lines).Succeeded() && half.size() == full.size(),
+    Check(catalog.ExpandEvent(event, 0.5f, half, lines).Succeeded() && half.size() == full.size(),
           "expand half-quality VFX");
       for (std::size_t index = 0; index < full.size(); ++index)
       {
@@ -514,7 +523,7 @@ void TestVfxCatalog()
           std::vector<hs::VfxLineSpawnCommand> effect_lines;
           Check(catalog.FindEffect(event.asset) != nullptr,
                 "new VFX exists in cooked catalog");
-          Check(catalog.ExpandEvent(event, 100, particles, effect_lines).Succeeded() &&
+          Check(catalog.ExpandEvent(event, 1.0f, particles, effect_lines).Succeeded() &&
                     !particles.empty(),
                 "new VFX expands into particles");
       }
@@ -522,17 +531,17 @@ void TestVfxCatalog()
     event.asset = hs::MakeAssetId("particle.boss.shockwave.release");
     event.geometry.kind = hs::PresentationGeometryKind::RingGaps;
     std::vector<hs::ParticleSpawnCommand> shockwave_accents;
-    Check(catalog.ExpandEvent(event, 100, shockwave_accents, lines).Succeeded() &&
+    Check(catalog.ExpandEvent(event, 1.0f, shockwave_accents, lines).Succeeded() &&
         !shockwave_accents.empty() && std::ranges::none_of(shockwave_accents, [](const auto &command) {
             return command.renderer == hs::VfxRenderer::Ground && command.primitive == hs::VfxPrimitive::Ring;
         }), "authoritative wavefront replaces only legacy ring that crosses safe gaps");
     event.geometry = {};
       event.asset = hs::MakeAssetId("particle.line.ricochet");
-    Check(!catalog.ExpandEvent(event, 100, full, lines).Succeeded(), "line target required");
+    Check(!catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded(), "line target required");
     parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
     parameters.target = {4.0f, 0.0f, 5.0f};
     event.parameters = hs::EncodeVfxParameters(parameters);
-    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && lines.size() == 1 &&
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded() && lines.size() == 1 &&
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
@@ -542,7 +551,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded() &&
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded() &&
                   std::ranges::any_of(particles, [&](const auto &command) {
                       return command.renderer == renderer && command.primitive == primitive;
                   }),
@@ -553,7 +562,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded(),
               "composition VFX expands");
         const bool has_ring = std::ranges::any_of(particles, [](const auto &command) {
             return command.renderer == hs::VfxRenderer::Ground &&
@@ -573,7 +582,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded(),
               "hierarchy VFX expands");
         return particles;
     };

@@ -88,7 +88,7 @@ std::optional<float> Envelope(const VfxSourceRecord&s,float age)
 void Append(const VfxProgramData&p,const VfxEffectRecord&e,const Anchor&a,float age,std::uint64_t owner,
             std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent,std::vector<VfxDistortionInput>&result)
 {
- if(!std::isfinite(age)||age<0||age>=1||static_cast<std::uint32_t>(quality)>2||quality==VfxQuality::Low||!Range(e.sources,p.sources))return;
+ if(!std::isfinite(age)||age<0||age>=1||static_cast<std::uint32_t>(quality)>2||!Range(e.sources,p.sources))return;
  const auto identity=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto&v){return v.handle==e.handle;});if(identity==p.effect_lookup.end()||identity->effect_id==0)return;
  for(std::uint32_t si=e.sources.first;si<e.sources.first+e.sources.count;++si)
  {

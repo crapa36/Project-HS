@@ -23,12 +23,91 @@ cbuffer FrameConstants : register(b0)
     float4 VfxLightColorIntensity[32];
     uint4 VfxLightCount;
     uint4 VfxDecalCount;
+    uint4 SkinCacheOptions; // x: vertices reserved per persistent scene slot.
+    row_major float4x4 InverseViewProjection;
+    row_major float4x4 CurrentUnjitteredViewProjection;
+    row_major float4x4 PreviousUnjitteredViewProjection;
+    float4 SurfaceViewOrigin;
+    float4 SurfaceJitterUv; // xy: current jitter UV; zw: previous jitter UV.
+    float4 LodViewRight;
+    float4 LodViewUp;
+    float4 LodViewForward;
+    float4 LodProjection; // x: perspective pixel scale; yzw: cascade pixels/world unit.
+    float4 LodOptions; // pixel tolerance, hysteresis, near distance, fade step.
+    uint4 LodClock; // frame, session epoch, valid view history, diagnostic flags.
+    uint4 MaterialParameterBases[4]; // Same selected table used by raster and deferred.
+    uint4 MaterialVaryingMasks[4];
+    uint4 MaterialSidecarOffsets[2];
+    uint4 MaterialSidecarInfo; // union mask, packed word count, plane count, reserved.
+    float4 OutputSize; // Output extent in xy, reciprocal extent in zw.
+    float4 PostOptions; // Bloom strength, outline width in output pixels, grading, sharpening.
+    float4 MaterialQualityOptions; // POM march/refinement, packed binary16 terrain fade range, screen refraction quality.
+    float4 DisplayOptions; // Native HDR enabled, paper white nits, peak nits, reserved.
+    row_major float4x4 InverseUnjitteredViewProjection;
+    float4 LightingOptions;
+    uint4 HeroMaterialParameterBases[2];
+    uint4 HeroMaterialVaryingMasks[2];
+    uint4 HeroBindingRanges[7];
+    float4 ProbeOptions; // cosine/sine yaw, maximum prefiltered LOD, enabled.
 };
 
 cbuffer PassConstants : register(b1)
 {
     uint PassValue;
+    // bit 0: static scene; bits 1-31: reflected material parameter slot base.
+    uint SceneDrawMaterial;
 };
+
+#include "geometry_records.hlsli"
+#include "material_parameters.hlsli"
+#include "material_sidecar.hlsli"
+#include "temporal_reconstruction.hlsli"
+#include "display_transform.hlsli"
+#include "volumetric_sampling.hlsli"
+
+// Transparent transmission samples the opaque radiance before its camera
+// prefix. The native frame publishes this alongside the volumetric textures.
+Texture2D<float4> VmRawOpaqueHdr : register(t1, space24);
+
+bool HsFogEnabled()
+{
+#ifdef HS_LOCAL_PROBE_CAPTURE
+    return false;
+#else
+    return VmCounts.y != 0u;
+#endif
+}
+float HsFogViewDepth(float3 world)
+{
+    return mul(float4(world - VmOriginNear.xyz, 0.0), VmWorldToView).z;
+}
+HsVolumetricTransport HsFogPrefix(float3 world, float2 pixel)
+{
+    if (!HsFogEnabled()) return HsVolumetricIdentity();
+    return HsSampleVolumetricTransport(pixel * ScreenSize.zw, HsFogViewDepth(world));
+}
+float3 HsFogSurface(float3 raw, float3 world, float2 pixel)
+{
+    return HsApplyVolumetricTransport(raw, HsFogPrefix(world, pixel));
+}
+float3 HsFogEmission(float3 raw, float3 world, float2 pixel)
+{
+    return HsFogPrefix(world, pixel).transmittance * raw;
+}
+float3 HsFogSky(float3 raw, float2 uv)
+{
+    if (!HsFogEnabled()) return raw;
+    return HsApplyVolumetricTransport(raw, HsSampleVolumetricTransport(uv, VmDepthRange.x));
+}
+
+// Terrain helper defaults remain usable by standalone material consumers.
+#define HS_MATERIAL_POM_STEPS uint(MaterialQualityOptions.x)
+#define HS_MATERIAL_POM_REFINEMENT_STEPS uint(MaterialQualityOptions.y)
+#define HS_MATERIAL_DETAIL_FADE_RANGE float2(f16tof32(asuint(MaterialQualityOptions.z) & 0xffffu), f16tof32(asuint(MaterialQualityOptions.z) >> 16u))
+
+#ifndef HS_SURFACE_SIDECAR_PLANES
+#define HS_SURFACE_SIDECAR_PLANES 0
+#endif
 
 struct InstanceData
 {
@@ -39,6 +118,10 @@ struct InstanceData
     float Yaw;
     float Padding;
 };
+#include "gpu_scene_tables.hlsli"
+ByteAddressBuffer SkinPreviousVertices : register(t3, space3);
+StructuredBuffer<InstanceData> SkinPreviousInstances : register(t4, space3);
+ByteAddressBuffer SkinCurrentVertices : register(t5, space3);
 
 struct FresnelShellGpu
 {
@@ -85,13 +168,25 @@ struct ParticleSpawnCommandGpu
 };
 
 StructuredBuffer<InstanceData> Instances : register(t0);
+struct StaticDrawRef
+{
+    uint InstanceIndex;
+    uint MeshFlags;
+    float LodThreshold;
+    uint InstanceGeneration;
+};
+StructuredBuffer<StaticDrawRef> StaticSceneDraws : register(t29, space3);
 StructuredBuffer<ParticleData> Particles : register(t1);
 ByteAddressBuffer VfxMeshAtlas : register(t0, space3);
 StructuredBuffer<ParticleSpawnCommandGpu> ParticleSpawnCommands : register(t12);
 StructuredBuffer<float> GroundGapAngles : register(t11, space3);
 StructuredBuffer<uint> DrawAliveIndices : register(t13);
 StructuredBuffer<uint> ParticleSpawnOwners : register(t17);
-StructuredBuffer<row_major float4x4> MonsterSkinMatrices : register(t18);
+struct MonsterSkinMatrixElement
+{
+    row_major float4x4 value;
+};
+StructuredBuffer<MonsterSkinMatrixElement> MonsterSkinMatrices : register(t18);
 RWStructuredBuffer<ParticleData> WritableParticles : register(u0);
 RWByteAddressBuffer IndirectArguments : register(u1);
 RWStructuredBuffer<uint> AliveInput : register(u2);
@@ -99,8 +194,12 @@ RWStructuredBuffer<uint> AliveOutput : register(u3);
 RWStructuredBuffer<uint> DeadIndices : register(u4);
 RWByteAddressBuffer ParticleCounters : register(u5);
 Texture2D<float4> GBufferBase : register(t2);
-Texture2D<float4> GBufferNormal : register(t3);
-Texture2D<float4> GBufferPosition : register(t4);
+Texture2D<float2> GBufferNormal : register(t3);
+Texture2D<uint2> GBufferMetadata : register(t4);
+Texture2D<float> SurfaceDepth : register(t0, space6);
+Texture2D<float2> SurfaceHistory : register(t1, space6);
+Texture2D<uint4> SurfaceSidecar0 : register(t2, space6);
+Texture2D<uint4> SurfaceSidecar1 : register(t3, space6);
 Texture2D<float> ShadowMap : register(t5);
 Texture2D<float4> HdrColor : register(t6);
 Texture2D<float4> OitAccumulation : register(t7);
@@ -112,11 +211,19 @@ Texture2D<float4> BloomQuarter : register(t23, space3);
 Texture2D<float4> BloomHalfCombined : register(t24, space3);
 Texture2D<float4> TemporalInput : register(t26, space3);
 Texture2D<float4> TemporalOutput : register(t27, space3);
+Texture2D<float2> TemporalNormalInput : register(t0, space9);
+Texture2D<uint2> TemporalMaterialInput : register(t1, space9);
+Texture2D<float4> SceneWork : register(t2, space9);
+Texture2D<float4> DisplayLinear : register(t3, space9);
+Texture2D<float4> CompositeHdr : register(t4, space9);
+Texture2D<float> VfxScreenReactive : register(t1, space32);
+StructuredBuffer<float> CurrentExposure : register(t1, space10); // Current, previous.
 Texture2D<float4> UiTexture : register(t11);
 Texture2DArray<float4> ArcherDiffuse : register(t14);
 Texture2DArray<float4> ArcherNormal : register(t15);
 Texture2DArray<float> VfxMasks : register(t16);
 Texture2D<float4> VfxGradientLut : register(t1, space3);
+Texture2DArray<float> VfxStbnScalar : register(t17, space3);
 Texture2DArray<float> VfxAuthoredMask : register(t7, space3);
 Texture2D<float4> MonsterBasecolor : register(t0, space1);
 Texture2D<float4> MonsterEmissive : register(t1, space1);
@@ -126,6 +233,8 @@ Texture2DArray<float4> FamilyNormal : register(t4, space1);
 SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
 SamplerState MaterialSampler : register(s2);
+
+#include "surface_layout.hlsli"
 
 struct SceneInput
 {
@@ -155,9 +264,142 @@ struct SceneOutput
     float3 EnvironmentStableWorld : TEXCOORD9;
     nointerpolation uint AnimationClip : TEXCOORD10;
     nointerpolation float AnimationProgress : TEXCOORD11;
+    float3 PreviousWorldPosition : TEXCOORD12;
+    nointerpolation uint MaterialId : TEXCOORD13;
+    nointerpolation uint SurfaceFlags : TEXCOORD14;
+    nointerpolation float HistoryConfidence : TEXCOORD15;
+    nointerpolation uint RasterDrawRecordId : TEXCOORD16;
+    nointerpolation uint2 InstanceKey : TEXCOORD17;
+    float4 ShadowClipDistance : SV_ClipDistance0;
 };
 
 #include "environment.hlsli"
+#include "hero_material.hlsli"
+#include "entity_surface.hlsli"
+#ifdef HS_GENERATED_ENVIRONMENT_MATERIAL
+#include "environment_material.generated.hlsli"
+#endif
+#ifdef HS_GENERATED_DEFERRED_MATERIALS
+#include "deferred_materials.generated.hlsli"
+#endif
+#include "deferred_surface.hlsli"
+
+// The native temporal consumer binds the service's immutable combined table.
+// LodClock.w bit4 selects guide availability, independently of GI/reflections.
+Texture2D<float> HeroGuideDepth : register(t14, space14);
+Texture2D<float2> HeroGuideMotion : register(t15, space14);
+Texture2D<float2> HeroGuideHistory : register(t16, space14);
+Texture2D<float4> HeroGuideClassification : register(t17, space14);
+Texture2D<uint2> HeroGuideMetadata : register(t18, space14);
+Texture2D<uint> HeroGuideOverflow : register(t19, space14);
+Texture2D<float2> HeroGuideTransport : register(t20, space14);
+
+struct HsSceneGradients
+{
+    float2 uvDx;
+    float2 uvDy;
+    float3 worldDx;
+    float3 worldDy;
+    float3 stableDx;
+    float3 stableDy;
+};
+
+HsSceneGradients RasterSceneGradients(SceneOutput input)
+{
+    HsSceneGradients gradients;
+    gradients.uvDx = ddx(input.Uv);
+    gradients.uvDy = ddy(input.Uv);
+    gradients.worldDx = ddx(input.WorldPosition);
+    gradients.worldDy = ddy(input.WorldPosition);
+    gradients.stableDx = ddx(input.EnvironmentStableWorld);
+    gradients.stableDy = ddy(input.EnvironmentStableWorld);
+    return gradients;
+}
+
+float2 HsSaturateGradient(float2 value, float2 gradient)
+{
+    return float2((value.x > 0.0 && value.x < 1.0) ? gradient.x : 0.0,
+                  (value.y > 0.0 && value.y < 1.0) ? gradient.y : 0.0);
+}
+
+HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
+                                             HsSceneGradients gradients,
+                                             uint materialWord)
+{
+    HsMaterialContext ctx = (HsMaterialContext)0;
+    ctx.uv = input.Uv;
+    ctx.d_uv_dx = gradients.uvDx;
+    ctx.d_uv_dy = gradients.uvDy;
+    const float2 card_uv = saturate(input.Uv);
+    const float2 card_dx = HsSaturateGradient(input.Uv, gradients.uvDx);
+    const float2 card_dy = HsSaturateGradient(input.Uv, gradients.uvDy);
+    ctx.actual_world_position = input.WorldPosition;
+    ctx.d_actual_world_dx = gradients.worldDx;
+    ctx.d_actual_world_dy = gradients.worldDy;
+    ctx.stable_world_position = input.EnvironmentStableWorld;
+    ctx.d_stable_world_dx = gradients.stableDx;
+    ctx.d_stable_world_dy = gradients.stableDy;
+    ctx.layer = input.Material;
+    const bool foliage = input.Mesh == 17 || input.Mesh == 19;
+    ctx.shading_normal = normalize(foliage && !front ? -input.WorldNormal : input.WorldNormal);
+    ctx.tangent = input.WorldTangent;
+    ctx.normal = float3(0, 0, 1);
+    ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
+    ctx.mesh = input.Mesh;
+    ctx.seed = input.EnvironmentSeed;
+    ctx.view_direction = CameraTime.xyz - input.WorldPosition;
+    ctx.parameter_base = materialWord >> 1;
+    // Legacy sampled-value library calls use neutral values. Authored graphs
+    // read their reflected declarations from MaterialParameters.
+    ctx.roughness_scale = 1.0;
+    ctx.metallic = 0.0;
+    ctx.sampled_base_color = input.Color.rgb;
+    ctx.sampled_roughness = 1;
+    ctx.sampled_alpha = 1;
+    ctx.sampled_ao = 1;
+    if (foliage)
+    {
+        const float4 rect = input.Mesh == 19 ? GrassRects[input.Material] : LeafRects[input.Material];
+        const float2 scale = rect.zw / 2048.0;
+        ctx.uv = rect.xy / 2048.0 + card_uv * scale;
+        ctx.d_uv_dx = card_dx * scale;
+        ctx.d_uv_dy = card_dy * scale;
+        ctx.layer = input.Mesh == 19 ? GrassPages[input.Material] : LeafPages[input.Material];
+    }
+#ifndef HS_GENERATED_ENVIRONMENT_MATERIAL
+    if (input.Mesh == 16 || input.Mesh == 18)
+    {
+        EnvMaterial material = EnvOpaque(ctx.uv, ctx.d_uv_dx, ctx.d_uv_dy, ctx.layer,
+                                        input.Mesh == 18, ctx.eye_distance);
+        ctx.sampled_base_color = material.color;
+        ctx.sampled_roughness = material.roughness;
+        ctx.sampled_ao = material.ao;
+        ctx.normal = material.normal;
+    }
+    else if (foliage)
+    {
+        const float3 uv = float3(ctx.uv, ctx.layer);
+        const float4 color = input.Mesh == 19
+            ? GrassBase.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy)
+            : LeafBase.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy);
+        ctx.sampled_base_color = color.rgb;
+        ctx.sampled_alpha = color.a;
+        ctx.normal = EnvDecode(input.Mesh == 19
+            ? GrassNormal.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy).rg
+            : LeafNormal.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy).rg);
+        ctx.sampled_roughness = input.Mesh == 19
+            ? GrassRoughness.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy)
+            : LeafRoughness.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy);
+    }
+#endif
+    return ctx;
+}
+
+HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front)
+{
+    return EnvironmentMaterialContext(input, front, RasterSceneGradients(input),
+                                      SceneDrawMaterial);
+}
 
 float4 UnpackColor(uint packed)
 {
@@ -197,10 +439,10 @@ void SkinMonster(inout float3 position, inout float3 normal, inout float3 tangen
     const uint matrix_base = MonsterAssetMeta[asset].x + clip_meta.x +
                              frame * clip_meta.w;
     const float4x4 skin =
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.x] * input.BoneWeights.x +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.y] * input.BoneWeights.y +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.z] * input.BoneWeights.z +
-        MonsterSkinMatrices[matrix_base + input.BoneIndices.w] * input.BoneWeights.w;
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.x].value * input.BoneWeights.x +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.y].value * input.BoneWeights.y +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.z].value * input.BoneWeights.z +
+        MonsterSkinMatrices[matrix_base + input.BoneIndices.w].value * input.BoneWeights.w;
     position = mul(skin, float4(position, 1.0)).xyz;
     // Squash/stretch needs the inverse transpose, including for blended
     // matrices with shear. Normalization removes the determinant magnitude.
@@ -304,9 +546,28 @@ float3 InstanceWorldPosition(InstanceData instance, float3 position)
     return world;
 }
 
-SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
+struct HsSceneVertexContext
 {
-    InstanceData instance = Instances[instance_id];
+    InstanceData instance;
+    StaticDrawRef draw;
+    uint skinSlot;
+    bool cachedSkin;
+    bool cachedSkinHistory;
+    bool gpuSceneRefs;
+    GeometryDrawRecord geometry;
+    bool geometryValid;
+    uint rasterRecordId;
+    uint2 instanceKey;
+};
+
+SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
+                                uint vertex_id)
+{
+    const InstanceData instance = context.instance;
+    const StaticDrawRef draw = context.draw;
+    const bool cached_skin = context.cachedSkin;
+    const bool cached_skin_history = context.cachedSkinHistory;
+    const uint skin_slot = context.skinSlot;
     const uint mesh = instance.Mesh & 0xff;
     uint environment_seed = (mesh == 9 || mesh == 20) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
     uint environment_entry;
@@ -314,10 +575,21 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
     float3 local_position = input.Position;
     float3 local_normal = input.Normal;
     float3 local_tangent = input.Tangent.xyz;
-    SkinArcher(local_position, local_normal, local_tangent, input, mesh);
-    SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
+    if (cached_skin)
+    {
+        const uint cached_vertex = skin_slot * SkinCacheOptions.x + vertex_id;
+        const uint cached_offset = cached_vertex * 76u;
+        local_position = asfloat(SkinCurrentVertices.Load3(cached_offset));
+        local_normal = asfloat(SkinCurrentVertices.Load3(cached_offset + 12u));
+        local_tangent = asfloat(SkinCurrentVertices.Load3(cached_offset + 56u));
+    }
+    else
+    {
+        SkinArcher(local_position, local_normal, local_tangent, input, mesh);
+        SkinMonster(local_position, local_normal, local_tangent, input, instance, mesh);
+    }
     // Sampling the charge timeline makes the bubbling reverse with a cancelled draw.
-    if (mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2)
+    if (!cached_skin && mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2)
     {
         const float progress = saturate(instance.Padding);
         const float phase = progress * 48.0;
@@ -332,6 +604,15 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
     const float3 stable_world = InstanceWorldPosition(instance, local_position);
     float3 world = mesh == 19 ? BendGrass(stable_world, local_position -
         float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0)) : stable_world;
+    float3 previous_world = world;
+    if (cached_skin_history)
+    {
+        const uint previous_vertex = skin_slot * SkinCacheOptions.x + vertex_id;
+        const float3 previous_local = asfloat(
+            SkinPreviousVertices.Load3(previous_vertex * 76u));
+        previous_world = InstanceWorldPosition(
+            SkinPreviousInstances[skin_slot], previous_local);
+    }
     local_normal /= max(instance.Scale.xyz, 0.0001);
     local_tangent *= instance.Scale.xyz;
     float3 normal = normalize(float3(
@@ -347,41 +628,168 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = normal;
     output.WorldPosition = world;
+    output.PreviousWorldPosition = previous_world;
     output.Color = UnpackColor(instance.Color);
     output.Mesh = mesh;
     output.Uv = input.Uv;
     output.WorldTangent = float4(tangent, input.Tangent.w);
     output.Material = (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
+    const bool environment = mesh == 9 || mesh == 20 || (mesh >= 16 && mesh <= 19);
+    const uint model = environment ? HsSurfaceModelEnvironment :
+        (mesh >= 10 && mesh <= 12 ? HsSurfaceModelJelly : HsSurfaceModelCel);
+    const uint foliage = mesh == 17 ? HsSurfaceFoliageLeaf :
+        (mesh == 19 ? HsSurfaceFoliageGrass : 0u);
+    output.SurfaceFlags = HsPackSurfaceFlags(model, foliage, mesh == 0 ? 1u : 0u);
+    output.MaterialId = (mesh == 9 || mesh == 20) ? 0x1000000eu : 0x30000000u + mesh;
+    output.HistoryConfidence = cached_skin_history ? 1.0 : 0.0;
+    if (context.geometryValid)
+    {
+        // Material binding identity is separate from a foliage atlas entry or
+        // a character's vertex submaterial index.
+        if ((context.geometry.Flags & 16u) == 0u)
+            output.MaterialId = environment ? 0x10000000u + context.geometry.PageSlot / 3u :
+                (HsHeroAssetIndex(mesh) != HsHeroInvalidOrdinal
+                    ? HsHeroOpaqueMaterialId(mesh, input.Material)
+                    : 0x20000000u + (context.geometry.PageSlot << 16u) + input.Material);
+        if ((context.geometry.Flags & 32u) != 0u)
+            output.MaterialId = context.geometry.Lod;
+        if (environment && mesh != 19 && (context.geometry.Flags & 12u) == 12u)
+            output.HistoryConfidence = 1.0;
+    }
+    // A resident previous page cannot establish the previous instance's LOD
+    // coverage. GPU selection invalidates history for new cuts and all fades.
+    if ((draw.MeshFlags & 0x100000u) != 0u)
+        output.HistoryConfidence = 0.0;
+    if (context.gpuSceneRefs && context.geometryValid && (context.geometry.Flags & 4u) != 0u &&
+        HsHlodHistoryFlags(draw.InstanceIndex, draw.InstanceGeneration) != 0u)
+        output.HistoryConfidence = 0.0;
+    output.RasterDrawRecordId = context.rasterRecordId;
+    output.InstanceKey = context.instanceKey;
     output.EnvironmentSeed = environment_seed;
     output.EnvironmentFade = instance.Scale.w;
     output.EnvironmentFlags = instance.Mesh & 0x30000;
     output.EnvironmentStableWorld = stable_world;
     output.AnimationClip = (instance.Mesh >> 8) & 0xff;
     output.AnimationProgress = saturate(instance.Padding);
+    output.ShadowClipDistance = HsShadowClipDistance(world, PassValue);
     output.Charge = mesh == 12 && ((instance.Mesh >> 8) & 0xff) == 2
         ? saturate(instance.Padding) : 0.0;
     return output;
 }
 
+SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_id,
+                                bool gpu_scene_refs)
+{
+    HsSceneVertexContext context = (HsSceneVertexContext)0;
+    context.skinSlot = 0xffffffffu;
+    context.rasterRecordId = 0xffffffffu;
+    context.gpuSceneRefs = gpu_scene_refs;
+    context.instanceKey = uint2(instance_id + 1u, 0u);
+    if (gpu_scene_refs)
+    {
+        context.draw = StaticSceneDraws[instance_id];
+        if (HsShadowIsDraw(PassValue))
+        {
+            // Shadow proxy coverage is complete, independently of camera LOD fades.
+            context.draw.MeshFlags &= ~0x20000u;
+            const uint mesh = HsLoadGpuSceneInstance(context.draw.InstanceIndex).Mesh & 0xffu;
+            if (mesh >= 16u && mesh <= 19u) context.draw.LodThreshold = 1.0;
+        }
+        context.instanceKey = uint2(context.draw.InstanceIndex + 1u, context.draw.InstanceGeneration);
+        context.instance = HsLoadGpuSceneInstance(context.draw.InstanceIndex);
+        context.cachedSkin = (context.draw.MeshFlags & 0x40000u) != 0;
+        context.cachedSkinHistory = (context.draw.MeshFlags & 0x80000u) != 0;
+        if (context.cachedSkin)
+            context.skinSlot = HsLoadGpuSceneSkin(context.draw.InstanceIndex).x;
+        context.instance.Mesh |= context.draw.MeshFlags;
+        const uint resolved_mesh = context.instance.Mesh & 0xff;
+        if (resolved_mesh >= 10 && resolved_mesh <= 15)
+            context.instance.Padding = context.draw.LodThreshold;
+        else
+            context.instance.Scale.w = context.draw.LodThreshold;
+    }
+    else
+    {
+        context.instance = Instances[instance_id];
+    }
+    if (HsShadowIsDraw(PassValue))
+    {
+        const HsShadowDrawRecord shadow = HsShadowLoadDraw(PassValue);
+        context.geometry = LoadGeometryDrawRecord(shadow.geometry_record);
+        context.geometryValid = true;
+        context.rasterRecordId = 0xffffffffu;
+    }
+    else if (PassValue >= 4u)
+    {
+        context.geometry = LoadGeometryDrawRecord(PassValue >> 2u);
+        context.geometryValid = true;
+        context.rasterRecordId = context.geometry.Reserved2 + instance_id -
+            context.geometry.VisibleBase;
+    }
+    return EvaluateSceneVertex(input, context, vertex_id);
+}
+
+SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
+{
+    return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
+                               (SceneDrawMaterial & 1u) != 0);
+}
+
 SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     SceneOutput output = SceneVS(input, instance_id, vertex_id);
-    output.Position = mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[PassValue]);
+    // Record IDs start at 1; legacy procedural draws retain cascades 0..2.
+    if (HsShadowIsDraw(PassValue))
+        output.Position = HsShadowProject(output.WorldPosition, PassValue);
+    else
+    {
+        const uint cascade = PassValue >= 4u ? (PassValue & 3u) - 1u : PassValue;
+        output.Position = mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[cascade]);
+    }
     return output;
 }
+void EnvironmentShadowPS(SceneOutput input, bool masked, bool front)
+{
+    HsShadowRasterClip(input.Position.xy, PassValue);
+    const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
+    EnvironmentLodClip(input);
+    if (masked) clip(HsMaterialEvaluateOpacity(material_context) - HsMaterialOpacityCutoff);
+}
+
 void ShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
+    HsShadowRasterClip(input.Position.xy, PassValue);
+    const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
     EnvironmentLodClip(input);
-    if (input.Mesh == 17 || input.Mesh == 19) clip(FoliageColor(input.Mesh, input.Material, input.Uv).a - 0.5);
+    if (input.Mesh == 17 || input.Mesh == 19)
+        clip(HsMaterialEvaluateOpacity(material_context) - HsMaterialOpacityCutoff);
     else if (!front) discard;
+}
+
+void EnvironmentOpaqueShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    EnvironmentShadowPS(input, false, front);
+}
+
+void EnvironmentMaskedShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    EnvironmentShadowPS(input, true, front);
 }
 
 struct GBufferOutput
 {
     float4 BaseColor : SV_Target0;
-    float4 Normal : SV_Target1;
-    float4 Position : SV_Target2;
+    float2 Normal : SV_Target1;
+    uint2 Metadata : SV_Target2;
     float4 Material : SV_Target3;
+    float2 Motion : SV_Target4;
+    float2 History : SV_Target5;
+#if HS_SURFACE_SIDECAR_PLANES > 0
+    uint4 Sidecar0 : SV_Target6;
+#endif
+#if HS_SURFACE_SIDECAR_PLANES > 1
+    uint4 Sidecar1 : SV_Target7;
+#endif
 };
 
 float4 SampleArcherDiffuse(uint material, float2 uv)
@@ -396,69 +804,313 @@ float3 SampleArcherNormal(uint material, float2 uv)
     return ArcherNormal.SampleLevel(MaterialSampler, float3(uv, slice), 0).xyz;
 }
 
-float3 SampleMonsterPbr(float2 uv)
+float3 SampleMonsterPbr(float2 uv, out float3 ram)
 {
     const float3 basecolor = MonsterBasecolor.SampleLevel(MaterialSampler, uv, 0).rgb;
-    const float3 emissive = MonsterEmissive.SampleLevel(MaterialSampler, uv, 0).rgb;
-    const float3 ram = MonsterRam.SampleLevel(MaterialSampler, uv, 0).rgb;
+    ram = MonsterRam.SampleLevel(MaterialSampler, uv, 0).rgb;
     const float roughness = ram.r;
     const float metallic = ram.b;
     const float3 lit_base = basecolor * lerp(0.75, 1.0, roughness);
     const float3 metal_tint = lerp(float3(1.0, 1.0, 1.0), basecolor, metallic);
-    return lit_base * metal_tint + emissive * 80.0;
+    return lit_base * metal_tint;
 }
 
 // Both passes share the facial alpha mask: replaced eyes must not leave opaque
 // depth behind the jelly, and the new marks must stay solid in the depth pass.
-float4 SampleFamilyColor(SceneOutput input)
+float4 SampleFamilyColor(SceneOutput input, HsSceneGradients gradients)
 {
-    float4 color = FamilyDiffuse.Sample(MaterialSampler, float3(input.Uv, input.Mesh - 10));
+    const float3 family_uv = float3(input.Uv, input.Mesh - 10);
+    float4 color = FamilyDiffuse.SampleGrad(MaterialSampler, family_uv,
+                                            gradients.uvDx, gradients.uvDy);
     const bool dead = input.AnimationClip == 4;
     const float strain = input.AnimationClip == 2
         ? smoothstep(0.0, 0.35, input.AnimationProgress) : 0.0;
     if (!dead && strain <= 0.0) return color;
     const float2 authored_uv = float2((input.Uv.x - 0.015) / 0.72, 1.0 - input.Uv.y);
+    const float2 authored_dx = float2(gradients.uvDx.x / 0.72, -gradients.uvDx.y);
+    const float2 authored_dy = float2(gradients.uvDy.x / 0.72, -gradients.uvDy.y);
     const bool left_eye = authored_uv.x < 0.5;
     const float2 eye_center = float2(left_eye ? 0.434 : 0.566, 0.573);
     const float2 eye = authored_uv - eye_center;
-    const float ellipse = length(eye / float2(0.0365, 0.081));
-    const float region_aa = max(fwidth(ellipse), 0.001);
+    const float2 eye_dx = authored_dx;
+    const float2 eye_dy = authored_dy;
+    const float2 ellipse_eye = eye / float2(0.0365, 0.081);
+    const float2 ellipse_dx_eye = eye_dx / float2(0.0365, 0.081);
+    const float2 ellipse_dy_eye = eye_dy / float2(0.0365, 0.081);
+    const float ellipse = length(ellipse_eye);
+    float2 ellipse_gradient = 0.0;
+    if (ellipse > 0.0)
+        ellipse_gradient = ellipse_eye / ellipse;
+    const float ellipse_dx = dot(ellipse_gradient, ellipse_dx_eye);
+    const float ellipse_dy = dot(ellipse_gradient, ellipse_dy_eye);
+    const float region_aa = max(abs(ellipse_dx) + abs(ellipse_dy), 0.001);
     const float region = 1.0 - smoothstep(1.0 - region_aa, 1.0 + region_aa, ellipse);
     if (region <= 0.0) return color;
     const float2 body_uv = float2((eye_center.x + (left_eye ? -0.09 : 0.09)) * 0.72 + 0.015,
                                 1.0 - eye_center.y);
-    float4 body = FamilyDiffuse.Sample(MaterialSampler, float3(body_uv, input.Mesh - 10));
+    float4 body = FamilyDiffuse.SampleGrad(MaterialSampler,
+                                           float3(body_uv, input.Mesh - 10),
+                                           float2(0.0, 0.0), float2(0.0, 0.0));
     body.a = 0.68;
     const float2 q = eye / float2(0.032, 0.073);
+    const float2 q_dx = eye_dx / float2(0.032, 0.073);
+    const float2 q_dy = eye_dy / float2(0.032, 0.073);
     // Normalized diagonal strokes stay within the original eye's UV island.
-    const float stroke_distance = dead ? min(abs(q.y - q.x), abs(q.y + q.x))
-        : abs(q.y - (left_eye ? -0.48 : 0.48) * q.x);
-    const float stroke_aa = max(fwidth(stroke_distance), 0.01);
+    float stroke_distance;
+    float stroke_dx;
+    float stroke_dy;
+    if (dead)
+    {
+        const float diagonal_a = q.y - q.x;
+        const float diagonal_b = q.y + q.x;
+        const float2 diagonal_a_dxdy = float2(q_dx.y - q_dx.x, q_dy.y - q_dy.x);
+        const float2 diagonal_b_dxdy = float2(q_dx.y + q_dx.x, q_dy.y + q_dy.x);
+        if (abs(diagonal_a) <= abs(diagonal_b))
+        {
+            stroke_distance = abs(diagonal_a);
+            stroke_dx = diagonal_a == 0.0 ? 0.0 : sign(diagonal_a) * diagonal_a_dxdy.x;
+            stroke_dy = diagonal_a == 0.0 ? 0.0 : sign(diagonal_a) * diagonal_a_dxdy.y;
+        }
+        else
+        {
+            stroke_distance = abs(diagonal_b);
+            stroke_dx = diagonal_b == 0.0 ? 0.0 : sign(diagonal_b) * diagonal_b_dxdy.x;
+            stroke_dy = diagonal_b == 0.0 ? 0.0 : sign(diagonal_b) * diagonal_b_dxdy.y;
+        }
+    }
+    else
+    {
+        const float slope = left_eye ? -0.48 : 0.48;
+        const float diagonal = q.y - slope * q.x;
+        stroke_distance = abs(diagonal);
+        stroke_dx = diagonal == 0.0 ? 0.0 : sign(diagonal) * (q_dx.y - slope * q_dx.x);
+        stroke_dy = diagonal == 0.0 ? 0.0 : sign(diagonal) * (q_dy.y - slope * q_dy.x);
+    }
+    const float stroke_aa = max(abs(stroke_dx) + abs(stroke_dy), 0.01);
     const float stroke = (1.0 - smoothstep(0.15 - stroke_aa, 0.15 + stroke_aa, stroke_distance)) *
         (1.0 - smoothstep(0.70, 0.90, max(abs(q.x), abs(q.y))));
     const float4 expression = lerp(body, float4(0.009, 0.006, 0.012, 1.0), stroke);
     return lerp(color, expression, region * (dead ? 1.0 : strain));
 }
 
-GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
+float4 SampleFamilyColor(SceneOutput input)
 {
-    EnvironmentLodClip(input);
+    return SampleFamilyColor(input, RasterSceneGradients(input));
+}
+
+#ifdef HS_GENERATED_HERO_MATERIAL
+HsMaterialContext HsHeroMaterialContext(SceneOutput input, bool front,
+    HsSceneGradients gradients, uint ordinal)
+{
+    HsMaterialContext ctx = (HsMaterialContext)0;
+    ctx.uv = input.Uv;
+    ctx.d_uv_dx = gradients.uvDx;
+    ctx.d_uv_dy = gradients.uvDy;
+    ctx.actual_world_position = input.WorldPosition;
+    ctx.d_actual_world_dx = gradients.worldDx;
+    ctx.d_actual_world_dy = gradients.worldDy;
+    ctx.stable_world_position = input.WorldPosition;
+    ctx.d_stable_world_dx = gradients.worldDx;
+    ctx.d_stable_world_dy = gradients.worldDy;
+    ctx.mesh = input.Mesh;
+    ctx.seed = input.EnvironmentSeed;
+    ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
+    ctx.view_direction = normalize(CameraTime.xyz - input.WorldPosition);
+    ctx.parameter_base = HeroMaterialParameterBases[ordinal / 4u][ordinal % 4u];
+    ctx.sampled_ao = 1.0;
+    ctx.sampled_alpha = 1.0;
+    ctx.sampled_roughness = 0.3;
+    float3 normal = normalize(input.WorldNormal);
+    float3 tangent = input.WorldTangent.xyz - normal * dot(normal, input.WorldTangent.xyz);
+    const float tangent_length_squared = dot(tangent, tangent);
+    tangent = tangent_length_squared > 0.0 ? tangent * rsqrt(tangent_length_squared) : HsBsdfTangent(normal);
+    const float3 bitangent = cross(normal, tangent) * input.WorldTangent.w;
+    ctx.normal = normal;
+    ctx.tangent = float4(tangent, input.WorldTangent.w);
+    if (input.Mesh == 0u || (input.Mesh >= 10u && input.Mesh <= 12u))
+    {
+        const bool family = input.Mesh >= 10u;
+        const uint slice = family ? input.Mesh - 10u : input.Material;
+        float4 color;
+        float4 normal_map;
+        if (family)
+        {
+            color = SampleFamilyColor(input, gradients);
+            normal_map = FamilyNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
+            if (input.Mesh == 12u)
+            {
+                const float3 charge_color = input.Charge < 0.5
+                    ? lerp(float3(1.0, 0.26, 0.025), float3(1.0, 0.065, 0.012), input.Charge * 2.0)
+                    : lerp(float3(1.0, 0.065, 0.012), float3(0.95, 0.008, 0.018), input.Charge * 2.0 - 1.0);
+                color.rgb *= charge_color / float3(1.0, 0.26, 0.025);
+            }
+        }
+        else
+        {
+            color = ArcherDiffuse.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy);
+            normal_map = float4(ArcherNormal.SampleGrad(MaterialSampler, float3(input.Uv, slice), gradients.uvDx, gradients.uvDy).xyz, 0.3);
+        }
+        ctx.sampled_base_color = color.rgb;
+        ctx.sampled_alpha = color.a;
+        ctx.sampled_roughness = normal_map.a;
+        float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
+        // Existing family UV.v conversion requires the Blender green-channel flip.
+        if (family) tangent_normal.y = -tangent_normal.y;
+        normal = normalize(tangent * tangent_normal.x + bitangent * tangent_normal.y + normal * tangent_normal.z);
+    }
+    else if (input.Mesh >= 13u && input.Mesh <= 15u)
+    {
+        ctx.sampled_base_color = MonsterBasecolor.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+        const float3 ram = MonsterRam.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+        ctx.sampled_roughness = ram.r;
+        ctx.sampled_metallic = ram.b;
+        ctx.sampled_ao = ram.g;
+        ctx.sampled_emission = MonsterEmissive.SampleGrad(MaterialSampler, input.Uv, gradients.uvDx, gradients.uvDy).rgb;
+    }
+    ctx.shading_normal = front ? normal : -normal;
+    return ctx;
+}
+
+bool HsHeroSceneCovered(SceneOutput input, bool front, HsSceneGradients gradients)
+{
+    const uint ordinal = HsHeroOrdinal(input.MaterialId);
+    if (!front || !HsHeroOpaqueOrdinalValid(ordinal) || HsHeroAssetIndex(input.Mesh) == HsHeroInvalidOrdinal)
+        return false;
+    return HsHeroEvaluateOpacity(HsHeroMaterialContext(input, front, gradients, ordinal), ordinal) >= HsMaterialOpacityCutoff;
+}
+
+HsSurfaceClosure HsHeroClosureToWorld(HsSurfaceClosure surface, HsMaterialContext ctx)
+{
+    if (!surface.normal_is_world)
+    {
+        const float3 n = ctx.shading_normal;
+        const float3 t = normalize(ctx.tangent.xyz - n * dot(n, ctx.tangent.xyz));
+        const float3 b = cross(n, t) * ctx.tangent.w;
+        surface.normal = t * surface.normal.x + b * surface.normal.y + n * surface.normal.z;
+        surface.tangent = t * surface.tangent.x + b * surface.tangent.y + n * surface.tangent.z;
+    }
+    surface.normal = normalize(surface.normal);
+    surface.normal_is_world = true;
+    return surface;
+}
+#endif
+
+bool HsEnvironmentLodCovered(SceneOutput input)
+{
+    if (input.Mesh < 16 || input.Mesh > 19 ||
+        (input.EnvironmentFlags & 0x10000) == 0u)
+        return true;
+    const uint2 cell = (uint2)input.Position.xy;
+    const uint hash = EnvHash(cell.x ^ EnvHash(cell.y));
+    const float sample_value = (hash & 0xffffff) / 16777216.0;
+    const bool below = sample_value < saturate(input.EnvironmentFade);
+    const bool complement = (input.EnvironmentFlags & 0x20000) != 0u;
+    return below != complement;
+}
+
+bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
+                    HsSceneGradients gradients, uint materialWord)
+{
+    if (!HsEnvironmentLodCovered(input) ||
+        (!front && input.Mesh != 17 && input.Mesh != 19) ||
+        input.Mesh == 6)
+        return false;
+
+    if (input.Mesh == 0 || (input.Mesh >= 10 && input.Mesh <= 12))
+    {
+        const bool family = input.Mesh >= 10;
+        const float4 base_color = family
+            ? SampleFamilyColor(input, gradients)
+            : SampleArcherDiffuse(input.Material, input.Uv);
+        if (base_color.a < (family ? 0.98 : 0.2))
+            return false;
+    }
+
+    if (input.Mesh == 9 || input.Mesh == 20 ||
+        (input.Mesh >= 16 && input.Mesh <= 19))
+    {
+        const HsMaterialContext material_context =
+            EnvironmentMaterialContext(input, front, gradients, materialWord);
+        if (!environment_opaque && (input.Mesh == 17 || input.Mesh == 19) &&
+            HsMaterialEvaluateOpacity(material_context) < HsMaterialOpacityCutoff)
+            return false;
+    }
+    return true;
+}
+
+// Integral of a unit-period line centered at each integer. Integrating over
+// the explicit pixel footprint keeps the diagnostic itself free of aliasing.
+float2 HsGridLineIntegral(float2 position, float half_width)
+{
+    const float2 phase = frac(position);
+    return floor(position) * (2.0 * half_width) +
+        min(phase, half_width) + max(phase - (1.0 - half_width), 0.0);
+}
+
+float HsGridCoverage(float2 position, float2 footprint, float half_width)
+{
+    footprint = max(footprint, 0.000001);
+    const float2 coverage = saturate((
+        HsGridLineIntegral(position + footprint * 0.5, half_width) -
+        HsGridLineIntegral(position - footprint * 0.5, half_width)) / footprint);
+    return 1.0 - (1.0 - coverage.x) * (1.0 - coverage.y);
+}
+
+GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
+                                     bool environment_opaque,
+                                     HsSceneGradients gradients,
+                                     uint materialWord)
+{
+    const HsMaterialContext material_context =
+        EnvironmentMaterialContext(input, front, gradients, materialWord);
     GBufferOutput output;
     output.BaseColor = input.Color;
-    output.Material = 0;
-    if (!front && input.Mesh != 17 && input.Mesh != 19) discard;
+    output.Material = float4(0.3, 0.0, 1.0, 0.0);
+    output.Metadata = uint2(input.MaterialId, input.SurfaceFlags);
+    output.Motion = 0.0;
+    output.History = 0.0;
+#if HS_SURFACE_SIDECAR_PLANES > 0
+    output.Sidecar0 = 0u;
+#endif
+#if HS_SURFACE_SIDECAR_PLANES > 1
+    output.Sidecar1 = 0u;
+#endif
+    const float4 current_clip = mul(float4(input.WorldPosition, 1.0), ViewProjection);
+    const float4 previous_clip = mul(float4(input.PreviousWorldPosition, 1.0),
+                                     PreviousViewProjection);
+    const float4 current_unjittered_clip = mul(float4(input.WorldPosition, 1.0),
+        CurrentUnjitteredViewProjection);
+    const float4 previous_unjittered_clip = mul(float4(input.PreviousWorldPosition, 1.0),
+        PreviousUnjitteredViewProjection);
+    const bool history_valid = input.HistoryConfidence > 0.0 &&
+        SurfaceViewOrigin.w > 0.5 &&
+        current_clip.w > 0.0 && previous_clip.w > 0.0 &&
+        current_unjittered_clip.w > 0.0 && previous_unjittered_clip.w > 0.0 &&
+        all(isfinite(current_clip)) && all(isfinite(previous_clip)) &&
+        all(isfinite(current_unjittered_clip)) && all(isfinite(previous_unjittered_clip));
+    if (history_valid)
+    {
+        const float2 motion = HsSurfaceClipUv(previous_unjittered_clip) -
+            HsSurfaceClipUv(current_unjittered_clip);
+        const float previous_depth = previous_clip.z / previous_clip.w;
+        if (all(isfinite(motion)) && isfinite(previous_depth))
+        {
+            output.Motion = motion;
+            output.History = float2(previous_depth, input.HistoryConfidence);
+        }
+    }
     float3 world_normal = normalize(input.WorldNormal);
     float roughness = 0.3;
-    if (input.Mesh == 6) discard; // gel projectiles use the transparent pass
     if (input.Mesh == 0 || (input.Mesh >= 10 && input.Mesh <= 12))
     {
         const bool family = input.Mesh >= 10;
         const float3 uv = float3(input.Uv, input.Mesh - 10);
-        const float4 base_color = family ? SampleFamilyColor(input)
+        const float4 base_color = family ? SampleFamilyColor(input, gradients)
             : SampleArcherDiffuse(input.Material, input.Uv);
-        clip(base_color.a - (family ? 0.98 : 0.2));
         output.BaseColor = float4(base_color.rgb, 1.0);
-        const float4 normal_map = family ? FamilyNormal.Sample(MaterialSampler, uv)
+        const float4 normal_map = family
+            ? FamilyNormal.SampleGrad(MaterialSampler, uv,
+                                      gradients.uvDx, gradients.uvDy)
             : float4(SampleArcherNormal(input.Material, input.Uv), 0.3);
         roughness = normal_map.a;
         float3 tangent_normal = normal_map.xyz * 2.0 - 1.0;
@@ -470,43 +1122,161 @@ GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
         world_normal = normalize(tangent * tangent_normal.x +
             bitangent * tangent_normal.y + world_normal * tangent_normal.z);
     }
+    output.Material.r = roughness;
     if (input.Mesh >= 13 && input.Mesh <= 15)
-        output.BaseColor = float4(SampleMonsterPbr(input.Uv), 1.0);
-    if (input.Mesh == 9 || input.Mesh == 20 || (input.Mesh >= 16 && input.Mesh <= 19))
+    {
+        float3 ram;
+        output.BaseColor = float4(SampleMonsterPbr(input.Uv, ram), 1.0);
+        output.Material = float4(ram.r, ram.b, ram.g, 0.0);
+    }
+    if ((LodClock.w & 1u) != 0 && (input.Mesh == 9 || input.Mesh == 20))
+    {
+        const float2 position = input.EnvironmentStableWorld.xz;
+        const float2 footprint = abs(gradients.stableDx.xz) + abs(gradients.stableDy.xz);
+        const float minor = HsGridCoverage(position, footprint, 0.025);
+        const float major = HsGridCoverage(position / 5.0, footprint / 5.0, 0.012);
+        output.BaseColor = float4(lerp(lerp(float3(0.045, 0.055, 0.065),
+            float3(0.65, 0.65, 0.65), minor), float3(0.95, 0.75, 0.30), major), 1.0);
+        world_normal = float3(0.0, 1.0, 0.0);
+        output.Material = float4(1.0, 0.0, 1.0, 0.0);
+    }
+    else if (input.Mesh == 9 || input.Mesh == 20 || (input.Mesh >= 16 && input.Mesh <= 19))
     {
         EnvMaterial m = (EnvMaterial)0;
-        float flag = 1;
-        if (input.Mesh == 9 || input.Mesh == 20)
-            m = EnvTerrain(input.WorldPosition, input.Mesh, input.EnvironmentSeed);
-        else if (input.Mesh == 16 || input.Mesh == 18)
+        HsSurfaceClosure surface = HsMaterialEvaluateSurface(material_context);
         {
-            m = EnvOpaque(input.Uv, input.Material, input.Mesh == 18, length(CameraTime.xyz-input.WorldPosition));
+            m.color = surface.base_color;
+            m.roughness = surface.roughness;
+            m.ao = surface.ao;
+            if (surface.normal_is_world)
+                m.normal = normalize(surface.normal);
+            else
             {
-                float3 t = normalize(input.WorldTangent.xyz-world_normal*dot(world_normal,input.WorldTangent.xyz));
-                float3 b = normalize(cross(world_normal,t))*input.WorldTangent.w;
-                m.normal = normalize(t*m.normal.x+b*m.normal.y+world_normal*m.normal.z);
+                const float3 n = material_context.shading_normal;
+                const float3 t = normalize(material_context.tangent.xyz -
+                    n * dot(n, material_context.tangent.xyz));
+                const float3 b = normalize(cross(n, t)) * material_context.tangent.w;
+                m.normal = normalize(t * surface.normal.x + b * surface.normal.y + n * surface.normal.z);
+                surface.tangent = t * surface.tangent.x + b * surface.tangent.y + n * surface.tangent.z;
             }
         }
-        else
-        {
-            float4 color = FoliageColor(input.Mesh,input.Material,input.Uv);
-            clip(color.a-0.5);
-            float3 uv = FoliageUv(input.Mesh,input.Material,input.Uv);
-            float3 n = EnvDecode(input.Mesh==19 ? GrassNormal.Sample(FoliageClamp,uv).rg : LeafNormal.Sample(FoliageClamp,uv).rg);
-            if (!front) world_normal = -world_normal;
-            float3 t = normalize(input.WorldTangent.xyz-world_normal*dot(world_normal,input.WorldTangent.xyz));
-            float3 b = normalize(cross(world_normal,t))*input.WorldTangent.w;
-            m.color=color.rgb;m.normal=normalize(t*n.x+b*n.y+world_normal*n.z);m.ao=1;
-            m.roughness=input.Mesh==19 ? GrassRoughness.Sample(FoliageClamp,uv) : LeafRoughness.Sample(FoliageClamp,uv);
-            flag=input.Mesh==19 ? 0.6 : 0.75;
-        }
         output.BaseColor=float4(m.color,1);world_normal=m.normal;
-        output.Material=float4(m.roughness,m.ao,0,flag);
+        output.Material=float4(m.roughness,saturate(surface.metallic),m.ao,0.0);
+#if HS_SURFACE_SIDECAR_PLANES > 0
+        const uint ordinal = input.MaterialId - 0x10000000u;
+        const uint varying_mask = ordinal < 15u
+            ? MaterialVaryingMasks[ordinal / 4u][ordinal % 4u] : 0u;
+        if (varying_mask != 0u)
+        {
+            surface.normal = world_normal;
+            surface.normal_is_world = true;
+            if ((varying_mask & 1u) != 0u)
+            {
+                const float tangent_length_squared = dot(surface.tangent, surface.tangent);
+                // The zero authored direction has the BSDF's default tangent.
+                surface.tangent = tangent_length_squared > 0.0
+                    ? surface.tangent * rsqrt(tangent_length_squared)
+                    : HsBsdfTangent(world_normal);
+            }
+            uint4 plane0, plane1;
+            HsPackMaterialSidecars(surface, varying_mask,
+                MaterialSidecarOffsets[0], MaterialSidecarOffsets[1], plane0, plane1);
+            output.Sidecar0 = plane0;
+#if HS_SURFACE_SIDECAR_PLANES > 1
+            output.Sidecar1 = plane1;
+#endif
+        }
+#endif
     }
-    output.Normal = float4(world_normal * 0.5 + 0.5,
-        input.Mesh >= 10 && input.Mesh <= 12 ? 2.0 + roughness : 1.0);
-    output.Position = float4(input.WorldPosition, input.Mesh == 0 ? 1.0 : 0.0);
+    output.Normal = HsEncodeSurfaceNormal(world_normal);
     return output;
+}
+
+#ifdef HS_GENERATED_HERO_MATERIAL
+GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ctx,
+    uint ordinal)
+{
+    HsSurfaceClosure surface = HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx, ordinal), ctx);
+    const float4 entity_surface = HsEntitySurface(input.Mesh, input.InstanceKey, input.WorldPosition);
+    surface.emission += entity_surface.rgb;
+    const float3 normal = surface.normal;
+    GBufferOutput output = (GBufferOutput)0;
+    output.BaseColor = float4(surface.base_color, 1.0);
+    output.Normal = HsEncodeSurfaceNormal(normal);
+    output.Metadata = uint2(input.MaterialId, input.SurfaceFlags);
+    output.Material = float4(surface.roughness, saturate(surface.metallic), surface.ao, 0.0);
+    const float4 current_clip = mul(float4(input.WorldPosition, 1.0), ViewProjection);
+    const float4 previous_clip = mul(float4(input.PreviousWorldPosition, 1.0), PreviousViewProjection);
+    const float4 current_unjittered = mul(float4(input.WorldPosition, 1.0), CurrentUnjitteredViewProjection);
+    const float4 previous_unjittered = mul(float4(input.PreviousWorldPosition, 1.0), PreviousUnjitteredViewProjection);
+    const bool history_valid = input.HistoryConfidence > 0.0 && SurfaceViewOrigin.w > 0.5 &&
+        current_clip.w > 0.0 && previous_clip.w > 0.0 && current_unjittered.w > 0.0 && previous_unjittered.w > 0.0 &&
+        all(isfinite(current_clip)) && all(isfinite(previous_clip)) &&
+        all(isfinite(current_unjittered)) && all(isfinite(previous_unjittered));
+    if (history_valid)
+    {
+        const float2 motion = HsSurfaceClipUv(previous_unjittered) - HsSurfaceClipUv(current_unjittered);
+        const float previous_depth = previous_clip.z / previous_clip.w;
+        if (all(isfinite(motion)) && isfinite(previous_depth))
+        {
+            output.Motion = motion;
+            output.History = float2(previous_depth, input.HistoryConfidence * (1.0 - entity_surface.a));
+        }
+    }
+#if HS_SURFACE_SIDECAR_PLANES > 0
+    const uint varying_mask = HeroMaterialVaryingMasks[ordinal / 4u][ordinal % 4u];
+    if ((varying_mask & 1u) != 0u)
+    {
+        const float tangent_length_squared = dot(surface.tangent, surface.tangent);
+        surface.tangent = tangent_length_squared > 0.0
+            ? surface.tangent * rsqrt(tangent_length_squared) : HsBsdfTangent(normal);
+    }
+    uint4 plane0, plane1;
+    HsPackMaterialSidecars(surface, varying_mask, MaterialSidecarOffsets[0], MaterialSidecarOffsets[1], plane0, plane1);
+    output.Sidecar0 = plane0;
+#if HS_SURFACE_SIDECAR_PLANES > 1
+    output.Sidecar1 = plane1;
+#endif
+#endif
+    return output;
+}
+
+GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, bool front,
+    HsSceneGradients gradients)
+{
+    const uint ordinal = HsHeroOrdinal(input.MaterialId);
+    return HsHeroEvaluateSceneSurface(input,
+        HsHeroMaterialContext(input, front, gradients, ordinal), ordinal);
+}
+
+GBufferOutput HeroScenePS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    const HsSceneGradients gradients = RasterSceneGradients(input);
+    const uint ordinal = HsHeroOrdinal(input.MaterialId);
+    if (!front || !HsHeroOpaqueOrdinalValid(ordinal) || HsHeroAssetIndex(input.Mesh) == HsHeroInvalidOrdinal) discard;
+    const HsMaterialContext ctx = HsHeroMaterialContext(input, front, gradients, ordinal);
+    if (HsHeroEvaluateOpacity(ctx, ordinal) < HsMaterialOpacityCutoff) discard;
+    return HsHeroEvaluateSceneSurface(input, ctx, ordinal);
+}
+
+void HeroShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    HsShadowRasterClip(input.Position.xy, PassValue);
+    const HsSceneGradients gradients = RasterSceneGradients(input);
+    if (!HsHeroSceneCovered(input, front, gradients)) discard;
+}
+#endif
+
+GBufferOutput ScenePSImpl(SceneOutput input, bool front, bool environment_opaque)
+{
+    // Derivatives must be captured before coverage can diverge this raster
+    // quad. Shared visibility paths pass their own explicit gradients.
+    const HsSceneGradients gradients = RasterSceneGradients(input);
+    if (!HsSceneCovered(input, front, environment_opaque, gradients,
+                        SceneDrawMaterial))
+        discard;
+    return HsEvaluateSceneSurface(input, front, environment_opaque, gradients,
+                                  SceneDrawMaterial);
 }
 
 struct FullScreenOutput
@@ -528,6 +1298,8 @@ FullScreenOutput FullScreenVS(uint vertex_id : SV_VertexID)
 
 float ShadowVisibility(float3 world)
 {
+    float cached_visibility;
+    if (HsVirtualShadowLookup(world, cached_visibility)) return cached_visibility;
     float visibility = 1.0;
     // Coarse coverage supplies the edge of each finer map, including the far fade.
     [unroll] for (int cascade = 2; cascade >= 0; --cascade)
@@ -542,17 +1314,15 @@ float ShadowVisibility(float3 world)
         const float2 lower = tile.zw + ShadowAtlasTexelSize.xy * 0.5;
         const float2 upper = tile.zw + tile.xy - ShadowAtlasTexelSize.xy * 0.5;
         float filtered = 0.0;
-        [unroll] for (int y = -1; y <= 1; ++y)
+        const uint samples = uint(ShadowAtlasTexelSize.w);
+        [loop] for (uint sample_index = 0; sample_index < samples; ++sample_index)
         {
-            [unroll] for (int x = -1; x <= 1; ++x)
-            {
                 const float2 sample_uv = clamp(
-                    atlas_uv + float2(x, y) * ShadowAtlasTexelSize.xy, lower, upper);
+                    atlas_uv + float2(HsShadowFilterOffsets[sample_index]) * ShadowAtlasTexelSize.xy, lower, upper);
                 filtered += ShadowMap.SampleCmpLevelZero(ShadowCompare, sample_uv, projected.z);
-            }
         }
         const float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-        visibility = lerp(visibility, filtered / 9.0, smoothstep(0.02, 0.12, edge));
+        visibility = lerp(visibility, filtered / float(samples), smoothstep(0.02, 0.12, edge));
     }
     return visibility;
 }
@@ -560,38 +1330,31 @@ float ShadowVisibility(float3 world)
 // Shared lighting for opaque family features and transparent jelly bodies.
 float3 VfxLocalLighting(float3 base, float3 normal, float3 world)
 {
-    float3 illumination = 0.0;
-    for (uint index = 0; index < VfxLightCount.x; ++index)
-    {
-        float3 delta = VfxLightPositionRadius[index].xyz - world;
-        float squared_distance = dot(delta, delta);
-        float radius = VfxLightPositionRadius[index].w;
-        float edge = saturate(1.0 - squared_distance / (radius * radius));
-        float diffuse = saturate(dot(normal, delta * rsqrt(max(squared_distance, 0.0001))));
-        illumination += VfxLightColorIntensity[index].rgb * VfxLightColorIntensity[index].w *
-            diffuse * edge * edge / (1.0 + squared_distance);
-    }
-    return base * illumination;
+    HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(base,normal,1.0,0.0,1.0,1.0);
+    surface.normal_is_world=true;
+    return HsLightListEvaluate(surface,world,CameraTime.xyz,1.0,HsLightLocalMask,true);
+}
+
+float3 VfxLocalLighting(HsSurfaceClosure surface, float3 world)
+{
+    return HsLightListEvaluate(surface,world,CameraTime.xyz,1.0,HsLightLocalMask,true);
 }
 
 float3 JellyLighting(float3 base, float3 normal, float3 world, float roughness, float charge)
 {
     const float3 view = normalize(CameraTime.xyz - world);
-    const float3 light = normalize(-LightDirectionIntensity.xyz);
-    const float3 halfway = normalize(view + light);
+    float3 light,primary_incident;
+    HsPrimaryDirectional(light,primary_incident);
     const float nv = saturate(dot(normal, view));
     const float nl = dot(normal, light);
     const float visibility = lerp(0.42, 1.0, ShadowVisibility(world));
-    const float wrapped = saturate((nl + 0.4) / 1.4);
     const float fresnel = 0.035 + 0.965 * pow(1.0 - nv, 5.0);
-    const float gloss = lerp(160.0, 18.0, saturate(roughness));
-    const float highlight = pow(saturate(dot(normal, halfway)), gloss);
     const float thickness = pow(nv, 1.5);
     const float internal = thickness * (0.05 + 0.15 * saturate(-nl) + charge * 0.45);
-    return base * (0.30 + (saturate(nl) * visibility + wrapped * 0.25) * LightColor.rgb + internal)
-        + LightColor.rgb * highlight * (0.35 + fresnel) * visibility
-        + lerp(base, float3(0.70, 0.85, 1.0), 0.30) * fresnel * 0.32
-        + VfxLocalLighting(base, normal, world);
+    HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(base,normal,roughness,0.0,1.0,1.0);
+    surface.normal_is_world=true;
+    return HsDeferredIndirectDiffuse(base*0.30)+base*internal+lerp(base,float3(0.70,0.85,1.0),0.30)*fresnel*0.32+
+        HsLightListEvaluate(surface,world,CameraTime.xyz,visibility,HsLightAllMask,true);
 }
 
 struct VfxDecalGpu
@@ -607,118 +1370,148 @@ StructuredBuffer<VfxDecalGpu> VfxDecals : register(t19, space3);
 Texture2DArray<float4> VfxFractureDecals : register(t20, space3);
 Texture2DArray<float> VfxOrganicDecals : register(t21, space3);
 
-float2 DecalCellRandom(float2 cell, uint seed)
+struct HsDeferredOutput
 {
-    float2 value = float2(dot(cell,float2(127.1,311.7)),dot(cell,float2(269.5,183.3)));
-    return frac(sin(value + float(seed%4093)) * 43758.5453);
+    float4 Radiance : SV_Target0;
+    float4 SubsurfaceDiffuse : SV_Target1;
+    float4 EnvironmentSpecular : SV_Target2;
+    float4 IndirectDiffuse : SV_Target3;
+};
+
+void HsDeferredLocalLightingComponents(HsSurfaceClosure closure, float3 world, float base_fresnel_override,bool world_query,
+    out float3 diffuse, out float3 specular)
+{
+    HsLightListEvaluateComponentsOptical(closure,world,CameraTime.xyz,1.0,
+        HsLightLocalMask,world_query,base_fresnel_override,diffuse,specular);
 }
-float DecalVoronoiBranch(float2 local, float cell_count, uint seed, float footprint)
+void HsDeferredLocalLightingComponents(HsSurfaceClosure closure,float3 world,float base_fresnel_override,
+    out float3 diffuse,out float3 specular)
 {
-    const float frequency = sqrt(max(cell_count,1)/3.14159265);
-    const float2 p = local*frequency;
-    const float2 cell = floor(p);
-    float first=1000,second=1000;
-    float2 nearest=0;
-    [unroll] for(int y=-1;y<=1;++y)
-    [unroll] for(int x=-1;x<=1;++x)
-    {
-        const float2 id=cell+float2(x,y);
-        const float2 delta=id+DecalCellRandom(id,seed)-p;
-        const float distance=dot(delta,delta);
-        if(distance<first){second=first;first=distance;nearest=id;}
-        else second=min(second,distance);
-    }
-    const float edge=sqrt(second)-sqrt(first);
-    const float aa=clamp(footprint*frequency,.002,.15);
-    const float selection=DecalCellRandom(nearest,seed+71).x;
-    const float density=lerp(.85,.22,saturate(length(local)));
-    return (1-smoothstep(.035-aa,.035+aa,edge))*step(selection,density);
+    HsDeferredLocalLightingComponents(closure,world,base_fresnel_override,false,diffuse,specular);
+}
+void HsDeferredLocalLightingComponents(HsSurfaceClosure closure,float3 world,
+    out float3 diffuse,out float3 specular)
+{
+    HsDeferredLocalLightingComponents(closure,world,-1.0,diffuse,specular);
 }
 
-float3 ApplyGroundDecals(float3 world, float2 world_dx, float2 world_dy, inout float3 base, inout float3 normal)
+HsDeferredOutput DeferredPS(FullScreenOutput input)
 {
-    float3 emissive=0;
-    // Derivatives come from the uniform deferred path, before material/projector branches.
-    const float ground_facing=smoothstep(.45,.8,normal.y);
-    if(ground_facing<=0) return emissive;
-    uint gradient_width,gradient_rows;
-    VfxGradientLut.GetDimensions(gradient_width,gradient_rows);
-    [loop] for(uint index=0;index<VfxDecalCount.x;++index)
+    HsDeferredOutput output=(HsDeferredOutput)0;
+    const HsSurfaceSample surface = HsLoadSurface(input.Uv);
+    const bool valid = HsSurfaceValid(surface);
+    float3 world = valid ? HsSurfaceWorldPosition(surface) : 0.0;
+    const float3 arena = float3(0.035, 0.055, 0.085);
+    output.Radiance=float4(arena,1.0);
+    if (!valid)
     {
-        const VfxDecalGpu decal=VfxDecals[index];
-        if(world.y<decal.Slab.x || world.y>decal.Slab.y) continue;
-        const float2 delta=(world.xz-decal.PositionRadius.xz)/decal.PositionRadius.w;
-        const float2 axis=decal.AxisAlphaAge.xy;
-        const float2 across=float2(-axis.y,axis.x);
-        const float2 local=float2(dot(delta,axis),dot(delta,across));
-        const float radial=length(local);
-        if(radial>=1) continue;
-        const float2 uv=local*.5+.5;
-        const float2 uv_dx=float2(dot(world_dx,axis),dot(world_dx,across))/(2*decal.PositionRadius.w);
-        const float2 uv_dy=float2(dot(world_dy,axis),dot(world_dy,across))/(2*decal.PositionRadius.w);
-        const float aa=max(length(uv_dx),length(uv_dy))*2;
-        const float footprint=1-smoothstep(max(0.0,1-max(.04,aa)),1.0,radial);
-        const float slab=smoothstep(decal.Slab.x,decal.Slab.x+.05,world.y)*(1-smoothstep(decal.Slab.y-.05,decal.Slab.y,world.y));
-        const float2 gradient_uv=float2((saturate(decal.AxisAlphaAge.w)*(gradient_width-1)+.5)/gradient_width,
-            (decal.Metadata.x+.5)/max(gradient_rows,1));
-        const float4 gradient=VfxGradientLut.SampleLevel(LinearClamp,gradient_uv,0);
-        const float3 tint=decal.ColorHdr.rgb*gradient.rgb;
-        const float alpha=saturate(decal.AxisAlphaAge.z*gradient.a*footprint*slab*ground_facing);
-        if(decal.Metadata.z==0)
+        if(ProbeOptions.w>0.0)
         {
-            const float3 sample_uv=float3(uv,decal.Metadata.y);
-            const float4 structure=VfxFractureDecals.SampleGrad(LinearClamp,sample_uv,uv_dx,uv_dy);
-            const float branch=DecalVoronoiBranch(local,decal.Fracture.y,decal.Metadata.w,aa);
-            // Authored R/G/A remain the structural soot/crack/edge masks. Procedural branches add sparse cell edges.
-            const float cracks=saturate(max(structure.g,branch*structure.a*.55));
-            const float soot=saturate(structure.r*structure.a);
-            const float coverage=alpha*max(soot,cracks);
-            base=lerp(base,base*lerp(float3(.3,.3,.3),saturate(tint)*.45,.25),coverage);
-            const float cooling=pow(1-saturate(decal.AxisAlphaAge.w),2);
-            emissive+=tint*decal.ColorHdr.w*decal.Fracture.x*cracks*alpha*cooling;
-            const float height_x=VfxFractureDecals.SampleGrad(LinearClamp,sample_uv+float3(1.0/512,0,0),uv_dx,uv_dy).b;
-            const float height_z=VfxFractureDecals.SampleGrad(LinearClamp,sample_uv+float3(0,1.0/512,0),uv_dx,uv_dy).b;
-            const float2 slope=clamp(float2(height_x-structure.b,height_z-structure.b)*(.003*512/(2*decal.PositionRadius.w)),-.15,.15)*coverage;
-            const float2 tangent=axis*slope.x+across*slope.y;
-            normal=normalize(normal-float3(tangent.x,0,tangent.y));
+            const float3 near_world=HsReconstructSurfaceRelative(input.Uv,1.0)+SurfaceViewOrigin.xyz;
+            output.Radiance=float4(EnvironmentSkyRadiance(normalize(near_world-CameraTime.xyz)),1.0);
         }
-        else
-        {
-            const float mask=VfxOrganicDecals.SampleGrad(LinearClamp,float3(uv,decal.Metadata.y),uv_dx,uv_dy);
-            const float coverage=alpha*mask;
-            // Organic residue changes the lit base; its authored low HDR remains a weak emissive contribution.
-            base=lerp(base,base*lerp(float3(.12,.12,.12),saturate(tint),.55),coverage);
-            emissive+=tint*decal.ColorHdr.w*coverage;
-        }
+        return output;
     }
-    return emissive;
-}
-
-float4 DeferredPS(FullScreenOutput input) : SV_Target0
-{
-    float4 base = GBufferBase.SampleLevel(LinearClamp, input.Uv, 0);
-    float4 normal_material = GBufferNormal.SampleLevel(LinearClamp, input.Uv, 0);
-    float3 normal = normalize(normal_material.xyz * 2.0 - 1.0);
-    float3 world = GBufferPosition.SampleLevel(LinearClamp, input.Uv, 0).xyz;
-    float4 environment_material = GBufferMaterial.SampleLevel(LinearClamp,input.Uv,0);
-    const float2 decal_world_dx=ddx(world.xz),decal_world_dy=ddy(world.xz);
-    if (environment_material.a > 0.5)
+    float4 base = GBufferBase.Load(int3(surface.pixel, 0));
+    float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
+    const float4 material = GBufferMaterial.Load(int3(surface.pixel, 0));
+    const uint model = HsSurfaceModel(surface.metadata);
+    const uint hero_ordinal=HsHeroOrdinal(surface.metadata.x);
+    if (model == HsSurfaceModelEnvironment || HsHeroOpaqueOrdinalValid(hero_ordinal))
     {
-        const float3 decal_emissive=ApplyGroundDecals(world,decal_world_dx,decal_world_dy,base.rgb,normal);
-        return float4(EnvironmentLighting(base.rgb,normal,world,environment_material,ShadowVisibility(world)) + VfxLocalLighting(base.rgb,normal,world)+decal_emissive,1);
+#ifdef HS_GENERATED_DEFERRED_MATERIALS
+        HsSurfaceClosure closure=HsReflectionLoadClosure(uint2(surface.pixel));
+#else
+        HsSurfaceClosure closure = HsMaterialMakeSurfaceClosure(
+            base.rgb, normal, material.r, material.g, material.b, 1.0);
+        closure.normal_is_world = true;
+        closure=HsApplyDecalSurfaceEmission(closure,uint2(surface.pixel));
+#endif
+        if(closure.unlit)
+        {
+            output.Radiance=float4(closure.base_color+closure.emission,1.0);
+            return output;
+        }
+        closure.ao *= LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
+        const float contact = LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
+        float3 diffuse,specular,ambient_specular,ambient_diffuse,local_diffuse,local_specular;
+        EnvironmentLightingComponents(closure,world,ShadowVisibility(world)*contact,-1.0,
+            diffuse,specular,ambient_specular,ambient_diffuse);
+        HsDeferredLocalLightingComponents(closure,world,local_diffuse,local_specular);
+        diffuse+=local_diffuse;
+        specular+=local_specular;
+        output.Radiance=float4(diffuse+specular+closure.emission,1.0);
+        if(closure.sss_weight>0.0) output.SubsurfaceDiffuse=float4(diffuse,1.0);
+        output.EnvironmentSpecular=HsDeferredEnvironmentSpecular(ambient_specular);
+        output.IndirectDiffuse=float4(ambient_diffuse,1.0);
+        return output;
     }
-    if (normal_material.a >= 2.0)
-        return float4(JellyLighting(base.rgb, normal, world, normal_material.a - 2.0, 0.0), 1.0);
-    float3 light = normalize(-LightDirectionIntensity.xyz);
-    float diffuse = dot(normal, light);
-    float stepped_diffuse = diffuse > 0.55 ? 1.0 : (diffuse > 0.05 ? 0.62 : 0.28);
+    if (model == HsSurfaceModelJelly)
+    {
+        output.Radiance=float4(JellyLighting(base.rgb,normal,world,material.r,0.0),1.0);
+        return output;
+    }
     float rim = pow(1.0 - saturate(normal.y), 3.0);
     float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world)) : 1.0;
-    float3 color = base.rgb *
-                       (0.35 + stepped_diffuse * visibility * LightColor.rgb) +
-                   base.rgb * rim * 0.22 + VfxLocalLighting(base.rgb, normal, world);
-    float3 arena = float3(0.035, 0.055, 0.085);
-    return float4(lerp(arena, color, base.a), 1.0);
+    visibility *= LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
+    const float ambient = LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
+    HsSurfaceClosure closure=HsMaterialMakeSurfaceClosure(base.rgb,normal,1.0,0.0,ambient,1.0);
+    closure.normal_is_world=true;
+    float3 color=HsDeferredIndirectDiffuse(base.rgb*(0.35*ambient))+base.rgb*rim*0.22+
+        HsLightListEvaluate(closure,world,CameraTime.xyz,visibility,HsLightAllMask,false);
+    output.Radiance=float4(lerp(arena,color,base.a),1.0);
+    output.IndirectDiffuse=float4(HsDeferredIndirectDiffuse(base.rgb*(0.35*ambient))*base.a,1.0);
+    return output;
+}
+
+// Native software GI receives an independent scene-linear light cache seed.
+// Evaluate the same direct lighting and emission as DeferredPS, without its
+// probe diffuse, environment specular, exposure, transparent or post terms.
+float4 BrixelizerCacheDirectPS(FullScreenOutput input) : SV_Target0
+{
+    const HsSurfaceSample surface = HsLoadSurface(input.Uv);
+    const bool valid = HsSurfaceValid(surface);
+    float3 world = valid ? HsSurfaceWorldPosition(surface) : 0.0;
+    if (!valid) return 0.0;
+    const float4 base = GBufferBase.Load(int3(surface.pixel, 0));
+    const uint model = HsSurfaceModel(surface.metadata);
+    const uint hero_ordinal = HsHeroOrdinal(surface.metadata.x);
+    if (model == HsSurfaceModelJelly) return 0.0;
+    if (model != HsSurfaceModelEnvironment && !HsHeroOpaqueOrdinalValid(hero_ordinal))
+    {
+        const float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
+        const float ambient = LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
+        HsSurfaceClosure cel = HsMaterialMakeSurfaceClosure(base.rgb, normal, 1.0, 0.0, ambient, 1.0);
+        cel.normal_is_world = true;
+        float visibility = base.a > 0.0 ? lerp(0.42, 1.0, ShadowVisibility(world)) : 1.0;
+        visibility *= LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
+        float3 diffuse, specular;
+        HsLightListEvaluateComponentsOptical(cel, world, CameraTime.xyz, visibility,
+            HsLightAllMask, false, -1.0, diffuse, specular);
+        return float4(diffuse * base.a, 1.0);
+    }
+#ifdef HS_GENERATED_DEFERRED_MATERIALS
+    HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(surface.pixel));
+#else
+    const float3 normal = HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0)));
+    const float4 material = GBufferMaterial.Load(int3(surface.pixel, 0));
+    HsSurfaceClosure closure = HsMaterialMakeSurfaceClosure(base.rgb, normal,
+        material.r, material.g, material.b, 1.0);
+    closure.normal_is_world = true;
+    closure=HsApplyDecalSurfaceEmission(closure,uint2(surface.pixel));
+#endif
+    if (closure.unlit) return float4(closure.base_color + closure.emission, 1.0);
+    closure.ao *= LightingOptions.x > 0.0 ? SceneAmbientOcclusion.Load(int3(surface.pixel, 0)) : 1.0;
+    const float contact = LightingOptions.y > 0.0 ? SceneContactShadow.Load(int3(surface.pixel, 0)) : 1.0;
+    const float visibility = ShadowVisibility(world) * contact;
+    float3 diffuse, specular;
+    // The directional mask plus local mask is exactly the deferred direct set.
+    HsLightListEvaluateComponentsOptical(closure, world, CameraTime.xyz, visibility,
+        HsLightDirectionalMask, false, -1.0, diffuse, specular);
+    float3 local_diffuse, local_specular;
+    HsDeferredLocalLightingComponents(closure, world, local_diffuse, local_specular);
+    const float coverage = model == HsSurfaceModelEnvironment || HsHeroOpaqueOrdinalValid(hero_ordinal) ? 1.0 : base.a;
+    return float4((diffuse + local_diffuse + closure.emission) * coverage, 1.0);
 }
 
 uint ParticleHash(uint value)
@@ -796,6 +1589,7 @@ void CatchUpBallistic(inout ParticleData particle, uint now)
     particle.PositionLife.w = particle.InitialVelocityMaxLife.w - max(0.0, age);
 }
 
+[shader("compute")]
 [numthreads(256, 1, 1)]
 void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
 {
@@ -1275,11 +2069,23 @@ ParticleOutput OwnerMeshVS(uint vertex_id : SV_VertexID, uint instance_id : SV_I
     const float3 axis_x = normalize(cross(reference, forward));
     const float3 axis_y = normalize(cross(forward, axis_x));
     const float3 scale = max(command.ShapeExtentSpeedMin.xyz, float3(0.00001, 0.00001, 0.00001));
+    float local_z = local.z, longitudinal_derivative = 1.0;
+    const float head_ratio = command.RotationRange.y;
+    if (head_ratio > 0.0)
+    {
+        const float minimum_z = command.EndColor.x, hinge_z = command.EndColor.y, maximum_z = command.EndColor.z;
+        const float target_hinge = lerp(minimum_z, maximum_z, 1.0 - head_ratio);
+        const bool tail = local.z < hinge_z;
+        longitudinal_derivative = tail ? (target_hinge - minimum_z) / (hinge_z - minimum_z)
+                                      : (maximum_z - target_hinge) / (maximum_z - hinge_z);
+        local_z = tail ? minimum_z + (local.z - minimum_z) * longitudinal_derivative
+                       : target_hinge + (local.z - hinge_z) * longitudinal_derivative;
+    }
+    const float3 normal = normalize(axis_x * (local_normal.x / scale.x) + axis_y * (local_normal.y / scale.y) +
+                                    forward * (local_normal.z / (scale.z * longitudinal_derivative)));
     const float3 world = command.PositionLifetimeMin.xyz +
         axis_x * (local.x * scale.x) + axis_y * (local.y * scale.y) +
-        forward * ((local.z - 0.5) * scale.z);
-    const float3 normal = normalize(axis_x * (local_normal.x / scale.x) + axis_y * (local_normal.y / scale.y) +
-                                    forward * (local_normal.z / scale.z));
+        forward * ((local_z - 0.5) * scale.z) + normal * command.RotationRange.z;
 
     ParticleOutput output;
     output.Position = mul(float4(world, 1.0), ViewProjection);
@@ -1392,7 +2198,9 @@ OitOutput SlimePS(SceneOutput input)
         }
     }
     clip(base.a - 0.001);
-    const float3 color = JellyLighting(base.rgb, normal, input.WorldPosition, roughness, input.Charge);
+    const float3 color = HsFogSurface(
+        JellyLighting(base.rgb, normal, input.WorldPosition, roughness, input.Charge),
+        input.WorldPosition, input.Position.xy);
     // Keep authored opaque features in the depth pass; the jelly body transmits the floor.
     const float alpha = base.a * 0.52;
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
@@ -1403,6 +2211,293 @@ OitOutput SlimePS(SceneOutput input)
     output.Revealage = alpha.xxxx;
     return output;
 }
+
+#ifdef HS_GENERATED_HERO_MATERIAL
+cbuffer HeroTransparencyConstants : register(b0, space14)
+{
+    uint4 HeroLayerInfo; // current layer, layer budget, phase, reserved.
+};
+Texture2D<float> HeroFrontDepth[4] : register(t0, space14);
+Texture2D<uint2> HeroFrontIdentity[4] : register(t4, space14);
+Texture2D<float> HeroExitDepth[4] : register(t8, space14);
+Texture2D<float4> HeroLayerBackground : register(t12, space14);
+Texture2D<uint> HeroOverflow : register(t13, space14);
+RWTexture2D<uint> HeroOverflowCounter : register(u0, space14);
+
+float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path, float2 pixel)
+{
+    float3 background=HsFogSky(EnvironmentSkyRadiance(direction), pixel * ScreenSize.zw);
+    const float3 exit_world=world+direction*optical_path;
+    const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
+    if(exit_clip.w<=0.0) return background;
+    const float2 uv=HsSurfaceClipUv(exit_clip);
+    if(any(uv<0.0) || any(uv>=1.0)) return background;
+    const uint2 sample_pixel=uint2(uv*ScreenSize.xy);
+    float scene_depth=SurfaceDepth.Load(int3(sample_pixel,0));
+    const uint next=HeroLayerInfo.x+1u;
+    if(next<HeroLayerInfo.y)
+    {
+        const float next_depth=HeroFrontDepth[next].Load(int3(sample_pixel,0));
+        if(next_depth>scene_depth) scene_depth=next_depth;
+    }
+    // The far-to-near source has coverage from the next front or the opaque
+    // surface. A displaced lookup may never pull a foreground silhouette.
+    if(scene_depth>exit_clip.z/exit_clip.w) return background;
+    if(scene_depth>0.0)
+    {
+        const float3 scene_world=HsReconstructSurfaceRelative(
+            HsSurfaceRasterUv(int2(sample_pixel)),scene_depth)+SurfaceViewOrigin.xyz;
+        if(dot(scene_world-exit_world,direction)<0.0) return background;
+    }
+    return HeroLayerBackground.Load(int3(sample_pixel,0)).rgb;
+}
+
+// Authored-thickness weighted OIT source path. This has one opaque scene guide;
+// measured front/back thickness and bounded multi-interface depth peeling are
+// separate transport paths, not implied by this screen-space lookup.
+float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
+    float2 pixel, bool front, float measured_path, bool layer_transport)
+{
+    const float3 view=normalize(CameraTime.xyz-world);
+    float3 normal=normalize(surface.normal);
+    if(dot(normal,view)<0.0) normal=-normal;
+    surface.normal=normal;
+    const float solid=saturate(surface.solid_transmission_weight);
+    const float eta=front ? 1.0/surface.ior : surface.ior;
+    const float3 transmitted=refract(-view,normal,eta);
+    const bool total_internal=solid>0.0 && dot(transmitted,transmitted)==0.0;
+    const float base_fresnel_override=total_internal ? 1.0 : -1.0;
+    float3 diffuse,specular,ambient_specular,local_diffuse,local_specular;
+    EnvironmentLightingComponents(surface,world,ShadowVisibility(world),base_fresnel_override,
+        diffuse,specular,ambient_specular);
+    HsDeferredLocalLightingComponents(surface,world,base_fresnel_override,true,local_diffuse,local_specular);
+    diffuse+=local_diffuse;
+    specular+=local_specular;
+    if(solid==0.0) return HsFogSurface(diffuse+specular+surface.emission,world,pixel);
+    const float nv=saturate(dot(normal,view));
+    const float fresnel=total_internal ? 1.0 :
+        HsBsdfSchlickFresnel(HsBsdfSolidDielectricF0(surface).xxx,nv).x;
+    if(total_internal)
+    {
+        // The actual solid interface has unit Fresnel under TIR. The shared
+        // evaluator already applied it to the authored solid fraction, with
+        // original GGX/anisotropy/layers/proposal/PDF and one ambient sample loop.
+        return HsFogSurface(diffuse*(1.0-solid)+specular+surface.emission,world,pixel);
+    }
+    const float optical_path=measured_path>=0.0 ? measured_path :
+        surface.thickness_m/max(abs(dot(transmitted,normal)),1e-4);
+    float3 background=EnvironmentSkyRadiance(transmitted);
+    float2 background_uv=pixel*ScreenSize.zw;
+    float background_view_depth=VmDepthRange.x;
+    const bool fog_enabled=HsFogEnabled();
+    if(layer_transport) background=HsFogSky(background,background_uv);
+    const float3 exit_world=world+transmitted*optical_path;
+    const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
+    if(layer_transport && MaterialQualityOptions.w>0.0)
+        background=HsHeroLayerBackground(world,transmitted,optical_path,pixel);
+    else if(!layer_transport && MaterialQualityOptions.w>0.0 && exit_clip.w>0.0)
+    {
+        const float2 uv=HsSurfaceClipUv(exit_clip);
+        if(all(uv>=0.0) && all(uv<1.0))
+        {
+            background_uv=uv;
+            const uint2 sample_pixel=uint2(uv*ScreenSize.xy);
+            const float depth=SurfaceDepth.Load(int3(sample_pixel,0));
+            // Reverse-Z depth must lie behind the authored exit plane. Reject
+            // foreground silhouettes instead of refracting through them.
+            if(depth>0.0 && depth<=exit_clip.z/exit_clip.w)
+            {
+                const float3 opaque_world=HsReconstructSurfaceRelative(
+                    HsSurfaceRasterUv(int2(sample_pixel)),depth)+SurfaceViewOrigin.xyz;
+                if(dot(opaque_world-exit_world,transmitted)>=0.0)
+                {
+                    if(fog_enabled)
+                    {
+                        background=VmRawOpaqueHdr.Load(int3(sample_pixel,0)).rgb;
+                        background_view_depth=HsFogViewDepth(opaque_world);
+                    }
+                    else background=HdrColor.Load(int3(sample_pixel,0)).rgb;
+                }
+            }
+        }
+    }
+    const float coat=saturate(surface.coat_weight);
+    const float coat_transmission=(1.0-coat*HsBsdfCoatFresnel(nv))*
+        (1.0-coat*HsBsdfCoatFresnel(abs(dot(transmitted,normal))));
+    // The base closure supplies the authored interface/transmission tint.
+    // Bulk Beer absorption remains the separately authored inverse-metre RGB.
+    const float3 transmission_weight=saturate(surface.base_color)*HsBsdfSolidBeerLambert(surface,optical_path)*
+        (solid*(1.0-fresnel)*coat_transmission);
+    const float3 raw_surface=diffuse*(1.0-solid)+specular+surface.emission;
+    if(!fog_enabled) return raw_surface+transmission_weight*background;
+    const HsVolumetricTransport prefix=HsFogPrefix(world,pixel);
+    if(layer_transport)
+    {
+        // B is already camera-domain radiance, including its own fog. This
+        // bounded screen-refraction model uses the current camera prefix;
+        // subtract that prefix once, with no transmittance division.
+        return prefix.radiance+prefix.transmittance*raw_surface+
+            transmission_weight*(background-prefix.radiance);
+    }
+    // Behind the interface, integrate only the front-to-background interval.
+    // A missing opaque exit uses the global sky at the fog far distance.
+    const HsVolumetricTransport interval=HsSampleVolumetricInterval(background_uv,
+        HsFogViewDepth(world),background_view_depth);
+    const float3 incoming=interval.radiance+interval.transmittance*background;
+    return prefix.radiance+prefix.transmittance*(raw_surface+transmission_weight*incoming);
+}
+
+float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world, float2 pixel, bool front)
+{
+    return HsHeroTranslucentLighting(surface,world,pixel,front,-1.0,false);
+}
+
+HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGradients gradients)
+{
+    const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;
+    if(ordinal!=5u) discard;
+    const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,ordinal);
+    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
+    clip(surface.opacity-0.001);
+    return surface;
+}
+
+bool HsHeroSelectedFront(SceneOutput input,uint layer)
+{
+    const int3 pixel=int3(int2(input.Position.xy),0);
+    return input.Position.z==HeroFrontDepth[layer].Load(pixel) &&
+        all(input.InstanceKey==HeroFrontIdentity[layer].Load(pixel));
+}
+
+uint2 HeroPeelFrontPS(SceneOutput input,bool front:SV_IsFrontFace):SV_Target0
+{
+    const HsSceneGradients gradients=RasterSceneGradients(input);
+    if(!front || input.InstanceKey.x==0u) discard;
+    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const int3 pixel=int3(int2(input.Position.xy),0);
+    const float opaque_depth=SurfaceDepth.Load(pixel);
+    if(input.Position.z<=opaque_depth) discard;
+    if(HeroLayerInfo.x>0u)
+    {
+        const float previous=HeroFrontDepth[HeroLayerInfo.x-1u].Load(pixel);
+        if(previous<=0.0 || input.Position.z>=previous) discard;
+    }
+    return input.InstanceKey;
+}
+
+void HeroPeelExitPS(SceneOutput input,bool front:SV_IsFrontFace)
+{
+    const HsSceneGradients gradients=RasterSceneGradients(input);
+    if(front) discard;
+    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const int3 pixel=int3(int2(input.Position.xy),0);
+    const uint layer=HeroLayerInfo.x;
+    const float entry=HeroFrontDepth[layer].Load(pixel);
+    if(entry<=0.0 || input.Position.z>=entry ||
+        any(input.InstanceKey!=HeroFrontIdentity[layer].Load(pixel))) discard;
+}
+
+OitOutput HeroOitTailPS(SceneOutput input,bool front:SV_IsFrontFace)
+{
+    const HsSceneGradients gradients=RasterSceneGradients(input);
+    if(!front || input.Position.z<=SurfaceDepth.Load(int3(int2(input.Position.xy),0))) discard;
+    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    [loop] for(uint layer=0u;layer<HeroLayerInfo.y;++layer)
+        if(HsHeroSelectedFront(input,layer)) discard;
+    uint ignored;
+    InterlockedAdd(HeroOverflowCounter[int2(input.Position.xy)],1u,ignored);
+    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,front);
+    const float alpha=saturate(surface.opacity);
+    const float z=saturate(length(input.WorldPosition-CameraTime.xyz)/180.0);
+    const float weight=clamp(pow(min(1.0,alpha*10.0)+0.01,3.0)*1e8*pow(1.0-z*0.9,3.0),1e-2,3e3);
+    OitOutput output;
+    output.Accumulation=float4(color*alpha*weight,alpha*weight);
+    output.Revealage=alpha.xxxx;
+    return output;
+}
+
+struct HeroTransparentGuideOutput
+{
+    float Depth:SV_Target0;
+    float2 Motion:SV_Target1;
+    float2 History:SV_Target2;
+    float4 Classification:SV_Target3;
+    uint2 Metadata:SV_Target4;
+    float2 Transport:SV_Target5;
+};
+HeroTransparentGuideOutput HeroTransparentGuidePS(SceneOutput input,bool front:SV_IsFrontFace)
+{
+    const HsSceneGradients gradients=RasterSceneGradients(input);
+    if(!front || !HsHeroSelectedFront(input,0u)) discard;
+    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    HeroTransparentGuideOutput output=(HeroTransparentGuideOutput)0;
+    output.Depth=input.Position.z;
+    output.Classification=float4(HsEncodeSurfaceNormal(surface.normal),saturate(surface.opacity),surface.roughness);
+    output.Metadata=input.InstanceKey;
+    output.Transport=float2(surface.solid_transmission_weight>0.0?1.0:0.0,any(surface.emission>0.0)?1.0:0.0);
+    const float4 current=mul(float4(input.WorldPosition,1.0),CurrentUnjitteredViewProjection);
+    const float4 previous=mul(float4(input.PreviousWorldPosition,1.0),PreviousUnjitteredViewProjection);
+    const float4 previous_jittered=mul(float4(input.PreviousWorldPosition,1.0),PreviousViewProjection);
+    const bool valid=input.HistoryConfidence>0.0 && SurfaceViewOrigin.w>0.5 &&
+        current.w>0.0 && previous.w>0.0 && previous_jittered.w>0.0 &&
+        all(isfinite(current)) && all(isfinite(previous)) && all(isfinite(previous_jittered)) &&
+        HeroOverflow.Load(int3(int2(input.Position.xy),0))==0u;
+    if(valid)
+    {
+        output.Motion=HsSurfaceClipUv(previous)-HsSurfaceClipUv(current);
+        output.History=float2(previous_jittered.z/previous_jittered.w,input.HistoryConfidence);
+    }
+    return output;
+}
+
+float4 HeroLayerCompositePS(SceneOutput input,bool front:SV_IsFrontFace):SV_Target0
+{
+    const HsSceneGradients gradients=RasterSceneGradients(input);
+    const uint layer=HeroLayerInfo.x;
+    if(!front || !HsHeroSelectedFront(input,layer)) discard;
+    const HsSurfaceClosure surface=HsHeroTransportSurface(input,front,gradients);
+    const float3 view=normalize(CameraTime.xyz-input.WorldPosition);
+    const float3 geometric_normal=normalize(input.WorldNormal);
+    float3 normal=normalize(surface.normal);
+    if(dot(normal,view)<0.0) normal=-normal;
+    const float3 transmitted=refract(-view,normal,1.0/surface.ior);
+    const int3 pixel=int3(int2(input.Position.xy),0);
+    const float exit_depth=HeroExitDepth[layer].Load(pixel);
+    float path=-1.0;
+    if(exit_depth>0.0 && dot(transmitted,transmitted)>0.0)
+    {
+        const float3 exit_world=HsReconstructSurfaceRelative(
+            HsSurfaceRasterUv(int2(input.Position.xy)),exit_depth)+SurfaceViewOrigin.xyz;
+        const float denominator=abs(dot(transmitted,geometric_normal));
+        if(denominator>0.0)
+            path=length(exit_world-input.WorldPosition)*abs(dot(view,geometric_normal))/denominator;
+    }
+    // The paired exit provides a measured local slab. Open geometry uses only
+    // the authored metre-valued thickness; another instance can never supply it.
+    const float3 color=HsHeroTranslucentLighting(surface,input.WorldPosition,input.Position.xy,front,path,true);
+    const float3 background=HeroLayerBackground.Load(pixel).rgb;
+    return float4(lerp(background,color,saturate(surface.opacity)),1.0);
+}
+
+OitOutput HeroTranslucentPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    const HsSceneGradients gradients = RasterSceneGradients(input);
+    const uint ordinal = HsHeroBindingOrdinals(input.Mesh, input.Material).y;
+    if (ordinal != 5u) discard;
+    const HsMaterialContext ctx = HsHeroMaterialContext(input, front, gradients, ordinal);
+    HsSurfaceClosure surface = HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx, ordinal), ctx);
+    clip(surface.opacity - 0.001);
+    const float3 color = HsHeroTranslucentLighting(surface, input.WorldPosition, input.Position.xy, front);
+    const float alpha = saturate(surface.opacity);
+    const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
+    const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
+        1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
+    OitOutput output;
+    output.Accumulation = float4(color * alpha * weight, alpha * weight);
+    output.Revealage = alpha.xxxx;
+    return output;
+}
+#endif
 
 float4 SampleVfxGradient(float row, float coordinate)
 {
@@ -2135,32 +3230,36 @@ OitOutput ParticlePS(ParticleOutput input)
     if (input.Renderer == 3)
     {
         float3 view_direction = normalize(CameraTime.xyz - input.WorldPosition);
-        float facing_light = saturate(dot(normalize(input.Normal),
-                                          normalize(-LightDirectionIntensity.xyz)));
-        float lighting = 0.35 + 0.65 * facing_light;
         if (input.Primitive == 11)
         {
             float fresnel = pow(1.0 - saturate(abs(dot(input.Normal, view_direction))), 1.5);
             alpha *= 0.25 + 0.75 * fresnel;
         }
-        input.Color.rgb *= lighting;
+        HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(input.Color.rgb,normalize(input.Normal),1.0,0.0,1.0,1.0);
+        surface.normal_is_world=true;
+        input.Color.rgb=HsDeferredIndirectDiffuse(input.Color.rgb*0.35)+HsLightListEvaluate(surface,input.WorldPosition,
+            CameraTime.xyz,1.0,HsLightAllMask,true)*0.65;
     }
     clip(alpha - 0.001);
     if (input.Renderer == 0 || input.Renderer == 3)
     {
         float2 screen_uv = input.Position.xy / ScreenSize.xy;
-        float valid = GBufferNormal.SampleLevel(LinearClamp, screen_uv, 0).a;
-        float3 scene_world = GBufferPosition.SampleLevel(LinearClamp, screen_uv, 0).xyz;
-        float scene_depth = dot(scene_world - CameraTime.xyz, CameraForwardSoftness.xyz);
-        float particle_depth = dot(input.WorldPosition - CameraTime.xyz, CameraForwardSoftness.xyz);
-        alpha *= valid > 0.0 ? saturate((scene_depth - particle_depth) / CameraForwardSoftness.w) : 1.0;
+        const HsSurfaceSample surface = HsLoadSurface(screen_uv);
+        if (HsSurfaceValid(surface))
+        {
+            float3 scene_world = HsSurfaceWorldPosition(surface);
+            float scene_depth = dot(scene_world - CameraTime.xyz, CameraForwardSoftness.xyz);
+            float particle_depth = dot(input.WorldPosition - CameraTime.xyz, CameraForwardSoftness.xyz);
+            alpha *= saturate((scene_depth - particle_depth) / CameraForwardSoftness.w);
+        }
     }
     float linear_depth = length(input.WorldPosition - CameraTime.xyz);
     float z = saturate(linear_depth / 180.0);
     float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
                          1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
     OitOutput output;
-    output.Accumulation = float4(input.Color.rgb * alpha * weight, alpha * weight);
+    output.Accumulation = float4(HsFogSurface(input.Color.rgb, input.WorldPosition,
+        input.Position.xy) * alpha * weight, alpha * weight);
     output.Revealage = alpha.xxxx;
     return output;
 }
@@ -2194,7 +3293,7 @@ float4 GroundAddPS(ParticleOutput input) : SV_Target0
     const float4 color = GroundGradient(input, gradient_coordinate);
     const float alpha = color.a * mask;
     clip(alpha - 0.001);
-    return float4(color.rgb * alpha, alpha);
+    return float4(HsFogEmission(color.rgb, input.WorldPosition, input.Position.xy) * alpha, alpha);
 }
 
 OitOutput OwnerMeshPS(ParticleOutput input)
@@ -2205,24 +3304,26 @@ OitOutput OwnerMeshPS(ParticleOutput input)
 
     const float3 normal = normalize(input.Normal);
     const float3 view_direction = normalize(CameraTime.xyz - input.WorldPosition);
-    const float diffuse = 0.35 + 0.65 * saturate(dot(normal, normalize(-LightDirectionIntensity.xyz)));
     const float fresnel = pow(1.0 - saturate(abs(dot(normal, view_direction))), 1.5);
-    const float lit = diffuse * (1.0 - 0.35 * saturate(input.SegmentMetadata.x)) +
-                      fresnel * input.SegmentMetadata.x;
-    const float3 color = gradient.rgb * input.GroundGradient.y * lit;
+    const float3 base=gradient.rgb*input.GroundGradient.y;
+    HsSurfaceClosure surface=HsMaterialMakeSurfaceClosure(base,normal,1.0,0.0,1.0,1.0);
+    surface.normal_is_world=true;
+    const float3 direct=HsLightListEvaluate(surface,input.WorldPosition,CameraTime.xyz,1.0,HsLightAllMask,true);
+    const float3 color=(HsDeferredIndirectDiffuse(base*0.35)+direct*0.65)*(1.0-0.35*saturate(input.SegmentMetadata.x))+
+        base*fresnel*input.SegmentMetadata.x;
     const float linear_depth = length(input.WorldPosition - CameraTime.xyz);
     const float z = saturate(linear_depth / 180.0);
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
                               1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
     OitOutput output;
-    output.Accumulation = float4(color * alpha * weight, alpha * weight);
+    output.Accumulation = float4(HsFogSurface(color, input.WorldPosition, input.Position.xy) * alpha * weight,
+        alpha * weight);
     output.Revealage = alpha.xxxx;
     return output;
 }
 
 Texture2D<float4> VfxDistortionVectors : register(t15, space3);
 Texture2D<float2> VfxFlowCurl : register(t16, space3);
-Texture2DArray<float> VfxStbnScalar : register(t17, space3);
 struct DistortionGpu
 {
     float4 PositionRadius;
@@ -2233,24 +3334,45 @@ struct DistortionGpu
 };
 StructuredBuffer<DistortionGpu> VfxDistortions : register(t18, space3);
 
+float2 HsActiveRenderTextureUv(float2 logical_uv, uint2 physical_extent)
+{
+    return clamp(logical_uv * ScreenSize.xy, 0.5, ScreenSize.xy - 0.5) /
+        float2(physical_extent);
+}
+
 float4 CompositePS(FullScreenOutput input) : SV_Target0
 {
-    const float4 vectors = VfxDistortionVectors.SampleLevel(LinearClamp,input.Uv,0);
+    uint distortion_width, distortion_height;
+    VfxDistortionVectors.GetDimensions(distortion_width, distortion_height);
+    const float4 vectors = VfxDistortionVectors.SampleLevel(LinearClamp,
+        HsActiveRenderTextureUv(input.Uv, uint2(distortion_width, distortion_height)), 0);
     // Normalize overlapping coverage while retaining single-source fade strength.
     float2 offset = clamp(vectors.xy/max(vectors.w,1.0),-0.04,0.04);
     const float2 border = min(input.Uv,1.0-input.Uv);
     offset *= smoothstep(0.0,0.04,min(border.x,border.y));
     float2 warped_uv = saturate(input.Uv + offset);
     // Reject displaced samples which cross foreground geometry in front of the distortion.
-    const float valid = GBufferNormal.SampleLevel(LinearClamp,warped_uv,0).a;
-    const float3 warped_world = GBufferPosition.SampleLevel(LinearClamp,warped_uv,0).xyz;
-    const float warped_depth = dot(warped_world-CameraTime.xyz,CameraForwardSoftness.xyz);
-    const float source_depth = vectors.z/max(vectors.w,0.00001);
-    const float visibility = valid > 0 && vectors.w > 0 ? saturate((warped_depth-source_depth)/0.35) : 1;
+    const HsSurfaceSample warped_surface = HsLoadSurface(warped_uv);
+    float visibility = 1.0;
+    if (HsSurfaceValid(warped_surface) && vectors.w > 0.0)
+    {
+        const float3 warped_world = HsSurfaceWorldPosition(warped_surface);
+        const float warped_depth = dot(warped_world-CameraTime.xyz,CameraForwardSoftness.xyz);
+        const float source_depth = vectors.z/vectors.w;
+        visibility = saturate((warped_depth-source_depth)/0.35);
+    }
     warped_uv = saturate(input.Uv + offset*visibility);
-    float3 opaque = HdrColor.SampleLevel(LinearClamp, warped_uv, 0).rgb;
-    float4 accumulation = OitAccumulation.SampleLevel(LinearClamp, input.Uv, 0);
-    float revealage = OitRevealage.SampleLevel(LinearClamp, input.Uv, 0);
+    uint hdr_width, hdr_height, accumulation_width, accumulation_height;
+    uint revealage_width, revealage_height;
+    HdrColor.GetDimensions(hdr_width, hdr_height);
+    OitAccumulation.GetDimensions(accumulation_width, accumulation_height);
+    OitRevealage.GetDimensions(revealage_width, revealage_height);
+    float3 opaque = HdrColor.SampleLevel(LinearClamp,
+        HsActiveRenderTextureUv(warped_uv, uint2(hdr_width, hdr_height)), 0).rgb;
+    float4 accumulation = OitAccumulation.SampleLevel(LinearClamp,
+        HsActiveRenderTextureUv(input.Uv, uint2(accumulation_width, accumulation_height)), 0);
+    float revealage = OitRevealage.SampleLevel(LinearClamp,
+        HsActiveRenderTextureUv(input.Uv, uint2(revealage_width, revealage_height)), 0);
     float3 transparent = accumulation.rgb / max(accumulation.a, 0.0001);
     return float4(lerp(opaque, transparent, saturate(1.0 - revealage)), 1.0);
 }
@@ -2318,9 +3440,25 @@ OitOutput FresnelShellPS(FresnelShellOutput input)
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) *
         1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
     OitOutput output;
-    output.Accumulation = float4(color * alpha * weight, alpha * weight);
+    output.Accumulation = float4(HsFogSurface(color, input.WorldPosition, input.Position.xy) * alpha * weight,
+        alpha * weight);
     output.Revealage = alpha.xxxx;
     return output;
+}
+
+GBufferOutput ScenePS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    return ScenePSImpl(input, front, false);
+}
+
+GBufferOutput EnvironmentOpaquePS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    return ScenePSImpl(input, front, true);
+}
+
+GBufferOutput EnvironmentMaskedPS(SceneOutput input, bool front : SV_IsFrontFace)
+{
+    return ScenePSImpl(input, front, false);
 }
 
 float ImpactCurve(uint row, float age)
@@ -2563,15 +3701,16 @@ float4 VfxFlashPS(VfxFlashOutput input) : SV_Target0
         coverage *= lerp(1.0, mask, input.Detail.x);
     }
     float2 screen_uv = input.Position.xy * ScreenSize.zw;
-    float valid = GBufferNormal.SampleLevel(LinearClamp, screen_uv, 0).a;
-    if (valid > 0.0)
+    const HsSurfaceSample surface = HsLoadSurface(screen_uv);
+    if (HsSurfaceValid(surface))
     {
-        float3 scene_world = GBufferPosition.SampleLevel(LinearClamp, screen_uv, 0).xyz;
+        float3 scene_world = HsSurfaceWorldPosition(surface);
         float scene_depth = dot(scene_world - CameraTime.xyz, CameraForwardSoftness.xyz);
         float flash_depth = dot(input.WorldPosition - CameraTime.xyz, CameraForwardSoftness.xyz);
         coverage *= saturate((scene_depth - flash_depth) / CameraForwardSoftness.w);
     }
-    return float4(input.Color.rgb * input.Color.a * coverage, 0.0);
+    return float4(HsFogEmission(input.Color.rgb, input.WorldPosition, input.Position.xy) *
+        input.Color.a * coverage, 0.0);
 }
 
 float AuthoredSpriteFbm(float2 uv, uint octaves)
@@ -2623,34 +3762,18 @@ OitOutput VfxSpriteOitPS(VfxFlashOutput input)
         const float3 forward = normalize(CameraForwardSoftness.xyz);
         const float3 right = normalize(cross(float3(0, 1, 0), forward));
         const float3 up = normalize(cross(forward, right));
-        const float3 light = normalize(-LightDirectionIntensity.xyz);
-        const float3 local_light = float3(dot(light, right), dot(light, up), dot(light, forward));
-        const float3 positive_weight = max(local_light, 0.0);
-        const float3 negative_weight = max(-local_light, 0.0);
-        const float response = dot(positive.rgb, positive_weight * positive_weight) + dot(negative.rgb, negative_weight * negative_weight);
         // Shadow palette colors the scattering; only baked emissive follows the hot gradient.
-        color = (input.Color.rgb * (0.18 + response * LightDirectionIntensity.w) +
+        const float3 scattering=HsLightListSixWay(input.WorldPosition,right,up,forward,
+            positive.rgb,negative.rgb,HsLightAllMask,false);
+        color = (HsDeferredIndirectDiffuse(input.Color.rgb * 0.18) + input.Color.rgb * scattering +
                  gradient.rgb * input.Gradient.y * negative.a) * detail;
-        for (uint index = 0; index < VfxLightCount.x; ++index)
-        {
-            const float3 delta = VfxLightPositionRadius[index].xyz - input.WorldPosition;
-            const float distance_squared = dot(delta, delta);
-            const float3 toward_light = delta * rsqrt(max(distance_squared, 0.0001));
-            const float3 local = float3(dot(toward_light, right), dot(toward_light, up), dot(toward_light, forward));
-            const float3 pos_weight = max(local, 0.0), neg_weight = max(-local, 0.0);
-            const float scattering = dot(positive.rgb, pos_weight * pos_weight) + dot(negative.rgb, neg_weight * neg_weight);
-            const float radius = VfxLightPositionRadius[index].w;
-            const float edge = saturate(1.0 - distance_squared / (radius * radius));
-            color += input.Color.rgb * VfxLightColorIntensity[index].rgb * VfxLightColorIntensity[index].w *
-                scattering * edge * edge / (1.0 + distance_squared) * detail;
-        }
         // Artistic mask modulates RGB only; baked positive alpha is the smoke silhouette.
         alpha *= positive.a * input.SurfaceData.y;
     }
     else
     {
         const uint octaves = input.SurfaceMetadata.x;
-        const float2 flow = float2(0.0, -seconds * 0.85);
+        const float2 flow = float2(0.0, -seconds * input.SurfaceData.z);
         const float2 uv = p * 0.65 + seed_uv + flow;
         const float2 warp = float2(AuthoredSpriteFbm(uv, octaves), AuthoredSpriteFbm(uv + float2(.37,.61), octaves)) - 0.5;
         const float noise = AuthoredSpriteFbm(uv + warp * input.SurfaceData.x, octaves);
@@ -2678,10 +3801,10 @@ OitOutput VfxSpriteOitPS(VfxFlashOutput input)
     }
     alpha *= 1.0 - smoothstep(0.72, 1.0, age);
     const float2 screen_uv = input.Position.xy * ScreenSize.zw;
-    const float valid = GBufferNormal.SampleLevel(LinearClamp, screen_uv, 0).a;
-    if (valid > 0)
+    const HsSurfaceSample surface = HsLoadSurface(screen_uv);
+    if (HsSurfaceValid(surface))
     {
-        const float3 scene = GBufferPosition.SampleLevel(LinearClamp, screen_uv, 0).xyz;
+        const float3 scene = HsSurfaceWorldPosition(surface);
         const float scene_depth = dot(scene - CameraTime.xyz, CameraForwardSoftness.xyz);
         const float sprite_depth = dot(input.WorldPosition - CameraTime.xyz, CameraForwardSoftness.xyz);
         alpha *= saturate((scene_depth - sprite_depth) / CameraForwardSoftness.w);
@@ -2690,7 +3813,8 @@ OitOutput VfxSpriteOitPS(VfxFlashOutput input)
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
     const float weight = clamp(pow(min(1.0, alpha * 10.0) + 0.01, 3.0) * 1e8 * pow(1.0 - z * 0.9, 3.0), 1e-2, 3e3);
     OitOutput output;
-    output.Accumulation = float4(color * alpha * weight, alpha * weight);
+    output.Accumulation = float4(HsFogSurface(color, input.WorldPosition, input.Position.xy) * alpha * weight,
+        alpha * weight);
     output.Revealage = alpha.xxxx;
     return output;
 }
@@ -2702,68 +3826,93 @@ float3 BloomBrightPass(float3 color)
     return color * knee * saturate((brightness - 0.6) / max(brightness, 0.0001));
 }
 
-float4 TemporalPS(FullScreenOutput input) : SV_Target0
+float4 PreExposurePS(FullScreenOutput input) : SV_Target0
 {
-    const float3 current = PostA.SampleLevel(LinearClamp, input.Uv, 0).rgb;
-    const int2 pixel = clamp(int2(input.Uv * ScreenSize.xy), int2(0, 0),
-                             int2(ScreenSize.xy) - 1);
-    const float4 position = GBufferPosition.Load(int3(pixel, 0));
-    const float4 normal = GBufferNormal.Load(int3(pixel, 0));
-    if (normal.a < 0.5)
-        return float4(current, 0.0);
+    const int2 pixel = HsSurfacePixel(input.Uv);
+    return float4(CompositeHdr.Load(int3(pixel, 0)).rgb * CurrentExposure[0], 1.0);
+}
 
-    const float4 current_clip = mul(float4(position.xyz, 1.0), ViewProjection);
-    const float current_depth = current_clip.z / max(current_clip.w, 0.0001);
-    if (TemporalOptions.y < 0.5)
-        return float4(current, current_depth);
+struct TemporalMrtOutput
+{
+    float4 ColorDepth : SV_Target0;
+    float2 Normal : SV_Target1;
+    uint2 Material : SV_Target2;
+};
 
-    const float4 previous_clip = mul(float4(position.xyz, 1.0), PreviousViewProjection);
-    if (previous_clip.w <= 0.0001)
-        return float4(current, current_depth);
-    const float2 previous_uv = float2(previous_clip.x / previous_clip.w * 0.5 + 0.5,
-                                      0.5 - previous_clip.y / previous_clip.w * 0.5);
-    if (any(previous_uv < 0.0) || any(previous_uv > 1.0))
-        return float4(current, current_depth);
+TemporalMrtOutput TemporalPS(FullScreenOutput input)
+{
+    // Output/history coordinates are unjittered. Current color and guides live
+    // in the jittered active render rectangle inside the capacity allocation.
+    const float2 current_uv = input.Uv + SurfaceJitterUv.xy;
+    const HsSurfaceSample surface = HsLoadSurface(current_uv);
+    const bool valid = HsSurfaceValid(surface);
+    const float2 surface_history = SurfaceHistory.Load(int3(surface.pixel, 0));
+    const float current_exposure = CurrentExposure[0];
+    const float3 composite = CompositeHdr.Load(int3(surface.pixel, 0)).rgb * current_exposure;
+    const float3 opaque = HdrColor.Load(int3(surface.pixel, 0)).rgb * current_exposure;
+    const float3 difference = abs(composite - opaque);
 
-    const float4 history = TemporalInput.SampleLevel(LinearClamp, previous_uv, 0);
-    const float expected_depth = previous_clip.z / previous_clip.w;
-    if (abs(history.a - expected_depth) > 0.002)
-        return float4(current, current_depth);
-
-    float3 minimum = current;
-    float3 maximum = current;
-    [unroll] for (int y = -1; y <= 1; ++y)
+    HsTemporalInput resolve = (HsTemporalInput)0;
+    resolve.uv = input.Uv;
+    resolve.render_extent = uint2(ScreenSize.xy);
+    resolve.output_extent = uint2(OutputSize.xy);
+    resolve.current_jitter_uv = SurfaceJitterUv.xy;
+    resolve.previous_jitter_uv = SurfaceJitterUv.zw;
+    resolve.current_depth = valid ? surface.depth : 0.0;
+    resolve.expected_previous_depth = surface_history.x;
+    resolve.current_normal = valid
+        ? HsDecodeSurfaceNormal(GBufferNormal.Load(int3(surface.pixel, 0))) : float3(0, 0, 1);
+    resolve.material_key = valid ? surface.metadata : uint2(0, 0);
+    resolve.motion_uv = GBufferMotion.Load(int3(surface.pixel, 0));
+    resolve.history_confidence = valid ? surface_history.y : 1.0;
+    resolve.reactive = saturate(max(difference.r, max(difference.g, difference.b)) /
+        max(1.0, max(composite.r, max(composite.g, composite.b))));
+    if ((LodClock.w & 8u) != 0u)
+        resolve.reactive = max(resolve.reactive, VfxScreenReactive.Load(int3(surface.pixel, 0)));
+    if((LodClock.w&4u)!=0u)
     {
-        [unroll] for (int x = -1; x <= 1; ++x)
+        const int3 guide_pixel=int3(surface.pixel,0);
+        const float hero_depth=HeroGuideDepth.Load(guide_pixel);
+        const float4 hero_class=HeroGuideClassification.Load(guide_pixel);
+        if(hero_depth>resolve.current_depth && hero_class.z>0.0)
         {
-            const float3 neighbor = PostA.SampleLevel(LinearClamp,
-                input.Uv + float2(x, y) * ScreenSize.zw, 0).rgb;
-            minimum = min(minimum, neighbor);
-            maximum = max(maximum, neighbor);
+            const float2 hero_history=HeroGuideHistory.Load(guide_pixel);
+            resolve.current_depth=hero_depth;
+            resolve.expected_previous_depth=hero_history.x;
+            resolve.history_confidence=hero_history.y;
+            resolve.motion_uv=HeroGuideMotion.Load(guide_pixel);
+            resolve.current_normal=HsDecodeSurfaceNormal(hero_class.xy);
+            resolve.material_key=HeroGuideMetadata.Load(guide_pixel);
+            resolve.reactive=max(resolve.reactive,hero_class.z*(1.0-saturate(hero_history.y)));
         }
+        if(HeroGuideOverflow.Load(guide_pixel)>0u) resolve.reactive=1.0;
     }
-    const float3 bounded_history = clamp(history.rgb, minimum, maximum);
-    const float3 opaque = HdrColor.SampleLevel(LinearClamp, input.Uv, 0).rgb;
-    const float reactive = saturate(max(max(abs(current.r - opaque.r),
-                                            abs(current.g - opaque.g)),
-                                        abs(current.b - opaque.b)) /
-                                    max(1.0, max(max(current.r, current.g), current.b)));
-    const float change = saturate(length(current - bounded_history) /
-                                  max(1.0, length(current)));
-    const float history_weight = 0.88 * (1.0 - reactive) * (1.0 - change);
-    return float4(lerp(current, bounded_history, history_weight), current_depth);
+    resolve.current_pre_exposure = current_exposure;
+    resolve.previous_pre_exposure = CurrentExposure[1];
+    resolve.history_valid = TemporalOptions.x > 0.5 && TemporalOptions.y > 0.5;
+    resolve.current_camera_origin = CameraTime.xyz;
+    resolve.current_inverse_unjittered_view_projection = InverseUnjitteredViewProjection;
+    resolve.previous_unjittered_view_projection = PreviousUnjitteredViewProjection;
+
+    const HsTemporalResult resolved = HsResolveTemporal(resolve, SceneWork, TemporalInput,
+        TemporalNormalInput, TemporalMaterialInput, LinearClamp);
+    TemporalMrtOutput output;
+    output.ColorDepth = resolved.color_depth;
+    output.Normal = resolved.normal_oct;
+    output.Material = resolved.material_key;
+    return output;
 }
 
 float3 BloomSource(float2 uv)
 {
-    return TemporalOptions.x > 0.5
-        ? TemporalOutput.SampleLevel(LinearClamp, uv, 0).rgb
-        : PostA.SampleLevel(LinearClamp, uv, 0).rgb;
+    return PostOptions.w > 0.0
+        ? HsSharpenTemporal(TemporalOutput, LinearClamp, uv, uint2(OutputSize.xy), PostOptions.w)
+        : TemporalOutput.SampleLevel(LinearClamp, uv, 0).rgb;
 }
 
 float4 BloomExtractPS(FullScreenOutput input) : SV_Target0
 {
-    const float2 texel = ScreenSize.zw * 0.5;
+    const float2 texel = OutputSize.zw * 0.5;
     float3 bright = 0.0;
     bright += BloomBrightPass(BloomSource(input.Uv + float2(-texel.x, -texel.y)));
     bright += BloomBrightPass(BloomSource(input.Uv + float2(texel.x, -texel.y)));
@@ -2809,28 +3958,27 @@ float4 BloomPS(FullScreenOutput input) : SV_Target0
     const float3 wide = BloomHalfCombined.SampleLevel(LinearClamp, input.Uv, 0).rgb;
     // Keep the diffuse halo below the exact additive ground silhouette.
     const float3 halo = min(max(wide, 0.0) * 0.35, max(center, 0.0) * 0.18 + 0.08);
-    return float4(center + (RenderOptions.y > 0.5 ? halo : 0.0), 1.0);
-}
-
-float3 AcesToneMap(float3 color)
-{
-    const float a = 2.51;
-    const float b = 0.03;
-    const float c = 2.43;
-    const float d = 0.59;
-    const float e = 0.14;
-    return saturate((color * (a * color + b)) / (color * (c * color + d) + e));
+    return float4(center + (RenderOptions.y > 0.5 ? halo * max(PostOptions.x, 0.0) : 0.0), 1.0);
 }
 
 float4 ToneMapPS(FullScreenOutput input) : SV_Target0
 {
-    return float4(AcesToneMap(PostB.SampleLevel(LinearClamp, input.Uv, 0).rgb), 1.0);
+    // Apply sharpening once here when the graph bypasses bloom composition.
+    const float3 scene = RenderOptions.y > 0.5 || PostOptions.z > 0.5
+        ? PostB.SampleLevel(LinearClamp, input.Uv, 0).rgb : BloomSource(input.Uv);
+    // No artistic grading transform exists in the current shader. The grading
+    // toggle never bypasses the required scene-to-display tone map.
+    const float3 display_linear = DisplayOptions.x > 0.5
+        ? HsDisplayToneMapHdr(scene, DisplayOptions.y, DisplayOptions.z)
+        : HsDisplayToneMapSdr(scene);
+    return float4(display_linear, 1.0);
 }
 
 float4 OutlinePS(FullScreenOutput input) : SV_Target0
 {
-    float2 texel = ScreenSize.zw * 0.675;
-    float center_mask = GBufferPosition.SampleLevel(LinearClamp, input.Uv, 0).a;
+    float2 texel = OutputSize.zw * max(PostOptions.y, 0.0);
+    const float2 guide_uv = input.Uv + SurfaceJitterUv.xy;
+    const float center_mask = HsSampleSurfaceOutlineMask(guide_uv);
     float edge = 0.0;
     static const float2 offsets[8] = {
         float2(-1, -1), float2(0, -1), float2(1, -1), float2(-1, 0),
@@ -2838,8 +3986,7 @@ float4 OutlinePS(FullScreenOutput input) : SV_Target0
     };
     for (uint index = 0; index < 8; ++index)
     {
-        float neighbor_mask = GBufferPosition.SampleLevel(
-            LinearClamp, input.Uv + offsets[index] * texel, 0).a;
+        const float neighbor_mask = HsSampleSurfaceOutlineMask(guide_uv + offsets[index] * texel);
         edge = max(edge, abs(center_mask - neighbor_mask));
     }
     float3 color = PostA.SampleLevel(LinearClamp, input.Uv, 0).rgb;
@@ -2849,9 +3996,9 @@ float4 OutlinePS(FullScreenOutput input) : SV_Target0
 
 float4 FxaaPS(FullScreenOutput input) : SV_Target0
 {
-    float2 texel = ScreenSize.zw;
+    float2 texel = OutputSize.zw;
     float3 center = PostB.SampleLevel(LinearClamp, input.Uv, 0).rgb;
-    if (TemporalOptions.x > 0.5) return float4(center, 1.0);
+    if (TemporalOptions.x > 0.5 || (LodClock.w & 2u) != 0) return float4(center, 1.0);
     float3 north = PostB.SampleLevel(LinearClamp, input.Uv + float2(0, texel.y), 0).rgb;
     float3 south = PostB.SampleLevel(LinearClamp, input.Uv - float2(0, texel.y), 0).rgb;
     float3 east = PostB.SampleLevel(LinearClamp, input.Uv + float2(texel.x, 0), 0).rgb;
@@ -2871,19 +4018,15 @@ float4 FxaaPS(FullScreenOutput input) : SV_Target0
 
 float4 UiPS(FullScreenOutput input) : SV_Target0
 {
-    const float reference_aspect = 1920.0 / 1080.0;
-    const float output_aspect = ScreenSize.x / ScreenSize.y;
-    float2 reference_uv = input.Uv;
-    if (output_aspect > reference_aspect)
-    {
-        reference_uv.x = (reference_uv.x - 0.5) * output_aspect / reference_aspect + 0.5;
-    }
-    else
-    {
-        reference_uv.y = (reference_uv.y - 0.5) * reference_aspect / output_aspect + 0.5;
-    }
-    if (any(reference_uv < 0.0) || any(reference_uv > 1.0)) discard;
-    return UiTexture.SampleLevel(LinearClamp, reference_uv, 0);
+    // CPU rasterization already maps the authored logical canvas into an
+    // output-sized bitmap, including its transparent letterbox margins.
+    const float4 ui = HsDisplayDecodePremultipliedUi(UiTexture.SampleLevel(LinearClamp, input.Uv, 0));
+    const float3 scene = DisplayLinear.SampleLevel(LinearClamp, input.Uv, 0).rgb;
+    const float3 display_linear = scene * (1.0 - ui.a) + ui.rgb;
+    const float3 encoded = DisplayOptions.x > 0.5
+        ? HsDisplayEncodeHdr10(display_linear, DisplayOptions.y, DisplayOptions.z)
+        : HsDisplayEncodeSdr(display_linear);
+    return float4(encoded, 1.0);
 }
 
 // Analytic silhouette with authored vector/noise detail; no temporal-history reconstruction.
@@ -2928,10 +4071,12 @@ VfxDistortionOutput VfxDistortionVS(uint vertex_id : SV_VertexID, uint instance_
     return output;
 }
 
-FresnelShellOutput FresnelShellVS(SceneInput input, uint vertex_id : SV_VertexID)
+FresnelShellOutput FresnelShellVS(SceneInput input, uint vertex_id : SV_VertexID,
+                                  uint instance_id : SV_InstanceID)
 {
-    // Root SRV t0 is rebound to the selected boss instance before each draw.
-    const SceneOutput scene = SceneVS(input, 0, vertex_id);
+    // Indexed draws name the selected instance in the complete instance/ref
+    // buffer, preserving the opaque surface's skin slot and unique vertex ID.
+    const SceneOutput scene = SceneVS(input, instance_id, vertex_id);
     const FresnelShellGpu shell = FresnelShellCommands[0];
     const bool crown = shell.Metadata.x == 0;
     const bool player = shell.Metadata.x == 2;
@@ -2947,7 +4092,11 @@ FresnelShellOutput FresnelShellVS(SceneInput input, uint vertex_id : SV_VertexID
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = scene.WorldNormal;
     output.WorldPosition = world;
-    output.Center = Instances[0].Position.xyz;
+    const uint visible_instance = GeometryVisibleInstance(instance_id);
+    if ((SceneDrawMaterial & 1u) != 0u)
+        output.Center = HsLoadGpuSceneInstance(StaticSceneDraws[visible_instance].InstanceIndex).Position.xyz;
+    else
+        output.Center = Instances[visible_instance].Position.xyz;
     return output;
 }
 float4 VfxDistortionPS(VfxDistortionOutput input) : SV_Target0
@@ -3002,11 +4151,11 @@ float4 VfxDistortionPS(VfxDistortionOutput input) : SV_Target0
     flow_vector += flow*(shape == 1 || shape == 3 ? .45 : .15);
     coverage *= lerp(.8,1.0,noise);
     const float2 screen_uv = input.Position.xy*ScreenSize.zw;
-    const float valid = GBufferNormal.SampleLevel(LinearClamp,screen_uv,0).a;
+    const HsSurfaceSample surface = HsLoadSurface(screen_uv);
     const float depth = dot(input.World-CameraTime.xyz,CameraForwardSoftness.xyz);
-    if(valid > 0)
+    if(HsSurfaceValid(surface))
     {
-        const float3 scene = GBufferPosition.SampleLevel(LinearClamp,screen_uv,0).xyz;
+        const float3 scene = HsSurfaceWorldPosition(surface);
         const float clearance = dot(scene-CameraTime.xyz,CameraForwardSoftness.xyz)-depth;
         coverage *= shape >= 5 ? saturate((clearance+.05)/.08) : saturate(clearance/.35);
     }

@@ -1,7 +1,9 @@
 #include "vfx_typed_frame_adapter.hpp"
+#include "vfx_generation_rebind.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -61,6 +63,7 @@ constexpr std::uint64_t kPickupHealIdleEffect = Hash64("particle.pickup.heal.idl
 constexpr std::uint64_t kPickupMagnetIdleEffect = Hash64("particle.pickup.magnet.idle");
 constexpr std::uint64_t kPickupRelicIdleEffect = Hash64("particle.pickup.relic_chest.idle");
 constexpr std::uint64_t kChargedOverchargeLoopEffect = Hash64("particle.upgrade.charged.overcharge_loop");
+constexpr std::uint64_t kArrowRainIncomingEffect = Hash64("particle.upgrade.arrow_rain.incoming_arrow");
 constexpr std::uint64_t kMultishotRetargetEffect = Hash64("particle.upgrade.retarget");
 constexpr std::uint64_t kRicochetBleedExtendEffect = Hash64("particle.upgrade.ricochet.bleed_extend");
 
@@ -146,13 +149,16 @@ constexpr std::array kPersistentBindings{
     PersistentBinding{PersistentVfxKind::PlayerBowDraw, Hash64("particle.player.bow_draw"), kEntityPayload},
     PersistentBinding{PersistentVfxKind::ChargedFullReady, Hash64("particle.upgrade.charged.full_ready"), kEntityPayload},
     PersistentBinding{PersistentVfxKind::ChargedOverchargeLoop, kChargedOverchargeLoopEffect, kEntityPayload},
+    PersistentBinding{PersistentVfxKind::SuicideCountdownLoop, Hash64("particle.enemy.suicide.countdown_loop"), kEntityPayload},
     PersistentBinding{PersistentVfxKind::EmpoweredReady, Hash64("particle.upgrade.empowered_ready"), kEntityPayload},
     PersistentBinding{PersistentVfxKind::MultishotRetarget, kMultishotRetargetEffect, kProjectilePathPayload},
+    PersistentBinding{PersistentVfxKind::BasicArrowReturn, Hash64("particle.upgrade.arrow.return"), kProjectilePathPayload},
     PersistentBinding{PersistentVfxKind::RicochetBleedExtend, kRicochetBleedExtendEffect, kEntityPayload},
     PersistentBinding{PersistentVfxKind::PickupXpIdle, kPickupXpIdleEffect, kEntityPayload},
     PersistentBinding{PersistentVfxKind::PickupHealIdle, kPickupHealIdleEffect, kEntityPayload},
     PersistentBinding{PersistentVfxKind::PickupMagnetIdle, kPickupMagnetIdleEffect, kEntityPayload},
     PersistentBinding{PersistentVfxKind::PickupRelicIdle, kPickupRelicIdleEffect, kEntityPayload},
+    PersistentBinding{PersistentVfxKind::PickupXpMagnetTrail, Hash64("particle.pickup.xp.magnet_trail"), kLinkPayload},
     PersistentBinding{PersistentVfxKind::PlayerLowHealthVignette, Hash64("post.player.low_health_vignette"), kContextPayload},
 };
 
@@ -390,8 +396,16 @@ void Diagnose(VfxTypedFrameInputs &result, std::uint64_t effect_id)
 }
 
 std::optional<float> Lifetime(const PersistentVfxVisual &visual,
-                              Tick current_tick) noexcept
+                             Tick current_tick) noexcept
 {
+    if (visual.kind == PersistentVfxKind::PickupXpMagnetTrail)
+    {
+        if (visual.active_tick > current_tick || current_tick >= visual.expires ||
+            !std::isfinite(visual.radius) || visual.radius <= 0 ||
+            !std::isfinite(visual.length) || visual.length < 0) return {};
+        return std::clamp(1.0f - visual.length / visual.radius, 0.0f,
+                          std::nextafter(1.0f, 0.0f));
+    }
     if (visual.kind == PersistentVfxKind::BossShockwaveWavefront &&
         current_tick < visual.active_tick)
         return std::nullopt;
@@ -521,6 +535,11 @@ bool MakeProjectilePath(const PersistentVfxVisual &visual,
     path.current_position = visual.projectile_current_position;
     path.previous_position = visual.projectile_previous_position;
     path.velocity = visual.projectile_velocity;
+    if (visual.kind == PersistentVfxKind::BasicArrowReturn)
+    {
+        if (!Finite(visual.return_start_position)) return false;
+        path.path_origin_position = visual.return_start_position;
+    }
     path.projectile_radius = visual.projectile_hitbox_radius;
     path.lifetime01 = 0.0f;
     path.state_flags = visual.projectile_state_flags;
@@ -549,6 +568,43 @@ bool MakeProjectileHead(const PersistentVfxVisual &visual,
     return true;
 }
 
+std::optional<float> DeliveryHeadRadius(const VfxProgramData &cooked,
+                                       const VfxEffectRecord &effect) noexcept
+{
+    if (effect.sources.first > cooked.sources.size() || effect.sources.count >
+        cooked.sources.size() - effect.sources.first) return {};
+    std::optional<float> radius;
+    for (std::size_t source_index = effect.sources.first;
+         source_index < effect.sources.first + effect.sources.count; ++source_index)
+    {
+        const auto &source = cooked.sources[source_index];
+        if (source.effect != effect.handle || source.type != VfxSourceType::HistoryRibbon ||
+            source.stable_id != Hash32("directional_trail"))
+            continue;
+        if (source.outputs.first > cooked.outputs.size() || source.outputs.count >
+            cooked.outputs.size() - source.outputs.first) return {};
+        for (const auto &output : std::span(cooked.outputs).subspan(
+                 source.outputs.first, source.outputs.count))
+        {
+            if (output.source != source_index || output.profile != VfxOutputProfile::RibbonAdd ||
+                output.shape != Hash32("camera_facing_ribbon") ||
+                output.motion != VfxMotionKind::HistoryRibbonTaperedFlow) continue;
+            if (output.parameters.first > cooked.parameters.size() || output.parameters.count >
+                cooked.parameters.size() - output.parameters.first) return {};
+            for (const auto &parameter : std::span(cooked.parameters).subspan(
+                     output.parameters.first, output.parameters.count))
+            {
+                if (parameter.key != Hash32("width_head")) continue;
+                if (radius || parameter.type != VfxParameterType::Float) return {};
+                const auto value = std::bit_cast<float>(parameter.bits);
+                if (!std::isfinite(value) || value <= 0) return {};
+                radius = value;
+            }
+        }
+    }
+    return radius;
+}
+
 bool MakeSafeSector(const VfxRingGapsPayload &ring, std::uint32_t index, VfxPayload &payload)
 {
     if (index >= ring.gap_angles_degrees.size()) return false;
@@ -566,7 +622,8 @@ std::optional<PersistentBinding> WarningBinding(std::uint64_t effect_id) noexcep
         return PersistentBinding{PersistentVfxKind::BossSpawnWarning, effect_id, kCirclePayload};
     if (effect_id == Hash64("particle.boss.area.telegraph"))
         return PersistentBinding{PersistentVfxKind::BossAreaWarning, effect_id, kCirclePayload};
-    if (effect_id == Hash64("particle.enemy.suicide.telegraph_radius"))
+    if (effect_id == Hash64("particle.enemy.suicide.telegraph_radius") ||
+        effect_id == Hash64("particle.enemy.suicide.charge"))
         return PersistentBinding{PersistentVfxKind::SuicideEnemyWarning, effect_id, kCirclePayload};
     if (effect_id == Hash64("particle.upgrade.explosive.mini_bomb.telegraph"))
         return PersistentBinding{PersistentVfxKind::MiniBombWarning, effect_id, kCirclePayload};
@@ -635,6 +692,10 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const auto *lookup = FindLookup(cooked, effect_id);
         const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
         if (effect && effect->input_mode == 1 &&
+            (effect_id == Hash64("particle.upgrade.retreat.second_dash") ||
+             effect_id == Hash64("particle.upgrade.retreat.afterimage")))
+            continue; // Captured success geometry is owned by VfxUpgradeMovementState.
+        if (effect && effect->input_mode == 1 &&
             (effect->payload_kind == kProjectilePayload ||
              (effect->payload_kind == kLinkPayload &&
               (effect_id == Hash64("particle.line.ricochet") || effect_id == Hash64("particle.line.burn_transfer") ||
@@ -697,11 +758,43 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             point.authored_scale = parameters.scale;
             input.payload = std::move(point);
         }
+        else if (effect->payload_kind == kEntityPayload &&
+                 effect_id == Hash64("particle.skill.charged_shot.cancel"))
+        {
+            if (event.sequence == 0 ||
+                event.geometry.kind != PresentationGeometryKind::EntityAttachment ||
+                event.geometry.source_id == 0 ||
+                !std::isfinite(event.geometry.radius) || event.geometry.radius <= 0 ||
+                event.geometry.end_tick != event.tick ||
+                event.geometry.start_tick > event.geometry.end_tick)
+            {
+                Diagnose(result, effect_id);
+                continue;
+            }
+            input.world_transform = Transform(event.position,
+                std::atan2(parameters.direction.x, parameters.direction.z));
+            input.payload = VfxEntityPayload{event.geometry.radius, 0, 1, 0,
+                                            event.geometry.source_id};
+        }
         else if (effect->payload_kind == kContextPayload)
         {
             VfxContextPayload context;
+            context.owner_id = event.geometry.source_id;
             context.direction = parameters.direction;
             context.ratio01 = std::clamp(parameters.scale, 0.0f, 1.0f);
+            if (effect_id == Hash64("particle.boss.phase_change") ||
+                effect_id == Hash64("particle.boss.death") ||
+                effect_id == Hash64("particle.session.wave_start"))
+            {
+                // LocalVolume component bounds use the original authored
+                // presentation scale, independently of ratio-based outputs.
+                if (parameters.scale <= 0.0f)
+                {
+                    Diagnose(result, effect_id);
+                    continue;
+                }
+                context.scalar0 = parameters.scale;
+            }
             if (effect_id == Hash64("particle.skill.charged_shot.pulse") &&
                 event.upgrade_stage != 0)
             {
@@ -778,6 +871,93 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
 
     for (const auto &visual : current)
     {
+        if (visual.kind == PersistentVfxKind::WaveTimer)
+        {
+            constexpr auto id = Hash64("particle.session.wave_warning");
+            const auto *lookup = FindLookup(cooked, id);
+            const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
+            if (!effect || effect->input_mode != 0 || effect->timing_kind != 0 ||
+                effect->payload_kind != kContextPayload ||
+                !std::isfinite(effect->seconds) || effect->seconds <= 0 || effect->seconds > 60 ||
+                visual.effect_asset.value != id || visual.stable_id == 0 ||
+                !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0 ||
+                visual.active_tick > current_tick || visual.source_horizon_tick <= current_tick)
+            { Diagnose(result, id); continue; }
+            const auto window = static_cast<Tick>(std::ceil(effect->seconds * 60.0f));
+            if (visual.source_horizon_tick - current_tick > window) continue;
+            const auto start = visual.source_horizon_tick > window
+                ? visual.source_horizon_tick - window : Tick{};
+            VfxPersistentInput input{};
+            input.stable_id = visual.stable_id;
+            input.effect_handle = effect->handle;
+            input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
+            input.current_transform = input.previous_transform = Transform(visual.position, 0);
+            input.elapsed_seconds = static_cast<float>(current_tick - start) / 60.0f;
+            input.normalized_age = input.elapsed_seconds / effect->seconds;
+            if (input.normalized_age >= 1) continue;
+            input.source_duration_seconds = effect->seconds;
+            input.stable_seed = PersistentSeed(visual.stable_id, effect->handle);
+            input.payload = VfxContextPayload{visual.stable_id, {}, input.normalized_age,
+                                              visual.radius, 0};
+            result.persistent.push_back(std::move(input));
+            continue;
+        }
+        if (visual.kind == PersistentVfxKind::ScheduledAreaDelivery)
+        {
+            const auto *lookup = FindLookup(cooked, kArrowRainIncomingEffect);
+            const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
+            const auto head_radius = effect ? DeliveryHeadRadius(cooked, *effect) :
+                std::optional<float>{};
+            if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
+                effect->payload_kind != kProjectilePayload ||
+                !std::isfinite(effect->seconds) || effect->seconds <= 0 || effect->seconds > 60 ||
+                !head_radius || !UpgradeBindingContains(cooked, Hash64("skill.arrow_rain"), 1,
+                                                       effect->handle) ||
+                visual.effect_asset.value != kArrowRainIncomingEffect ||
+                visual.skill != kArrowRainSkill || visual.source_upgrade != 0 ||
+                visual.stable_id == 0 || visual.projectile_owner_id == 0 || visual.cast_id == 0 ||
+                visual.active_tick > current_tick || visual.expires <= visual.active_tick ||
+                !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0)
+            {
+                Diagnose(result, kArrowRainIncomingEffect);
+                continue;
+            }
+            // Gameplay supplies only its admitted schedule and landing circle.
+            // The cooked visual recipe owns the final approach window; absence
+            // of the real pending action ends every owner-follow output.
+            const auto window_ticks = static_cast<Tick>(
+                std::ceil(static_cast<double>(effect->seconds) * 60.0));
+            const auto started = std::max(visual.active_tick,
+                visual.expires > window_ticks ? visual.expires - window_ticks : Tick{});
+            if (current_tick < started || current_tick >= visual.expires) continue;
+            const auto duration_ticks = visual.expires - started;
+            const auto height = visual.radius * 2.0f;
+            const auto position_at = [&](Tick sample_tick) {
+                const auto remaining = static_cast<float>(visual.expires - sample_tick) /
+                    static_cast<float>(duration_ticks);
+                return Float3{visual.position.x, visual.position.y + height * remaining,
+                              visual.position.z};
+            };
+            const auto position = position_at(current_tick);
+            const auto previous_position = position_at(current_tick > started ? current_tick - 1 : started);
+            const Float3 velocity{0, -height * 60.0f / static_cast<float>(duration_ticks), 0};
+            VfxPersistentInput input;
+            input.stable_id = visual.stable_id;
+            input.effect_handle = effect->handle;
+            input.current_transform = Transform(position, 0);
+            input.previous_transform = Transform(previous_position, 0);
+            input.elapsed_seconds = static_cast<float>(current_tick - started) / 60.0f;
+            input.normalized_age = std::clamp(input.elapsed_seconds / effect->seconds, 0.0f, 1.0f);
+            input.stable_seed = PersistentSeed(visual.projectile_owner_id, effect->handle);
+            input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
+            // This is an authored delivery head size, not the damage radius.
+            // The full landing Circle remains on the schedule/secondary area.
+            input.payload = VfxProjectilePayload{velocity,
+                {*head_radius, *head_radius, *head_radius}, *head_radius,
+                input.normalized_age, 0};
+            result.persistent.push_back(std::move(input));
+            continue;
+        }
         if (visual.kind == PersistentVfxKind::BossDashWarning ||
             visual.kind == PersistentVfxKind::BossVolleyWarning ||
             visual.kind == PersistentVfxKind::RangedEnemyWarning ||
@@ -796,6 +976,13 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 effect->payload_kind != kProjectilePayload ||
                 visual.projectile_owner_id == 0 ||
                 visual.projectile_spawned_tick > current_tick)
+            {
+                Diagnose(result, visual.effect_asset.value);
+                continue;
+            }
+            if (visual.skill == 3 && visual.source_upgrade == 2 &&
+                (!UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 3,
+                                         effect->handle) || visual.cast_id == 0))
             {
                 Diagnose(result, visual.effect_asset.value);
                 continue;
@@ -853,19 +1040,60 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const bool fixed_status_stamp =
             visual.kind == PersistentVfxKind::ChargedFullReady ||
             visual.kind == PersistentVfxKind::MultishotRetarget ||
+            visual.kind == PersistentVfxKind::BasicArrowReturn ||
             visual.kind == PersistentVfxKind::RicochetBleedExtend;
         const bool empowered_ready_stamp =
             visual.kind == PersistentVfxKind::EmpoweredReady;
         const auto age = fixed_status_stamp
             ? std::optional<float>{0.0f}
             : Lifetime(visual, current_tick);
-        if (!lookup || !effect || effect->input_mode != 1 ||
+        const bool pickup_motion = visual.kind == PersistentVfxKind::PickupXpMagnetTrail;
+        if (!lookup || !effect || effect->input_mode != (pickup_motion ? 0u : 1u) ||
             effect->payload_kind != binding.payload_kind || !age)
         {
             Diagnose(result, binding.effect_id);
             continue;
         }
-        if ((visual.kind == PersistentVfxKind::MultishotRetarget &&
+        if (visual.kind == PersistentVfxKind::UpgradeSlowArea &&
+            visual.skill == kArrowRainSkill && visual.source_upgrade != 7 &&
+            !UpgradeBindingContains(cooked, Hash64("skill.arrow_rain"), 6, effect->handle))
+        {
+            Diagnose(result, binding.effect_id);
+            continue;
+        }
+        if ((visual.kind == PersistentVfxKind::BurnTransferLink ||
+             visual.kind == PersistentVfxKind::RicochetLink) && visual.cast_id != 0)
+        {
+            const auto skill_id = visual.skill == kPiercingShotSkill
+                ? Hash64("skill.piercing_shot")
+                : visual.skill == kMultishotSkill ? Hash64("skill.multishot")
+                : visual.skill == kRicochetSkill ? Hash64("skill.ricochet_arrow") : 0;
+            if (!skill_id || visual.source_upgrade >= 8 ||
+                !UpgradeBindingContains(cooked, skill_id, visual.source_upgrade + 1u,
+                                        effect->handle))
+            {
+                Diagnose(result, binding.effect_id);
+                continue;
+            }
+        }
+        if ((visual.kind == PersistentVfxKind::RicochetReturnLink &&
+             (visual.skill != kRicochetSkill || visual.source_upgrade != 0 ||
+              visual.cast_id == 0 ||
+              !UpgradeBindingContains(cooked, Hash64("skill.ricochet_arrow"), 1,
+                                      effect->handle))) ||
+            (visual.kind == PersistentVfxKind::ChargedFullReady &&
+             visual.source_upgrade == 0 &&
+             !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 1,
+                                     effect->handle)) ||
+            (visual.kind == PersistentVfxKind::BasicArrowReturn &&
+             (visual.skill != 0 || visual.source_upgrade != 6 ||
+              !UpgradeBindingContains(cooked, Hash64("skill.basic_attack"), 7,
+                                      effect->handle))) ||
+            (visual.kind == PersistentVfxKind::ChargedFullReady &&
+             visual.source_upgrade == 4 &&
+             !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 5,
+                                     effect->handle)) ||
+            (visual.kind == PersistentVfxKind::MultishotRetarget &&
              (visual.skill != kMultishotSkill || visual.source_upgrade != 7 ||
               !UpgradeBindingContains(cooked, Hash64("skill.multishot"), 8, effect->handle))) ||
             (visual.kind == PersistentVfxKind::RicochetBleedExtend &&
@@ -881,6 +1109,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             continue;
         }
         if ((visual.kind == PersistentVfxKind::MultishotRetarget ||
+             visual.kind == PersistentVfxKind::BasicArrowReturn ||
              visual.kind == PersistentVfxKind::RicochetBleedExtend) &&
             (visual.projectile_owner_id == 0 ||
              visual.expires <= visual.active_tick || current_tick >= visual.expires ||
@@ -891,7 +1120,12 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         }
 
         float source_duration_seconds = 0.0f;
-        if (bow_draw_stamp)
+        if (visual.kind == PersistentVfxKind::FireArea)
+        {
+            if (visual.expires <= visual.active_tick) { Diagnose(result, binding.effect_id); continue; }
+            source_duration_seconds = static_cast<float>(visual.expires - visual.active_tick) / 60.0f;
+        }
+        else if (bow_draw_stamp)
         {
             if (visual.source_horizon_tick <= visual.active_tick)
             {
@@ -943,6 +1177,9 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         VfxPersistentInput input;
         input.stable_id = visual.stable_id;
         input.status_episode_generation = visual.status_episode_generation;
+        if (visual.kind == PersistentVfxKind::BossPhase2Aura ||
+            visual.kind == PersistentVfxKind::BossPhaseTransition)
+            input.status_episode_generation = visual.active_tick;
         input.effect_handle = effect->handle;
         input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
         const auto current_position = visual.projectile_owner_id != 0
@@ -1044,6 +1281,9 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 visual.entity_health_fraction >= 0.0f && visual.entity_health_fraction <= 0.35f;
             if (geometry_ok)
                 input.payload = VfxContextPayload{visual.entity_render_id, {}, visual.entity_health_fraction, 0.0f, 0.0f};
+            // Low-health presence is renewed each snapshot. Its pulse follows
+            // the advancing simulation phase, not that one-tick presence start.
+            input.elapsed_seconds = static_cast<float>(current_tick) / 60.0f;
         }
         else if (binding.payload_kind == kCirclePayload)
             geometry_ok = MakeCircle(visual, *age, input.payload);
@@ -1053,10 +1293,12 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             geometry_ok = MakeLine(visual, *age, input.payload);
         else if (binding.payload_kind == kProjectilePathPayload)
             geometry_ok = MakeProjectilePath(visual, prior, *age, input.payload);
-        if (geometry_ok && visual.kind == PersistentVfxKind::MultishotRetarget)
+        if (geometry_ok && (visual.kind == PersistentVfxKind::MultishotRetarget ||
+                            visual.kind == PersistentVfxKind::BasicArrowReturn))
         {
             geometry_ok = visual.effect_asset.value == binding.effect_id &&
-                visual.projectile_spawned_tick == visual.active_tick;
+                (visual.kind == PersistentVfxKind::BasicArrowReturn ||
+                 visual.projectile_spawned_tick == visual.active_tick);
             if (geometry_ok)
                 std::get<VfxProjectilePathPayload>(input.payload).lifetime01 =
                     input.normalized_age;
@@ -1068,6 +1310,48 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         }
         result.persistent.push_back(std::move(input));
 
+        const auto append_area_recipe = [&](std::uint64_t effect_id,
+                                            std::uint64_t skill_id,
+                                            std::uint32_t ordinal) {
+            const auto *recipe_lookup = FindLookup(cooked, effect_id);
+            const auto *recipe = recipe_lookup
+                ? FindEffect(cooked, recipe_lookup->handle) : nullptr;
+            if (!recipe || recipe->input_mode != 1 || recipe->timing_kind != 1 ||
+                recipe->payload_kind != kCirclePayload ||
+                !UpgradeBindingContains(cooked, skill_id, ordinal, recipe->handle) ||
+                visual.cast_id == 0)
+            {
+                Diagnose(result, effect_id);
+                return;
+            }
+            // Distinct recipes reuse the area's actual geometry and clock,
+            // while keeping independent stable identity and visual-only seed.
+            auto recipe_input = result.persistent.back();
+            recipe_input.effect_handle = recipe->handle;
+            recipe_input.stable_id = SupplementalStableId(visual.stable_id, effect_id);
+            recipe_input.stable_seed = PersistentSeed(recipe_input.stable_id,
+                                                      recipe->handle);
+            result.persistent.push_back(std::move(recipe_input));
+        };
+        if (alias)
+            append_area_recipe(base_binding->effect_id, alias->skill_id, alias->ordinal);
+        if (visual.kind == PersistentVfxKind::ArrowRainArea &&
+            visual.skill == kArrowRainSkill && visual.source_upgrade == 0)
+            append_area_recipe(Hash64("particle.upgrade.arrow_rain.secondary_area"),
+                               Hash64("skill.arrow_rain"), 1);
+        if (visual.kind == PersistentVfxKind::FireArea && visual.skill == kArrowRainSkill &&
+            visual.source_upgrade == 3)
+            append_area_recipe(Hash64("particle.upgrade.arrow_rain.fire_patch"),
+                               Hash64("skill.arrow_rain"), 4);
+        if (visual.kind == PersistentVfxKind::FireArea && visual.skill == kTrapSkill &&
+            visual.source_upgrade == 4)
+            append_area_recipe(Hash64("particle.upgrade.trap.fire_variant"),
+                               Hash64("skill.trap"), 5);
+        if ((visual.kind == PersistentVfxKind::TrapPending ||
+             visual.kind == PersistentVfxKind::TrapArmed) &&
+            visual.skill == kRetreatShotSkill && visual.source_upgrade == 1)
+            append_area_recipe(Hash64("particle.upgrade.retreat.start_trap"),
+                               Hash64("skill.retreat_shot"), 2);
         const auto *supplement = FindDamageTrailSupplement(visual);
         if (!supplement) continue;
 
@@ -1120,6 +1404,101 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         result.persistent.push_back(std::move(supplemental_input));
     }
 
+    return result;
+}
+
+std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramData &previous,
+                                           const VfxProgramData &next) noexcept
+{
+    const auto count = owners_.size();
+    std::erase_if(owners_, [&](Owner &owner) {
+        if (RebindVfxGenerationHandle(previous, next, owner.input.effect_handle, 1u) !=
+            VfxGenerationRebindOutcome::Retained) return true;
+        const auto &effect = next.effects[owner.input.effect_handle - 1u];
+        if (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
+            !UpgradeBindingContains(next, Hash64("skill.retreat_shot"), 8, effect.handle)) return true;
+        owner.seconds = effect.seconds;
+        owner.input.source_duration_seconds = effect.seconds;
+        return false;
+    });
+    return count - owners_.size();
+}
+
+std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
+    const VfxProgramData &cooked,
+    std::span<const PresentationEvent> dispatched_events,
+    Tick current_tick)
+{
+    std::erase_if(owners_, [current_tick](const Owner &owner) {
+        return current_tick < owner.started ||
+            static_cast<float>(current_tick - owner.started) / 60.0f >= owner.seconds;
+    });
+    for (const auto &event : dispatched_events)
+    {
+        const bool dash = event.asset.value == Hash64("particle.upgrade.retreat.second_dash");
+        const bool afterimage = event.asset.value == Hash64("particle.upgrade.retreat.afterimage");
+        if ((!dash && !afterimage) || event.kind != PresentationKind::Vfx ||
+            event.upgrade_skill != kRetreatShotSkill || event.upgrade_index != 7 ||
+            event.upgrade_stage != 1 || event.sequence == 0 ||
+            event.upgrade_cast_id == 0 || event.upgrade_owner_id == 0 ||
+            event.tick > current_tick || !Finite(event.position) ||
+            !Finite(event.geometry) || event.geometry.kind != PresentationGeometryKind::Line ||
+            event.geometry.source_id != event.upgrade_owner_id || event.geometry.width <= 0 ||
+            event.geometry.start_tick != event.tick || event.geometry.end_tick != event.tick)
+            continue;
+        const auto *lookup = FindLookup(cooked, event.asset.value);
+        const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
+        if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
+            effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
+            !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
+            !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
+            static_cast<float>(current_tick - event.tick) / 60.0f >= effect->seconds)
+            continue;
+        const auto end = event.geometry.end_position;
+        const Float3 delta{end.x - event.position.x, end.y - event.position.y,
+                           end.z - event.position.z};
+        const float length = std::hypot(delta.x, std::hypot(delta.y, delta.z));
+        if (!std::isfinite(length) || length <= 0.0001f) continue;
+        const Float3 direction{delta.x / length, delta.y / length, delta.z / length};
+        const auto stable_id = SupplementalStableId(
+            event.upgrade_cast_id ^ event.sequence ^ event.upgrade_owner_id,
+            event.asset.value);
+        if (std::any_of(owners_.begin(), owners_.end(), [stable_id](const Owner &owner) {
+                return owner.input.stable_id == stable_id;
+            }))
+            continue;
+        Owner owner{};
+        owner.started = event.tick;
+        owner.seconds = effect->seconds;
+        owner.input.stable_id = stable_id;
+        owner.input.effect_handle = effect->handle;
+        owner.input.source_visual_kind = 0xFF;
+        owner.input.current_transform = Transform(event.position,
+                                                  std::atan2(direction.x, direction.z));
+        owner.input.previous_transform = owner.input.current_transform;
+        owner.input.stable_seed = PersistentSeed(stable_id, effect->handle);
+        owner.input.source_duration_seconds = effect->seconds;
+        if (dash)
+            owner.input.payload = VfxLinePayload{event.position, end, direction,
+                                                 event.geometry.width, 0.0f, 0};
+        else
+            owner.input.payload = VfxContextPayload{event.upgrade_owner_id, direction,
+                                                    0.0f, length, event.geometry.width};
+        owners_.push_back(std::move(owner));
+    }
+    std::vector<VfxPersistentInput> result;
+    result.reserve(owners_.size());
+    for (const auto &owner : owners_)
+    {
+        auto input = owner.input;
+        input.elapsed_seconds = static_cast<float>(current_tick - owner.started) / 60.0f;
+        input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
+        if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
+            line->lifetime01 = input.normalized_age;
+        else
+            std::get<VfxContextPayload>(input.payload).ratio01 = input.normalized_age;
+        result.push_back(std::move(input));
+    }
     return result;
 }
 
@@ -1214,7 +1593,11 @@ void RebindVfxGroundEventOwners(const VfxProgramData &cooked,
     rebound.reserve(events.size());
     for (auto &event : events)
     {
-        if (event.geometry_owner_id == 0) continue;
+        if (event.geometry_owner_id == 0)
+        {
+            rebound.push_back(std::move(event));
+            continue;
+        }
         const auto binding = WarningBinding(event.geometry_effect_id);
         if (!binding || !WarningShapeMatches(*binding, event.payload)) continue;
         const auto *lookup = FindLookup(cooked, binding->effect_id);

@@ -273,8 +273,28 @@ void MeasureDecoded(const DirectX::ScratchImage& compressed, size_t layer, Layer
 }
 } // namespace
 
+std::vector<std::filesystem::path> EnvironmentHistogramInputs(const std::filesystem::path& source)
+{
+    const auto manifest_path = source / "project_hs_environment_materials_v9_LEAN.json";
+    std::ifstream input(manifest_path);
+    if (!input) throw std::runtime_error("Missing histogram terrain manifest");
+    Json manifest; input >> manifest;
+    const auto& layers = manifest.at("terrain").at("layers");
+    if (layers.size() != kLayers) throw std::runtime_error("Expected four histogram terrain layers");
+    std::vector<std::filesystem::path> paths{manifest_path};
+    for (size_t layer = 0; layer < kLayers; ++layer) {
+        if (layers[layer].at("slice").get<size_t>() != layer)
+            throw std::runtime_error("Histogram terrain slices must be ordered");
+        const std::filesystem::path relative(layers[layer].at("textures").at("base_color").get<std::string>());
+        if (relative.is_absolute()) throw std::runtime_error("Absolute histogram source path");
+        for (const auto& part : relative) if (part == "..") throw std::runtime_error("Histogram source escapes pack");
+        paths.push_back(source / relative);
+    }
+    return paths;
+}
+
 void CookEnvironmentHistogram(const std::filesystem::path& source,
-    const std::filesystem::path& output, ID3D11Device* device)
+    const std::filesystem::path& output, ID3D11Device* device, bool use_cache)
 {
     std::ifstream input(source/"project_hs_environment_materials_v9_LEAN.json");
     if (!input) throw std::runtime_error("Missing histogram terrain manifest");
@@ -289,15 +309,15 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
         if (relative.is_absolute()) throw std::runtime_error("Absolute histogram source path");
         for (const auto& part:relative) if (part=="..") throw std::runtime_error("Histogram source escapes pack");
         paths[layer]=source/relative;
-        inputs.push_back({{"path",relative.generic_string()},{"hash",HashFile(paths[layer])}});
+        if (use_cache) inputs.push_back({{"path",relative.generic_string()},{"hash",HashFile(paths[layer])}});
     }
     std::filesystem::create_directories(output);
     const auto gaussianPath=output/"environment_terrain_gaussian.dds";
     const auto histogramPath=output/"environment_terrain_histogram.dds";
     const auto qaPath=output/"environment_terrain_histogram.qa.json";
     const auto cachePath=output/"environment_terrain_histogram.cache.json";
-    const Json identity={{"recipe",kRecipe},{"encoder",device?"DirectXTex-D3D11-BC7":"DirectXTex-CPU-BC7"},{"inputs",inputs}};
-    try {
+    if (use_cache) try {
+        const Json identity={{"recipe",kRecipe},{"encoder",device?"DirectXTex-D3D11-BC7":"DirectXTex-CPU-BC7"},{"inputs",inputs}};
         std::ifstream cached(cachePath); Json cache; cached>>cache;
         if (cache.at("identity")==identity && cache.at("gaussian_hash")==HashFile(gaussianPath) &&
             cache.at("histogram_hash")==HashFile(histogramPath) && cache.at("qa_hash")==HashFile(qaPath)) {
@@ -322,7 +342,15 @@ void CookEnvironmentHistogram(const std::filesystem::path& source,
     Check(DirectX::SaveToDDSFile(compressed.GetImages(),compressed.GetImageCount(),compressed.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,gaussianPath.c_str()),"Save Gaussian terrain");
     Check(DirectX::SaveToDDSFile(histogram.GetImages(),histogram.GetImageCount(),histogram.GetMetadata(),DirectX::DDS_FLAGS_FORCE_DX10_EXT,histogramPath.c_str()),"Save histogram terrain LUT");
     { std::ofstream stream(qaPath); stream<<qa.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram QA"); }
-    const Json cache={{"identity",identity},{"gaussian_hash",HashFile(gaussianPath)},{"histogram_hash",HashFile(histogramPath)},{"qa_hash",HashFile(qaPath)}};
-    { std::ofstream stream(cachePath); stream<<cache.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram cache"); }
+    if (use_cache) {
+        const Json identity={{"recipe",kRecipe},{"encoder",device?"DirectXTex-D3D11-BC7":"DirectXTex-CPU-BC7"},{"inputs",inputs}};
+        const Json cache={{"identity",identity},{"gaussian_hash",HashFile(gaussianPath)},{"histogram_hash",HashFile(histogramPath)},{"qa_hash",HashFile(qaPath)}};
+        { std::ofstream stream(cachePath); stream<<cache.dump(2)<<'\n'; if (!stream) throw std::runtime_error("Failed writing histogram cache"); }
+    }
+}
+void CookEnvironmentHistogram(const std::filesystem::path& source,
+    const std::filesystem::path& output, ID3D11Device* device)
+{
+    CookEnvironmentHistogram(source, output, device, true);
 }
 } // namespace hs::content

@@ -1,4 +1,5 @@
 #include "vfx_typed_frame_adapter.hpp"
+#include "vfx_session_state.hpp"
 
 #include <hs/game_domain/domain_signal.hpp>
 
@@ -217,6 +218,28 @@ void TestEventGeometryTagsAndGapExpansion()
     Check(std::abs(multishot_payload.range - 23.0f) < 0.0001f &&
               std::abs(multishot_payload.half_angle_degrees - 31.0f) < 0.0001f,
           "multishot cone geometry was changed by the adapter");
+}
+
+void TestTerminalVfxClock()
+{
+    using Clock = hs::FixedStepClock::Clock;
+    hs::runtime_detail::VfxSessionState state;
+    const auto start = Clock::time_point{};
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory, start) == 120,
+          "terminal VFX clock did not anchor at the source snapshot tick");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 3) == 123,
+          "terminal VFX clock did not advance at fixed-step real time");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Paused,
+                                    start + hs::FixedStepClock::kFixedStep * 6) == 120,
+          "paused VFX clock used terminal real time");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 6) == 120,
+          "terminal VFX clock retained an anchor after leaving terminal phase");
+    state.Synchronize(1);
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 9) == 120,
+          "terminal VFX clock did not reset with the session");
 }
 
 void TestArrowRainPullLinkGeometry()
@@ -628,18 +651,22 @@ void TestUpgradeSlowAreaAliases()
         {arrow_rain_id, 3, 1, Hash32("CircleAreaPayload")},
     });
     program.upgrade_bindings = {
-        {Hash64("skill.trap"), 2, {0, 1}},
-        {Hash64("skill.arrow_rain"), 8, {1, 1}},
+        {Hash64("skill.trap"), 2, {0, 2}},
+        {Hash64("skill.arrow_rain"), 8, {2, 2}},
+        {Hash64("skill.arrow_rain"), 6, {4, 1}},
     };
-    program.upgrade_sequences = {2, 3};
+    program.upgrade_sequences = {2, 1, 3, 1, 1};
+    for (auto &effect : program.effects) effect.timing_kind = 1;
 
     const auto trap = UpgradeSlowAreaVisual(trap_skill, 1, 0xA1);
     const auto trap_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
         program, {}, std::array{trap}, {}, 130);
     Check(trap_result.unsupported_effect_ids.empty() &&
-              trap_result.persistent.size() == 1 &&
-              trap_result.persistent.front().effect_handle == 2,
-          "trap landing slow did not select its authored alias");
+              trap_result.persistent.size() == 2 &&
+              trap_result.persistent.front().effect_handle == 2 &&
+              trap_result.persistent[1].effect_handle == 1 &&
+              trap_result.persistent[1].stable_id != trap_result.persistent[0].stable_id,
+          "trap landing slow did not submit distinct alias and bound base owners");
     const auto &trap_input = trap_result.persistent.front();
     const auto &trap_circle = std::get<hs::VfxCirclePayload>(trap_input.payload);
     Check(trap_input.stable_id == trap.stable_id &&
@@ -659,9 +686,11 @@ void TestUpgradeSlowAreaAliases()
     const auto arrow_rain_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
         program, {}, std::array{arrow_rain}, {}, 130);
     Check(arrow_rain_result.unsupported_effect_ids.empty() &&
-              arrow_rain_result.persistent.size() == 1 &&
-              arrow_rain_result.persistent.front().effect_handle == 3,
-          "arrow rain finish slow did not select its authored alias");
+              arrow_rain_result.persistent.size() == 2 &&
+              arrow_rain_result.persistent.front().effect_handle == 3 &&
+              arrow_rain_result.persistent[1].effect_handle == 1 &&
+              arrow_rain_result.persistent[1].stable_id != arrow_rain_result.persistent[0].stable_id,
+          "arrow rain finish slow did not submit distinct alias and bound base owners");
 
     // ArrowRain upgrade 6 uses the same UpgradeSlowArea visual kind but keeps
     // the generic persistent area recipe because its source is not ordinal 7.
@@ -921,6 +950,33 @@ void TestProjectilePathUsesAuthoritativeMotion()
           path.velocity.x == 60.0f && path.velocity.z == 2.0f &&
           path.projectile_radius == 0.2f && path.lifetime01 == 0.0f,
           "projectile path used legacy cosmetic or frame delta motion");
+
+    const auto return_id = Hash64("particle.upgrade.arrow.return");
+    auto returning_program = Program({{return_id, 1, 1, Hash32("ProjectilePathPayload")}});
+    returning_program.effects[0].seconds = 0.5f;
+    returning_program.upgrade_bindings = {{Hash64("skill.basic_attack"), 7, {0, 1}}};
+    returning_program.upgrade_sequences = {1};
+    visual.kind = hs::PersistentVfxKind::BasicArrowReturn;
+    visual.effect_asset = {return_id};
+    visual.skill = 0;
+    visual.source_upgrade = 6;
+    visual.active_tick = 100;
+    visual.expires = 130;
+    visual.return_start_position = {8.0f, 1.0f, 6.0f};
+    const auto returned = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        returning_program, {}, std::array{visual}, {}, 110);
+    Check(returned.unsupported_effect_ids.empty() && returned.persistent.size() == 1,
+          "basic return did not bind to its actual return episode");
+    const auto &return_path = std::get<hs::VfxProjectilePathPayload>(returned.persistent[0].payload);
+    Check(return_path.path_origin_position.x == 8.0f && return_path.current_position.x == 4.0f &&
+              return_path.previous_position.x == 3.0f &&
+              std::abs(return_path.lifetime01 - 1.0f / 3.0f) < 0.00001f &&
+              std::abs(returned.persistent[0].elapsed_seconds - 10.0f / 60.0f) < 0.00001f,
+          "basic return borrowed projectile birth instead of its captured return clock and origin");
+    returning_program.upgrade_sequences.clear();
+    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
+              returning_program, {}, std::array{visual}, {}, 110).persistent.empty(),
+          "basic return accepted missing cooked upgrade membership");
 }
 
 void TestHostileProjectileBindings()
@@ -1087,13 +1143,17 @@ void TestWarningOwnerRefresh()
         {volley_id, 1, 0, Hash32("ConePayload")},
         {dash_id, 2, 0, Hash32("LineAreaPayload")} });
     hs::runtime_detail::RebindVfxGroundEventOwners(reloaded, retained);
-    Check(retained.size() == 2 && retained[0].effect_handle == 2 &&
+    Check(retained.size() == 3 && retained[0].effect_handle == 2 &&
               retained[1].effect_handle == 1 && retained[0].geometry_owner_id == 77 &&
-              retained[1].geometry_owner_id == 88,
+              retained[1].geometry_owner_id == 88 && retained[2].geometry_owner_id == 0 &&
+              retained[2].event_tick == original_sibling.event_tick &&
+              std::holds_alternative<hs::VfxPointPayload>(retained[2].payload),
           "owner-backed warning handles were not rebound after reload");
     auto missing = Program({{dash_id, 4, 1, Hash32("LineAreaPayload")} });
     hs::runtime_detail::RebindVfxGroundEventOwners(missing, retained);
-    Check(retained.empty(), "warnings with missing or mismatched recipes survived reload");
+    Check(retained.size() == 1 && retained[0].geometry_owner_id == 0 &&
+              retained[0].event_tick == original_sibling.event_tick,
+          "warnings with missing or mismatched recipes survived reload, or an unrelated event was removed");
 }
 
 void TestRangedWarningIdentity()
@@ -1173,6 +1233,25 @@ void TestOwnedVisualLinks()
     auto oldseed=input.stable_seed;program.effects.push_back(program.effects[0]);program.effects[1].handle=2;program.effect_lookup[0].handle=2;
     Check(decode(104).persistent[0].stable_seed==oldseed,"link reorder changed semantic seed");
     visual.link_target_position=visual.position;Check(decode(104).persistent.empty(),"degenerate link accepted");
+
+    program=Program({{Hash64("particle.upgrade.ricochet.return"),1,1,Hash32("SourceTargetPayload")}});
+    program.effects[0].timing_kind=1;
+    program.upgrade_bindings={{Hash64("skill.ricochet_arrow"),1,{0,1}}};
+    program.upgrade_sequences={1};
+    visual.kind=hs::PersistentVfxKind::RicochetReturnLink;
+    visual.cast_id=19;visual.skill=5;visual.source_upgrade=0;
+    visual.projectile_owner_id=71;visual.projectile_spawned_tick=80;
+    visual.position=visual.projectile_current_position={5,.7f,2};
+    visual.projectile_previous_position={6,.7f,2};
+    visual.return_start_position={9,.7f,2};visual.link_target_position={1,.7f,2};
+    const auto returning=decode(104);
+    Check(returning.unsupported_effect_ids.empty()&&returning.persistent.size()==1&&
+          returning.persistent[0].normalized_age==.5f,
+          "ricochet return lost real cast provenance or actual return distance progress");
+    visual.source_upgrade=1;
+    Check(decode(104).persistent.empty(),"ricochet return accepted unrelated upgrade provenance");
+    visual.source_upgrade=0;program.upgrade_sequences.clear();
+    Check(decode(104).persistent.empty(),"ricochet return accepted missing cooked membership");
 }
 
 void TestEnemyStatusOwners()
@@ -1315,6 +1394,15 @@ void TestPlayerStateOwners()
               entity.lifetime01 == .5f && active.persistent[0].elapsed_seconds == .5f &&
               context.ratio01 == .25f && context.owner_id == shell.stable_id,
           "player shell clock/mesh or low-health ratio lost");
+    low.active_tick = 131;
+    low.expires = 132;
+    const std::array renewed_owners{shell, low};
+    const auto renewed = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, renewed_owners, owners, 131);
+    Check(renewed.persistent.size() == 2 &&
+              renewed.persistent[1].stable_id == active.persistent[1].stable_id &&
+              renewed.persistent[1].elapsed_seconds > active.persistent[1].elapsed_seconds,
+          "renewed low-health presence preserves an advancing pulse clock");
     const auto expired = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 160);
     Check(expired.persistent.empty(), "expired player state remained active");
     shell.effect_asset = {};
@@ -1752,6 +1840,7 @@ int main()
 {
     try
     {
+        TestTerminalVfxClock();
         TestEnemyStatusOwners();
         TestBossStateOwners();
         TestPlayerStateOwners();

@@ -1,0 +1,383 @@
+#include "renderer_asset_io.hpp"
+#include "checked_binary_read.hpp"
+
+#include <Windows.h>
+#include <wrl/client.h>
+#if HS_WITH_DIRECTSTORAGE
+#include <dstorage.h>
+#endif
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <future>
+#include <limits>
+#include <stdexcept>
+#include <unordered_map>
+
+namespace hs
+{
+namespace
+{
+Result IoFailure(std::string message)
+{
+    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
+}
+struct EventOwner
+{
+    HANDLE value{};
+    ~EventOwner() { if (value) CloseHandle(value); }
+};
+#if HS_WITH_DIRECTSTORAGE
+using Microsoft::WRL::ComPtr;
+struct NativeTransport
+{
+    ComPtr<IDStorageFactory> factory;
+    ComPtr<IDStorageQueue1> queue;
+    ComPtr<IDStorageStatusArray> statuses;
+    std::array<bool, 256> occupied{};
+    std::uint64_t next_tag{1};
+    std::uint32_t chunk_bytes{}, staging_bytes{};
+    HRESULT last_error{S_OK};
+    void ReadErrors() noexcept
+    {
+        if (WaitForSingleObject(queue->GetErrorEvent(), 0) == WAIT_OBJECT_0)
+        {
+            DSTORAGE_ERROR_RECORD record{};
+            queue->RetrieveErrorRecord(&record);
+            last_error = record.FirstFailure.HResult;
+        }
+    }
+};
+#endif
+struct ReadOwner
+{
+    ImmutableAssetRead input;
+    ResidencyTicket storage;
+    std::vector<std::byte> bytes;
+    std::future<std::vector<std::byte>> future;
+    EventOwner event;
+    bool cancelled{}, submitted{};
+#if HS_WITH_DIRECTSTORAGE
+    std::shared_ptr<NativeTransport> transport;
+    ComPtr<IDStorageFile> file;
+    std::uint32_t status{};
+    std::uint64_t tag{};
+#endif
+    ~ReadOwner()
+    {
+        // Release of the queue/file/destination/event is never cancellation.
+        // This owner outlives every submitted native marker or async future.
+#if HS_WITH_DIRECTSTORAGE
+        if (transport && submitted)
+        {
+            WaitForSingleObject(event.value, INFINITE);
+            transport->occupied[status] = false;
+        }
+#endif
+        if (future.valid()) future.wait();
+    }
+};
+} // namespace
+struct RendererAssetIo::Impl
+{
+    std::unordered_map<std::uint64_t, std::unique_ptr<ReadOwner>> reads;
+    bool initialized{};
+    ResidencyTicket transport_ticket;
+#if HS_WITH_DIRECTSTORAGE
+    std::shared_ptr<NativeTransport> transport;
+#endif
+};
+RendererAssetIo::RendererAssetIo() : impl_(std::make_unique<Impl>()) {}
+RendererAssetIo::~RendererAssetIo() = default;
+bool RendererAssetIo::HasPendingReads() const noexcept { return !impl_->reads.empty(); }
+void RendererAssetIo::SetWaitForReads(bool wait) noexcept { wait_for_reads_ = wait; }
+bool RendererAssetIo::NativeEnabled() const noexcept
+{
+#if HS_WITH_DIRECTSTORAGE
+    return static_cast<bool>(impl_->transport);
+#else
+    return false;
+#endif
+}
+Result RendererAssetIo::Initialize(bool native_enabled, std::uint32_t staging_bytes,
+                                   ResidencyManager &residency)
+{
+    if (impl_->initialized || !impl_->reads.empty())
+        return IoFailure("Asset IO transport was already initialized.");
+    if (!native_enabled) { impl_->initialized = true; return Result::Success(); }
+#if HS_WITH_DIRECTSTORAGE
+    if (!staging_bytes) return IoFailure("DirectStorage requires a bounded staging reservation.");
+    const auto ticket = residency.ReserveHost(staging_bytes);
+    if (!ticket) return IoFailure("DirectStorage staging cannot fit the shared host budget.");
+    auto transport = std::make_shared<NativeTransport>();
+    auto hr = DStorageGetFactory(IID_PPV_ARGS(&transport->factory));
+    if (SUCCEEDED(hr)) hr = transport->factory->SetStagingBufferSize(staging_bytes);
+    DSTORAGE_QUEUE_DESC description{};
+    description.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+    description.Capacity = 1024;
+    description.Priority = DSTORAGE_PRIORITY_NORMAL;
+    description.Name = "HS immutable asset reads";
+    if (SUCCEEDED(hr)) hr = transport->factory->CreateQueue(&description, IID_PPV_ARGS(&transport->queue));
+    if (SUCCEEDED(hr)) hr = transport->factory->CreateStatusArray(256, "HS asset status", IID_PPV_ARGS(&transport->statuses));
+    if (FAILED(hr) || !residency.CommitHost(ticket, staging_bytes))
+    {
+        static_cast<void>(residency.ReleaseNow(ticket));
+        return IoFailure("DirectStorage transport initialization failed: " + std::to_string(hr));
+    }
+    transport->chunk_bytes = std::min(staging_bytes, 8u * 1024u * 1024u);
+    transport->staging_bytes = staging_bytes;
+    impl_->transport_ticket = ticket;
+    impl_->transport = std::move(transport);
+    impl_->initialized = true;
+    return Result::Success();
+#else
+    static_cast<void>(staging_bytes); static_cast<void>(residency);
+    return IoFailure("Native DirectStorage was requested without its pinned SDK build.");
+#endif
+}
+Result RendererAssetIo::ShareTransportFrom(const RendererAssetIo &other, ResidencyManager &residency)
+{
+    if (impl_->initialized || !impl_->reads.empty() || !other.impl_->initialized)
+        return IoFailure("Resident asset IO candidate was already initialized.");
+#if HS_WITH_DIRECTSTORAGE
+    if (other.impl_->transport)
+    {
+        const auto size = other.impl_->transport->staging_bytes;
+        const auto ticket = residency.ReserveHost(size);
+        if (!ticket || !residency.CommitHost(ticket, size))
+        {
+            if (ticket) static_cast<void>(residency.ReleaseNow(ticket));
+            return IoFailure("Resident asset IO transport accounting exceeds the shared host budget.");
+        }
+        // The candidate ledger replaces the old ledger at publication. Both
+        // refer to one retained native transport, not two staging buffers.
+        impl_->transport_ticket = ticket;
+    }
+    impl_->transport = other.impl_->transport;
+#else
+    static_cast<void>(residency);
+#endif
+    impl_->initialized = other.impl_->initialized;
+    return Result::Success();
+}
+Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &streaming,
+                                ResidencyManager &residency, ResidencyTicket storage, bool &submitted)
+{
+    submitted = false;
+    const auto *page = streaming.Find(input.request);
+    if (!impl_->initialized || !page || page->state != StreamingPageState::Requested ||
+        page->asset_id != input.logical_id || page->content_generation != input.generation ||
+        input.logical_id.empty() || input.path.empty() || !input.generation_lease || !input.expected_bytes ||
+        input.expected_bytes > std::numeric_limits<std::size_t>::max() ||
+        input.expected_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
+        !storage || !residency.Contains(storage) || impl_->reads.contains(input.request.value))
+        return IoFailure("Immutable asset read identity, lease or reservation is invalid.");
+    auto read = std::make_unique<ReadOwner>();
+    read->input = std::move(input);
+    read->storage = storage;
+#if HS_WITH_DIRECTSTORAGE
+    if (impl_->transport)
+    {
+        auto &transport = *impl_->transport;
+        const auto chunks = (read->input.expected_bytes - 1u) / transport.chunk_bytes + 1u;
+        DSTORAGE_QUEUE_INFO info{};
+        transport.queue->Query(&info);
+        if (chunks + 2u >= info.Desc.Capacity)
+            return IoFailure("Immutable asset read exceeds the bounded DirectStorage queue capacity.");
+        const auto free_status = std::find(transport.occupied.begin(), transport.occupied.end(), false);
+        if (free_status == transport.occupied.end() || chunks + 2u > info.EmptySlotCount)
+            return Result::Success(); // Requested remains eligible for the next pump.
+        if (transport.next_tag == UINT64_MAX) return IoFailure("DirectStorage cancellation tag exhausted.");
+        auto hr = transport.factory->OpenFile(read->input.path.c_str(), IID_PPV_ARGS(&read->file));
+        BY_HANDLE_FILE_INFORMATION file_info{};
+        if (SUCCEEDED(hr)) hr = read->file->GetFileInformation(&file_info);
+        const auto actual_size = (static_cast<std::uint64_t>(file_info.nFileSizeHigh) << 32u) | file_info.nFileSizeLow;
+        if (FAILED(hr) || actual_size != read->input.expected_bytes)
+            return IoFailure("DirectStorage immutable file size/open validation failed.");
+        read->bytes.resize(static_cast<std::size_t>(actual_size));
+        read->event.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!read->event.value) return IoFailure("DirectStorage read completion event creation failed.");
+        read->status = static_cast<std::uint32_t>(free_status - transport.occupied.begin());
+        read->tag = transport.next_tag++;
+        read->transport = impl_->transport;
+        const auto key = read->input.request.value;
+        auto *retained = read.get();
+        // Map insertion/allocation happens before EnqueueRequest can auto-submit.
+        impl_->reads.emplace(key, std::move(read));
+        if (!streaming.BeginRead({key}) || !streaming.SubmitRead({key}))
+        { impl_->reads.erase(key); return IoFailure("DirectStorage request state transition failed."); }
+        transport.occupied[retained->status] = true;
+        retained->submitted = true;
+        submitted = true;
+        for (std::uint64_t offset = 0; offset < actual_size;)
+        {
+            const auto bytes = static_cast<UINT32>(std::min<std::uint64_t>(transport.chunk_bytes, actual_size - offset));
+            DSTORAGE_REQUEST request{};
+            request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+            request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_MEMORY;
+            request.Options.CompressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
+            request.Source.File = {retained->file.Get(), offset, bytes};
+            request.Destination.Memory = {retained->bytes.data() + offset, bytes};
+            request.CancellationTag = retained->tag;
+            request.Name = retained->input.logical_id.c_str();
+            transport.queue->EnqueueRequest(&request);
+            offset += bytes;
+        }
+        transport.queue->EnqueueStatus(transport.statuses.Get(), retained->status);
+        transport.queue->EnqueueSetEvent(retained->event.value);
+        transport.queue->Submit();
+        return Result::Success();
+    }
+#endif
+    const auto path = read->input.path;
+    const auto expected = read->input.expected_bytes;
+    const auto key = read->input.request.value;
+    auto *retained = read.get();
+    impl_->reads.emplace(key, std::move(read));
+    if (!streaming.BeginRead({key}) || !streaming.SubmitRead({key}))
+    { impl_->reads.erase(key); return IoFailure("Async asset request state transition failed."); }
+    try
+    {
+        retained->future = std::async(std::launch::async, [path, expected] {
+            std::vector<std::byte> bytes;
+            if (auto result = ReadCheckedBinary(path, bytes, expected); !result)
+                throw std::runtime_error(std::string(result.Message()));
+            return bytes;
+        });
+    }
+    catch (const std::exception &error)
+    {
+        static_cast<void>(streaming.FinishRead({key}));
+        static_cast<void>(streaming.Cancel({key}));
+        impl_->reads.erase(key);
+        return IoFailure("Could not submit immutable async asset read: " + std::string(error.what()));
+    }
+    retained->submitted = true;
+    submitted = true;
+    return Result::Success();
+}
+Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &streaming,
+                             ResidencyManager &residency, AssetReadCompletion &output)
+{
+    output = {};
+    const auto found = impl_->reads.find(request.value);
+    if (found == impl_->reads.end()) return IoFailure("Asset read owner is missing.");
+    auto &read = *found->second;
+    const auto *page = streaming.Find(request);
+    read.cancelled = read.cancelled || !page || page->state == StreamingPageState::Cancelled ||
+        page->content_generation != read.input.generation;
+    HRESULT hr = S_OK;
+#if HS_WITH_DIRECTSTORAGE
+    if (read.transport)
+    {
+        read.transport->ReadErrors();
+        if (wait_for_reads_)
+        {
+            const auto event_result = WaitForSingleObject(read.event.value, INFINITE);
+            if (event_result != WAIT_OBJECT_0)
+                return IoFailure("DirectStorage completion event wait failed.");
+            if (!read.transport->statuses->IsComplete(read.status))
+                return IoFailure("DirectStorage completion event preceded its status marker.");
+        }
+        else if (!read.transport->statuses->IsComplete(read.status)) return Result::Success();
+        hr = read.transport->statuses->GetHResult(read.status);
+        // Status completion precedes the event marker. The event must also
+        // complete before its handle/queue slot can be reused or destroyed.
+        if (!wait_for_reads_)
+        {
+            const auto event_result = WaitForSingleObject(read.event.value, 0);
+            if (event_result == WAIT_TIMEOUT) return Result::Success();
+            if (event_result != WAIT_OBJECT_0) return IoFailure("DirectStorage completion event wait failed.");
+        }
+    }
+    else
+#endif
+    {
+        if (!read.future.valid()) return Result::Success();
+        if (wait_for_reads_) read.future.wait();
+        else if (read.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return Result::Success();
+        try { read.bytes = read.future.get(); }
+        catch (const std::exception &error)
+        {
+            static_cast<void>(streaming.FinishRead(request));
+            static_cast<void>(streaming.Cancel(request));
+            static_cast<void>(residency.ReleaseNow(read.storage));
+            impl_->reads.erase(found);
+            return IoFailure("Immutable asset read failed: " + std::string(error.what()));
+        }
+    }
+    static_cast<void>(streaming.FinishRead(request));
+    output.ready = true;
+    output.cancelled = read.cancelled;
+    if (FAILED(hr) || read.cancelled)
+    {
+        static_cast<void>(streaming.Cancel(request));
+        static_cast<void>(residency.ReleaseNow(read.storage));
+    }
+    else
+    {
+        if (read.bytes.size() != read.input.expected_bytes || !residency.CommitHost(read.storage, read.bytes.capacity()))
+        {
+            static_cast<void>(streaming.Cancel(request));
+            static_cast<void>(residency.ReleaseNow(read.storage));
+            impl_->reads.erase(found);
+            return IoFailure("Completed immutable read size or shared host accounting is invalid.");
+        }
+        output.bytes = std::move(read.bytes);
+        output.storage = read.storage;
+    }
+    impl_->reads.erase(found);
+    return FAILED(hr) ? IoFailure("DirectStorage read failed: " + std::to_string(hr)) : Result::Success();
+}
+void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &streaming) noexcept
+{
+    static_cast<void>(streaming.Cancel(request));
+    const auto found = impl_->reads.find(request.value);
+    if (found == impl_->reads.end()) return;
+    found->second->cancelled = true;
+#if HS_WITH_DIRECTSTORAGE
+    if (found->second->transport)
+        found->second->transport->queue->CancelRequestsWithTag(UINT64_MAX, found->second->tag);
+#endif
+}
+void RendererAssetIo::CancelAll(StreamingManager &streaming) noexcept
+{
+    for (const auto &[id, read] : impl_->reads) { static_cast<void>(read); Cancel({id}, streaming); }
+}
+Result RendererAssetIo::CollectCancelled(StreamingManager &streaming, ResidencyManager &residency)
+{
+    for (auto iterator = impl_->reads.begin(); iterator != impl_->reads.end();)
+    {
+        const auto request = iterator->second->input.request;
+        const auto *page = streaming.Find(request);
+        const bool cancelled = iterator->second->cancelled || !page ||
+            page->state == StreamingPageState::Cancelled ||
+            page->content_generation != iterator->second->input.generation;
+        ++iterator; // Poll may erase the retained owner, but never inserts one.
+        if (!cancelled) continue;
+        Cancel(request, streaming);
+        AssetReadCompletion output;
+        if (auto result = Poll(request, streaming, residency, output); !result) return result;
+    }
+    return Result::Success();
+}
+Result RendererAssetIo::DrainSubmitted(StreamingManager &streaming, ResidencyManager &residency)
+{
+    CancelAll(streaming);
+    while (!impl_->reads.empty())
+    {
+        auto &read = *impl_->reads.begin()->second;
+#if HS_WITH_DIRECTSTORAGE
+        if (read.transport && WaitForSingleObject(read.event.value, INFINITE) != WAIT_OBJECT_0)
+            return IoFailure("DirectStorage drain did not establish terminal completion.");
+#endif
+        if (read.future.valid()) read.future.wait();
+        AssetReadCompletion output;
+        if (auto result = Poll(read.input.request, streaming, residency, output); !result) return result;
+    }
+    return Result::Success();
+}
+void RendererAssetIo::SwapState(RendererAssetIo &other) noexcept { impl_.swap(other.impl_); }
+} // namespace hs

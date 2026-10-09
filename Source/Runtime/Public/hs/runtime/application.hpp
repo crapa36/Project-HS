@@ -22,6 +22,7 @@ struct ApplicationTimelineAction
 struct ApplicationConfig
 {
     bool smoke{};
+    bool smoke_render_lockstep{};
     bool warp{};
     bool visible{true};
     bool validation{};
@@ -57,10 +58,14 @@ struct ApplicationConfig
     std::uint32_t camera_zoom_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
+    bool render_scale_explicit{};
+    bool shadow_resolution_explicit{};
+    bool particle_percentage_explicit{};
     std::uint64_t seed{1};
     Tick maximum_ticks{180};
     BarrierMode barrier_mode{BarrierMode::Automatic};
     std::filesystem::path artifact_directory{"Artifacts/runtime"};
+    std::filesystem::path generation_pointer;
     std::filesystem::path heartbeat_path;
     std::filesystem::path playtest_output_directory;
     std::filesystem::path replay_directory;

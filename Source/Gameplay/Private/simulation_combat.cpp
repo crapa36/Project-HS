@@ -51,6 +51,30 @@ DomainSignalKind ProjectileImpactKind(const ProjectileActor &projectile) noexcep
     return DomainSignalKind::Count;
 }
 
+void BindStatusVisual(DomainSignal &signal, const EnemyActor &enemy,
+                      SkillKind skill, std::uint8_t source_upgrade,
+                      std::size_t episode_index) noexcept
+{
+    // A status application is owned by the enemy's actual status episode. It
+    // can be applied by a transferred burn or an area before damage flush, so
+    // do not borrow the enemy's last damage cast as its activation identity.
+    signal.source_entity_id = enemy.id.value;
+    signal.status_episode_generation = enemy.status_visual_episodes[episode_index].generation;
+    if (skill >= SkillKind::Count || source_upgrade >= kUpgradeCount) return;
+    signal.upgrade_skill = static_cast<std::uint8_t>(skill);
+    signal.upgrade_index = source_upgrade;
+    signal.upgrade_stage = UpgradeVisualStage::Resolve;
+    signal.upgrade_owner_id = enemy.id.value;
+}
+
+void BindUpgradeLink(VisualLinkView &link, SkillKind skill,
+                     std::uint8_t source_upgrade, std::uint64_t cast_id) noexcept
+{
+    link.skill = skill;
+    link.source_upgrade = source_upgrade;
+    link.cast_id = cast_id;
+}
+
 } // namespace
 
 void GameSimulation::SimulationWorld::EmitUpgradeVisual(
@@ -397,6 +421,22 @@ AreaActor *GameSimulation::SimulationWorld::SpawnArea(AreaKind kind, SkillKind s
 void GameSimulation::SimulationWorld::ScheduleAction(const ScheduledAction &action)
 {
     auto scheduled = action;
+    if (action.kind == ScheduledKind::Area && action.skill == SkillKind::ArrowRain &&
+        action.origin == EffectOrigin::Derived && action.source_upgrade == 0)
+    {
+        // Keep the actual schedule's identity/clock without allocating an
+        // entity, emitting a success event, or changing damage/RNG state.
+        scheduled.visual_started = tick;
+        std::uint64_t identity = 14695981039346656037ull;
+        for (const auto value : {action.cast_id, static_cast<std::uint64_t>(action.due),
+                                std::uint64_t{0x4152524f57524149}})
+            for (unsigned byte = 0; byte < 8; ++byte)
+            {
+                identity ^= (value >> (byte * 8)) & 255u;
+                identity *= 1099511628211ull;
+            }
+        scheduled.visual_owner_id = identity ? identity : 1;
+    }
     if (action.kind == ScheduledKind::Explosion && action.skill == SkillKind::ExplosiveArrow &&
         action.source_upgrade == 1)
     {
@@ -427,7 +467,8 @@ void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int
                 std::uint8_t source_upgrade,
                 std::uint8_t source_relic,
                 std::uint8_t source_enemy,
-                std::uint64_t originating_area_id)
+                std::uint64_t originating_area_id, Float2 incoming_direction,
+                bool shockwave_contact, Float2 impact_position)
 {
     if (target == 0 && tick < actors->player.revive_invulnerable_until)
     {
@@ -449,7 +490,8 @@ void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int
                   std::max(rules.stats.combat.minimum_final_damage, amount), skill,
                  origin, proc.root_cast, source_upgrade, source_relic, source_enemy,
                  bleed, burn, slow, slow_duration, {}, {}, 0,
-                 originating_area_id});
+                 originating_area_id, incoming_direction, impact_position,
+                 shockwave_contact});
 }
 
 void GameSimulation::SimulationWorld::QueueAreaDamage(Float2 position, float radius, std::int32_t damage, SkillKind skill,
@@ -1102,7 +1144,7 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
     actors->player.basic_attack_animation_until = tick;
     actors->player.active_cast_tick = tick + 9;
     actors->player.active_animation_until = actors->player.active_cast_tick + kAnimationBlendOutTicks;
-    CancelChargedShot();
+    CancelChargedShot(true);
     actors->player.active_basic_empower_until =
         tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
 }
@@ -1128,6 +1170,14 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
             direction = Normalize(Subtract(actors->player.position, boss->position));
         if (action.kind == BossActionKind::Dash)
         {
+            if (LengthSquared(action.direction) <= 0.0001f)
+            {
+                DomainSignalGeometry retarget{};
+                retarget.source_id = action.cast_id;
+                retarget.start_tick = retarget.end_tick = tick;
+                EmitVfx(DomainSignalKind::BossDashRetargeted, boss->position,
+                        direction, 1.0f, 1.0f, 0, boss->id.value, retarget);
+            }
             EmitVfx(DomainSignalKind::BossDashStarted, boss->position,
                     direction, 1.0f, 0.12f);
             boss->velocity = Multiply(direction, action.speed);
@@ -1324,13 +1374,13 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 {
                     projectile->homing = true;
                     projectile->homing_target = target->id.value;
-                    if (action.origin == EffectOrigin::Derived)
-                        EmitUpgradeVisual(SkillKind::PiercingShot, 1,
-                                          UpgradeVisualStage::Spawn,
-                                          projectile->position,
-                                          Normalize(projectile->velocity),
-                                          projectile->cast_id, projectile->id.value);
                 }
+                if (action.origin == EffectOrigin::Derived)
+                    EmitUpgradeVisual(SkillKind::PiercingShot, 1,
+                                      UpgradeVisualStage::Spawn,
+                                      projectile->position,
+                                      Normalize(projectile->velocity),
+                                      projectile->cast_id, projectile->id.value);
             }
             if (projectile && action.skill == SkillKind::RicochetArrow &&
                 action.origin == EffectOrigin::Original)
@@ -1536,6 +1586,22 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                                 .additional_move_distance));
         RecordUpgradeDisplacement(SkillKind::RetreatShot, 7, before,
                                   actors->player.position);
+        const auto actual_second_move = Subtract(actors->player.position, before);
+        if (LengthSquared(actual_second_move) > 0.0f)
+        {
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::Line;
+            geometry.width = rules.stats.player_collision_radius * 2.0f;
+            geometry.source_id = kPlayerRenderId;
+            geometry.start_tick = geometry.end_tick = tick;
+            geometry.end_position = {actors->player.position.x, 1.05f,
+                                     actors->player.position.y};
+            EmitUpgradeVisual(SkillKind::RetreatShot, 8,
+                              UpgradeVisualStage::Spawn, before,
+                              Normalize(actual_second_move),
+                              actors->player.retreat_followup_cast,
+                              kPlayerRenderId, geometry);
+        }
         auto direction = actors->player.retreat_followup_direction;
         auto *target = NearestEnemy(actors->player.position,
                                     rules.skills[static_cast<std::size_t>(
@@ -1620,6 +1686,13 @@ void GameSimulation::SimulationWorld::MovementPhase()
         Metrics().stat_utility[static_cast<std::size_t>(StatKind::MoveSpeed)] +=
             static_cast<std::uint64_t>(std::llround(extra * 1000.0f));
     }
+    const bool forced_motion = tick < actors->player.retreat_until;
+    const bool locomotion_moving = !forced_motion && moved > 0.0f;
+    if (forced_motion || locomotion_moving)
+        actors->player.movement_stopped_tick = 0;
+    else if (actors->player.locomotion_moving)
+        actors->player.movement_stopped_tick = tick;
+    actors->player.locomotion_moving = locomotion_moving;
     const auto locomotion_target =
         LengthSquared(Subtract(actors->player.position, actors->player.previous_position)) > 0.000001f
             ? 1.0f : 0.0f;
@@ -1680,7 +1753,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
             QueueDamage(0, enemy.dash_damage, SkillKind::Count,
                        EffectOrigin::Original, enemy.attack_cast_id, 0, false,
                        0.0f, 0, kNoTelemetrySource, kNoTelemetrySource,
-                       static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                       static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                       Normalize(Subtract(actors->player.position, enemy.position)));
             enemy.dash_hit = true;
         }
         if (enemy.boss && enemy.attacking && tick >= enemy.attack_resolve)
@@ -1695,7 +1769,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
                 QueueDamage(0, enemy.damage, SkillKind::Count,
                            EffectOrigin::Original, enemy.attack_cast_id, 0, false,
                            0.0f, 0, kNoTelemetrySource, kNoTelemetrySource,
-                           static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                           static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                           Normalize(Subtract(actors->player.position, enemy.position)));
             }
             enemy.attacking = false;
             enemy.velocity = {};
@@ -1986,6 +2061,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                                       SkillKind::BasicAttack, 5});
         EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
+        BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                         SkillKind::BasicAttack, 5, 2);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                             UpgradeEffectMetric::SlowApplications);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
@@ -2001,6 +2078,11 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                                 UpgradeEffectMetric::CooldownTicksSaved,
                                 before - *longest);
+            if (before > *longest)
+                EmitUpgradeVisual(SkillKind::BasicAttack, 6,
+                                  UpgradeVisualStage::Spawn, actors->player.position,
+                                  actors->player.aim, projectile.cast_id,
+                                  kPlayerRenderId);
         }
     }
     if (projectile.skill == SkillKind::PiercingShot &&
@@ -2047,6 +2129,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             EmitVfxLine(DomainSignalKind::BurnTransferred,
                         source ? source->position : projectile.previous_position,
                         enemy.position);
+            BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                            6, projectile.cast_id);
             ApplyBurn(enemy, runtime.stored_burn_attack, false,
                       runtime.stored_burn_remaining, projectile.skill, 6);
             ++runtime.transfer_count;
@@ -2131,6 +2215,10 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 arrow->homing_target = target->id.value;
                 arrow->burn = true;
                 ++runtime.transfer_count;
+                EmitVfxLine(DomainSignalKind::BurnTransferred,
+                            enemy.position, target->position);
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                5, projectile.cast_id);
                 EmitUpgradeVisual(SkillKind::MultiShot, 6,
                                   UpgradeVisualStage::Spawn, arrow->position,
                                   Normalize(arrow->velocity), projectile.cast_id,
@@ -2149,6 +2237,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         enemy.mark_expires = tick + mark.mark_duration_ticks;
         EmitVfx(DomainSignalKind::MarkApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
+        BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                         SkillKind::ExplosiveArrow, 6, 3);
         RecordUpgradeEffect(SkillKind::ExplosiveArrow, 6,
                             UpgradeEffectMetric::ExplosionsCreated);
         QueueAreaDamage(enemy.position,
@@ -2349,6 +2439,13 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         {
             EmitVfxLine(DomainSignalKind::RicochetLinked, enemy.position, next->position);
             if (projectile.origin == EffectOrigin::Original &&
+                HasUpgrade(projectile.upgrade_mask, 2) && projectile.hit_count == 1)
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                1, projectile.cast_id);
+            else if (projectile.origin == EffectOrigin::Derived && projectile.source_upgrade == 5)
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                5, projectile.cast_id);
+            if (projectile.origin == EffectOrigin::Original &&
                 HasUpgrade(projectile.upgrade_mask, 7))
             {
                 Tick *longest{};
@@ -2389,6 +2486,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                               projectile.skill, 3);
                 EmitVfxLine(DomainSignalKind::BurnTransferred,
                             enemy.position, next->position);
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                3, projectile.cast_id);
                 projectile.carried_burn_attack = enemy.status.burn->attack_snapshot;
                 projectile.carried_burn_expires = enemy.status.burn->expires;
             }
@@ -2724,7 +2823,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
             QueueDamage(0, projectile.damage, SkillKind::Count,
                        EffectOrigin::Original, projectile.cast_id, 0, false, 0.0f, 0,
                        kNoTelemetrySource, kNoTelemetrySource,
-                       projectile.source_enemy);
+                       projectile.source_enemy, 0, Normalize(projectile.velocity));
             projectile.dead = true;
         }
         if (projectile.dead) continue;
@@ -2759,10 +2858,13 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     if (auto *branch = FireProjectile(
                             projectile.skill, projectile.position, child_direction,
                              split.damage_multiplier, EffectOrigin::Derived, projectile.cast_id, 0,
-                            true, 1); branch && target)
+                            true, 1))
                     {
-                        branch->homing = true;
-                        branch->homing_target = target->id.value;
+                        if (target)
+                        {
+                            branch->homing = true;
+                            branch->homing_target = target->id.value;
+                        }
                         EmitUpgradeVisual(SkillKind::PiercingShot, 2,
                                           UpgradeVisualStage::Spawn, branch->position,
                                           Normalize(branch->velocity), projectile.cast_id,
@@ -2787,6 +2889,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     {
                         arrow->homing = true;
                         arrow->homing_target = target->id.value;
+                        EmitUpgradeVisual(SkillKind::MultiShot, 8,
+                                          UpgradeVisualStage::Spawn, arrow->position,
+                                          Normalize(arrow->velocity), projectile.cast_id,
+                                          arrow->id.value);
                     }
                 }
                 projectile.dead = true;
@@ -2862,6 +2968,17 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     area.radius / 2.0f, 0.12f);
         if (area.kind == AreaKind::EnemyDamage)
         {
+            if (area.ring_outer_radius <= 0.0f && area.source_enemy >= kBossTelemetryBase &&
+                area.source_enemy != kNoTelemetrySource)
+            {
+                DomainSignalGeometry geometry{};
+                geometry.kind = DomainSignalGeometryKind::Circle;
+                geometry.radius = area.radius;
+                geometry.start_tick = geometry.end_tick = tick;
+                geometry.source_id = area.id.value;
+                EmitVfx(DomainSignalKind::BossAreaTicked, area.position, {},
+                        1.0f, 0.12f, 0, 0, geometry);
+            }
             if (area.ring_outer_radius > 0.0f)
             {
                 const auto duration = std::max<Tick>(area.expires - area.active_tick, 1);
@@ -2893,7 +3010,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     QueueDamage(0, area.damage, SkillKind::Count,
                                area.origin, area.cast_id, 0, false, 0.0f, 0,
                                kNoTelemetrySource, kNoTelemetrySource,
-                               area.source_enemy);
+                               area.source_enemy, 0,
+                               Normalize(delta), true, actors->player.position);
                 }
             }
             else if (DistanceSquared(area.position, actors->player.position) <=
@@ -2904,7 +3022,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 QueueDamage(0, area.damage, SkillKind::Count,
                            area.origin, area.cast_id, 0, false, 0.0f, 0,
                            kNoTelemetrySource, kNoTelemetrySource,
-                           area.source_enemy);
+                           area.source_enemy, 0,
+                           Normalize(Subtract(actors->player.position, area.position)));
             }
         }
         else if (area.kind == AreaKind::Trap)
@@ -2959,6 +3078,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     target->mark_expires = tick + mark.mark_duration_ticks;
                     EmitVfx(DomainSignalKind::MarkApplied, target->position,
                             {}, target->boss ? 1.4f : 0.75f, 0.025f);
+                    BindStatusVisual(combat_state->domain_signals.back(), *target,
+                                     SkillKind::Trap, 6, 3);
                     RecordUpgradeEffect(SkillKind::Trap, 6,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     QueueDamage(target->id.value,
@@ -3072,6 +3193,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                          area.skill, area.source_upgrade, area.source_relic});
                     EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
                             enemy.boss ? 1.4f : 0.75f, 0.025f);
+                    BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                                     area.skill, area.source_upgrade, 2);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
                                         UpgradeEffectMetric::SlowApplications);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
@@ -3295,7 +3418,13 @@ void GameSimulation::SimulationWorld::ApplyBleed(EnemyActor &enemy, float attack
                 std::uint8_t source_relic)
 {
     if (stacks != 0 && rules.statuses.bleed.maximum_stacks != 0) BeginStatusEpisode(enemy, 0, tick);
-    if (stacks != 0) EmitVfx(DomainSignalKind::BleedApplied, enemy.position);
+    if (stacks != 0)
+    {
+        EmitVfx(DomainSignalKind::BleedApplied, enemy.position);
+        if (rules.statuses.bleed.maximum_stacks != 0)
+            BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                             source_skill, source_upgrade, 0);
+    }
     RecordUpgradeEffect(source_skill, source_upgrade,
                         UpgradeEffectMetric::BleedStacksApplied, stacks);
     for (std::uint8_t stack = 0; stack < stacks; ++stack)
@@ -3328,6 +3457,8 @@ void GameSimulation::SimulationWorld::ApplyBurn(EnemyActor &enemy, float attack,
     if (rules.statuses.burn.maximum_instances == 0) return;
     BeginStatusEpisode(enemy, 1, tick);
     EmitVfx(DomainSignalKind::BurnApplied, enemy.position);
+    BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                     source_skill, source_upgrade, 1);
     RecordUpgradeEffect(source_skill, source_upgrade,
                         UpgradeEffectMetric::BurnApplications);
     const BurnEffect incoming{attack, tick + duration + 1,
@@ -3437,6 +3568,17 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             telemetry->damage_taken += event.amount;
             EmitVfx(DomainSignalKind::PlayerDamaged, actors->player.position, {},
                     1.0f, 0.1f);
+            if (applied_damage > 0)
+            {
+                DomainSignalGeometry contact{};
+                contact.source_id = event.cast_id;
+                contact.start_tick = contact.end_tick = tick;
+                EmitVfx(DomainSignalKind::PlayerHitDirection, actors->player.position,
+                        event.incoming_direction, 1.0f, 0.1f, 0, 0, contact);
+                if (event.shockwave_contact)
+                    EmitVfx(DomainSignalKind::BossShockwaveContact, event.impact_position,
+                            event.incoming_direction, 1.0f, 0.1f, 0, 0, contact);
+            }
             if (source_enemy < kEnemyArchetypeCount)
             {
                 const auto hit_key = (static_cast<std::uint64_t>(source_enemy) << 56) |
@@ -3640,6 +3782,8 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
                  event.skill, source_upgrade, event.source_relic});
             EmitVfx(DomainSignalKind::SlowApplied, enemy->position, {},
                     enemy->boss ? 1.4f : 0.75f, 0.025f);
+            BindStatusVisual(combat_state->domain_signals.back(), *enemy,
+                             event.skill, source_upgrade, 2);
             RecordUpgradeEffect(event.skill, source_upgrade,
                                 UpgradeEffectMetric::SlowApplications);
             RecordUpgradeEffect(event.skill, source_upgrade,
@@ -3690,11 +3834,26 @@ std::uint64_t GameSimulation::SimulationWorld::Heal(std::int32_t amount,
     return applied;
 }
 
-void GameSimulation::SimulationWorld::CancelChargedShot() noexcept
+void GameSimulation::SimulationWorld::CancelChargedShot(bool released) noexcept
 {
     if (actors->player.charging)
+    {
         EmitSignal(DomainSignalKind::ChargedShotEnded, actors->player.position,
                    static_cast<std::uint8_t>(SkillKind::ChargedShot));
+        if (!released)
+        {
+            DomainSignalGeometry attachment{};
+            attachment.kind = DomainSignalGeometryKind::EntityAttachment;
+            attachment.radius = rules.stats.player_collision_radius;
+            attachment.source_id = kPlayerRenderId;
+            attachment.start_tick = actors->player.charge_start;
+            attachment.end_tick = tick;
+            EmitVfx(DomainSignalKind::ChargedShotCancelled, actors->player.position,
+                    actors->player.aim, 1.0f, 1.05f,
+                    static_cast<std::uint8_t>(SkillKind::ChargedShot),
+                    kPlayerRenderId, attachment);
+        }
+    }
     actors->player.charging = false;
     actors->player.charging_skill = SkillKind::Count;
     actors->player.charging_slot = 0xFF;
@@ -3717,8 +3876,27 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             enemy.boss ? 1.5f : 1.0f, 0.3f,
             static_cast<std::uint8_t>(enemy.kind), enemy.boss ? 0 : enemy.id.value);
     if (enemy.boss)
-        EmitSignal(DomainSignalKind::BossDied, enemy.position,
-                   static_cast<std::uint8_t>(*enemy.boss));
+    {
+        EmitVfx(DomainSignalKind::BossDied, enemy.position, {0.0f, 1.0f}, 1.0f, 0.0f,
+                static_cast<std::uint8_t>(*enemy.boss), enemy.id.value);
+        combat_state->domain_signals.back().status_episode_generation = enemy.phase2_started;
+        assert(combat_state->boss_death_visual_count < combat_state->boss_death_visuals.size());
+        if (combat_state->boss_death_visual_count < combat_state->boss_death_visuals.size())
+        {
+            auto &capture = combat_state->boss_death_visuals[combat_state->boss_death_visual_count++];
+            capture = {};
+            capture.sequence = event_sequence;
+            capture.tick = tick;
+            capture.enemy = EnemyReadView(enemy);
+            const auto action = std::find_if(combat_state->boss_actions.begin(), combat_state->boss_actions.end(),
+                [&](const auto &value) { return value.boss_id == enemy.id.value; });
+            if (action != combat_state->boss_actions.end())
+            {
+                capture.has_action = true;
+                capture.action = BossActionReadView(*action);
+            }
+        }
+    }
     ++telemetry->kills;
     const auto enemy_index = EnemyTelemetryIndex(enemy);
     ++Metrics().enemy_killed[enemy_index];
@@ -4019,12 +4197,14 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
                     return area.kind == AreaKind::EnemyDamage;
                 });
             EmitVfx(DomainSignalKind::BossPhaseChanged, enemy.position,
-                    {}, 1.0f, 1.25f);
+                    {}, 1.0f, 1.25f, 0, enemy.id.value);
+            combat_state->domain_signals.back().status_episode_generation = enemy.phase2_started;
         }
     }
     if (final_dead)
     {
         session_phase = SessionPhase::Victory;
+        EmitSignal(DomainSignalKind::SessionVictory, actors->player.position);
     }
     else if (actors->player.health <= 0)
     {
@@ -4034,6 +4214,7 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
             EmitVfx(DomainSignalKind::PlayerDied, actors->player.position, {},
                     1.0f, 0.2f);
             session_phase = SessionPhase::Defeat;
+            EmitSignal(DomainSignalKind::SessionDefeat, actors->player.position);
         }
     }
 }

@@ -13,6 +13,17 @@ namespace hs::runtime_detail
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(
     const VfxProgramData &program, std::span<const VfxEventInput> inputs, Tick current_tick);
 
+struct VfxOwnedStatusTickMoteCommand
+{
+    Sequence event_sequence{};
+    VfxFlashSpawnInput flash;
+};
+// A real status tick supplies the burst clock; the matching entity episode
+// supplies the persistent recipe and surface anchor.
+[[nodiscard]] std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
+    const VfxProgramData &program, std::span<const VfxEventInput> events,
+    std::span<const VfxPersistentInput> owners);
+
 // Reconstruct the currently visible indexed births for gameplay-owned entity
 // status effects. This is intentionally stateless: callers submit the result
 // directly for the current frame instead of retaining the records as flashes.
@@ -30,6 +41,9 @@ class VfxPersistentSparkState
         std::span<const VfxPersistentInput> owners,
         Tick current_tick);
     void Clear() noexcept { cursors_.clear(); }
+    [[nodiscard]] std::uint64_t Rebind(const VfxProgramData &previous,
+                                     const VfxProgramData &next) noexcept;
+    void Swap(VfxPersistentSparkState &prepared) noexcept { cursors_.swap(prepared.cursors_); }
 
   private:
     struct Cursor

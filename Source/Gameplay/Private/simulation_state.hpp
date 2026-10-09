@@ -29,6 +29,10 @@ struct CombatState
     std::vector<DomainSignal> domain_signals;
     // Presentation metadata only; intentionally excluded from the checksum.
     std::vector<VisualLinkView> visual_links;
+    // Fixed backing avoids allocation/order changes in the death phase. No
+    // visual TTL enters Gameplay; Runtime uses the cooked death source clock.
+    std::array<BossDeathVisualView, kCosmeticOwnerCapacity> boss_death_visuals{};
+    std::size_t boss_death_visual_count{};
     EnemySpatialGrid enemy_grid;
     std::vector<std::size_t> collision_candidates;
 };

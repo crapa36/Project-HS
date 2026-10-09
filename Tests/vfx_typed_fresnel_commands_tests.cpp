@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_fresnel_commands.hpp"
+#include "test_generation_paths.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -273,8 +274,7 @@ void PreservesPlayerInvulnerableOwnerAndCookedShell()
 
 void CookedBossShellsConvertWhenAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -317,8 +317,7 @@ void CookedBossShellsConvertWhenAvailable()
 
 void CookedPlayerShellConvertsWhenAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};

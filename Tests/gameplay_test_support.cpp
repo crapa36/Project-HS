@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include "test_generation_paths.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,15 +28,13 @@ const TestContent &DefaultContent()
     static const auto data = [] {
         TestContent loaded;
         Check(hs::LoadSimulationRules(
-                  std::filesystem::current_path() / "Cooked" /
-                      "simulation_rules.hsbin",
+                  test_generation::ProductPath("game-data/simulation-rules"),
                   loaded.simulation_rules).Succeeded(),
-              "load cooked simulation rules");
+              "load selected simulation rules");
         Check(hs::LoadPresentationCatalog(
-                  std::filesystem::current_path() / "Cooked" /
-                      "presentation_catalog.hsbin",
+                  test_generation::ProductPath("game-data/presentation-catalog"),
                   loaded.presentation).Succeeded(),
-              "load cooked presentation catalog");
+              "load selected presentation catalog");
         return loaded;
     }();
     return data;

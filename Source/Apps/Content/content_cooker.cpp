@@ -3,6 +3,7 @@
 #endif
 
 #include "content_cooker.hpp"
+#include "../CharacterContent/character_sources.hpp"
 #include "environment_texture_cooker.hpp"
 #include "environment_mesh_cooker.hpp"
 #include "vfx_mesh_cooker.hpp"
@@ -10,7 +11,9 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -19,31 +22,113 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <vector>
 
 namespace hs::content
 {
 
-void ClearCookedAudioDirectory(const std::filesystem::path &output)
+std::unordered_map<std::string, std::filesystem::path> AudioProducts(
+    const std::filesystem::path &build_root)
 {
-    const auto audio_output = output / "Audio";
-    if (audio_output.filename() != "Audio" || audio_output.parent_path() != output ||
-        output.empty())
+    std::ifstream stream(build_root / "Actions/audio/result.json", std::ios::binary);
+    if (!stream)
+        throw std::runtime_error("audio ActionResult is missing; build hs_audio_products first");
+    const auto result = Json::parse(stream);
+    if (result.at("schema_version") != 1 || result.at("action_id") != "audio")
+        throw std::runtime_error("audio ActionResult schema/action mismatch");
+    const auto product_set_id = result.at("product_set_id").get<std::string>();
+    if (product_set_id.size() != 64 ||
+        !std::ranges::all_of(product_set_id, [](const unsigned char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        }))
+        throw std::runtime_error("audio ActionResult has an invalid ProductSetId");
+
+    std::unordered_map<std::string, std::filesystem::path> products;
+    for (const auto &product : result.at("products"))
     {
-        throw std::runtime_error("refusing to clean an unsafe Cooked/Audio path");
+        const auto logical_id = product.at("logical_id").get<std::string>();
+        if (!logical_id.starts_with("audio/"))
+            throw std::runtime_error("audio ActionResult contains a foreign product");
+        const auto name = logical_id.substr(6);
+        if (name.empty() || name.find_first_of("/\\:") != std::string::npos ||
+            name == "." || name == "..")
+            throw std::runtime_error("audio ActionResult contains an unsafe product name");
+        const auto expected_locator = (std::filesystem::path("Products") / "audio" /
+                                       product_set_id / name).generic_string();
+        if (product.at("locator") != expected_locator)
+            throw std::runtime_error("audio ActionResult product locator mismatch");
+        const auto path = build_root / expected_locator;
+        if (!std::filesystem::is_regular_file(path) ||
+            std::filesystem::is_symlink(std::filesystem::symlink_status(path)) ||
+            std::filesystem::file_size(path) != product.at("size").get<std::uint64_t>() ||
+            !products.emplace(name, path).second)
+            throw std::runtime_error("audio ActionResult product missing, corrupt, or duplicated: " + name);
+    }
+    if (products.size() != 380 || !products.contains("audio_cues.json"))
+        throw std::runtime_error("audio ActionResult product set is incomplete");
+    return products;
+}
+
+std::filesystem::path NormalizeForComparison(const std::filesystem::path &path)
+{
+    std::error_code filesystem_error;
+    const auto normalized = std::filesystem::weakly_canonical(path, filesystem_error);
+    if (!filesystem_error)
+        return normalized;
+    filesystem_error.clear();
+    const auto absolute = std::filesystem::absolute(path, filesystem_error);
+    if (filesystem_error)
+        throw std::runtime_error(path.string() + ": cannot normalize output path");
+    return absolute.lexically_normal();
+}
+
+std::wstring FoldPath(const std::filesystem::path &path)
+{
+    auto text = path.lexically_normal().generic_wstring();
+    std::ranges::transform(text, text.begin(),
+                           [](const wchar_t character) {
+                               return std::towlower(character);
+                           });
+    return text;
+}
+
+bool IsPathWithin(const std::filesystem::path &path, const std::filesystem::path &root)
+{
+    const auto path_text = FoldPath(path);
+    const auto root_text = FoldPath(root);
+    return path_text == root_text ||
+           (path_text.size() > root_text.size() && path_text.starts_with(root_text) &&
+            path_text[root_text.size()] == L'/');
+}
+
+void ValidateLegacyOracleOutput(const std::filesystem::path &output)
+{
+    if (output.empty() || !output.is_absolute())
+    {
+        throw std::runtime_error("legacy oracle output root must be an absolute path");
     }
 
-    std::error_code filesystem_error;
-    std::filesystem::create_directories(audio_output, filesystem_error);
-    if (filesystem_error)
-        throw std::runtime_error("Cooked/Audio: " + filesystem_error.message());
-    for (const auto &entry : std::filesystem::directory_iterator(audio_output, filesystem_error))
+    const auto normalized = NormalizeForComparison(output);
+    const auto source_root = NormalizeForComparison(paths::SourceRoot());
+    const auto build_root = NormalizeForComparison(paths::BuildRoot());
+    const std::array<std::filesystem::path, 3> source_roots{
+        source_root / "ContentSource", source_root / "Schemas", source_root / "Content/Shaders"};
+    for (const auto &root : source_roots)
     {
-        if (filesystem_error)
-            throw std::runtime_error("Cooked/Audio: " + filesystem_error.message());
-        std::filesystem::remove_all(entry.path(), filesystem_error);
-        if (filesystem_error)
-            throw std::runtime_error("Cooked/Audio cleanup: " + filesystem_error.message());
+        if (IsPathWithin(normalized, root))
+            throw std::runtime_error("legacy oracle output root is under an authoritative source root: " +
+                                     output.string());
+    }
+
+    const std::array<std::filesystem::path, 5> reserved_build_roots{
+        build_root / "Actions", build_root / "Products", build_root / "Generations",
+        build_root / "GenerationState", build_root / "Cooked"};
+    for (const auto &root : reserved_build_roots)
+    {
+        if (IsPathWithin(normalized, root))
+            throw std::runtime_error("legacy oracle output root is under a reserved build root: " +
+                                     output.string());
     }
 }
 
@@ -88,7 +173,20 @@ bool WriteCookedTable(const std::filesystem::path &path, const T &data,
                       std::string &error_message)
 {
     static_assert(std::is_trivially_copyable_v<T>);
-    const auto payload = std::as_bytes(std::span(&data, 1));
+    std::vector<std::byte> canonical;
+    std::span<const std::byte> payload;
+    if constexpr (std::is_same_v<T, hs::SimulationRules>)
+    {
+        canonical = hs::CanonicalSimulationRulesBytes(data);
+        if (canonical.size() != sizeof(data))
+        {
+            error_message = "canonical simulation payload size differs from cooked ABI";
+            return false;
+        }
+        payload = std::span<const std::byte>(canonical.data(), canonical.size());
+    }
+    else
+        payload = std::as_bytes(std::span(&data, 1));
     hs::CookedHeader header;
     header.schema_hash = schema_hash;
     header.source_hash = source_hash;
@@ -102,11 +200,15 @@ bool WriteCookedTable(const std::filesystem::path &path, const T &data,
     return AtomicWrite(path, file, error_message);
 }
 
-int RunContent(std::string_view mode)
+int RunContent(std::string_view mode, const std::filesystem::path &output_root)
 {
-        const auto environment_source = std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path() / "Textures/Environment";
+        if (mode != "--validate-only" && mode != "--legacy-oracle")
+            throw std::runtime_error("unsupported content mode");
+        if (mode == "--legacy-oracle")
+            ValidateLegacyOracleOutput(output_root);
+        const auto environment_source = std::filesystem::path(paths::GameData()).parent_path() / "Textures/Environment";
         const auto environment_mesh_source = environment_source.parent_path().parent_path() / "Models/Environment/environment_meshes.json";
-        const auto vfx_mesh_source=std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path()/"VFX/Meshes/vfx_mesh_atlas.json";
+        const auto vfx_mesh_source=std::filesystem::path(paths::GameData()).parent_path()/"VFX/Meshes/vfx_mesh_atlas.json";
         ValidateVfxMeshAtlas(vfx_mesh_source);
         ValidateEnvironmentTextures(environment_source);
         ValidateEnvironmentMeshes(environment_mesh_source);
@@ -117,11 +219,12 @@ int RunContent(std::string_view mode)
         if (mode == "--validate-only")
         {
             std::cout << "content.validated documents=" << kDocumentNames.size()
-                      << " source_hash=" << source_hash << '\n';
+                      << " source_hash=" << source_hash
+                      << " gameplay_source_hash=" << gameplay_hash << '\n';
             return 0;
         }
 
-        const std::filesystem::path output = HS_COOKED_DIRECTORY;
+        const std::filesystem::path output = output_root;
         std::error_code filesystem_error;
         std::filesystem::create_directories(output, filesystem_error);
         if (filesystem_error)
@@ -130,28 +233,32 @@ int RunContent(std::string_view mode)
         }
 
         CookVfxMeshAtlas(vfx_mesh_source, output/"vfx_mesh_atlas.hsbin");
-        CookVfxRuntimeContent(std::filesystem::path(HS_GAME_DATA_DIRECTORY).parent_path().parent_path(),output);
+        CookVfxRuntimeContent(std::filesystem::path(paths::GameData()).parent_path().parent_path(),output);
         CookEnvironmentTextures(environment_source, output);
         CookEnvironmentMeshes(environment_mesh_source, output);
+        const auto audio_products = AudioProducts(paths::BuildRoot());
         const auto audio_output = output / "Audio";
-        ClearCookedAudioDirectory(output);
-        const auto audio_source = std::filesystem::path(HS_AUDIO_DIRECTORY);
+        std::filesystem::create_directories(audio_output, filesystem_error);
+        if (filesystem_error)
+            throw std::runtime_error(audio_output.string() + ": " + filesystem_error.message());
         const auto &audio_document = sources.documents.at("audio_cues");
-        const auto audio_catalog = sources.inventory.document_text[0];
-        {
-            std::ofstream stream(audio_output / "audio_cues.json", std::ios::binary | std::ios::trunc);
-            if (!stream.write(audio_catalog.data(), static_cast<std::streamsize>(audio_catalog.size())))
-                throw std::runtime_error("Cooked/Audio/audio_cues.json: write failed");
-        }
+        std::filesystem::copy_file(audio_products.at("audio_cues.json"),
+                                   audio_output / "audio_cues.json",
+                                   std::filesystem::copy_options::overwrite_existing,
+                                   filesystem_error);
+        if (filesystem_error)
+            throw std::runtime_error((audio_output / "audio_cues.json").string() + ": " +
+                                     filesystem_error.message());
         for (const auto &entry : audio_document.at("entries"))
             for (const auto &file : entry.at("files"))
             {
                 const auto name = file.get<std::string>();
-                std::filesystem::copy_file(audio_source / name, audio_output / name,
+                std::filesystem::copy_file(audio_products.at(name), audio_output / name,
                                            std::filesystem::copy_options::overwrite_existing,
                                            filesystem_error);
                 if (filesystem_error)
-                    throw std::runtime_error("Cooked/Audio/" + name + ": " + filesystem_error.message());
+                    throw std::runtime_error((audio_output / name).string() + ": " +
+                                             filesystem_error.message());
             }
 
         std::string error_message;
@@ -207,72 +314,7 @@ int RunContent(std::string_view mode)
             throw std::runtime_error("presentation_catalog.hsbin self-check mismatch");
         }
 
-        const auto character_sources = std::array<CharacterAssetSource, 8>{
-            CharacterAssetSource{
-                HS_CHARACTER_MODEL,
-                {std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "Idle.fbx",
-                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "RunForward.fbx",
-                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DrawArrow.fbx",
-                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "AimRecoil.fbx",
-                 std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DeathBackward.fbx"},
-                "archer", "Archer", false},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "SlimeFamily/Melee/SlimeMelee.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Melee/Idle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Melee/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Melee/Draw.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Melee/Recoil.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Melee/Death.fbx"},
-                "enemy_melee", "SlimeMelee", false, false, true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "SlimeFamily/Ranged/SlimeRanged.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Idle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Draw.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Recoil.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Death.fbx"},
-                "enemy_ranged", "SlimeRanged", false, false, true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "SlimeFamily/Suicide/SlimeSuicide.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Suicide/Idle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Suicide/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Suicide/Draw.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Suicide/Recoil.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Suicide/Death.fbx"},
-                "enemy_suicide", "SlimeSuicide", false, false, true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "SlimeFamily/Projectile/SlimeGelProjectile.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Idle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Draw.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Recoil.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "SlimeFamily/Ranged/Death.fbx"},
-                "enemy_gel_projectile", "SlimeGelProjectile", false, false, true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "TurtleShell_SK.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/IdleBattle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Attack01.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Attack02.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "5m/Die.fbx"},
-                "boss_5m", "Boss5mTurtleShell", true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "ChestMonster_SK.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/IdleBattle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Attack01.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Attack02.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "10m/Die.fbx"},
-                "boss_10m", "Boss10mChestMonster", true},
-            CharacterAssetSource{
-                std::filesystem::path(HS_MONSTER_MODEL_DIRECTORY) / "Beholder_SK.fbx",
-                {std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/IdleBattle.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Run.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Attack01.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Attack03.fbx",
-                 std::filesystem::path(HS_MONSTER_ANIMATION_DIRECTORY) / "final/Die.fbx"},
-                 "boss_final", "BossFinalBeholder", true},
-        };
+        const auto character_sources = CharacterAssetSources(paths::SourceRoot());
         std::size_t archer_material_count{};
         for (const auto &source : character_sources)
         {
@@ -295,7 +337,7 @@ int RunContent(std::string_view mode)
         };
         for (const auto shader : shaders)
         {
-            const auto source = std::filesystem::path(HS_SHADER_DIRECTORY) / shader;
+            const auto source = std::filesystem::path(paths::Shaders()) / shader;
             const auto destination = output / shader;
             std::filesystem::copy_file(source, destination,
                                        std::filesystem::copy_options::overwrite_existing,

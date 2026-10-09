@@ -42,6 +42,13 @@ std::uint32_t SpawnSeed(Sequence sequence, std::uint32_t emitter) noexcept
 
 Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
 {
+    return Load(path, path.parent_path() / "vfx_program.hsbin", catalog);
+}
+
+Result VfxCatalog::Load(const std::filesystem::path &path,
+                        const std::filesystem::path &program_path,
+                        VfxCatalog &catalog)
+{
     std::ifstream stream(path, std::ios::binary | std::ios::ate);
     if (!stream)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog is missing.");
@@ -122,7 +129,7 @@ Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle sprite table is invalid.");
         previous = sprite.sprite_id;
     }
-    std::ifstream program_stream(path.parent_path() / "vfx_program.hsbin", std::ios::binary | std::ios::ate);
+    std::ifstream program_stream(program_path, std::ios::binary | std::ios::ate);
     if (!program_stream)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program is missing.");
     const auto program_size = program_stream.tellg();
@@ -192,6 +199,18 @@ const CookedVfxDefinition *VfxCatalog::FindEffect(EffectId id) const noexcept
     return found != definitions_.end() && found->effect_id == id.value ? &*found : nullptr;
 }
 
+void VfxCatalog::Swap(VfxCatalog &prepared) noexcept
+{
+    definitions_.swap(prepared.definitions_);
+    emitters_.swap(prepared.emitters_);
+    sprites_.swap(prepared.sprites_);
+    authored_mesh_indices_.swap(prepared.authored_mesh_indices_);
+    using std::swap;
+    swap(program_, prepared.program_);
+    swap(sprite_count_, prepared.sprite_count_);
+    swap(payload_hash_, prepared.payload_hash_);
+}
+
 const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
 {
     const auto found = std::lower_bound(sprites_.begin(), sprites_.end(), id.value,
@@ -201,7 +220,7 @@ const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
     return found != sprites_.end() && found->sprite_id == id.value ? &*found : nullptr;
 }
 
-Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t quality_percent,
+Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_fraction,
                           std::vector<ParticleSpawnCommand> &particles,
                           std::vector<VfxLineSpawnCommand> &lines) const
 {
@@ -218,6 +237,15 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
             return Result::Success();
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX effect ID is missing.");
     }
+    if (!std::isfinite(decorative_fraction) || decorative_fraction < 0 || decorative_fraction > 1)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Decorative particle fraction is invalid.");
+    const auto authored = std::ranges::find(program_.effect_lookup, event.asset.value, &VfxEffectLookupRecord::effect_id);
+    const auto *policy = authored != program_.effect_lookup.end() && authored->handle && authored->handle <= program_.effects.size()
+        ? &program_.effects[authored->handle - 1] : nullptr;
+    const bool decorative = policy && !policy->must_match_logic && std::ranges::none_of(
+        std::span(program_.sources).subspan(policy->sources.first, policy->sources.count), [](const auto &source) {
+            return source.authoritative || source.type == VfxSourceType::ProjectileFollow;
+        });
     const auto parameters = DecodeVfxParameters(event.parameters);
     const auto direction_length = std::hypot(parameters.direction.x, parameters.direction.z);
     if (!std::isfinite(parameters.scale) || parameters.scale <= 0.0f || direction_length <= 0.0001f)
@@ -290,7 +318,8 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, std::uint32_t qua
         command.stretch = emitter.stretch;
         command.uv_repeat = 1.0f;
         command.scroll_speed = 0.0f;
-        command.count = quality_percent <= 50 ? (emitter.count + 1) / 2 : emitter.count;
+        command.count = decorative && emitter.renderer != VfxRenderer::Ground
+            ? static_cast<std::uint32_t>(std::ceil(double(emitter.count) * decorative_fraction)) : emitter.count;
         command.seed = SpawnSeed(event.sequence, index);
         particles.push_back(command);
     }

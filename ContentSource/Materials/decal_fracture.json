@@ -1,0 +1,211 @@
+{
+  "id": "decal_fracture",
+  "version": 7,
+  "domain": "decal",
+  "shading_model": "metallic_roughness",
+  "parameters": [
+    {
+      "id": "target_roughness",
+      "type": "float",
+      "default": 0.9
+    },
+    {
+      "id": "roughness_blend",
+      "type": "float",
+      "default": 0.0
+    }
+  ],
+  "textures": [
+    {
+      "id": "decal_texture",
+      "product_id": "render/texture/vfx_fracture_decal_array.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "decal_structure"
+    }
+  ],
+  "samplers": [
+    {
+      "id": "decal_sampler",
+      "profile": "linear_clamp"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "uv",
+      "op": "context",
+      "type": "float2",
+      "name": "uv"
+    },
+    {
+      "id": "d_uv_dx",
+      "op": "context",
+      "type": "float2",
+      "name": "d_uv_dx"
+    },
+    {
+      "id": "d_uv_dy",
+      "op": "context",
+      "type": "float2",
+      "name": "d_uv_dy"
+    },
+    {
+      "id": "layer",
+      "op": "context",
+      "type": "uint",
+      "name": "layer"
+    },
+    {
+      "id": "sampled_base_color",
+      "op": "context",
+      "type": "float3",
+      "name": "sampled_base_color"
+    },
+    {
+      "id": "normal",
+      "op": "context",
+      "type": "float3",
+      "name": "normal"
+    },
+    {
+      "id": "sampled_roughness",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_roughness"
+    },
+    {
+      "id": "decal_tint_hdr",
+      "op": "context",
+      "type": "float4",
+      "name": "decal_tint_hdr"
+    },
+    {
+      "id": "decal_projector",
+      "op": "context",
+      "type": "float4",
+      "name": "decal_projector"
+    },
+    {
+      "id": "decal_shape",
+      "op": "context",
+      "type": "float3",
+      "name": "decal_shape"
+    },
+    {
+      "id": "seed",
+      "op": "context",
+      "type": "uint",
+      "name": "seed"
+    },
+    {
+      "id": "decal_texture",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "decal_texture"
+    },
+    {
+      "id": "decal_sampler",
+      "op": "sampler_ref",
+      "type": "sampler_ref",
+      "declaration": "decal_sampler"
+    },
+    {
+      "id": "target_roughness",
+      "op": "parameter",
+      "type": "float",
+      "name": "target_roughness"
+    },
+    {
+      "id": "roughness_blend",
+      "op": "parameter",
+      "type": "float",
+      "name": "roughness_blend"
+    },
+    {
+      "id": "decal_surface",
+      "op": "decal_fracture",
+      "type": "surface_closure",
+      "inputs": [
+        {
+          "node": "decal_texture",
+          "type": "texture_ref"
+        },
+        {
+          "node": "decal_sampler",
+          "type": "sampler_ref"
+        },
+        {
+          "node": "uv",
+          "type": "float2"
+        },
+        {
+          "node": "layer",
+          "type": "uint"
+        },
+        {
+          "node": "d_uv_dx",
+          "type": "float2"
+        },
+        {
+          "node": "d_uv_dy",
+          "type": "float2"
+        },
+        {
+          "node": "sampled_base_color",
+          "type": "float3"
+        },
+        {
+          "node": "normal",
+          "type": "float3"
+        },
+        {
+          "node": "sampled_roughness",
+          "type": "float"
+        },
+        {
+          "node": "decal_tint_hdr",
+          "type": "float4"
+        },
+        {
+          "node": "decal_projector",
+          "type": "float4"
+        },
+        {
+          "node": "decal_shape",
+          "type": "float3"
+        },
+        {
+          "node": "seed",
+          "type": "uint"
+        },
+        {
+          "node": "target_roughness",
+          "type": "float"
+        },
+        {
+          "node": "roughness_blend",
+          "type": "float"
+        }
+      ]
+    }
+  ],
+  "outputs": {
+    "surface": "typed_closure",
+    "closure": {
+      "node": "decal_surface",
+      "type": "surface_closure"
+    },
+    "normal_space": "world"
+  },
+  "render_flags": {
+    "alpha_mode": "mask",
+    "rt_policy": "raster_only",
+    "receivers": {
+      "models": [
+        "environment"
+      ],
+      "required_surface_flags": 1,
+      "forbidden_surface_flags": 1792,
+      "normal_filter": "ground_facing"
+    }
+  }
+}

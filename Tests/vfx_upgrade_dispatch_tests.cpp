@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -114,6 +115,7 @@ hs::VfxProgramData UpgradeSlowProgram()
         hs::VfxEffectRecord effect;
         effect.handle=static_cast<std::uint32_t>(program.effects.size()+1);
         effect.input_mode=1;
+        effect.timing_kind=1;
         effect.payload_kind=circle;
         program.effects.push_back(effect);
         program.effect_lookup.push_back({id,effect.handle});
@@ -121,8 +123,8 @@ hs::VfxProgramData UpgradeSlowProgram()
     add_effect(baseline); add_effect(trap); add_effect(arrow_rain);
     const auto trap_skill=hs::MakeAssetId("skill.trap").value;
     const auto arrow_rain_skill=hs::MakeAssetId("skill.arrow_rain").value;
-    program.upgrade_bindings={{trap_skill,2,{0,1}},{arrow_rain_skill,8,{1,1}}};
-    program.upgrade_sequences={2,3};
+    program.upgrade_bindings={{trap_skill,2,{0,2}},{arrow_rain_skill,8,{2,2}}};
+    program.upgrade_sequences={2,1,3,1};
     return program;
 }
 hs::VfxProgramData ArrowRainPullProgram()
@@ -620,6 +622,76 @@ void SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding()
           "retreat landing shockwave did not dispatch its cooked circle effect");
     Check(simulation.Shutdown().Succeeded(),"retreat landing shockwave shutdown");
 }
+void RealSecondRetreatRetainsCapturedGeometry()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0x5EC0DA5u},QuietRules()).Succeeded(),"second retreat initialize");
+    Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot)}).Succeeded() &&
+          simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantUpgrade,
+          static_cast<std::uint64_t>(hs::SkillKind::RetreatShot),7}).Succeeded(),
+          "grant second retreat upgrade");
+    hs::InputFrame input;
+    input.held.aim_world={20,0,0};
+    const std::array edge{hs::ActionEdge{1,hs::GameAction::SkillQ,hs::EdgeKind::Pressed}};
+    hs::DomainSignal movement{};
+    bool found=false;
+    for(std::uint32_t step=0;step<180&&!found;++step)
+    {
+        const auto before=simulation.GetObservation().player_position;
+        input.target_tick=simulation.GetObservation().tick+1;
+        input.ordered_edges=step==0?std::span<const hs::ActionEdge>(edge):std::span<const hs::ActionEdge>{};
+        (void)simulation.TickFixed(input,std::chrono::nanoseconds{16'666'667});
+        for(const auto &signal:simulation.PendingDomainSignals())
+            if(signal.kind==hs::DomainSignalKind::UpgradeVisual &&
+               signal.upgrade_skill==static_cast<std::uint8_t>(hs::SkillKind::RetreatShot) &&
+               signal.upgrade_index==7 && signal.upgrade_stage==hs::UpgradeVisualStage::Spawn)
+            {
+                const auto after=simulation.GetObservation().player_position;
+                Check(signal.geometry.kind==hs::DomainSignalGeometryKind::Line &&
+                      signal.position.x==before.x && signal.position.z==before.y &&
+                      signal.geometry.end_position.x==after.x && signal.geometry.end_position.z==after.y &&
+                      signal.geometry.width==simulation.Rules().stats.player_collision_radius*2.0f,
+                      "second retreat did not capture actual successful movement endpoints and width");
+                movement=signal;found=true;
+            }
+        simulation.ClearDomainSignals();
+    }
+    Check(found,"real second retreat emitted no movement owner");
+    auto program=Program();
+    const auto first=static_cast<std::uint32_t>(program.upgrade_sequences.size());
+    for(const auto &[name,payload,seconds]:std::array{
+            std::tuple{"particle.upgrade.retreat.second_dash","LineAreaPayload",0.5f},
+            std::tuple{"particle.upgrade.retreat.afterimage","PresentationContextPayload",0.55f}})
+    {
+        hs::VfxEffectRecord effect;
+        effect.handle=static_cast<std::uint32_t>(program.effects.size()+1);
+        effect.input_mode=1;effect.payload_kind=Hash32(payload);effect.seconds=seconds;
+        program.effects.push_back(effect);
+        program.effect_lookup.push_back({hs::MakeAssetId(name).value,effect.handle});
+        program.upgrade_sequences.push_back(effect.handle);
+    }
+    program.upgrade_bindings.push_back({hs::MakeAssetId("skill.retreat_shot").value,8,{first,2}});
+    std::array<hs::PresentationEvent,2> projected{};
+    const auto count=hs::ProjectDomainSignal(movement,projected);
+    std::vector<hs::PresentationEvent> dispatched;
+    Check(count==1&&hs::runtime_detail::DispatchVfxUpgradeEvents(
+              program,std::span(projected).first(count),dispatched).Succeeded()&&dispatched.size()==2,
+          "real second retreat did not dispatch its two exact bound persistent recipes");
+    hs::runtime_detail::VfxUpgradeMovementState state;
+    const auto start=state.Emit(program,dispatched,movement.tick);
+    const auto retained=state.Emit(program,dispatched,movement.tick+1);
+    Check(start.size()==2&&retained.size()==2&&start[0].stable_id==retained[0].stable_id&&
+          start[0].stable_id!=start[1].stable_id,
+          "retained second retreat duplicated its capture or collapsed recipe identities");
+    const auto &line=std::get<hs::VfxLinePayload>(retained[0].payload);
+    Check(line.start.x==movement.position.x&&line.end.x==movement.geometry.end_position.x&&
+          line.width==movement.geometry.width&&retained[0].elapsed_seconds==1.0f/60.0f&&
+          state.Emit(program,{},movement.tick+30).size()==1&&
+          state.Emit(program,{},movement.tick+33).empty(),
+          "captured retreat line moved after activation or survived its authored fade");
+    Check(simulation.Shutdown().Succeeded(),"second retreat shutdown");
+}
 void SimulationEmitsCooldownProcForRealRefund()
 {
     hs::GameSimulation simulation;
@@ -894,15 +966,17 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
               "slow-area cooked alias fixture changed its authored effect");
         const auto adapted=hs::runtime_detail::BuildVfxTypedFrameInputs(
             program,{},std::array{owner},{},snapshot.View().header.tick);
-        Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==1,
-              "slow-area owner did not adapt to one typed persistent input");
+        Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==2,
+              "slow-area owner did not submit its alias and bound base recipe");
         Check(adapted.persistent.front().effect_handle==expected_effect &&
               adapted.persistent.front().stable_id==owner.stable_id &&
               std::count_if(adapted.persistent.begin(),adapted.persistent.end(),
                   [&](const auto &input_value) {
                       return input_value.stable_id==owner.stable_id;
-                  })==1,
-              "slow-area owner selected a duplicate or baseline typed effect");
+                  })==1 &&
+              adapted.persistent[1].effect_handle==1 &&
+              adapted.persistent[1].stable_id!=adapted.persistent[0].stable_id,
+              "slow-area alias and base collapsed their distinct typed identities");
         const auto &circle=std::get<hs::VfxCirclePayload>(adapted.persistent.front().payload);
         Check(std::abs(circle.center.x-owner.position.x)<0.0001f &&
               std::abs(circle.center.z-owner.position.z)<0.0001f &&
@@ -1078,7 +1152,8 @@ void FourNewBindingsRequireExactStageAndCookedMembership()
             event.geometry.radius=2.5f;
             event.geometry.source_id=event.upgrade_owner_id;
         }
-        else if(entry.skill==hs::SkillKind::Trap && entry.index != 3)
+        else if(entry.skill==hs::SkillKind::Trap &&
+                (entry.index==2 || entry.index==5))
         {
             event.geometry.kind=hs::PresentationGeometryKind::Circle;
             event.geometry.radius=2.5f;
@@ -1120,7 +1195,8 @@ void FourNewBindingsRequireExactStageAndCookedMembership()
         program=Program();
         if(entry.skill==hs::SkillKind::BasicAttack) event.geometry.range=0.0f;
         else if(entry.skill==hs::SkillKind::ExplosiveArrow) event.geometry.radius=0.0f;
-        else if(entry.skill==hs::SkillKind::Trap && entry.index != 3) event.geometry.radius=0.0f;
+        else if(entry.skill==hs::SkillKind::Trap &&
+                (entry.index==2 || entry.index==5)) event.geometry.radius=0.0f;
         else continue;
         Check(!hs::runtime_detail::DispatchVfxUpgradeEvents(
                   program,std::span(&event,1),output).Succeeded(),
@@ -1458,6 +1534,6 @@ void RealFirePulseAndTrapMarkBindings()
 }
 int main()
 {
-    try {SimulationProjectionDispatchUsesZeroBasedUpgradeIndex();SimulationChargedShotPulseProjectsAndDispatches();SimulationEmitsSecondaryFanAfterSuccessfulVolley();ScheduledFanIngressUsesFrozenCastDirection();SimulationEmitsOuterArrowConeAfterSuccessfulProjectile();SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding();SimulationEmitsCooldownProcForRealRefund();StagesAreIndependent();InvalidContractsFailWithoutPartialOutput();ExplicitAdditionalMappings();CooldownProcMappings();RealSlowAreaOwnersSelectAuthoredAliases();RealArrowRainPullProjectsAndDispatches();FourNewBindingsRequireExactStageAndCookedMembership();RealEmpoweredBasicAndRollTrapBindings();RealTrapRearmPullAndBleedBindings();RealFirePulseAndTrapMarkBindings();std::cout<<"VFX upgrade dispatch passed\n";return 0;}
+    try {SimulationProjectionDispatchUsesZeroBasedUpgradeIndex();SimulationChargedShotPulseProjectsAndDispatches();SimulationEmitsSecondaryFanAfterSuccessfulVolley();ScheduledFanIngressUsesFrozenCastDirection();SimulationEmitsOuterArrowConeAfterSuccessfulProjectile();SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding();RealSecondRetreatRetainsCapturedGeometry();SimulationEmitsCooldownProcForRealRefund();StagesAreIndependent();InvalidContractsFailWithoutPartialOutput();ExplicitAdditionalMappings();CooldownProcMappings();RealSlowAreaOwnersSelectAuthoredAliases();RealArrowRainPullProjectsAndDispatches();FourNewBindingsRequireExactStageAndCookedMembership();RealEmpoweredBasicAndRollTrapBindings();RealTrapRearmPullAndBleedBindings();RealFirePulseAndTrapMarkBindings();std::cout<<"VFX upgrade dispatch passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

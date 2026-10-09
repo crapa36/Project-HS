@@ -1,5 +1,7 @@
 #include <hs/runtime/audio_engine.hpp>
+#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/process_info.hpp>
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -270,6 +272,7 @@ struct AudioCue
 
 struct AudioEngine::Impl
 {
+    SelectedGeneration selected_generation;
     struct ActiveVoice
     {
         IXAudio2SourceVoice *voice{};
@@ -404,17 +407,56 @@ AudioEngine::~AudioEngine()
 
 Result AudioEngine::Initialize(const SettingsData &settings)
 {
-    return Initialize(settings, std::filesystem::path{"Cooked/Audio"});
+    SelectedGeneration generation;
+    if (auto loaded = LoadSelectedGeneration(
+            CurrentExecutableDirectory() / "GenerationState/runtime-full.json",
+            generation); !loaded)
+        return loaded;
+    const auto initialized = Initialize(settings, generation.product_paths);
+    if (initialized)
+        impl_->selected_generation = std::move(generation);
+    return initialized;
 }
 
 Result AudioEngine::Initialize(const SettingsData &settings,
                                const std::filesystem::path &audio_directory)
 {
+    return InitializeResolved(settings, [&](std::string_view logical_id,
+                                            std::filesystem::path &path) {
+        path = audio_directory / std::string(logical_id.substr(6));
+        return Result::Success();
+    });
+}
+
+Result AudioEngine::Initialize(
+    const SettingsData &settings,
+    const std::unordered_map<std::string, std::filesystem::path> &product_paths)
+{
+    return InitializeResolved(settings, [&](std::string_view logical_id,
+                                            std::filesystem::path &path) {
+        const auto found = product_paths.find(std::string(logical_id));
+        if (found == product_paths.end())
+            return Result::Failure(ErrorCode::TaskFailed, "audio",
+                                   "audio product missing: " + std::string(logical_id));
+        if (!found->second.is_absolute())
+            return Result::Failure(ErrorCode::InvalidArgument, "audio",
+                                   "audio product path is not absolute: " + std::string(logical_id));
+        path = found->second;
+        return Result::Success();
+    });
+}
+
+Result AudioEngine::InitializeResolved(const SettingsData &settings,
+                                       const ResolveAudioPath &resolve_path)
+{
     Shutdown();
 
     try
     {
-        std::ifstream catalog_file(audio_directory / "audio_cues.json");
+        std::filesystem::path catalog_path;
+        if (auto resolved = resolve_path("audio/audio_cues.json", catalog_path); !resolved)
+            return resolved;
+        std::ifstream catalog_file(catalog_path);
         if (!catalog_file)
             return Result::Failure(ErrorCode::TaskFailed, "audio", "audio catalog open failed");
         const auto catalog = Json::parse(catalog_file);
@@ -461,8 +503,11 @@ Result AudioEngine::Initialize(const SettingsData &settings,
                     return Result::Failure(ErrorCode::InvalidArgument, "audio", "unsafe audio filename");
                 if (!file_names.insert(name).second)
                     return Result::Failure(ErrorCode::InvalidArgument, "audio", "duplicate audio filename");
+                std::filesystem::path wave_path;
+                if (auto resolved = resolve_path("audio/" + name, wave_path); !resolved)
+                    return resolved;
                 std::shared_ptr<AudioSample> sample;
-                if (auto loaded = LoadWaveHeader(audio_directory / relative, sample); !loaded)
+                if (auto loaded = LoadWaveHeader(wave_path, sample); !loaded)
                     return loaded;
                 if (cue.spatial && sample->format.nChannels != 1)
                     return Result::Failure(ErrorCode::InvalidArgument, "audio", "spatial audio must be mono");
@@ -574,6 +619,7 @@ void AudioEngine::Shutdown() noexcept
     impl_->ReleaseNative();
     impl_->cues.clear();
     impl_->last_play_ms.clear();
+    impl_->selected_generation = {};
     impl_->status = {};
 }
 

@@ -7,7 +7,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace hs
@@ -68,6 +70,10 @@ enum class PersistentVfxKind : std::uint8_t
     BasicArrowReturn,
     RicochetBleedExtend,
     ChargedOverchargeLoop,
+    ScheduledAreaDelivery,
+    SuicideCountdownLoop,
+    PickupXpMagnetTrail,
+    WaveTimer,
 };
 
 struct PersistentVfxVisual
@@ -155,6 +161,28 @@ struct RenderInstance
     std::uint32_t environment_seed{};
     std::uint32_t environment_variant{};
     std::uint64_t vfx_owner_id{}; // Shared warning group; never used as interpolation identity.
+    // Stable render-content identities. A zero ID means the instance is still
+    // backed by a procedural/compatibility path rather than a Generation
+    // product. Where material metadata is embedded in the render package,
+    // material_id intentionally equals asset_id until that product is split.
+    AssetId asset_id{};
+    AssetId material_id{};
+    struct Revisions
+    {
+        std::uint64_t transform{};
+        std::uint64_t pose{};
+        std::uint64_t material{};
+        std::uint64_t content{};
+
+        [[nodiscard]] bool operator==(const Revisions &) const noexcept = default;
+    } revisions{};
+    // Explicit authored clip identity. Zero retains the legacy five semantic
+    // AnimationPoseRef slots. Time is local, continuous seconds before rate;
+    // the selected authored clip owns looping and duration. No per-instance
+    // names, renderer metadata or simulation timing changes are required.
+    AssetId animation_clip_id{};
+    double animation_time_seconds{};
+    float animation_playback_rate{1.0f};
 };
 
 struct AnimationPoseRef
@@ -171,13 +199,113 @@ struct AnimationPoseRef
     float upper_body_normalized_time{};
     float upper_body_playback_rate{1.0f};
     float upper_body_weight{};
+    std::uint64_t revision{};
 };
+
+struct RenderSceneInstanceKey
+{
+    std::uint64_t stable_id{};
+    std::uint32_t fallback_ordinal{};
+
+    [[nodiscard]] bool operator==(const RenderSceneInstanceKey &) const noexcept = default;
+};
+
+enum class RenderSceneDeltaKind : std::uint8_t
+{
+    Unchanged,
+    Created,
+    Updated,
+};
+
+enum RenderSceneRevisionMask : std::uint8_t
+{
+    RenderSceneTransformChanged = 1u << 0,
+    RenderScenePoseChanged = 1u << 1,
+    RenderSceneMaterialChanged = 1u << 2,
+    RenderSceneContentChanged = 1u << 3,
+};
+
+struct RenderSceneDeltaItem
+{
+    RenderSceneInstanceKey key{};
+    std::uint32_t source_index{};
+    RenderInstance::Revisions revisions{};
+    RenderSceneDeltaKind kind{RenderSceneDeltaKind::Unchanged};
+    std::uint8_t revision_mask{};
+};
+
+// Owning producer-side representation. base_generation identifies the scene
+// generation this delta was computed from. Consumers that miss a published
+// snapshot can detect the gap instead of applying an incomplete incremental
+// update.
+struct RenderSceneDelta
+{
+    std::vector<RenderSceneDeltaItem> instances;
+    std::vector<RenderSceneInstanceKey> destroyed;
+    std::uint64_t base_generation{};
+    std::uint64_t generation{};
+    std::size_t created{};
+    std::size_t updated{};
+    std::size_t unchanged{};
+};
+
+struct RenderSceneDeltaView
+{
+    std::span<const RenderSceneDeltaItem> instances;
+    std::span<const RenderSceneInstanceKey> destroyed;
+    std::uint64_t base_generation{};
+    std::uint64_t generation{};
+    std::size_t created{};
+    std::size_t updated{};
+    std::size_t unchanged{};
+    bool published{};
+};
+
+[[nodiscard]] RenderInstance::Revisions
+DeriveRenderInstanceRevisions(const RenderInstance &instance) noexcept;
+[[nodiscard]] std::uint64_t
+DeriveAnimationPoseRevision(const AnimationPoseRef &pose) noexcept;
+[[nodiscard]] std::uint64_t
+DeriveNamedAnimationPoseRevision(const RenderInstance &instance) noexcept;
+void PopulateRenderInstanceIdentity(RenderInstance &instance) noexcept;
+void PopulateRenderInstanceRevisions(RenderInstance &instance) noexcept;
+
+enum class LightType : std::uint32_t
+{
+    Directional, Point, Spot, Rectangle, Disk,
+};
+
+enum class LightUnit : std::uint32_t
+{
+    Lux,       // Directional illuminance.
+    Lumen,     // Total Point/Spot luminous flux.
+    Luminance, // Rectangle/Disk emitted luminance in cd/m^2, per emitting side.
+};
+
+// The renderer's explicit white-equivalent photometric conversion policy.
+inline constexpr float kLightWhiteLumensPerWatt = 683.0f;
+inline constexpr std::uint32_t kLightShadowRequested = 1u;
 
 struct LightView
 {
-    Float3 direction{};
-    float intensity{};
-    Float3 color{};
+    Float3 direction{}; // Propagation direction; renderer normalizes it during upload.
+    float quantity{};   // Authored photometric quantity in unit.
+    Float3 color{};     // Linear RGB multiplier; photometric conversion happens once on upload.
+    std::uint64_t stable_id{};
+    std::uint32_t generation{1};
+    std::uint64_t revision{1};
+    LightType type{LightType::Directional};
+    LightUnit unit{LightUnit::Lux};
+    Float3 position{};  // Absolute world position, meters.
+    float range{};     // Finite local influence radius from emitter center, meters.
+    Float2 shape{};    // Rectangle full width/height or Disk ellipse radii, meters.
+    float emitter_radius{}; // Positive finite Point/Spot radius for inverse-square clamping.
+    float inner_cone_radians{}; // Spot half angles: 0 <= inner < outer < pi/2.
+    float outer_cone_radians{};
+    std::uint32_t shadow_flags{};
+    bool legacy_attenuation{}; // Explicit migration: 1/(1+d^2) instead of inverse square.
+    Float3 area_tangent{}; // Authored width/radius-X direction; projected orthogonal to direction.
+    bool two_sided{}; // Area only. Each side emits the authored luminance, no flux rescaling.
 };
 
 struct UiModel
@@ -216,6 +344,34 @@ struct RenderSnapshotHeader
     std::uint64_t session_id{};
 };
 
+// Immutable environment data shared by all snapshots for one arena/content layout.
+// A snapshot retains its own lease when the producer replaces the cached scene.
+struct StaticRenderScene
+{
+    struct EligibleStaticMember
+    {
+        std::uint64_t stable_id{}, object_id{};
+        std::uint32_t instance_index{};
+    };
+    std::vector<RenderInstance> instances;
+    AssetId scene_asset_id{};
+    std::string content_generation_id;
+    std::uint32_t layout_abi{};
+    std::array<std::byte, 32> eligible_layout_digest{};
+    std::vector<EligibleStaticMember> eligible_static_members;
+};
+
+// Actual projected instance captured before its source actor leaves the scene.
+// The snapshot carries provenance only; Runtime owns recipe-dependent retention.
+struct CapturedRenderInstance
+{
+    std::uint64_t session_id{}, source_entity_id{};
+    Sequence sequence{};
+    Tick tick{};
+    RenderInstance instance;
+    AnimationPoseRef animation_pose;
+};
+
 struct RenderSnapshot
 {
     RenderSnapshotHeader header{};
@@ -225,6 +381,9 @@ struct RenderSnapshot
     std::span<const UiModel> ui;
     std::span<const PersistentVfxVisual> persistent_vfx;
     CameraView camera{};
+    std::shared_ptr<const StaticRenderScene> static_scene;
+    RenderSceneDeltaView scene_delta{};
+    std::span<const CapturedRenderInstance> captured_instances;
 };
 
 class RenderSnapshotStorage
@@ -236,11 +395,15 @@ class RenderSnapshotStorage
     void Clear() noexcept;
     [[nodiscard]] bool AddInstance(const RenderInstance &instance);
     [[nodiscard]] bool AddPose(const AnimationPoseRef &pose);
+    [[nodiscard]] bool AddCapturedInstance(const CapturedRenderInstance &capture);
     [[nodiscard]] bool AddLight(const LightView &light);
     [[nodiscard]] bool AddUi(const UiModel &ui);
     [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
     [[nodiscard]] std::size_t InstanceCount() const noexcept;
     [[nodiscard]] RenderSnapshot View() const noexcept;
+    void SetStaticScene(std::shared_ptr<const StaticRenderScene> scene) noexcept;
+    void SetSceneDelta(RenderSceneDelta delta);
+    void ClearSceneDelta() noexcept;
 
     RenderSnapshotHeader header{};
     CameraView camera{};
@@ -248,9 +411,13 @@ class RenderSnapshotStorage
   private:
     std::vector<RenderInstance> instances_;
     std::vector<AnimationPoseRef> poses_;
+    std::vector<CapturedRenderInstance> captured_instances_;
     std::vector<LightView> lights_;
     std::vector<UiModel> ui_;
     std::vector<PersistentVfxVisual> persistent_vfx_;
+    std::shared_ptr<const StaticRenderScene> static_scene_;
+    RenderSceneDelta scene_delta_;
+    bool scene_delta_published_{};
 };
 
 } // namespace hs

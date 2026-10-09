@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <type_traits>
+#include <hs/core/graphics_settings.hpp>
 
 namespace hs
 {
@@ -27,6 +28,7 @@ struct SettingsData
     float sfx_volume{1.0f};
     float ui_volume{1.0f};
     std::array<std::uint16_t, 4> skill_virtual_keys{'Q', 'W', 'E', 'R'};
+    float screen_overlay_intensity{1.0f};
 };
 
 enum class UiCommandKind : std::uint8_t
@@ -45,12 +47,16 @@ enum class UiCommandKind : std::uint8_t
     SetUiVolumePercent,
     BeginSkillRebind,
     CancelSkillRebind,
+    SetGraphicsSetting,
+    SetVfxScreenOverlayIntensityPercent,
 };
 
 struct UiCommand
 {
     UiCommandKind kind{};
     std::uint32_t value{};
+    SettingId graphics_setting{};
+    std::array<char, 64> graphics_token{};
 };
 
 static_assert(std::is_trivially_copyable_v<SettingsData> &&

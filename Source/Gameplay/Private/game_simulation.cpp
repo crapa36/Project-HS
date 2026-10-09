@@ -6,6 +6,76 @@ namespace hs
 using namespace gameplay_detail;
 
 
+EnemyView GameSimulation::SimulationWorld::EnemyReadView(const EnemyActor &enemy) const
+{
+        std::uint8_t statuses{};
+        if (enemy.status.bleed_count != 0)
+            statuses |= static_cast<std::uint8_t>(StatusFlag::Bleed);
+        if (enemy.status.burn)
+            statuses |= static_cast<std::uint8_t>(StatusFlag::Burn);
+        if (!enemy.status.slows.empty())
+            statuses |= static_cast<std::uint8_t>(StatusFlag::Slow);
+        if (enemy.marked_by_skill != SkillKind::Count &&
+            enemy.mark_expires >= tick)
+            statuses |= static_cast<std::uint8_t>(StatusFlag::Mark);
+        std::array<StatusEpisodeView, 4> episodes{};
+        for(std::size_t i=0;i<episodes.size();++i) {
+            episodes[i].started=enemy.status_visual_episodes[i].started;
+            episodes[i].generation=enemy.status_visual_episodes[i].generation;
+        }
+        for(std::size_t i=0;i<enemy.status.bleed_count;++i)
+            if(enemy.status.bleeds[i].expires>tick) episodes[0].expires=std::max(episodes[0].expires,enemy.status.bleeds[i].expires);
+        if(enemy.status.burn&&enemy.status.burn->expires>tick) episodes[1].expires=enemy.status.burn->expires;
+        for(const auto&slow:enemy.status.slows) if(slow.expires>tick) episodes[2].expires=std::max(episodes[2].expires,slow.expires);
+        if(enemy.marked_by_skill!=SkillKind::Count&&enemy.mark_expires>=tick) episodes[3].expires=enemy.mark_expires+1;
+        return {enemy.id,
+                        enemy.kind,
+                        enemy.boss,
+                        enemy.position,
+                        enemy.velocity,
+                        enemy.locked_aim,
+                        enemy.warning_extent,
+                        enemy.spawned_tick,
+                        enemy.attacking ? enemy.attack_resolve - enemy.warning_ticks : Tick{},
+                        enemy.attack_resolve,
+                        enemy.boss_action_started,
+                        enemy.boss_action_until,
+                        enemy.boss_action_recoil,
+                        enemy.health,
+                        enemy.max_health,
+                        statuses,
+                        enemy.attacking,
+                        false,
+                        enemy.warning_sequence,
+                        rules.enemies[static_cast<std::size_t>(enemy.kind)].ranged_projectile_radius,
+                        enemy.boss ? rules.boss_common.collision_radius : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius,
+                        episodes,
+                        enemy.final_phase,
+                        enemy.phase2_started,
+                        enemy.invulnerable_until,
+                        enemy.dash_started,
+                        enemy.dash_until,
+                        enemy.dash_origin};
+}
+
+BossActionView GameSimulation::SimulationWorld::BossActionReadView(const BossAction &action) const
+{
+        return {static_cast<BossActionViewKind>(action.kind),
+                             action.boss_id, action.animation_started, action.due,
+                             action.position,
+                             action.direction, action.distance, action.arc_degrees,
+                             action.angle_offset, action.radius, action.cast_id,
+                             // Keep this aligned with enemy projectile spawn.
+                              rules.boss_common.projectile_range,
+                              action.safe_gap_count, action.safe_gap_degrees,
+                              action.half_width,
+                              action.warning_sequence, action.warning_started,
+                              action.kind == BossActionKind::Dash
+                                  ? rules.boss_common.collision_radius +
+                                        rules.stats.player_collision_radius
+                                  : 0.0f};
+}
+
 GameSimulation::GameSimulation() : impl_(std::make_unique<SimulationWorld>())
 {
 }
@@ -385,7 +455,10 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
                      impl_->actors->player.health,
                      impl_->actors->player.max_health,
                      impl_->actors->player.revive_invulnerable_until,
-                     impl_->actors->player.revive_invulnerable_started};
+                     impl_->actors->player.revive_invulnerable_started,
+                     impl_->actors->player.forced_move_skill,
+                     impl_->actors->player.movement_stopped_tick,
+                     impl_->actors->player.locomotion_moving};
     model.effective_attack = impl_->EffectiveAttack();
     model.effective_attack_speed = impl_->EffectiveAttackSpeed();
     model.effective_move_speed = impl_->EffectiveMoveSpeed();
@@ -473,54 +546,7 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     for (const auto &enemy : impl_->actors->enemies)
     {
         if (enemy.dead) continue;
-        std::uint8_t statuses{};
-        if (enemy.status.bleed_count != 0)
-            statuses |= static_cast<std::uint8_t>(StatusFlag::Bleed);
-        if (enemy.status.burn)
-            statuses |= static_cast<std::uint8_t>(StatusFlag::Burn);
-        if (!enemy.status.slows.empty())
-            statuses |= static_cast<std::uint8_t>(StatusFlag::Slow);
-        if (enemy.marked_by_skill != SkillKind::Count &&
-            enemy.mark_expires >= impl_->tick)
-            statuses |= static_cast<std::uint8_t>(StatusFlag::Mark);
-        std::array<StatusEpisodeView, 4> episodes{};
-        for(std::size_t i=0;i<episodes.size();++i) {
-            episodes[i].started=enemy.status_visual_episodes[i].started;
-            episodes[i].generation=enemy.status_visual_episodes[i].generation;
-        }
-        for(std::size_t i=0;i<enemy.status.bleed_count;++i)
-            if(enemy.status.bleeds[i].expires>impl_->tick) episodes[0].expires=std::max(episodes[0].expires,enemy.status.bleeds[i].expires);
-        if(enemy.status.burn&&enemy.status.burn->expires>impl_->tick) episodes[1].expires=enemy.status.burn->expires;
-        for(const auto&slow:enemy.status.slows) if(slow.expires>impl_->tick) episodes[2].expires=std::max(episodes[2].expires,slow.expires);
-        if(enemy.marked_by_skill!=SkillKind::Count&&enemy.mark_expires>=impl_->tick) episodes[3].expires=enemy.mark_expires+1;
-        model.AddEnemy({enemy.id,
-                        enemy.kind,
-                        enemy.boss,
-                        enemy.position,
-                        enemy.velocity,
-                        enemy.locked_aim,
-                        enemy.warning_extent,
-                        enemy.spawned_tick,
-                        enemy.attacking ? enemy.attack_resolve - enemy.warning_ticks : Tick{},
-                        enemy.attack_resolve,
-                        enemy.boss_action_started,
-                        enemy.boss_action_until,
-                        enemy.boss_action_recoil,
-                        enemy.health,
-                        enemy.max_health,
-                        statuses,
-                        enemy.attacking,
-                        false,
-                        enemy.warning_sequence,
-                        impl_->rules.enemies[static_cast<std::size_t>(enemy.kind)].ranged_projectile_radius,
-                        enemy.boss ? impl_->rules.boss_common.collision_radius : impl_->rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius,
-                        episodes,
-                        enemy.final_phase,
-                        enemy.phase2_started,
-                        enemy.invulnerable_until,
-                        enemy.dash_started,
-                        enemy.dash_until,
-                        enemy.dash_origin});
+        model.AddEnemy(impl_->EnemyReadView(enemy));
     }
     for (const auto &projectile : impl_->actors->projectiles)
     {
@@ -571,33 +597,34 @@ void GameSimulation::WriteReadModel(GameReadModelStorage &model) const
     {
         if (!pickup.dead)
             model.AddPickup({pickup.id, pickup.kind, pickup.position, false,
-                             pickup.spawned_tick});
+                             pickup.spawned_tick, pickup.visual_motion_started,
+                             pickup.visual_motion_updated == impl_->tick &&
+                                 pickup.visual_motion_started != 0,
+                             pickup.visual_motion_initial_distance});
     }
     for (const auto &action : impl_->combat_state->scheduled_actions)
+    {
+        if (action.kind == ScheduledKind::Area && action.skill == SkillKind::ArrowRain &&
+            action.origin == EffectOrigin::Derived && action.source_upgrade == 0 &&
+            action.visual_owner_id != 0 && action.visual_started <= impl_->tick &&
+            impl_->tick < action.due)
+            model.AddScheduledAreaDelivery({action.visual_owner_id, action.cast_id,
+                action.position, action.radius, action.visual_started, action.due,
+                action.skill, action.source_upgrade});
         if (action.kind == ScheduledKind::Explosion && action.skill == SkillKind::ExplosiveArrow &&
             action.source_upgrade == 1 && action.visual_owner_id != 0 && impl_->tick < action.due)
             model.AddMiniBomb({action.visual_owner_id, action.cast_id, action.position, action.radius,
                                action.visual_started, action.due});
+    }
     for (const auto &link : impl_->combat_state->visual_links)
         if (link.started <= impl_->tick && impl_->tick < link.expires)
             model.AddVisualLink(link);
     for (const auto &action : impl_->combat_state->boss_actions)
     {
-        model.AddBossAction({static_cast<BossActionViewKind>(action.kind),
-                             action.boss_id, action.animation_started, action.due,
-                             action.position,
-                             action.direction, action.distance, action.arc_degrees,
-                             action.angle_offset, action.radius, action.cast_id,
-                             // Keep this aligned with enemy projectile spawn.
-                              impl_->rules.boss_common.projectile_range,
-                              action.safe_gap_count, action.safe_gap_degrees,
-                              action.half_width,
-                              action.warning_sequence, action.warning_started,
-                              action.kind == BossActionKind::Dash
-                                  ? impl_->rules.boss_common.collision_radius +
-                                        impl_->rules.stats.player_collision_radius
-                                  : 0.0f});
+        model.AddBossAction(impl_->BossActionReadView(action));
     }
+    for (std::size_t index = 0; index < impl_->combat_state->boss_death_visual_count; ++index)
+        model.AddBossDeathVisual(impl_->combat_state->boss_death_visuals[index]);
 }
 
 std::span<const DomainSignal> GameSimulation::PendingDomainSignals() const noexcept

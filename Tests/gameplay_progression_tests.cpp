@@ -85,7 +85,7 @@ void TestStartingEnemyBalanceAndBoundary()
     std::uint32_t grass_count{};
     std::uint32_t dirt_count{};
     std::uint32_t rock_count{};
-    for (const auto &instance : snapshot.View().instances)
+    for (const auto &instance : snapshot.View().static_scene->instances)
     {
         if (instance.mesh == hs::RenderMesh::Ground) ++ground_count;
         if (instance.mesh == hs::RenderMesh::TreeTrunk) ++tree_count;

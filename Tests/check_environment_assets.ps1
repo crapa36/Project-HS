@@ -1,5 +1,50 @@
-param([Parameter(Mandatory=$true)][string]$Cooked)
+param([Parameter(Mandatory=$true)][string]$GenerationPointer)
 $ErrorActionPreference='Stop'
+
+$pointerPath = [IO.Path]::GetFullPath($GenerationPointer)
+if (!(Test-Path -LiteralPath $pointerPath -PathType Leaf)) {
+    throw "Generation pointer does not exist: $pointerPath"
+}
+$pointer = Get-Content -LiteralPath $pointerPath -Raw | ConvertFrom-Json
+if ($pointer.schema_version -ne 1 -or
+    [string]::IsNullOrWhiteSpace([string]$pointer.generation_id) -or
+    [string]::IsNullOrWhiteSpace([string]$pointer.manifest_locator)) {
+    throw "Invalid Generation pointer: $pointerPath"
+}
+$buildRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path $pointerPath -Parent) '..'))
+$manifestPath = [IO.Path]::GetFullPath((Join-Path $buildRoot ([string]$pointer.manifest_locator)))
+if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Generation manifest does not exist: $manifestPath"
+}
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ($manifest.schema_version -notin @(2, 3) -or
+    [string]$manifest.generation_id -ne [string]$pointer.generation_id -or
+    $null -eq $manifest.products) {
+    throw "Generation manifest does not match pointer: $manifestPath"
+}
+$generationProducts = @{}
+foreach ($product in $manifest.products) {
+    $logicalId = [string]$product.logical_id
+    $locator = [string]$product.locator
+    if ([string]::IsNullOrWhiteSpace($logicalId) -or
+        [string]::IsNullOrWhiteSpace($locator) -or
+        $generationProducts.ContainsKey($logicalId)) {
+        throw "Invalid or duplicate Generation product in: $manifestPath"
+    }
+    $productPath = [IO.Path]::GetFullPath((Join-Path $buildRoot $locator))
+    if (!(Test-Path -LiteralPath $productPath -PathType Leaf)) {
+        throw "Generation product path does not exist for $logicalId`: $productPath"
+    }
+    $generationProducts[$logicalId] = $productPath
+}
+function Resolve-EnvironmentProduct {
+    param([Parameter(Mandatory=$true)][string]$FileName)
+    $logicalId = "environment/$FileName"
+    if (!$generationProducts.ContainsKey($logicalId)) {
+        throw "Generation is missing required environment product: $logicalId"
+    }
+    return $generationProducts[$logicalId]
+}
 function Read-FilePrefix {
     param([Parameter(Mandatory=$true)][string]$Path,[Parameter(Mandatory=$true)][int]$Count)
     $stream=[IO.File]::OpenRead($Path)
@@ -42,9 +87,20 @@ function Assert-FiniteFloatPayload {
     }
 }
 $sets=@(@('terrain',4,12,@('basecolor','surface','normal','detail','height')),@('rock',4,12,@('basecolor','surface','normal','detail')),@('bark',3,12,@('basecolor','surface','normal','detail')),@('grass',2,6,@('basecolor','normal','roughness')),@('leaf',3,6,@('basecolor','normal','roughness')))
+$renderTextureNames=@('terrain_gaussian','terrain_surface','terrain_normal','terrain_detail','terrain_height',
+    'rock_basecolor','rock_surface','rock_normal','rock_detail',
+    'bark_basecolor','bark_surface','bark_normal','bark_detail',
+    'grass_basecolor','grass_normal','grass_roughness',
+    'leaf_basecolor','leaf_normal','leaf_roughness')
+foreach($name in $renderTextureNames){
+    $logicalId="render/texture/environment_$name.rpkg"
+    if(!$generationProducts.ContainsKey($logicalId)){
+        throw "Generation is missing required render texture product: $logicalId"
+    }
+}
 $count=0
 foreach($set in $sets){ foreach($role in $set[3]){
-    $file=Join-Path $Cooked "environment_$($set[0])_$role.dds"
+    $file=Resolve-EnvironmentProduct "environment_$($set[0])_$role.dds"
     $asset=Read-FilePrefix $file 148
     $bytes=$asset.Bytes
     if($asset.Length -lt 148 -or $asset.BytesRead -lt 148){throw "Truncated DDS: $file"}
@@ -58,7 +114,7 @@ foreach($set in $sets){ foreach($role in $set[3]){
 }}
 # Histogram resources use linear Gaussian values and an uncompressed inverse LUT.
 foreach($special in @(@('gaussian',2048,2048,12,98),@('histogram',256,16,1,2))){
-    $file=Join-Path $Cooked "environment_terrain_$($special[0]).dds"
+    $file=Resolve-EnvironmentProduct "environment_terrain_$($special[0]).dds"
     $asset=Read-FilePrefix $file 148
     $bytes=$asset.Bytes
     if($asset.Length -lt 148 -or $asset.BytesRead -lt 148){throw "Truncated histogram DDS: $file"}
@@ -80,11 +136,11 @@ $meshes=0
 foreach($set in @(@('trunk',3),@('leaf',3),@('rock',4),@('grass',4))){for($variant=0;$variant -lt $set[1];++$variant){
     [long]$previous=3000001
     for($lod=0;$lod -lt 3;++$lod){
-        $suffix=if($lod -eq 0){''}else{"_lod$lod"};$file=Join-Path $Cooked "environment_$($set[0])_$variant$suffix.meshbin"
+        $suffix=if($lod -eq 0){''}else{"_lod$lod"};$file=Resolve-EnvironmentProduct "environment_$($set[0])_$variant$suffix.meshbin"
         $asset=Read-FilePrefix $file 16;$bytes=$asset.Bytes;if($asset.Length -lt 16 -or $asset.BytesRead -lt 16){throw "Truncated mesh: $file"}
         $vertices=[BitConverter]::ToUInt32($bytes,8)
         if([BitConverter]::ToUInt32($bytes,0) -ne 0x4d455348 -or [BitConverter]::ToUInt32($bytes,4) -ne 1 -or [BitConverter]::ToUInt32($bytes,12) -ne 76 -or $vertices -eq 0 -or $vertices%3 -ne 0 -or $asset.Length -ne 16+[long]$vertices*76 -or $vertices -ge $previous){throw "Invalid LOD mesh payload: $file"}
         $previous=$vertices;++$meshes
     }
 }}
-Write-Output "environment.assets DDS=$count meshes=$meshes all payloads and LOD reductions valid"
+Write-Output "environment.assets DDS=$count render-texture-packages=$($renderTextureNames.Count) meshes=$meshes all payloads and LOD reductions valid"

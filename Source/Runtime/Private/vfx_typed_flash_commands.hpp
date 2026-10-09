@@ -22,6 +22,12 @@ namespace hs::runtime_detail
     const VfxProgramData &program,
     std::span<const VfxPersistentInput> inputs);
 
+// Real area presence owns the source interval. Rate births use the 60 Hz
+// schedule; each tongue ends at that interval's end, with no invented TTL.
+[[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs,
+    Tick current_tick);
+
 struct VfxOwnedStatusTickFlashCommand
 {
     Sequence event_sequence{};

@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "characters": {
+    "archer": [
+      {
+        "diffuse": "FemaleFitA_Body_diffuse.png",
+        "opaque": "archer_skin"
+      },
+      {
+        "diffuse": "Erika_Archer_Clothes_diffuse.png",
+        "opaque": "archer_cloth"
+      },
+      {
+        "diffuse": "FemaleFitA_eyelash_diffuse.png",
+        "opaque": "archer_cutout"
+      },
+      {
+        "diffuse": "Bow_DIFF.jpg",
+        "opaque": "archer_equipment"
+      },
+      {
+        "diffuse": "Arrow_DIFF.png",
+        "opaque": "archer_equipment"
+      }
+    ],
+    "enemy_melee": [
+      {
+        "diffuse": "SlimeMelee_BaseColor.png",
+        "opaque": "slime_features",
+        "translucent": "slime_body"
+      }
+    ],
+    "enemy_ranged": [
+      {
+        "diffuse": "SlimeRanged_BaseColor.png",
+        "opaque": "slime_features",
+        "translucent": "slime_body"
+      }
+    ],
+    "enemy_suicide": [
+      {
+        "diffuse": "SlimeSuicide_BaseColor.png",
+        "opaque": "slime_features",
+        "translucent": "slime_body"
+      }
+    ],
+    "enemy_gel_projectile": [
+      {
+        "diffuse": "SlimeGelProjectile_BaseColor.png",
+        "opaque": "slime_features",
+        "translucent": "slime_body"
+      }
+    ],
+    "boss_5m": [
+      {
+        "name": "DefaultPBR_MAT",
+        "opaque": "monster_pbr"
+      }
+    ],
+    "boss_10m": [
+      {
+        "name": "DefaultPBR_MAT",
+        "opaque": "monster_pbr"
+      }
+    ],
+    "boss_final": [
+      {
+        "name": "DefaultPBR_MAT",
+        "opaque": "monster_pbr"
+      }
+    ]
+  }
+}

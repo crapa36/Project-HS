@@ -174,11 +174,36 @@ void RequireUpgrade(const Json &entry, std::string_view path, std::string_view l
 
 } // namespace
 
+hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources)
+{
+    hs::PresentationCatalog presentation{};
+    const auto &character = sources.documents.at("characters")["entries"][0];
+    const auto &camera = character["camera"];
+    presentation.camera = {
+        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "yaw_degrees")),
+        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "pitch_degrees")),
+        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "vertical_fov_degrees")),
+        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "distance_m")),
+        CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "minimum_distance_percent"), "characters", "$/entries/0/camera/minimum_distance_percent"),
+        CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "maximum_distance_percent"), "characters", "$/entries/0/camera/maximum_distance_percent")};
+    if (presentation.camera.minimum_distance_percent > presentation.camera.maximum_distance_percent)
+        ThrowValidationError("characters", "$/entries/0/camera", "minimum distance must not exceed maximum distance");
+    const auto &relics = sources.documents.at("relics")["entries"];
+    for (std::size_t index = 0; index < relics.size(); ++index)
+    {
+        const auto path = "$/entries/" + std::to_string(index);
+        CopyText(presentation.relic_names[index], RequireString(relics[index], "relics", path, "display_name"), "relics", path + "/display_name");
+        CopyText(presentation.relic_rules[index], RequireString(relics[index], "relics", path, "rule"), "relics", path + "/rule");
+    }
+    return presentation;
+}
+
 BuiltGameData BuildGameData(const ContentSources &sources)
 {
     BuiltGameData content{};
     auto &data = content.simulation_rules;
     auto &presentation = content.presentation;
+    presentation = BuildPresentationCatalog(sources);
     data.version = 7;
 
     const auto &stats_document = sources.documents.at("stats");
@@ -353,16 +378,6 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     }
 
     const auto &character = sources.documents.at("characters")["entries"][0];
-    const auto &camera = character["camera"];
-    presentation.camera = {
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "yaw_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "pitch_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "vertical_fov_degrees")),
-        static_cast<float>(RequireNumber(camera, "characters", "$/entries/0/camera", "distance_m")),
-        CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "minimum_distance_percent"), "characters", "$/entries/0/camera/minimum_distance_percent"),
-        CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "maximum_distance_percent"), "characters", "$/entries/0/camera/maximum_distance_percent")};
-    if (presentation.camera.minimum_distance_percent > presentation.camera.maximum_distance_percent)
-        ThrowValidationError("characters", "$/entries/0/camera", "minimum distance must not exceed maximum distance");
     const auto spawn_view = DeriveMaxZoomView(presentation.camera);
     data.character_initial.starting_level = CheckedInteger<std::uint8_t>(RequireInteger(character, "characters", "$/entries/0", "starting_level"), "characters", "$/entries/0/starting_level");
     data.character_initial.starting_basic_attack_level = CheckedInteger<std::uint8_t>(RequireInteger(character, "characters", "$/entries/0", "starting_basic_attack_level"), "characters", "$/entries/0/starting_basic_attack_level");
@@ -558,7 +573,6 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &healing = relic_document["healing_pickup"];
     data.relic_drop.healing_pickup_probability = static_cast<float>(RequireNumber(healing,"relics","$/healing_pickup","normal_enemy_drop_probability_percent") / 100.0); data.relic_drop.healing_pickup_maximum_hp_heal_fraction=static_cast<float>(RequireNumber(healing,"relics","$/healing_pickup","maximum_hp_heal_fraction")); data.relic_drop.healing_pickup_independent_from_other_rewards=healing["independent_from_other_rewards"].get<bool>(); data.relic_drop.healing_pickup_can_coexist_with_xp_and_relic_box=healing["can_coexist_with_xp_and_relic_box"].get<bool>(); data.relic_chest_base_chance=data.relic_drop.normal_enemy_base_probability; data.relic_chest_miss_increment=data.relic_drop.normal_enemy_probability_increment_per_kill;
     const auto &relics = relic_document["entries"];
-    for (std::size_t index=0; index<relics.size(); ++index) { const auto path="$/entries/"+std::to_string(index); CopyText(presentation.relic_names[index],RequireString(relics[index],"relics",path,"display_name"),"relics",path+"/display_name"); CopyText(presentation.relic_rules[index],RequireString(relics[index],"relics",path,"rule"),"relics",path+"/rule"); }
     const auto relic_number = [&](std::size_t index,std::string_view key){return Number(relics[index],"relics","$/entries/"+std::to_string(index),key);}; const auto relic_ticks=[&](std::size_t index,std::string_view key){return ToTicks(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));}; const auto relic_count=[&](std::size_t index,std::string_view key){return CheckedInteger<std::uint32_t>(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));};
     data.relics.bleed_kill_heal={relic_number(0,"maximum_hp_heal_fraction"),relic_ticks(0,"internal_cooldown")}; data.relics.burn_propagation={relic_number(1,"search_radius"),relic_number(1,"copied_burn_strength"),relic_count(1,"maximum_targets")}; data.relics.kill_cooldown_surge={relic_count(2,"kills_per_trigger"),relic_ticks(2,"all_active_cooldown_reduction")}; data.relics.bleed_burn_explosion={relic_number(3,"radius"),relic_number(3,"damage_multiplier"),relic_ticks(3,"per_target_cooldown")}; data.relics.radial_basic_attack={relic_count(4,"cadence_interval"),relic_count(4,"direction_count"),relic_number(4,"damage_multiplier")}; data.relics.basic_kill_tracker={relic_number(5,"search_radius"),relic_number(5,"damage_multiplier"),relic_count(5,"maximum_triggers_per_original_attack")}; data.relics.movement_echo={relic_number(6,"required_cumulative_distance"),relic_ticks(6,"position_history_age"),relic_number(6,"damage_multiplier")}; data.relics.alternating_skills={relic_ticks(7,"window"),relic_number(7,"cooldown_refund_fraction")}; data.relics.different_skill_tracker={relic_ticks(8,"window"),relic_number(8,"damage_multiplier"),relic_ticks(8,"per_target_cooldown")}; data.relics.damage_knockback={relic_number(9,"radius"),relic_number(9,"push_distance"),relic_number(9,"slow_fraction"),relic_ticks(9,"slow_duration"),relic_ticks(9,"cooldown")}; data.relics.once_revive={relic_number(10,"revive_hp_fraction"),relic_ticks(10,"invulnerability_duration"),relic_count(10,"maximum_triggers_per_session")}; data.relics.combat_hit_chain={relic_count(11,"direct_hits_per_trigger"),relic_number(11,"search_radius"),relic_count(11,"maximum_targets"),relic_number(11,"damage_multiplier")}; data.relics.projectile_cadence_reward={relic_count(12,"hits_per_trigger"),relic_ticks(12,"cooldown_reduction")}; data.relics.pre_damage_guard={relic_number(13,"damage_reduction_fraction"),relic_ticks(13,"cooldown")}; data.relics.slow_synergy={relic_number(14,"damage_multiplier"),relic_ticks(14,"per_target_cooldown")}; data.relics.area_resonance={relic_number(15,"damage_multiplier"),relic_ticks(15,"cooldown")}; data.relics.boss_pressure={relic_number(16,"damage_multiplier"),relic_ticks(16,"per_target_cooldown")}; data.relics.hit_streak_reward={relic_count(17,"direct_hits_per_trigger"),relic_number(17,"damage_multiplier")}; data.relics.pickup_reward={relic_number(18,"attack_power_fraction"),relic_ticks(18,"duration")}; data.relics.low_health_survival={relic_number(19,"health_threshold_fraction"),relic_number(19,"damage_reduction_fraction"),relic_ticks(19,"cooldown")};
 

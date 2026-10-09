@@ -14,6 +14,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <set>
 #include <queue>
 #include <stdexcept>
@@ -142,7 +143,7 @@ bool CacheHit(const std::filesystem::path& path,const std::string& inputHash)
         cache.contains("output")&&cache["output"].is_string()&&
         cache["input"]==inputHash&&cache["output"]==HashFile(path);
 }
-std::vector<Pixel> Load(const std::filesystem::path& path, const std::string& role)
+void ValidatePngRole(const std::filesystem::path& path, const std::string& role)
 {
     // Check PNG IHDR, including precision before WIC conversion.
     std::array<unsigned char, 26> header{};
@@ -152,6 +153,10 @@ std::vector<Pixel> Load(const std::filesystem::path& path, const std::string& ro
         (role == "height" && (header[24] != 16 || header[25] != 0)) ||
         ((role == "normal" || role == "detail_normal") && (header[24] != 8 || header[25] != 2)))
         throw std::runtime_error("Invalid environment PNG role/precision: " + path.string());
+}
+std::vector<Pixel> Load(const std::filesystem::path& path, const std::string& role)
+{
+    ValidatePngRole(path, role);
     DirectX::ScratchImage source, converted;
     DirectX::TexMetadata metadata{};
     Check(DirectX::LoadFromWICFile(path.c_str(), DirectX::WIC_FLAGS_IGNORE_SRGB, &metadata, source), "Load " + path.string());
@@ -197,6 +202,16 @@ std::vector<std::string> Roles(const Group& g)
     if(g.name=="terrain") return {"base_color","surface_ra","normal","detail_normal","height"};
     return {"base_color","surface_ra","normal","detail_normal"};
 }
+Group FindRoleGroup(const Json& manifest, const std::string& name, const std::string& role)
+{
+    for (auto& group : Groups(manifest)) {
+        if (group.name != name) continue;
+        const auto roles = Roles(group);
+        if (std::ranges::find(roles, role) == roles.end()) break;
+        return group;
+    }
+    throw std::runtime_error("Unknown environment texture group/role: " + name + "/" + role);
+}
 void CookRole(const std::filesystem::path& root,const std::filesystem::path& output,const Group& group,const std::string& role,ID3D11Device* device)
 {
     const bool normal=role=="normal"||role=="detail_normal", color=role=="base_color";
@@ -206,9 +221,17 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
     Check(array.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM,2048,2048,group.pages.size(),mips),"Allocate environment array");
     std::memset(array.GetPixels(),0,array.GetPixelsSize());
     for(size_t page=0;page<group.pages.size();++page) {
-        const auto source=Load(TexturePath(root,group.pages[page],role),role);
-        const auto normals=rough?Load(TexturePath(root,group.pages[page],"normal"),"normal"):std::vector<Pixel>{};
-        const auto alpha=group.foliage?Load(TexturePath(root,group.pages[page],"base_color"),"base_color"):std::vector<Pixel>{};
+        std::map<std::filesystem::path,std::vector<Pixel>> decoded;
+        const auto load=[&](const std::string& requested_role)->const std::vector<Pixel>& {
+            const auto path=TexturePath(root,group.pages[page],requested_role);
+            auto it=decoded.find(path);
+            if(it==decoded.end()) it=decoded.emplace(path,Load(path,requested_role)).first;
+            else ValidatePngRole(path,requested_role);
+            return it->second;
+        };
+        const auto& source=load(role);
+        const auto* normals=rough?&load("normal"):nullptr;
+        const auto* alpha=group.foliage?&load("base_color"):nullptr;
         std::vector<Rect> rects;
         if(group.foliage) {for(const auto& r:group.rects) if(r.page==static_cast<int>(page)) rects.push_back(r);}
         else rects.push_back(Rect{0,0,0,2048,2048});
@@ -224,17 +247,17 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
                 std::queue<int> queue;
                 for(int y=top;y<bottom;++y) for(int x=left;x<right;++x) {
                     const int x0=std::max(x*step,rect.x),y0=std::max(y*step,rect.y),x1=std::min((x+1)*step,rect.x+rect.w),y1=std::min((y+1)*step,rect.y+rect.h);
-                    auto p=Average(source,x0,y0,x1,y1,normal,color,group.foliage?&alpha:nullptr);
-                    if(rough&&mip>0) p.r=RoughnessAA(p.r,Length(Average(normals,x0,y0,x1,y1,true,false,group.foliage?&alpha:nullptr)));
+                    auto p=Average(source,x0,y0,x1,y1,normal,color,alpha);
+                    if(rough&&mip>0) p.r=RoughnessAA(p.r,Length(Average(*normals,x0,y0,x1,y1,true,false,alpha)));
                     Encode(p,normal,color);
-                    if(group.foliage) p.a=Average(alpha,x0,y0,x1,y1,false,false).a;
+                    if(group.foliage) p.a=Average(*alpha,x0,y0,x1,y1,false,false).a;
                     const int index=(y-gt)*w+x-gl; pixels[index]=p;
                     if(group.foliage&&p.a>0.f) {nearest[index]=index;queue.push(index);}
                 }
                 // Coverage is measured per entry; a scale is fitted before alpha quantization.
                 if(group.foliage&&mip>0) {
                     size_t covered=0;
-                    for(int y=rect.y;y<rect.y+rect.h;++y) for(int x=rect.x;x<rect.x+rect.w;++x) if(alpha[static_cast<size_t>(y)*2048+x].a>=.5f) ++covered;
+                    for(int y=rect.y;y<rect.y+rect.h;++y) for(int x=rect.x;x<rect.x+rect.w;++x) if((*alpha)[static_cast<size_t>(y)*2048+x].a>=.5f) ++covered;
                     const float goal=static_cast<float>(covered)/(rect.w*rect.h);
                     float lo=0,hi=16;
                     for(int iteration=0;iteration<20;++iteration) {
@@ -284,36 +307,92 @@ void ValidateEnvironmentTextures(const std::filesystem::path& source)
         for (const auto *role : {"base_color", "normal", "detail_normal", "surface_ra"})
             (void)Load(TexturePath(source, material.at("textures"), role), role);
 }
-void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output)
+std::vector<std::filesystem::path> EnvironmentTextureInputs(const std::filesystem::path& source)
+{
+    const auto manifest = Read(source);
+    std::set<std::filesystem::path> paths{
+        source / "project_hs_environment_materials_v9_LEAN.json", source / "baked_materials.json"};
+    for (const auto& group : Groups(manifest)) for (const auto& page : group.pages)
+        for (const auto& role : Roles(group)) {
+            paths.insert(TexturePath(source, page, role));
+            if (role == "surface_ra" || role == "roughness") paths.insert(TexturePath(source, page, "normal"));
+            if (group.foliage) paths.insert(TexturePath(source, page, "base_color"));
+        }
+    return {paths.begin(), paths.end()};
+}
+std::vector<std::string> EnvironmentTextureProducts(const std::filesystem::path& source)
+{
+    const auto manifest = Read(source);
+    std::vector<std::string> names;
+    for (const auto& group : Groups(manifest)) for (const auto& role : Roles(group))
+        names.push_back(OutputPath({}, group, role).filename().string());
+    if (names.size() != 19) throw std::runtime_error("Expected 19 environment texture products");
+    return names;
+}
+std::vector<std::filesystem::path> EnvironmentTextureRoleInputs(
+    const std::filesystem::path& source, const std::string& group_name, const std::string& role)
+{
+    const auto group=FindRoleGroup(Read(source),group_name,role);
+    std::set<std::filesystem::path> paths{source/"project_hs_environment_materials_v9_LEAN.json"};
+    if (group_name=="rock" || group_name=="bark" ||
+        (group.foliage && role!="base_color"))
+        paths.insert(source/"baked_materials.json");
+    for(const auto& page:group.pages) {
+        paths.insert(TexturePath(source,page,role));
+        if(role=="surface_ra"||role=="roughness") paths.insert(TexturePath(source,page,"normal"));
+        if(group.foliage) paths.insert(TexturePath(source,page,"base_color"));
+    }
+    return {paths.begin(),paths.end()};
+}
+std::string EnvironmentTextureRoleProduct(
+    const std::filesystem::path& source, const std::string& group_name, const std::string& role)
+{
+    return OutputPath({},FindRoleGroup(Read(source),group_name,role),role).filename().string();
+}
+void CookEnvironmentTextureRole(const std::filesystem::path& source,
+                                const std::filesystem::path& output,
+                                const std::string& group_name, const std::string& role,
+                                ID3D11Device* device)
+{
+    const auto group=FindRoleGroup(Read(source),group_name,role);
+    std::filesystem::create_directories(output);
+    CookRole(source,output,group,role,device);
+}
+void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output,
+                             ID3D11Device* device, bool use_cache)
 {
     const auto manifest=Read(source);
     const auto groups=Groups(manifest);
     std::filesystem::create_directories(output);
-    Microsoft::WRL::ComPtr<ID3D11Device> device;
-    const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_0};
-    const HRESULT deviceResult=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,
-        levels,1,D3D11_SDK_VERSION,device.GetAddressOf(),nullptr,nullptr);
-    if (FAILED(deviceResult)) {
-        // Only device availability selects the CPU path; GPU compression errors remain fatal.
-        std::cout<<"Environment BC7: D3D11 hardware unavailable (HRESULT "<<deviceResult<<"); using CPU compressor"<<std::endl;
-    } else {
-        std::cout<<"Environment BC7: D3D11 GPU compressor"<<std::endl;
-    }
-    CookEnvironmentHistogram(source, output, device.Get());
     for(const auto& group:groups) for(const auto& role:Roles(group)) {
         const auto path=OutputPath(output,group,role);
-        const auto inputHash=InputHash(source,manifest,group,role,device.Get()!=nullptr);
-        if (CacheHit(path,inputHash)) {
+        const auto inputHash=use_cache?InputHash(source,manifest,group,role,device!=nullptr):std::string{};
+        if (use_cache && CacheHit(path,inputHash)) {
             std::cout<<"Environment "<<group.name<<" "<<role<<": cache hit"<<std::endl;
             continue;
         }
         std::cout<<"Environment "<<group.name<<" "<<role<<": cooking"<<std::endl;
-        CookRole(source,output,group,role,device.Get());
-        std::ofstream cache(path.string()+".cache.json",std::ios::trunc);
-        cache<<Json{{"input",inputHash},{"output",HashFile(path)}}.dump()<<'\n';
-        cache.close();
-        if (!cache) throw std::runtime_error("Cannot save texture cache "+path.string());
+        CookRole(source,output,group,role,device);
+        if (use_cache) {
+            std::ofstream cache(path.string()+".cache.json",std::ios::trunc);
+            cache<<Json{{"input",inputHash},{"output",HashFile(path)}}.dump()<<'\n';
+            cache.close();
+            if (!cache) throw std::runtime_error("Cannot save texture cache "+path.string());
+        }
         std::cout<<"Environment "<<group.name<<" "<<role<<": complete"<<std::endl;
     }
+}
+void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output)
+{
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_0};
+    const HRESULT result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,
+        levels,1,D3D11_SDK_VERSION,device.GetAddressOf(),nullptr,nullptr);
+    if (FAILED(result))
+        std::cout<<"Environment BC7: D3D11 hardware unavailable (HRESULT "<<result<<"); using CPU compressor"<<std::endl;
+    else
+        std::cout<<"Environment BC7: D3D11 GPU compressor"<<std::endl;
+    CookEnvironmentHistogram(source,output,device.Get());
+    CookEnvironmentTextures(source,output,device.Get(),true);
 }
 }

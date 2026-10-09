@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_flash_commands.hpp"
+#include "test_generation_paths.hpp"
 #include <hs/core/render_snapshot.hpp>
 
 #include <array>
@@ -1109,7 +1110,7 @@ void UpgradeStatusStampsUseAuthoredGeometry()
 
 void ProductionUpgradeStatusStampsDecode()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Require(file.good(), "production VFX program missing");
     const std::string binary{std::istreambuf_iterator<char>(file),
                              std::istreambuf_iterator<char>()};
@@ -1211,7 +1212,7 @@ void PickupCollectorImpactUsesLinkSource()
 
 void ProductionStatusAndPickupOutputsDecode()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Require(file.good(), "production VFX program missing");
     const std::string binary{std::istreambuf_iterator<char>(file),
                              std::istreambuf_iterator<char>()};

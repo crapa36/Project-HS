@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "id": "local_probes",
+  "environment_product": "render/lighting/default_probe.rpkg",
+  "color_space": "rec709_linear",
+  "radiance_unit": "scene_linear_radiance_per_steradian",
+  "blend_policy": "normalized_influence_visibility_with_single_environment_baseline",
+  "revision_policy": "hash_actual_environment_material_light_static_layout_inputs",
+  "capture": {
+    "kind": "native_static_common_material_cube_views",
+    "cube_edge": 32,
+    "ggx_samples": 128,
+    "maximum_cube_views_per_graph": 6,
+    "include": ["static_geometry", "common_material_opacity", "static_direct_lights", "emission", "global_environment_sky"],
+    "exclude": ["dynamic_characters", "dynamic_vfx", "ui", "post", "exposure", "recursive_local_probes"]
+  },
+  "probes": [
+    {"stable_id": 1, "position": [-18, 2, -18], "weight": 1, "influence_min": [-46, -0.5, -46], "influence_max": [10, 12, 10], "influence_fade": 8, "projection_min": [-50, -2, -50], "projection_max": [14, 20, 14], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100},
+    {"stable_id": 2, "position": [18, 2, -18], "weight": 1, "influence_min": [-10, -0.5, -46], "influence_max": [46, 12, 10], "influence_fade": 8, "projection_min": [-14, -2, -50], "projection_max": [50, 20, 14], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100},
+    {"stable_id": 3, "position": [-18, 2, 18], "weight": 1, "influence_min": [-46, -0.5, -10], "influence_max": [10, 12, 46], "influence_fade": 8, "projection_min": [-50, -2, -14], "projection_max": [14, 20, 50], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100},
+    {"stable_id": 4, "position": [18, 2, 18], "weight": 1, "influence_min": [-10, -0.5, -10], "influence_max": [46, 12, 46], "influence_fade": 8, "projection_min": [-14, -2, -14], "projection_max": [50, 20, 50], "visibility_bias": 0.05, "visibility_fade": 0.25, "capture_distance": 100}
+  ],
+  "author_notes": "Four overlapping world-space cells cover the central static forest arena. Native cube views must use the immutable current StaticRenderScene with its actual common materials, opacity, terrain, world-position light queries and shadow resources. These are capture positions and bounds, not fabricated baked lighting. The package producer derives actual revisions and dependencies; the native service invalidates changed scenes, bakes bounded views and uses global environment fallback until completion. Local captures contain global sky once; normalized blending never adds a second unweighted environment contribution. Expanded layouts can author more cells within the same 64-probe format."
+}

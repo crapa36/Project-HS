@@ -22,76 +22,6 @@ const Json &RequireArray(const Json &, std::string_view, std::string_view, std::
 std::string RequireString(const Json &, std::string_view, std::string_view, std::string_view);
 void RequireCount(const Json &, std::string_view, std::string_view, std::size_t);
 
-void ValidateAudioWave(const std::filesystem::path &path, bool stereo,
-                      std::string_view json_path)
-{
-    std::ifstream stream(path, std::ios::binary);
-    std::array<std::uint8_t, 44> header{};
-    if (!stream.read(reinterpret_cast<char *>(header.data()), header.size()) ||
-        std::memcmp(header.data(), "RIFF", 4) != 0 ||
-        std::memcmp(header.data() + 8, "WAVE", 4) != 0 ||
-        std::memcmp(header.data() + 12, "fmt ", 4) != 0 ||
-        std::memcmp(header.data() + 36, "data", 4) != 0)
-        ThrowValidationError("audio_cues", json_path, "file is not a RIFF PCM WAV");
-    const auto u16 = [&](std::size_t offset) {
-        return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
-    };
-    const auto u32 = [&](std::size_t offset) {
-        return static_cast<std::uint32_t>(header[offset] | (header[offset + 1] << 8) |
-                                          (header[offset + 2] << 16) | (header[offset + 3] << 24));
-    };
-    const auto file_size = std::filesystem::file_size(path);
-    const auto data_size = u32(40);
-    if (u32(4) != file_size - 8 || 44u + data_size + (data_size & 1u) != file_size ||
-        u16(20) != 1 || u32(24) != 48000 || u16(34) != 24 ||
-        u16(22) != (stereo ? 2 : 1))
-        ThrowValidationError("audio_cues", json_path,
-                             "WAV must be 48kHz 24-bit PCM with the required channel count");
-}
-
-void ValidateAudioSources(const Json &audio)
-{
-    std::set<std::string, std::less<>> files_seen;
-    const auto &entries = RequireArray(audio, "audio_cues", "$", "entries");
-    constexpr std::size_t expected_cue_count = 107;
-    constexpr std::size_t expected_file_count = 379;
-    RequireCount(entries, "audio_cues", "$/entries", expected_cue_count);
-    const auto root = std::filesystem::path(HS_AUDIO_DIRECTORY);
-    for (std::size_t i = 0; i < entries.size(); ++i)
-    {
-        const auto path = "$/entries/" + std::to_string(i);
-        const auto &entry = entries[i];
-        const auto id = RequireString(entry, "audio_cues", path, "id");
-        if (RequireString(entry, "audio_cues", path, "encoding") != "PCM")
-            ThrowValidationError("audio_cues", path + "/encoding", "only PCM encoding is supported");
-        const auto &streaming = RequireMember(entry, "audio_cues", path, "streaming");
-        if (!streaming.is_boolean() || streaming.get<bool>())
-            ThrowValidationError("audio_cues", path + "/streaming", "streaming must be false");
-        const auto files = RequireArray(entry, "audio_cues", path, "files");
-        const auto category = id.starts_with("audio.bgm.") || id.starts_with("audio.ambience.");
-        for (std::size_t j = 0; j < files.size(); ++j)
-        {
-            if (!files[j].is_string() || files[j].get<std::string>().empty())
-                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
-                                     "expected non-empty file name");
-            const auto name = files[j].get<std::string>();
-            const auto relative = std::filesystem::path(name);
-            if (relative.has_root_name() || relative.has_root_directory() ||
-                std::ranges::any_of(relative, [](const auto &part) { return part == ".."; }) ||
-                relative.extension() != ".wav" || !files_seen.emplace(name).second)
-                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
-                                     "file name must be a unique safe relative WAV path");
-            const auto full = root / relative;
-            if (!std::filesystem::is_regular_file(full))
-                ThrowValidationError("audio_cues", path + "/files/" + std::to_string(j),
-                                     "referenced WAV file does not exist: " + full.string());
-            ValidateAudioWave(full, category, path + "/files/" + std::to_string(j));
-        }
-    }
-    if (files_seen.size() != expected_file_count)
-        ThrowValidationError("audio_cues", "$/entries", "expected exactly 379 unique referenced WAV files");
-}
-
 [[noreturn]] void ThrowValidationError(std::string_view file, std::string_view path,
                        std::string_view message)
 {
@@ -322,6 +252,425 @@ void ValidateRoot(const Json &document, std::string_view name)
     }
 }
 
+void ValidateGameDataDocumentSemantics(const Json &document, std::string_view name)
+{
+    if (name == "audio_cues")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "maximum_source_voices",
+                          "submixes", "priority_order", "pause_behavior",
+                          "silent_mode_when_device_missing", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        static_cast<void>(CollectIds(entries, name));
+        if (RequireInteger(document, name, "$", "maximum_source_voices") != 64)
+            ThrowValidationError(name, "$/maximum_source_voices",
+                                 "audio capacity does not match runtime contracts");
+        return;
+    }
+
+    if (name == "bosses")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "common", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 3);
+        static_cast<void>(CollectIds(entries, name));
+        constexpr std::array<std::string_view, 3> expected_ids = {
+            "boss.mid_5m", "boss.mid_10m", "boss.final_15m"};
+        for (std::size_t index = 0; index < expected_ids.size(); ++index)
+        {
+            const auto path = "$/entries/" + std::to_string(index);
+            if (RequireString(entries[index], name, path, "id") != expected_ids[index])
+                ThrowValidationError(name, path + "/id", "boss order is part of the cooked ABI");
+            RequirePositive(RequireInteger(entries[index], name, path, "hp"), name,
+                            path + "/hp");
+        }
+        return;
+    }
+
+    if (name == "characters")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 1);
+        static_cast<void>(CollectIds(entries, name));
+        const auto &character = entries[0];
+        const auto path = std::string("$/entries/0");
+        if (RequireString(character, name, path, "id") != "character.archer" ||
+            RequireString(RequireMember(character, name, path, "movement"), name,
+                          path + "/movement", "input") != "RMB")
+        {
+            ThrowValidationError(name, path, "first version must contain RMB archer");
+        }
+        const auto &active_slots =
+            RequireArray(RequireMember(character, name, path, "aiming"), name,
+                         path + "/aiming", "active_skill_slots");
+        RequireCount(active_slots, name, path + "/aiming/active_skill_slots", 4);
+        constexpr std::array<std::string_view, 4> expected_slots = {"Q", "W", "E", "R"};
+        for (std::size_t index = 0; index < expected_slots.size(); ++index)
+        {
+            if (!active_slots[index].is_string() ||
+                active_slots[index].get<std::string>() != expected_slots[index])
+            {
+                ThrowValidationError(name,
+                                     path + "/aiming/active_skill_slots/" +
+                                         std::to_string(index),
+                                     "slot order must be Q, W, E, R");
+            }
+        }
+        return;
+    }
+
+    if (name == "enemies")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "spawn_scaling",
+                          "common", "common_rules", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 3);
+        static_cast<void>(CollectIds(entries, name));
+        constexpr std::array<std::string_view, 3> expected_ids = {
+            "enemy.melee", "enemy.ranged", "enemy.suicide"};
+        for (std::size_t index = 0; index < expected_ids.size(); ++index)
+        {
+            const auto path = "$/entries/" + std::to_string(index);
+            if (RequireString(entries[index], name, path, "id") != expected_ids[index])
+                ThrowValidationError(name, path + "/id", "enemy order is part of the cooked ABI");
+            RequirePositive(RequireInteger(entries[index], name, path, "base_hp"), name,
+                            path + "/base_hp");
+            RequirePositive(RequireNumber(entries[index], name, path, "movement_speed_mps"), name,
+                            path + "/movement_speed_mps");
+        }
+        return;
+    }
+
+    if (name == "level")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 1);
+        static_cast<void>(CollectIds(entries, name));
+        const auto &path_entry = entries[0];
+        const auto arena = RequireMember(path_entry, name, "$/entries/0", "arena");
+        RequirePositive(RequireNumber(arena, name, "$/entries/0/arena", "width_m"), name,
+                        "$/entries/0/arena/width_m");
+        RequirePositive(RequireNumber(arena, name, "$/entries/0/arena", "depth_m"), name,
+                        "$/entries/0/arena/depth_m");
+        const auto &experience =
+            RequireMember(path_entry, name, "$/entries/0", "experience");
+        const auto &rewards = RequireArray(experience, name, "$/entries/0/experience", "rewards");
+        RequireCount(rewards, name, "$/entries/0/experience/rewards", 6);
+        for (std::size_t index = 0; index < rewards.size(); ++index)
+            static_cast<void>(RequireString(
+                rewards[index], name,
+                "$/entries/0/experience/rewards/" + std::to_string(index), "source_id"));
+        return;
+    }
+
+    if (name == "materials")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "entries",
+                          "rendering_rules"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 11);
+        static_cast<void>(CollectIds(entries, name));
+        return;
+    }
+
+    if (name == "particles")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "gpu_capacity", "sprites",
+                          "effects", "rules"});
+        const auto &effects = RequireArray(document, name, "$", "effects");
+        const auto effect_ids = CollectIds(effects, name);
+        if (RequireInteger(document, name, "$", "gpu_capacity") != 10'000)
+            ThrowValidationError(name, "$/gpu_capacity", "particle capacity does not match runtime contracts");
+        constexpr std::array required_particle_ids{
+            "particle.basic_attack", "particle.boss.area.activate", "particle.boss.dash.impact",
+            "particle.boss.dash.start", "particle.boss.phase_change", "particle.boss.shockwave.release",
+            "particle.boss.spawn", "particle.boss.death", "particle.enemy.spawn_warning", "particle.boss.volley.release",
+            "particle.common.enemy_death", "particle.common.explosion_large", "particle.common.explosion_small",
+            "particle.common.heal", "particle.common.heavy_hit", "particle.common.hit", "particle.common.mark_apply",
+            "particle.common.mark_trigger", "particle.common.player_death", "particle.common.player_hit",
+            "particle.common.pull", "particle.common.push", "particle.enemy.melee.hit",
+            "particle.enemy.melee.windup", "particle.enemy.ranged.release",
+            "particle.enemy.suicide.charge", "particle.enemy.suicide.explosion",
+            "particle.line.burn_transfer", "particle.line.relic_chain", "particle.line.ricochet",
+            "particle.pickup.heal_collect", "particle.pickup.magnet_collect", "particle.pickup.relic_collect",
+            "particle.pickup.xp_spawn", "particle.pickup.xp_collect", "particle.relic.cooldown_surge",
+            "particle.relic.cooldown_refund", "particle.relic.tracking_arrow", "particle.relic.afterimage_arrow",
+            "particle.relic.revive", "particle.relic.bleed_burn_explosion", "particle.relic.combat_chain",
+            "particle.relic.damage_push", "particle.relic.radial_arrows", "particle.relic.projectile_cadence_reward",
+            "particle.relic.pre_damage_guard", "particle.relic.slow_synergy", "particle.relic.area_resonance",
+            "particle.relic.boss_pressure", "particle.relic.hit_streak_reward", "particle.relic.pickup_reward",
+            "particle.relic.low_health_survival", "particle.skill.arrow_rain", "particle.skill.arrow_rain.area_pulse",
+            "particle.skill.arrow_rain.impact", "particle.skill.charged_shot", "particle.skill.charged_shot.pulse",
+            "particle.skill.charged_shot.ready", "particle.skill.explosive_arrow",
+            "particle.skill.explosive_arrow.main", "particle.skill.explosive_arrow.secondary",
+            "particle.skill.damage_area.pulse", "particle.skill.fire_area.pulse", "particle.skill.multishot",
+            "particle.skill.piercing_shot", "particle.skill.piercing_shot.trail_pulse",
+            "particle.skill.retreat_shot", "particle.skill.retreat_shot.land", "particle.skill.retreat_shot.move",
+            "particle.skill.ricochet_arrow", "particle.skill.trap.idle", "particle.skill.ricochet_arrow.hit",
+            "particle.skill.trap", "particle.skill.trap.arm", "particle.skill.trap.trigger",
+            "particle.status.bleed_apply", "particle.status.bleed_tick", "particle.status.burn_apply",
+            "particle.status.burn_tick", "particle.status.slow_apply", "particle.status.slow_area"};
+        for (const auto id : required_particle_ids)
+            if (!effect_ids.contains(id))
+                ThrowValidationError(name, "$/effects",
+                                     std::string("required particle effect is missing: ") + id);
+        return;
+    }
+
+    if (name == "relics")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category",
+                          "average_relics_per_session_target", "maximum_relic_slots",
+                          "duplicate_acquisition_allowed", "all_unlocked_in_first_version",
+                          "box_rules", "healing_pickup", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 20);
+        static_cast<void>(CollectIds(entries, name));
+        constexpr std::array<std::string_view, 20> expected_ids{
+            "relic.bleed_kill_heal", "relic.burn_spread_on_kill", "relic.kill_cooldown_surge",
+            "relic.bleed_burn_explosion", "relic.sixth_basic_radial", "relic.basic_kill_tracking_arrow",
+            "relic.movement_afterimage_arrow", "relic.alternating_active_refund",
+            "relic.cross_active_tracking_arrow", "relic.on_damage_push_slow", "relic.once_revive",
+            "relic.combat_hit_chain", "relic.projectile_cadence_reward", "relic.pre_damage_guard",
+            "relic.slow_synergy", "relic.area_resonance", "relic.boss_pressure", "relic.hit_streak_reward",
+            "relic.pickup_reward", "relic.low_health_survival"};
+        constexpr std::array<std::string_view, 20> expected_logics{
+            "bleeding_enemy_kill_heal", "burning_enemy_kill_spread",
+            "every_tenth_kill_reduce_active_cooldowns", "burn_applied_to_bleeding_explosion",
+            "sixth_basic_attack_radial_arrows", "basic_kill_tracking_arrow",
+            "movement_distance_afterimage_arrow", "different_active_within_window_refund",
+            "different_active_same_target_tracking_arrow", "player_damaged_push_and_slow",
+            "fatal_damage_once_revive", "every_twelfth_direct_hit_chain", "projectile_cadence_reward",
+            "pre_damage_guard", "slow_synergy", "area_resonance", "boss_pressure", "hit_streak_reward",
+            "pickup_reward", "low_health_survival"};
+        for (std::size_t index = 0; index < entries.size(); ++index)
+        {
+            const auto path = "$/entries/" + std::to_string(index);
+            if (RequireString(entries[index], name, path, "id") != expected_ids[index])
+                ThrowValidationError(name, path + "/id", "relic IDs/order are part of the cooked ABI");
+            if (RequireInteger(entries[index], name, path, "ordinal") !=
+                static_cast<std::int64_t>(index + 1))
+                ThrowValidationError(name, path + "/ordinal", "ordinal must be 1 through 20");
+            if (RequireString(entries[index], name, path, "logic_id") != expected_logics[index])
+                ThrowValidationError(name, path + "/logic_id", "relic logic/order is part of the cooked ABI");
+        }
+        constexpr std::array<std::array<std::string_view, 3>, 8> expected_parameters{{
+            {{"hits_per_trigger", "cooldown_reduction", ""}},
+            {{"damage_reduction_fraction", "cooldown", ""}},
+            {{"damage_multiplier", "per_target_cooldown", ""}},
+            {{"damage_multiplier", "cooldown", ""}},
+            {{"damage_multiplier", "per_target_cooldown", ""}},
+            {{"direct_hits_per_trigger", "damage_multiplier", ""}},
+            {{"attack_power_fraction", "duration", ""}},
+            {{"health_threshold_fraction", "damage_reduction_fraction", "cooldown"}}}};
+        for (std::size_t index = 12; index < entries.size(); ++index)
+        {
+            const auto path = "$/entries/" + std::to_string(index);
+            const auto &keys = expected_parameters[index - 12];
+            if (keys[2].empty())
+                RequireExactParameterKeys(entries[index], name, path,
+                                          std::array{keys[0], keys[1]});
+            else
+                RequireExactParameterKeys(entries[index], name, path, keys);
+        }
+        return;
+    }
+
+    if (name == "skills")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "active_skill_limit",
+                          "automatic_slot_order", "acquisition_level", "maximum_level",
+                          "upgrade_choices_per_skill", "common_rules", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 9);
+        static_cast<void>(CollectIds(entries, name));
+        if (RequireInteger(document, name, "$", "active_skill_limit") != 4 ||
+            RequireInteger(document, name, "$", "upgrade_choices_per_skill") != 4)
+            ThrowValidationError(name, "$", "expected four active slots and four selected upgrades");
+        const auto &slots = RequireArray(document, name, "$", "automatic_slot_order");
+        RequireCount(slots, name, "$/automatic_slot_order", 4);
+        constexpr std::array<std::string_view, 4> expected_slots = {"Q", "W", "E", "R"};
+        for (std::size_t index = 0; index < expected_slots.size(); ++index)
+            if (!slots[index].is_string() || slots[index].get<std::string>() != expected_slots[index])
+                ThrowValidationError(name, "$/automatic_slot_order/" + std::to_string(index),
+                                     "slot order must be Q, W, E, R");
+        constexpr std::array<std::string_view, 9> expected_ids = {
+            "skill.basic_attack", "skill.piercing_shot", "skill.multishot", "skill.charged_shot",
+            "skill.explosive_arrow", "skill.ricochet_arrow", "skill.arrow_rain", "skill.trap",
+            "skill.retreat_shot"};
+        constexpr std::array<std::string_view, 9> expected_logics = {
+            "basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles",
+            "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet",
+            "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
+        const std::array<std::set<std::string, std::less<>>, 9> parameter_keys{{
+            {"damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "starting_level", "maximum_level", "selected_upgrades_per_session"},
+            {"cooldown", "damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "damage_decay_per_pierce", "minimum_damage_fraction", "maximum_hits_per_target"},
+            {"cooldown", "fan_angle", "projectile_count", "damage_multiplier_per_arrow", "projectile_speed", "range", "collision_radius", "pierce_per_arrow", "maximum_hits_per_target"},
+            {"maximum_charge_time", "minimum_damage_multiplier", "maximum_damage_multiplier", "minimum_range", "maximum_range", "minimum_collision_radius", "maximum_collision_radius", "projectile_speed", "pierce", "movement_speed_multiplier_while_charging", "cooldown"},
+            {"cooldown", "projectile_speed", "range", "collision_radius", "explosion_radius", "explosion_damage_multiplier"},
+            {"cooldown", "damage_multiplier", "projectile_speed", "collision_radius", "initial_range", "ricochet_search_radius", "maximum_ricochets"},
+            {"target_range", "cooldown", "activation_delay", "radius", "duration", "tick_interval", "damage_multiplier_per_tick", "total_damage_ticks"},
+            {"forward_roll_distance", "forward_roll_duration", "cooldown", "activation_delay", "active_duration", "detection_radius", "explosion_radius", "damage_multiplier", "slow_fraction", "slow_duration"},
+            {"forced_move_duration", "forced_move_distance", "damage_multiplier", "cooldown", "projectile_speed", "collision_radius", "projectile_range", "pierce"}}};
+        for (std::size_t index = 0; index < entries.size(); ++index)
+        {
+            const auto path = "$/entries/" + std::to_string(index);
+            if (RequireString(entries[index], name, path, "id") != expected_ids[index])
+                ThrowValidationError(name, path + "/id", "skill order is part of cooked ABI");
+            if (RequireString(entries[index], name, path, "logic_id") != expected_logics[index])
+                ThrowValidationError(name, path + "/logic_id", "skill logic order is part of cooked ABI");
+            RequireExactParameterKeys(entries[index], name, path, parameter_keys[index]);
+            const auto &parameters = RequireArray(entries[index], name, path, "parameters");
+            for (std::size_t parameter_index = 0; parameter_index < parameters.size(); ++parameter_index)
+            {
+                const auto parameter_path = path + "/parameters/" + std::to_string(parameter_index);
+                const auto &value = RequireMember(parameters[parameter_index], name, parameter_path, "value");
+                if (value.is_number() && (!std::isfinite(value.get<double>()) || value.get<double>() < 0.0))
+                    ThrowValidationError(name, parameter_path + "/value",
+                                         "numeric skill parameter must be finite and non-negative");
+            }
+        }
+        return;
+    }
+
+    if (name == "spawn_schedule")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "tick_rate_hz",
+                          "continuous_intervals", "compositions", "waves", "placement", "rules"});
+        const auto &intervals = RequireArray(document, name, "$", "continuous_intervals");
+        const auto &compositions = RequireArray(document, name, "$", "compositions");
+        const auto &waves = RequireArray(document, name, "$", "waves");
+        RequireCount(intervals, name, "$/continuous_intervals", 6);
+        RequireCount(compositions, name, "$/compositions", 7);
+        RequireCount(waves, name, "$/waves", 5);
+        if (RequireInteger(document, name, "$", "tick_rate_hz") != 60)
+            ThrowValidationError(name, "$/tick_rate_hz", "fixed simulation rate must be 60 Hz");
+        std::int64_t previous_end = 0;
+        for (std::size_t index = 0; index < intervals.size(); ++index)
+        {
+            const auto path = "$/continuous_intervals/" + std::to_string(index);
+            const auto start = RequireInteger(intervals[index], name, path, "start_seconds");
+            const auto end = RequireInteger(intervals[index], name, path, "end_seconds");
+            const auto rate = RequireNumber(intervals[index], name, path, "rate_per_second");
+            if (start != previous_end || end <= start || rate <= 0)
+                ThrowValidationError(name, path, "intervals must be contiguous and positive");
+            previous_end = end;
+        }
+        if (previous_end != 900)
+            ThrowValidationError(name, "$/continuous_intervals", "intervals must end at 900 seconds");
+        std::int64_t previous_start = -1;
+        for (std::size_t index = 0; index < compositions.size(); ++index)
+        {
+            const auto path = "$/compositions/" + std::to_string(index);
+            const auto start = RequireInteger(compositions[index], name, path, "start_seconds");
+            const auto melee = RequireInteger(compositions[index], name, path, "melee_weight");
+            const auto ranged = RequireInteger(compositions[index], name, path, "ranged_weight");
+            const auto suicide = RequireInteger(compositions[index], name, path, "suicide_weight");
+            if (start <= previous_start || melee < 0 || ranged < 0 || suicide < 0 ||
+                melee + ranged + suicide != 100)
+                ThrowValidationError(name, path,
+                                     "composition starts must increase and weights must total 100");
+            previous_start = start;
+        }
+        for (std::size_t index = 0; index < waves.size(); ++index)
+        {
+            const auto path = "$/waves/" + std::to_string(index);
+            const auto seconds = RequireInteger(waves[index], name, path, "duration_seconds");
+            const auto ticks = RequireInteger(waves[index], name, path, "duration_ticks");
+            if (RequireInteger(waves[index], name, path, "total_count") <= 0 || seconds <= 0 ||
+                ticks != seconds * 60)
+                ThrowValidationError(name, path, "wave count and 60 Hz duration must agree");
+        }
+        return;
+    }
+
+    if (name == "stats")
+    {
+        RequireExactKeys(document, name, {"$schema", "schema_version", "category", "entries"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 1);
+        static_cast<void>(CollectIds(entries, name));
+        const auto &entry = entries[0];
+        const auto base = RequireMember(entry, name, "$/entries/0", "base_values");
+        RequirePositive(RequireNumber(base, name, "$/entries/0/base_values", "maximum_hp"), name,
+                        "$/entries/0/base_values/maximum_hp");
+        RequirePositive(RequireNumber(base, name, "$/entries/0/base_values", "attack_power"), name,
+                        "$/entries/0/base_values/attack_power");
+        RequirePositive(RequireNumber(base, name, "$/entries/0/base_values",
+                                      "basic_attack_rate_per_second"), name,
+                        "$/entries/0/base_values/basic_attack_rate_per_second");
+        RequireCount(RequireArray(entry, name, "$/entries/0", "allocations"), name,
+                     "$/entries/0/allocations", 6);
+        RequireCount(RequireArray(entry, name, "$/entries/0", "statuses"), name,
+                     "$/entries/0/statuses", 3);
+        return;
+    }
+
+    if (name == "ui_strings")
+    {
+        RequireExactKeys(document, name,
+                         {"$schema", "schema_version", "category", "locale", "font_asset_id",
+                          "layout", "screen_flow", "screens", "entries", "hidden_hud_items",
+                          "accessibility_rules"});
+        const auto &entries = RequireArray(document, name, "$", "entries");
+        RequireCount(entries, name, "$/entries", 28);
+        const auto ids = CollectIds(entries, name);
+        if (RequireString(document, name, "$", "locale") != "ko-KR")
+            ThrowValidationError(name, "$/locale", "only ko-KR is supported");
+        const auto &screens = RequireArray(document, name, "$", "screens");
+        for (std::size_t screen_index = 0; screen_index < screens.size(); ++screen_index)
+        {
+            const auto path = "$/screens/" + std::to_string(screen_index);
+            const auto &string_ids = RequireArray(screens[screen_index], name, path, "string_ids");
+            for (std::size_t index = 0; index < string_ids.size(); ++index)
+            {
+                if (!string_ids[index].is_string())
+                    ThrowValidationError(name, path + "/string_ids/" + std::to_string(index),
+                                         "expected string ID");
+                RequireReference(ids, string_ids[index].get<std::string>(), name,
+                                 path + "/string_ids/" + std::to_string(index));
+            }
+        }
+        return;
+    }
+
+    if (name == "upgrades")
+    {
+        RequireExactKeys(document, name, {"$schema", "schema_version", "category", "groups"});
+        const auto &groups = RequireArray(document, name, "$", "groups");
+        RequireCount(groups, name, "$/groups", 9);
+        for (std::size_t group_index = 0; group_index < groups.size(); ++group_index)
+        {
+            const auto group_path = "$/groups/" + std::to_string(group_index);
+            const auto &entries = RequireArray(groups[group_index], name, group_path, "entries");
+            RequireCount(entries, name, group_path + "/entries", 8);
+            for (std::size_t entry_index = 0; entry_index < entries.size(); ++entry_index)
+            {
+                const auto path = group_path + "/entries/" + std::to_string(entry_index);
+                if (RequireInteger(entries[entry_index], name, path, "ordinal") !=
+                    static_cast<std::int64_t>(entry_index + 1))
+                    ThrowValidationError(name, path + "/ordinal", "ordinal must be 1 through 8");
+                RequireString(entries[entry_index], name, path, "logic_id");
+                RequireArray(entries[entry_index], name, path, "parameters");
+            }
+        }
+        return;
+    }
+
+    ThrowValidationError(name, "$", "unsupported GameData category");
+}
+
 void ValidateDocuments(const ContentSources &sources)
 {
     const auto &audio = sources.documents.at("audio_cues");
@@ -338,47 +687,6 @@ void ValidateDocuments(const ContentSources &sources)
     const auto &ui = sources.documents.at("ui_strings");
     const auto &upgrades = sources.documents.at("upgrades");
 
-    RequireExactKeys(audio, "audio_cues",
-                     {"$schema", "schema_version", "category", "maximum_source_voices",
-                      "submixes", "priority_order", "pause_behavior",
-                      "silent_mode_when_device_missing", "entries"});
-    RequireExactKeys(bosses, "bosses",
-                     {"$schema", "schema_version", "category", "common", "entries"});
-    RequireExactKeys(characters, "characters",
-                     {"$schema", "schema_version", "category", "entries"});
-    RequireExactKeys(enemies, "enemies",
-                     {"$schema", "schema_version", "category", "spawn_scaling",
-                      "common", "common_rules", "entries"});
-    RequireExactKeys(level, "level",
-                     {"$schema", "schema_version", "category", "entries"});
-    RequireExactKeys(materials, "materials",
-                     {"$schema", "schema_version", "category", "entries",
-                      "rendering_rules"});
-    RequireExactKeys(particles, "particles",
-                     {"$schema", "schema_version", "category", "gpu_capacity", "sprites", "effects",
-                      "rules"});
-    RequireExactKeys(relics, "relics",
-                     {"$schema", "schema_version", "category",
-                      "average_relics_per_session_target", "maximum_relic_slots",
-                      "duplicate_acquisition_allowed", "all_unlocked_in_first_version",
-                      "box_rules", "healing_pickup", "entries"});
-    RequireExactKeys(skills, "skills",
-                     {"$schema", "schema_version", "category", "active_skill_limit",
-                      "automatic_slot_order", "acquisition_level", "maximum_level",
-                      "upgrade_choices_per_skill", "common_rules", "entries"});
-    RequireExactKeys(spawn, "spawn_schedule",
-                     {"$schema", "schema_version", "category", "tick_rate_hz",
-                      "continuous_intervals", "compositions", "waves", "placement",
-                      "rules"});
-    RequireExactKeys(stats, "stats",
-                     {"$schema", "schema_version", "category", "entries"});
-    RequireExactKeys(ui, "ui_strings",
-                     {"$schema", "schema_version", "category", "locale",
-                      "font_asset_id", "layout", "screen_flow", "screens", "entries",
-                      "hidden_hud_items", "accessibility_rules"});
-    RequireExactKeys(upgrades, "upgrades",
-                     {"$schema", "schema_version", "category", "groups"});
-
     const auto &character_entries = RequireArray(characters, "characters", "$", "entries");
     const auto &skill_entries = RequireArray(skills, "skills", "$", "entries");
     const auto &enemy_entries = RequireArray(enemies, "enemies", "$", "entries");
@@ -388,20 +696,7 @@ void ValidateDocuments(const ContentSources &sources)
     const auto &material_entries = RequireArray(materials, "materials", "$", "entries");
     const auto &particle_entries = RequireArray(particles, "particles", "$", "effects");
     const auto &relic_entries = RequireArray(relics, "relics", "$", "entries");
-    const auto &audio_entries = RequireArray(audio, "audio_cues", "$", "entries");
-    const auto &ui_entries = RequireArray(ui, "ui_strings", "$", "entries");
     const auto &upgrade_groups = RequireArray(upgrades, "upgrades", "$", "groups");
-
-    RequireCount(character_entries, "characters", "$/entries", 1);
-    RequireCount(skill_entries, "skills", "$/entries", 9);
-    RequireCount(enemy_entries, "enemies", "$/entries", 3);
-    RequireCount(boss_entries, "bosses", "$/entries", 3);
-    RequireCount(level_entries, "level", "$/entries", 1);
-    RequireCount(stat_entries, "stats", "$/entries", 1);
-    RequireCount(relic_entries, "relics", "$/entries", 20);
-    RequireCount(upgrade_groups, "upgrades", "$/groups", 9);
-    RequireCount(material_entries, "materials", "$/entries", 11);
-    RequireCount(ui_entries, "ui_strings", "$/entries", 28);
 
     const auto character_ids = CollectIds(character_entries, "characters");
     const auto skill_ids = CollectIds(skill_entries, "skills");
@@ -410,74 +705,12 @@ void ValidateDocuments(const ContentSources &sources)
     const auto stat_ids = CollectIds(stat_entries, "stats");
     const auto material_ids = CollectIds(material_entries, "materials");
     const auto particle_ids = CollectIds(particle_entries, "particles");
-    constexpr std::array required_particle_ids{
-        "particle.basic_attack", "particle.boss.area.activate", "particle.boss.dash.impact",
-        "particle.boss.dash.start", "particle.boss.phase_change", "particle.boss.shockwave.release",
-        "particle.boss.spawn", "particle.boss.death", "particle.enemy.spawn_warning", "particle.boss.volley.release",
-        "particle.common.enemy_death", "particle.common.explosion_large", "particle.common.explosion_small",
-        "particle.common.heal", "particle.common.heavy_hit", "particle.common.hit", "particle.common.mark_apply",
-        "particle.common.mark_trigger", "particle.common.player_death", "particle.common.player_hit",
-        "particle.common.pull", "particle.common.push", "particle.enemy.melee.hit",
-        "particle.enemy.melee.windup", "particle.enemy.ranged.release",
-        "particle.enemy.suicide.charge", "particle.enemy.suicide.explosion",
-        "particle.line.burn_transfer", "particle.line.relic_chain", "particle.line.ricochet",
-        "particle.pickup.heal_collect", "particle.pickup.magnet_collect", "particle.pickup.relic_collect",
-        "particle.pickup.xp_spawn", "particle.pickup.xp_collect", "particle.relic.cooldown_surge",
-        "particle.relic.cooldown_refund", "particle.relic.tracking_arrow", "particle.relic.afterimage_arrow",
-        "particle.relic.revive", "particle.relic.bleed_burn_explosion",
-        "particle.relic.combat_chain", "particle.relic.damage_push",
-        "particle.relic.radial_arrows", "particle.relic.projectile_cadence_reward",
-        "particle.relic.pre_damage_guard", "particle.relic.slow_synergy",
-        "particle.relic.area_resonance", "particle.relic.boss_pressure",
-        "particle.relic.hit_streak_reward", "particle.relic.pickup_reward",
-        "particle.relic.low_health_survival", "particle.skill.arrow_rain", "particle.skill.arrow_rain.area_pulse",
-        "particle.skill.arrow_rain.impact", "particle.skill.charged_shot", "particle.skill.charged_shot.pulse",
-        "particle.skill.charged_shot.ready", "particle.skill.explosive_arrow",
-        "particle.skill.explosive_arrow.main", "particle.skill.explosive_arrow.secondary",
-        "particle.skill.damage_area.pulse", "particle.skill.fire_area.pulse",
-        "particle.skill.multishot", "particle.skill.piercing_shot", "particle.skill.piercing_shot.trail_pulse",
-        "particle.skill.retreat_shot", "particle.skill.retreat_shot.land",
-        "particle.skill.retreat_shot.move", "particle.skill.ricochet_arrow",
-        "particle.skill.trap.idle",
-        "particle.skill.ricochet_arrow.hit", "particle.skill.trap", "particle.skill.trap.arm",
-        "particle.skill.trap.trigger", "particle.status.bleed_apply", "particle.status.bleed_tick",
-        "particle.status.burn_apply", "particle.status.burn_tick", "particle.status.slow_apply",
-        "particle.status.slow_area"};
-    for (const auto id : required_particle_ids)
-        if (!particle_ids.contains(id))
-            ThrowValidationError("particles", "$/effects", std::string("required particle effect is missing: ") + id);
     const auto relic_ids = CollectIds(relic_entries, "relics");
-    const auto audio_ids = CollectIds(audio_entries, "audio_cues");
-    ValidateAudioSources(audio);
-    const auto ui_ids = CollectIds(ui_entries, "ui_strings");
     static_cast<void>(character_ids);
     static_cast<void>(relic_ids);
-    static_cast<void>(audio_ids);
 
-    constexpr std::array<std::string_view, 9> expected_skills = {
-        "skill.basic_attack",   "skill.piercing_shot", "skill.multishot",
-        "skill.charged_shot",   "skill.explosive_arrow", "skill.ricochet_arrow",
-        "skill.arrow_rain",     "skill.trap",          "skill.retreat_shot",
-    };
-    constexpr std::array<std::string_view, 9> expected_skill_logics = {
-        "basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles",
-        "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet",
-        "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
-    constexpr std::array<std::string_view, 3> expected_enemies = {
-        "enemy.melee", "enemy.ranged", "enemy.suicide"};
-    constexpr std::array<std::string_view, 3> expected_bosses = {
-        "boss.mid_5m", "boss.mid_10m", "boss.final_15m"};
-    for (std::size_t index = 0; index < expected_skills.size(); ++index)
+    for (std::size_t index = 0; index < skill_entries.size(); ++index)
     {
-        if (RequireString(skill_entries[index], "skills",
-                          "$/entries/" + std::to_string(index), "id") !=
-            expected_skills[index])
-        {
-            ThrowValidationError("skills", "$/entries/" + std::to_string(index) + "/id",
-                 "skill order is part of cooked ABI");
-        }
-        if (RequireString(skill_entries[index], "skills", "$/entries/" + std::to_string(index), "logic_id") != expected_skill_logics[index])
-            ThrowValidationError("skills", "$/entries/" + std::to_string(index) + "/logic_id", "skill logic order is part of cooked ABI");
         RequireReference(material_ids,
                          RequireString(skill_entries[index], "skills",
                                        "$/entries/" + std::to_string(index), "material_id"),
@@ -486,82 +719,29 @@ void ValidateDocuments(const ContentSources &sources)
                          RequireString(skill_entries[index], "skills",
                                        "$/entries/" + std::to_string(index), "particle_id"),
                          "skills", "$/entries/" + std::to_string(index) + "/particle_id");
-        const std::array<std::set<std::string, std::less<>>, 9> parameter_keys{{
-            {"damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "starting_level", "maximum_level", "selected_upgrades_per_session"},
-            {"cooldown", "damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "damage_decay_per_pierce", "minimum_damage_fraction", "maximum_hits_per_target"},
-            {"cooldown", "fan_angle", "projectile_count", "damage_multiplier_per_arrow", "projectile_speed", "range", "collision_radius", "pierce_per_arrow", "maximum_hits_per_target"},
-            {"maximum_charge_time", "minimum_damage_multiplier", "maximum_damage_multiplier", "minimum_range", "maximum_range", "minimum_collision_radius", "maximum_collision_radius", "projectile_speed", "pierce", "movement_speed_multiplier_while_charging", "cooldown"},
-            {"cooldown", "projectile_speed", "range", "collision_radius", "explosion_radius", "explosion_damage_multiplier"},
-            {"cooldown", "damage_multiplier", "projectile_speed", "collision_radius", "initial_range", "ricochet_search_radius", "maximum_ricochets"},
-            {"target_range", "cooldown", "activation_delay", "radius", "duration", "tick_interval", "damage_multiplier_per_tick", "total_damage_ticks"},
-            {"forward_roll_distance", "forward_roll_duration", "cooldown", "activation_delay", "active_duration", "detection_radius", "explosion_radius", "damage_multiplier", "slow_fraction", "slow_duration"},
-            {"forced_move_duration", "forced_move_distance", "damage_multiplier", "cooldown", "projectile_speed", "collision_radius", "projectile_range", "pierce"}}};
-        RequireExactParameterKeys(skill_entries[index], "skills", "$/entries/" + std::to_string(index), parameter_keys[index]);
     }
-    for (std::size_t index = 0; index < expected_enemies.size(); ++index)
+    for (std::size_t index = 0; index < enemy_entries.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
-        if (RequireString(enemy_entries[index], "enemies", path, "id") !=
-            expected_enemies[index])
-        {
-            ThrowValidationError("enemies", path + "/id", "enemy order is part of cooked ABI");
-        }
-        RequirePositive(RequireInteger(enemy_entries[index], "enemies", path, "base_hp"),
-                        "enemies", path + "/base_hp");
-        RequirePositive(
-            RequireNumber(enemy_entries[index], "enemies", path, "movement_speed_mps"),
-            "enemies", path + "/movement_speed_mps");
         RequireReference(material_ids,
                          RequireString(enemy_entries[index], "enemies", path, "material_id"),
                          "enemies", path + "/material_id");
     }
-    for (std::size_t index = 0; index < expected_bosses.size(); ++index)
+    for (std::size_t index = 0; index < boss_entries.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
-        if (RequireString(boss_entries[index], "bosses", path, "id") !=
-            expected_bosses[index])
-        {
-            ThrowValidationError("bosses", path + "/id", "boss order is part of cooked ABI");
-        }
-        RequirePositive(RequireInteger(boss_entries[index], "bosses", path, "hp"),
-                        "bosses", path + "/hp");
         RequireReference(material_ids,
                          RequireString(boss_entries[index], "bosses", path, "material_id"),
                          "bosses", path + "/material_id");
     }
 
     const auto &character = character_entries[0];
-    if (RequireString(character, "characters", "$/entries/0", "id") !=
-            "character.archer" ||
-        RequireString(RequireMember(character, "characters", "$/entries/0", "movement"),
-                      "characters", "$/entries/0/movement", "input") !=
-            "RMB")
-    {
-        ThrowValidationError("characters", "$/entries/0", "first version must contain RMB archer");
-    }
     RequireReference(stat_ids,
                      RequireString(character, "characters", "$/entries/0", "stat_profile_id"),
                      "characters", "$/entries/0/stat_profile_id");
     RequireReference(material_ids,
                      RequireString(character, "characters", "$/entries/0", "material_id"),
                      "characters", "$/entries/0/material_id");
-
-    if (RequireInteger(skills, "skills", "$", "active_skill_limit") != 4 ||
-        RequireInteger(skills, "skills", "$", "upgrade_choices_per_skill") != 4)
-    {
-        ThrowValidationError("skills", "$", "expected four active slots and four selected upgrades");
-    }
-    const auto &slots = RequireArray(skills, "skills", "$", "automatic_slot_order");
-    RequireCount(slots, "skills", "$/automatic_slot_order", 4);
-    constexpr std::array<std::string_view, 4> expected_slots = {"Q", "W", "E", "R"};
-    for (std::size_t index = 0; index < expected_slots.size(); ++index)
-    {
-        if (!slots[index].is_string() || slots[index].get<std::string>() != expected_slots[index])
-        {
-            ThrowValidationError("skills", "$/automatic_slot_order/" + std::to_string(index),
-                 "slot order must be Q, W, E, R");
-        }
-    }
 
     std::unordered_set<std::string> upgraded_skills;
     for (std::size_t group_index = 0; group_index < upgrade_groups.size(); ++group_index)
@@ -574,93 +754,8 @@ void ValidateDocuments(const ContentSources &sources)
         {
             ThrowValidationError("upgrades", path + "/skill_id", "duplicate skill upgrade group");
         }
-        const auto &entries =
-            RequireArray(upgrade_groups[group_index], "upgrades", path, "entries");
-        RequireCount(entries, "upgrades", path + "/entries", 8);
-        for (std::size_t entry_index = 0; entry_index < entries.size(); ++entry_index)
-        {
-            const auto entry_path = path + "/entries/" + std::to_string(entry_index);
-            if (RequireInteger(entries[entry_index], "upgrades", entry_path, "ordinal") !=
-                static_cast<std::int64_t>(entry_index + 1))
-            {
-                ThrowValidationError("upgrades", entry_path + "/ordinal", "ordinal must be 1 through 8");
-            }
-            RequireString(entries[entry_index], "upgrades", entry_path, "logic_id");
-            RequireArray(entries[entry_index], "upgrades", entry_path, "parameters");
-        }
     }
 
-    for (std::size_t index = 0; index < relic_entries.size(); ++index)
-    {
-        const auto path = "$/entries/" + std::to_string(index);
-        if (RequireInteger(relic_entries[index], "relics", path, "ordinal") !=
-            static_cast<std::int64_t>(index + 1))
-        {
-            ThrowValidationError("relics", path + "/ordinal", "ordinal must be 1 through 20");
-        }
-    }
-
-    constexpr std::array<std::string_view, 20> expected_relic_ids{
-        "relic.bleed_kill_heal", "relic.burn_spread_on_kill", "relic.kill_cooldown_surge",
-        "relic.bleed_burn_explosion", "relic.sixth_basic_radial", "relic.basic_kill_tracking_arrow",
-        "relic.movement_afterimage_arrow", "relic.alternating_active_refund", "relic.cross_active_tracking_arrow",
-        "relic.on_damage_push_slow", "relic.once_revive", "relic.combat_hit_chain",
-        "relic.projectile_cadence_reward", "relic.pre_damage_guard", "relic.slow_synergy",
-        "relic.area_resonance", "relic.boss_pressure", "relic.hit_streak_reward", "relic.pickup_reward",
-        "relic.low_health_survival"};
-    constexpr std::array<std::string_view, 20> expected_relic_logics{
-        "bleeding_enemy_kill_heal", "burning_enemy_kill_spread", "every_tenth_kill_reduce_active_cooldowns",
-        "burn_applied_to_bleeding_explosion", "sixth_basic_attack_radial_arrows", "basic_kill_tracking_arrow",
-        "movement_distance_afterimage_arrow", "different_active_within_window_refund", "different_active_same_target_tracking_arrow",
-        "player_damaged_push_and_slow", "fatal_damage_once_revive", "every_twelfth_direct_hit_chain",
-        "projectile_cadence_reward", "pre_damage_guard", "slow_synergy", "area_resonance", "boss_pressure",
-        "hit_streak_reward", "pickup_reward", "low_health_survival"};
-    for (std::size_t index = 0; index < relic_entries.size(); ++index)
-    {
-        const auto path = "$/entries/" + std::to_string(index);
-        if (RequireString(relic_entries[index], "relics", path, "id") != expected_relic_ids[index])
-            ThrowValidationError("relics", path + "/id", "relic IDs/order are part of the cooked ABI");
-        if (RequireString(relic_entries[index], "relics", path, "logic_id") != expected_relic_logics[index])
-            ThrowValidationError("relics", path + "/logic_id", "relic logic/order is part of the cooked ABI");
-        if (index >= 12)
-        {
-            constexpr std::array<std::array<std::string_view, 3>, 8> expected_parameters{{
-                {{"hits_per_trigger", "cooldown_reduction", ""}},
-                {{"damage_reduction_fraction", "cooldown", ""}},
-                {{"damage_multiplier", "per_target_cooldown", ""}},
-                {{"damage_multiplier", "cooldown", ""}},
-                {{"damage_multiplier", "per_target_cooldown", ""}},
-                {{"direct_hits_per_trigger", "damage_multiplier", ""}},
-                {{"attack_power_fraction", "duration", ""}},
-                {{"health_threshold_fraction", "damage_reduction_fraction", "cooldown"}}}};
-            const auto &keys = expected_parameters[index - 12];
-            if (keys[2].empty())
-                RequireExactParameterKeys(relic_entries[index], "relics", path,
-                                          std::array{keys[0], keys[1]});
-            else
-                RequireExactParameterKeys(relic_entries[index], "relics", path, keys);
-        }
-    }
-
-    const auto &base = RequireMember(stat_entries[0], "stats", "$/entries/0", "base_values");
-    RequirePositive(RequireNumber(base, "stats", "$/entries/0/base_values", "maximum_hp"),
-                    "stats", "$/entries/0/base_values/maximum_hp");
-    RequirePositive(RequireNumber(base, "stats", "$/entries/0/base_values", "attack_power"),
-                    "stats", "$/entries/0/base_values/attack_power");
-    RequirePositive(
-        RequireNumber(base, "stats", "$/entries/0/base_values",
-                      "basic_attack_rate_per_second"),
-        "stats", "$/entries/0/base_values/basic_attack_rate_per_second");
-    RequireCount(RequireArray(stat_entries[0], "stats", "$/entries/0", "allocations"),
-                 "stats", "$/entries/0/allocations", 6);
-    RequireCount(RequireArray(stat_entries[0], "stats", "$/entries/0", "statuses"),
-                 "stats", "$/entries/0/statuses", 3);
-
-    const auto &arena = RequireMember(level_entries[0], "level", "$/entries/0", "arena");
-    RequirePositive(RequireNumber(arena, "level", "$/entries/0/arena", "width_m"),
-                    "level", "$/entries/0/arena/width_m");
-    RequirePositive(RequireNumber(arena, "level", "$/entries/0/arena", "depth_m"),
-                    "level", "$/entries/0/arena/depth_m");
     const auto &experience =
         RequireMember(level_entries[0], "level", "$/entries/0", "experience");
     const auto &rewards = RequireArray(experience, "level", "$/entries/0/experience", "rewards");
@@ -675,134 +770,15 @@ void ValidateDocuments(const ContentSources &sources)
         }
     }
 
-    const auto &intervals =
-        RequireArray(spawn, "spawn_schedule", "$", "continuous_intervals");
-    const auto &compositions = RequireArray(spawn, "spawn_schedule", "$", "compositions");
-    const auto &waves = RequireArray(spawn, "spawn_schedule", "$", "waves");
-    RequireCount(intervals, "spawn_schedule", "$/continuous_intervals", 6);
-    RequireCount(compositions, "spawn_schedule", "$/compositions", 7);
-    RequireCount(waves, "spawn_schedule", "$/waves", 5);
-    if (RequireInteger(spawn, "spawn_schedule", "$", "tick_rate_hz") != 60)
-    {
-        ThrowValidationError("spawn_schedule", "$/tick_rate_hz", "fixed simulation rate must be 60 Hz");
-    }
-    std::int64_t previous_end = 0;
-    for (std::size_t index = 0; index < intervals.size(); ++index)
-    {
-        const auto path = "$/continuous_intervals/" + std::to_string(index);
-        const auto start =
-            RequireInteger(intervals[index], "spawn_schedule", path, "start_seconds");
-        const auto end =
-            RequireInteger(intervals[index], "spawn_schedule", path, "end_seconds");
-        const auto rate =
-            RequireNumber(intervals[index], "spawn_schedule", path, "rate_per_second");
-        if (start != previous_end || end <= start || rate <= 0)
-        {
-            ThrowValidationError("spawn_schedule", path, "intervals must be contiguous and positive");
-        }
-        previous_end = end;
-    }
-    if (previous_end != 900)
-    {
-        ThrowValidationError("spawn_schedule", "$/continuous_intervals", "intervals must end at 900 seconds");
-    }
-    std::int64_t previous_start = -1;
-    for (std::size_t index = 0; index < compositions.size(); ++index)
-    {
-        const auto path = "$/compositions/" + std::to_string(index);
-        const auto start =
-            RequireInteger(compositions[index], "spawn_schedule", path, "start_seconds");
-        const auto melee =
-            RequireInteger(compositions[index], "spawn_schedule", path, "melee_weight");
-        const auto ranged =
-            RequireInteger(compositions[index], "spawn_schedule", path, "ranged_weight");
-        const auto suicide =
-            RequireInteger(compositions[index], "spawn_schedule", path, "suicide_weight");
-        if (start <= previous_start || melee < 0 || ranged < 0 || suicide < 0 ||
-            melee + ranged + suicide != 100)
-        {
-            ThrowValidationError("spawn_schedule", path,
-                 "composition starts must increase and weights must total 100");
-        }
-        previous_start = start;
-    }
-    for (std::size_t index = 0; index < waves.size(); ++index)
-    {
-        const auto path = "$/waves/" + std::to_string(index);
-        const auto seconds =
-            RequireInteger(waves[index], "spawn_schedule", path, "duration_seconds");
-        const auto ticks =
-            RequireInteger(waves[index], "spawn_schedule", path, "duration_ticks");
-        if (RequireInteger(waves[index], "spawn_schedule", path, "total_count") <= 0 ||
-            seconds <= 0 || ticks != seconds * 60)
-        {
-            ThrowValidationError("spawn_schedule", path, "wave count and 60 Hz duration must agree");
-        }
-    }
-
-    if (RequireInteger(particles, "particles", "$", "gpu_capacity") != 10'000 ||
-        RequireInteger(audio, "audio_cues", "$", "maximum_source_voices") != 64)
-    {
-        ThrowValidationError("content", "$", "particle and audio capacities do not match runtime contracts");
-    }
-    if (RequireString(ui, "ui_strings", "$", "locale") != "ko-KR")
-    {
-        ThrowValidationError("ui_strings", "$/locale", "only ko-KR is supported");
-    }
-    const auto &screens = RequireArray(ui, "ui_strings", "$", "screens");
-    for (std::size_t screen_index = 0; screen_index < screens.size(); ++screen_index)
-    {
-        const auto path = "$/screens/" + std::to_string(screen_index);
-        const auto &string_ids = RequireArray(screens[screen_index], "ui_strings", path,
-                                              "string_ids");
-        for (std::size_t index = 0; index < string_ids.size(); ++index)
-        {
-            if (!string_ids[index].is_string())
-            {
-                ThrowValidationError("ui_strings", path + "/string_ids/" + std::to_string(index),
-                     "expected string ID");
-            }
-            RequireReference(ui_ids, string_ids[index].get<std::string>(), "ui_strings",
-                             path + "/string_ids/" + std::to_string(index));
-        }
-    }
-
-    for (std::size_t index = 0; index < skill_entries.size(); ++index)
-    {
-        const auto path = "$/entries/" + std::to_string(index);
-        const auto &parameters = RequireArray(skill_entries[index], "skills", path, "parameters");
-        std::unordered_set<std::string> keys;
-        for (std::size_t parameter_index = 0; parameter_index < parameters.size();
-             ++parameter_index)
-        {
-            const auto parameter_path =
-                path + "/parameters/" + std::to_string(parameter_index);
-            const auto key =
-                RequireString(parameters[parameter_index], "skills", parameter_path, "key");
-            if (!keys.emplace(key).second)
-            {
-                ThrowValidationError("skills", parameter_path + "/key", "duplicate parameter key");
-            }
-            RequireString(parameters[parameter_index], "skills", parameter_path, "unit");
-            const auto &value =
-                RequireMember(parameters[parameter_index], "skills", parameter_path, "value");
-            if (value.is_number())
-            {
-                const auto number = value.get<double>();
-                if (!std::isfinite(number) || number < 0.0)
-                {
-                    ThrowValidationError("skills", parameter_path + "/value",
-                         "numeric skill parameter must be finite and non-negative");
-                }
-            }
-        }
-    }
 }
 
-ContentSources LoadAndValidateSources()
+namespace
 {
-    ValidateGameDataDirectory();
-    const auto schema_text = ReadRequiredText(HS_SCHEMA_FILE);
+
+void ValidateGameDataSchema()
+{
+    const auto schema_path = paths::Schema();
+    const auto schema_text = ReadRequiredText(schema_path);
     Json schema;
     try
     {
@@ -810,7 +786,7 @@ ContentSources LoadAndValidateSources()
     }
     catch (const Json::exception &exception)
     {
-        throw std::runtime_error(std::string(HS_SCHEMA_FILE) + ": " + exception.what());
+        throw std::runtime_error(schema_path.string() + ": " + exception.what());
     }
     if (!schema.is_object() || schema.value("$schema", std::string{}) !=
                                    "https://json-schema.org/draft/2020-12/schema" ||
@@ -818,30 +794,150 @@ ContentSources LoadAndValidateSources()
         schema["oneOf"].size() != kDocumentNames.size() || !schema.contains("$defs") ||
         !schema["$defs"].is_object())
     {
-        throw std::runtime_error(std::string(HS_SCHEMA_FILE) +
+        throw std::runtime_error(schema_path.string() +
                                  ": expected complete draft 2020-12 category schema");
     }
+}
 
-    ContentSources sources;
-    sources.inventory = LoadContentSourceInventory();
+Json ParseGameDataDocument(std::string_view text, std::string_view name)
+{
+    Json document;
+    try
+    {
+        document = Json::parse(text);
+    }
+    catch (const Json::exception &exception)
+    {
+        throw std::runtime_error(GameDataCategoryPath(name).string() + ": " +
+                                 exception.what());
+    }
+    ValidateRoot(document, name);
+    ValidateGameDataDocumentSemantics(document, name);
+    return document;
+}
+
+void ValidateGameDataDocuments(ContentSources &sources)
+{
     for (std::size_t index = 0; index < kDocumentNames.size(); ++index)
     {
         const auto name = kDocumentNames[index];
-        const auto path = GameDataCategoryPath(name);
         const auto &text = sources.inventory.document_text[index];
-        Json document;
-        try
-        {
-            document = Json::parse(text);
-        }
-        catch (const Json::exception &exception)
-        {
-            throw std::runtime_error(path.string() + ": " + exception.what());
-        }
-        ValidateRoot(document, name);
-        sources.documents.emplace(name, std::move(document));
+        sources.documents.emplace(name, ParseGameDataDocument(text, name));
     }
     ValidateDocuments(sources);
+}
+
+} // namespace
+
+ContentSources LoadAndValidateSources()
+{
+    ValidateGameDataDirectory();
+    ValidateGameDataSchema();
+    ContentSources sources;
+    sources.inventory = LoadContentSourceInventory();
+    ValidateGameDataDocuments(sources);
+    return sources;
+}
+
+ContentSources LoadAndValidateGameDataDocuments()
+{
+    ValidateGameDataDirectory();
+    ValidateGameDataSchema();
+    ContentSources sources;
+    for (std::size_t index = 0; index < kDocumentNames.size(); ++index)
+        sources.inventory.document_text[index] =
+            ReadRequiredText(GameDataCategoryPath(kDocumentNames[index]));
+    ValidateGameDataDocuments(sources);
+    return sources;
+}
+
+ContentSources LoadScopedGameDataSources(std::span<const std::string_view> names)
+{
+    ValidateGameDataDirectory();
+    ValidateGameDataSchema();
+    ContentSources sources;
+    std::set<std::string, std::less<>> requested;
+    for (const auto name : names)
+    {
+        if (!IsGameDataCategory(name) || name == "audio_cues" ||
+            name == "materials" || name == "particles" || name == "ui_strings" ||
+            !requested.emplace(name).second)
+            throw std::runtime_error("invalid or repeated semantic GameData category: " +
+                                     std::string(name));
+        const auto path = GameDataCategoryPath(name);
+        auto text = ReadRequiredText(path);
+        sources.documents.emplace(name, ParseGameDataDocument(text, name));
+        const auto position = std::ranges::find(kDocumentNames, name);
+        sources.inventory.document_text[static_cast<std::size_t>(
+            std::distance(kDocumentNames.begin(), position))] = std::move(text);
+    }
+
+    constexpr std::array<std::string_view, 9> simulation_scope = {
+        "stats", "level", "characters", "skills", "upgrades", "enemies",
+        "relics", "spawn_schedule", "bosses"};
+    constexpr std::array<std::string_view, 2> presentation_scope = {
+        "characters", "relics"};
+    const auto is_exact_scope = [&](const auto &expected) {
+        if (requested.size() != expected.size())
+            return false;
+        return std::ranges::all_of(expected, [&](const auto name) {
+            return requested.contains(std::string(name));
+        });
+    };
+    const auto is_simulation = is_exact_scope(simulation_scope);
+    if (!is_simulation && !is_exact_scope(presentation_scope))
+        throw std::runtime_error("unsupported semantic GameData scope");
+
+    const auto &character = sources.documents.at("characters")["entries"][0];
+    const auto &relic_entries = sources.documents.at("relics")["entries"];
+    if (is_simulation)
+    {
+        const auto &stats = sources.documents.at("stats")["entries"];
+        const auto &skills = sources.documents.at("skills")["entries"];
+        const auto &enemies = sources.documents.at("enemies")["entries"];
+        const auto &bosses = sources.documents.at("bosses")["entries"];
+        const auto stat_ids = CollectIds(stats, "stats");
+        const auto skill_ids = CollectIds(skills, "skills");
+        const auto enemy_ids = CollectIds(enemies, "enemies");
+        const auto boss_ids = CollectIds(bosses, "bosses");
+        RequireReference(stat_ids,
+                         RequireString(character, "characters", "$/entries/0",
+                                       "stat_profile_id"),
+                         "characters", "$/entries/0/stat_profile_id");
+        const auto relic_id_set = CollectIds(relic_entries, "relics");
+        const auto check_starting_ids = [&](std::string_view field,
+                                            const std::unordered_set<std::string> &ids) {
+            const auto &entries = RequireArray(character, "characters", "$/entries/0", field);
+            for (std::size_t index = 0; index < entries.size(); ++index)
+            {
+                if (!entries[index].is_string())
+                    ThrowValidationError("characters", "$/entries/0/" + std::string(field),
+                                         "starting selection must be a string ID");
+                RequireReference(ids, entries[index].get<std::string>(), "characters",
+                                 "$/entries/0/" + std::string(field) + "/" +
+                                     std::to_string(index));
+            }
+        };
+        check_starting_ids("starting_active_skill_ids", skill_ids);
+        check_starting_ids("starting_relic_ids", relic_id_set);
+        const auto &rewards = RequireArray(sources.documents.at("level")["entries"][0]
+                                              ["experience"],
+                                           "level", "$/entries/0/experience", "rewards");
+        for (std::size_t index = 0; index < rewards.size(); ++index)
+        {
+            const auto path = "$/entries/0/experience/rewards/" + std::to_string(index);
+            const auto id = RequireString(rewards[index], "level", path, "source_id");
+            if (!enemy_ids.contains(id) && !boss_ids.contains(id))
+                ThrowValidationError("level", path + "/source_id",
+                                     "unknown enemy or boss reference");
+        }
+        const auto &groups = sources.documents.at("upgrades")["groups"];
+        for (std::size_t index = 0; index < groups.size(); ++index)
+            RequireReference(skill_ids,
+                             RequireString(groups[index], "upgrades",
+                                           "$/groups/" + std::to_string(index), "skill_id"),
+                             "upgrades", "$/groups/" + std::to_string(index) + "/skill_id");
+    }
     return sources;
 }
 

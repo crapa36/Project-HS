@@ -1,5 +1,7 @@
 #include "vfx_typed_ribbon_commands.hpp"
 
+#include <hs/core/render_snapshot.hpp>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -503,17 +505,63 @@ std::optional<VfxRibbonSourceInput> LinkRibbon(const VfxProgramData &c,
                                                const VfxEffectRecord &effect,
                                                bool allow_arrow_rain = false)
 {
+    const auto identity=std::find_if(c.effect_lookup.begin(),c.effect_lookup.end(),[&](const auto &x){return x.handle==effect.handle;});
+    if(identity==c.effect_lookup.end())return {};
+    const bool basic_return = identity->effect_id == Hash64("particle.upgrade.arrow.return");
+    const bool retreat_dash = identity->effect_id == Hash64("particle.upgrade.retreat.second_dash");
+    const bool retreat_afterimage = identity->effect_id == Hash64("particle.upgrade.retreat.afterimage");
+    const bool pickup_motion = identity->effect_id == Hash64("particle.pickup.xp.magnet_trail") &&
+        input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::PickupXpMagnetTrail);
+    const bool captured_motion = basic_return || retreat_dash || retreat_afterimage;
+    VfxLinkPayload captured{};
     const auto *link=std::get_if<VfxLinkPayload>(&input.payload);
-    if(!link||(allow_arrow_rain ? (effect.input_mode!=0||effect.timing_kind!=0)
+    if (basic_return)
+    {
+        const auto *path = std::get_if<VfxProjectilePathPayload>(&input.payload);
+        if (!path || effect.payload_kind != kProjectilePathPayload ||
+            !Finite(path->path_origin_position) || !Finite(path->current_position) ||
+            !std::isfinite(path->projectile_radius) || path->projectile_radius <= 0)
+            return {};
+        captured.source_position = path->path_origin_position;
+        captured.target_position = path->current_position;
+        captured.width = path->projectile_radius * 2.0f;
+        link = &captured;
+    }
+    else if (retreat_dash)
+    {
+        const auto *line = std::get_if<VfxLinePayload>(&input.payload);
+        if (!line || effect.payload_kind != Hash32("LineAreaPayload")) return {};
+        captured.source_position = line->start;
+        captured.target_position = line->end;
+        captured.width = line->width;
+        link = &captured;
+    }
+    else if (retreat_afterimage)
+    {
+        const auto *context = std::get_if<VfxContextPayload>(&input.payload);
+        if (!context || effect.payload_kind != Hash32("PresentationContextPayload") ||
+            context->owner_id == 0 || !Finite(context->direction) ||
+            !std::isfinite(context->scalar0) || context->scalar0 <= 0 ||
+            !std::isfinite(context->scalar1) || context->scalar1 <= 0)
+            return {};
+        captured.source_position = TransformOrigin(input.current_transform);
+        captured.target_position = Add3(captured.source_position,
+                                        Scale3(context->direction, context->scalar0));
+        captured.width = context->scalar1;
+        link = &captured;
+    }
+    if(!link||(captured_motion ? (effect.input_mode!=1||effect.timing_kind!=0||
+                                  !std::isfinite(effect.seconds)||effect.seconds<=0)
+                               : pickup_motion ? (effect.input_mode!=0||effect.timing_kind!=1)
+                               : allow_arrow_rain ? (effect.input_mode!=0||effect.timing_kind!=0)
                                : (effect.input_mode!=1||effect.timing_kind!=1))||
-        effect.payload_kind!=Hash32("SourceTargetPayload")||
+        (!captured_motion&&effect.payload_kind!=Hash32("SourceTargetPayload"))||
         input.stable_id==0||static_cast<std::uint32_t>(input.quality)>2||!Finite(link->source_position)||!Finite(link->target_position)||
         !std::isfinite(link->width)||link->width<=0||!std::isfinite(input.normalized_age)||input.normalized_age<0||input.normalized_age>=1||
         !std::isfinite(input.elapsed_seconds)||input.elapsed_seconds<0||!InRange(effect.sources,c.sources))return {};
-    const auto identity=std::find_if(c.effect_lookup.begin(),c.effect_lookup.end(),[&](const auto &x){return x.handle==effect.handle;});
-    if(identity==c.effect_lookup.end()||(identity->effect_id!=Hash64("particle.line.ricochet")&&
+    if(!captured_motion&&(identity->effect_id!=Hash64("particle.line.ricochet")&&
         identity->effect_id!=Hash64("particle.line.burn_transfer")&&identity->effect_id!=Hash64("particle.line.relic_chain")&&
-        identity->effect_id!=Hash64("particle.upgrade.ricochet.return")&&
+        identity->effect_id!=Hash64("particle.upgrade.ricochet.return")&&!pickup_motion&&
         (!allow_arrow_rain || identity->effect_id != kArrowRainPullEffect)))return {};
     const float length=std::hypot(link->target_position.x-link->source_position.x,
         link->target_position.y-link->source_position.y,link->target_position.z-link->source_position.z);
@@ -524,7 +572,7 @@ std::optional<VfxRibbonSourceInput> LinkRibbon(const VfxProgramData &c,
     ribbon.position=link->target_position;ribbon.previous_position=link->source_position;
     ribbon.control=Add3(Scale3(link->source_position,.5f),Scale3(link->target_position,.5f));
     ribbon.control.y+=std::min(.35f,length*.12f);ribbon.history_seconds=1.0f/60;
-    ribbon.normalized_age=input.normalized_age;ribbon.start_alpha=std::clamp((1-input.normalized_age)/.2f,0.0f,1.0f);
+    ribbon.normalized_age=input.normalized_age;ribbon.start_alpha=pickup_motion ? 1.0f : std::clamp((1-input.normalized_age)/.2f,0.0f,1.0f);
     float taper{};std::uint32_t segments{};bool have_core=false;
     // Both authored source records share one analytic curve; core defines tessellation and taper.
     for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
@@ -884,6 +932,18 @@ std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
                 identity->effect_id == kBossDashWakeEffect)
                 if (auto wake = BossDashWakeRibbon(cooked, input, *effect))
                     result.push_back(std::move(*wake));
+            if (identity != cooked.effect_lookup.end() &&
+                identity->effect_id == Hash64("particle.upgrade.retreat.second_dash"))
+                if (auto link = LinkRibbon(cooked, input, *effect))
+                    result.push_back(std::move(*link));
+            continue;
+        }
+        if (std::holds_alternative<VfxContextPayload>(input.payload) ||
+            (std::holds_alternative<VfxProjectilePathPayload>(input.payload) &&
+             input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::BasicArrowReturn)))
+        {
+            if (auto link = LinkRibbon(cooked, input, *effect))
+                result.push_back(std::move(*link));
             continue;
         }
         if(std::holds_alternative<VfxLinkPayload>(input.payload))
@@ -1033,6 +1093,89 @@ std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
     std::vector<VfxRibbonSourceInput> result;
     for (const auto &event : events)
     {
+        if (const auto *entity = std::get_if<VfxEntityPayload>(&event.payload))
+        {
+            const auto *effect = FindEffect(cooked, event.effect_handle);
+            const auto identity = effect ? std::find_if(cooked.effect_lookup.begin(),
+                cooked.effect_lookup.end(), [&](const auto &entry) {
+                    return entry.handle == effect->handle;
+                }) : cooked.effect_lookup.end();
+            if (!effect || identity == cooked.effect_lookup.end() ||
+                identity->effect_id != Hash64("particle.skill.charged_shot.cancel") ||
+                effect->input_mode != 0 || effect->timing_kind != 0 ||
+                effect->payload_kind != Hash32("EntityAttachmentPayload") ||
+                static_cast<std::uint32_t>(event.quality) > 2 ||
+                !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
+                event.sequence == 0 || current_tick < event.event_tick ||
+                entity->render_instance_id == 0 || !std::isfinite(entity->footprint_radius) ||
+                entity->footprint_radius <= 0 || !InRange(effect->sources, cooked.sources))
+                continue;
+            const auto elapsed = static_cast<float>(current_tick - event.event_tick) / 60.0f;
+            const auto anchor = TransformOrigin(event.world_transform);
+            if (elapsed >= effect->seconds || !Finite(anchor)) continue;
+            for (const auto &source : std::span(cooked.sources).subspan(
+                     effect->sources.first, effect->sources.count))
+            {
+                if (source.effect != effect->handle || source.type != kHistoryRibbon ||
+                    source.stable_id != Hash32("retract_ribbon") || source.knot_count != 2 ||
+                    source.knots[0] != 0 || source.knots[1] != 1 || source.outputs.count != 1 ||
+                    !InRange(source.parameters, cooked.parameters) ||
+                    !InRange(source.outputs, cooked.outputs)) continue;
+                const auto history = Parameter(std::span(cooked.parameters).subspan(
+                    source.parameters.first, source.parameters.count), Hash32("history_seconds"));
+                const auto &output = cooked.outputs[source.outputs.first];
+                if (!history.present || !history.valid || history.value <= 0 ||
+                    history.value > 62.0f / 60.0f || output.source !=
+                        static_cast<std::uint32_t>(&source - cooked.sources.data()) || output.profile != kRibbonAdd ||
+                    output.motion != VfxMotionKind::ReverseFlowBow || output.shape != Hash32("dual_retract_ribbon") ||
+                    output.min_quality > static_cast<std::uint32_t>(event.quality) ||
+                    !InRange(output.parameters, cooked.parameters) ||
+                    !InRange(output.textures, cooked.texture_bindings) || output.parameters.count != 3 ||
+                    !std::isfinite(output.hdr) || output.hdr <= 0 || output.rgba[3] > 1 ||
+                    std::any_of(output.rgba.begin(), output.rgba.end(),
+                        [](float value) { return !std::isfinite(value) || value < 0; })) continue;
+                const auto params = std::span(cooked.parameters).subspan(
+                    output.parameters.first, output.parameters.count);
+                const auto reverse = Parameter(params, Hash32("reverse_flow"));
+                const auto head = Parameter(params, Hash32("width_head"));
+                const auto tail = Parameter(params, Hash32("width_tail"));
+                if (!reverse.present || !reverse.valid || reverse.value != 1 ||
+                    !head.present || !head.valid || head.value <= 0 ||
+                    !tail.present || !tail.valid || tail.value < 0 || tail.value > head.value)
+                    continue;
+                const auto age = elapsed / effect->seconds;
+                const Float3 forward{event.world_transform[8], event.world_transform[9],
+                                     event.world_transform[10]};
+                if (!Finite(forward)) continue;
+                VfxRibbonSourceInput ribbon;
+                ribbon.owner_id = event.sequence;
+                ribbon.effect_handle = event.effect_handle;
+                ribbon.source_id = source.stable_id;
+                ribbon.stable_seed = event.stable_seed;
+                ribbon.importance = effect->importance;
+                ribbon.analytic = true;
+                ribbon.position = anchor;
+                ribbon.previous_position = Add3(anchor,
+                    Scale3(forward, entity->footprint_radius * (1 - age)));
+                ribbon.control = Scale3(Add3(ribbon.position, ribbon.previous_position), .5f);
+                ribbon.control.y += entity->footprint_radius * .2f * (1 - age);
+                ribbon.history_seconds = history.value;
+                ribbon.normalized_age = age;
+                ribbon.start_alpha = KnotAlpha(source, age);
+                ribbon.segments = 16;
+                VfxRibbonOutputInput translated;
+                translated.profile = output.profile;
+                translated.motion = output.motion;
+                translated.color = {output.rgba[0], output.rgba[1], output.rgba[2], output.rgba[3]};
+                translated.hdr = output.hdr;
+                translated.gradient_row = output.gradient_row;
+                translated.width_head = head.value * (1 - age);
+                translated.width_tail = tail.value * (1 - age);
+                ribbon.outputs.push_back(translated);
+                result.push_back(std::move(ribbon));
+            }
+            continue;
+        }
         const auto *effect = FindEffect(cooked, event.effect_handle);
         if (const auto *link = std::get_if<VfxLinkPayload>(&event.payload))
         {

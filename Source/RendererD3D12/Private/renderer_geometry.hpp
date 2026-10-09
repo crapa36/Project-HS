@@ -1,0 +1,47 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace hs
+{
+inline constexpr std::uint32_t kGeometryDrawRecordCapacity = 4096;
+inline constexpr std::uint32_t kGeometryGpuSceneRefs = 1u;
+inline constexpr std::uint32_t kGeometryMeshEligible = 2u;
+inline constexpr std::uint32_t kGeometryStaticInstances = 4u;
+inline constexpr std::uint32_t kGeometryPreviousPage = 8u;
+inline constexpr std::uint32_t kGeometryBuiltin = 16u;
+inline constexpr std::uint32_t kGeometryExplicitMaterialBinding = 32u;
+inline constexpr std::uint32_t kGeometryArgumentStride = 24;
+inline constexpr std::uint32_t kGeometryMeshDispatchDimension = 65535;
+inline constexpr std::uint32_t kGeometryMeshDispatchGroupLimit = 1u << 22;
+
+// Byte-for-byte counterpart of GeometryDrawRecord in geometry.hlsli. Record 0
+// is invalid so packed geometry pass values never overlap legacy cascades 0..2.
+namespace renderer_detail
+{
+struct GpuGeometryDrawRecord
+{
+    std::uint32_t page_slot{}, first_index{}, index_count{}, first_meshlet{};
+    std::uint32_t meshlet_count{}, visible_base{}, instance_count{}, flags{};
+    std::uint32_t triangle_offset{}, remap_offset{}, geometry_generation{}, lod{};
+    std::uint32_t mesh_id{}, reserved0{}, reserved1{}, reserved2{};
+};
+static_assert(sizeof(GpuGeometryDrawRecord) == 64);
+static_assert(offsetof(GpuGeometryDrawRecord, instance_count) == 24);
+} // namespace renderer_detail
+
+// The grid is padded to full rows. Its PRODUCT, including padded groups,
+// must satisfy DispatchMesh's limit, not only the number of real meshlets.
+[[nodiscard]] constexpr bool GeometryMeshDispatchFits(
+    std::uint32_t meshlet_count, std::uint32_t instance_capacity) noexcept
+{
+    const auto groups = static_cast<std::uint64_t>(meshlet_count) * instance_capacity;
+    if (meshlet_count == 0 || groups > kGeometryMeshDispatchGroupLimit) return false;
+    const auto x = groups < kGeometryMeshDispatchDimension
+        ? groups : kGeometryMeshDispatchDimension;
+    const auto y = groups == 0 ? 1 :
+        (groups + kGeometryMeshDispatchDimension - 1) / kGeometryMeshDispatchDimension;
+    return x * y <= kGeometryMeshDispatchGroupLimit;
+}
+} // namespace hs

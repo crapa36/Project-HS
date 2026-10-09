@@ -298,6 +298,9 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
     pickup.guaranteed_boss_chest = guaranteed;
     actors->pickups.push_back(pickup);
     ++Metrics().pickup_drops[static_cast<std::size_t>(kind)];
+    if (kind != PickupKind::Experience)
+        EmitVfx(DomainSignalKind::PickupSpawned, pickup.position, {}, 1.0f,
+                0.2f, static_cast<std::uint8_t>(kind), pickup.id.value);
 }
 
 void GameSimulation::SimulationWorld::StartSession()
@@ -335,6 +338,7 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->cast_runtimes.clear();
     combat_state->domain_signals.clear();
     combat_state->visual_links.clear();
+    combat_state->boss_death_visual_count = 0;
     progression->waves.clear();
     progression->cards = {};
     progression->card_count = 0;
@@ -1156,6 +1160,11 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         if (growth_ticks == wave.start_tick)
         {
             progression->waves.push_back({growth_ticks, wave.duration_ticks, wave.count, 0});
+            DomainSignalGeometry geometry{};
+            geometry.source_id = wave.start_tick;
+            geometry.start_tick = geometry.end_tick = tick;
+            EmitVfx(DomainSignalKind::WaveStarted, {}, {}, rules.arena_half_extent,
+                    0.025f, 0, 0, geometry);
         }
     }
     for (auto &wave : progression->waves)
@@ -1360,6 +1369,10 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
             geometry.source_id = action.warning_sequence;
             EmitVfx(signal, boss.position, volley_direction, 1.0f, 0.025f,
                     context, 0, geometry);
+            if (action.angle_offset != 0.0f)
+                EmitVfx(DomainSignalKind::BossVolleyOffsetTelegraphed,
+                        boss.position, volley_direction, 1.0f, 0.025f,
+                        context, 0, geometry);
         }
         else if (action.kind == BossActionKind::Shockwave)
         {
@@ -1576,7 +1589,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                    0, false, 0.0f, 0, kNoTelemetrySource,
                                    kNoTelemetrySource,
                                    static_cast<std::uint8_t>(
-                                       EnemyTelemetryIndex(enemy)));
+                                       EnemyTelemetryIndex(enemy)), 0, enemy.locked_aim);
                     }
                 }
                 else if (enemy.kind == EnemyKind::Ranged)
@@ -1612,7 +1625,8 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                EffectOrigin::Original, enemy.attack_cast_id,
                                0, false, 0.0f, 0, kNoTelemetrySource,
                                kNoTelemetrySource,
-                               static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                               static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                               Normalize(Subtract(actors->player.position, enemy.position)));
                     enemy.dead = true;
                 }
                 enemy.attacking = false;

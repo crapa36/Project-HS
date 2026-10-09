@@ -1,3 +1,4 @@
+#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
@@ -52,6 +53,7 @@ struct Arguments
 {
     std::optional<std::filesystem::path> spec_path;
     std::optional<std::filesystem::path> artifact_directory;
+    std::optional<std::filesystem::path> generation_pointer;
     bool warp{};
     bool simulation_only{};
     bool child{};
@@ -70,6 +72,10 @@ struct Arguments
         else if (argument.starts_with("--artifacts=") && !arguments.artifact_directory)
         {
             arguments.artifact_directory = argument.substr(12);
+        }
+        else if (argument.starts_with("--generation=") && !arguments.generation_pointer)
+        {
+            arguments.generation_pointer = argument.substr(13);
         }
         else if (argument == "--warp")
         {
@@ -94,7 +100,8 @@ struct Arguments
         }
     }
     if ((arguments.spec_path && arguments.spec_path->empty()) ||
-        (arguments.artifact_directory && arguments.artifact_directory->empty()))
+        (arguments.artifact_directory && arguments.artifact_directory->empty()) ||
+        (arguments.generation_pointer && arguments.generation_pointer->empty()))
     {
         return hs::Result::Failure(hs::ErrorCode::InvalidArgument, "hs_experiment",
                                    "Spec and artifact paths must not be empty.");
@@ -182,7 +189,8 @@ struct Arguments
                                   const hs::ExperimentSpec &spec,
                                   const std::filesystem::path &spec_path,
                                   const std::filesystem::path &artifact_directory,
-                                  bool warp)
+                                  bool warp,
+                                  const std::filesystem::path &generation_pointer)
 {
 #if defined(HS_DEVELOPMENT_TOOLS)
     auto command = hs::QuoteWindowsCommandLineArgument(executable.wstring()) +
@@ -191,6 +199,9 @@ struct Arguments
                    L" --artifacts=" +
                    hs::QuoteWindowsCommandLineArgument(artifact_directory.wstring());
     if (warp) command += L" --warp";
+    if (!generation_pointer.empty())
+        command += L" --generation=" +
+                   hs::QuoteWindowsCommandLineArgument(generation_pointer.wstring());
 
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
@@ -202,6 +213,7 @@ struct Arguments
     }
     CloseHandle(process.hThread);
 
+    const auto startup_started = std::chrono::steady_clock::now();
     const auto close_process = [&] { CloseHandle(process.hProcess); };
     const auto pipe_name = std::to_wstring(process.dwProcessId);
     for (const auto &action : spec.timeline_actions)
@@ -243,7 +255,8 @@ struct Arguments
     }
 
     const auto heartbeat_path = artifact_directory / "heartbeat.json";
-    auto last_progress = std::chrono::steady_clock::now();
+    auto last_progress = startup_started;
+    bool running_heartbeat_started{};
     std::filesystem::file_time_type last_write{};
     for (;;)
     {
@@ -252,15 +265,31 @@ struct Arguments
         const auto write = std::filesystem::last_write_time(heartbeat_path, error);
         if (!error && write != last_write)
         {
-            last_write = write;
-            last_progress = std::chrono::steady_clock::now();
+            std::ifstream heartbeat_stream(heartbeat_path);
+            const auto heartbeat = nlohmann::json::parse(heartbeat_stream, nullptr, false);
+            if (heartbeat.is_object())
+            {
+                last_write = write;
+                const auto state = heartbeat.value("state", std::string{});
+                // Simulation creates its running heartbeat only after renderer
+                // initialization. Native PSO compilation belongs to startup.
+                if (state == "running" || state == "finished")
+                {
+                    running_heartbeat_started = true;
+                    last_progress = std::chrono::steady_clock::now();
+                }
+            }
         }
-        if (std::chrono::steady_clock::now() - last_progress > std::chrono::seconds(15))
+        const auto timeout = running_heartbeat_started
+            ? std::chrono::seconds(15) : std::chrono::seconds(120);
+        const auto observed = running_heartbeat_started ? last_progress : startup_started;
+        if (std::chrono::steady_clock::now() - observed > timeout)
         {
             const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
                                               artifact_directory / "watchdog.dmp");
             std::ofstream(artifact_directory / "watchdog.json", std::ios::trunc)
-                << nlohmann::json{{"timeout_seconds", 15},
+                << nlohmann::json{{"timeout_seconds", timeout.count()},
+                                  {"phase", running_heartbeat_started ? "running" : "startup"},
                                   {"process_id", process.dwProcessId},
                                   {"dump_written", dumped}}
                        .dump(2)
@@ -268,7 +297,9 @@ struct Arguments
             TerminateProcess(process.hProcess, 4);
             WaitForSingleObject(process.hProcess, 5'000);
             close_process();
-            std::cerr << "Experiment child heartbeat timed out.\n";
+            std::cerr << (running_heartbeat_started
+                ? "Experiment child heartbeat timed out.\n"
+                : "Experiment child startup timed out.\n");
             return 1;
         }
     }
@@ -289,6 +320,7 @@ struct Arguments
     (void)spec_path;
     (void)artifact_directory;
     (void)warp;
+    (void)generation_pointer;
     std::cerr << "Experiment child control is excluded from Release.\n";
     return 2;
 #endif
@@ -649,9 +681,28 @@ int main(int argc, char **argv)
     }
 
     const auto executable = hs::CurrentExecutablePath();
+    const auto generation_pointer = arguments.generation_pointer
+        ? std::filesystem::absolute(*arguments.generation_pointer)
+        : executable.parent_path() / "GenerationState/runtime-full.json";
+    hs::SelectedGeneration selected_generation;
+    if (auto loaded = hs::LoadSelectedGeneration(generation_pointer,
+                                                  selected_generation);
+        !loaded)
+    {
+        std::cerr << loaded.Message() << '\n';
+        return 2;
+    }
+    std::filesystem::path simulation_rules_path;
+    if (auto resolved = selected_generation.Require("game-data/simulation-rules",
+                                                    simulation_rules_path);
+        !resolved)
+    {
+        std::cerr << resolved.Message() << '\n';
+        return 2;
+    }
     const auto build_hash_value = HashFile(executable);
     const auto content_hash_value =
-        ReadCookedSourceHash(executable.parent_path() / "Cooked" / "simulation_rules.hsbin");
+        ReadCookedSourceHash(simulation_rules_path);
     if (executable.empty() || !build_hash_value || !content_hash_value)
     {
         std::cerr << "Cannot calculate build/content hashes.\n";
@@ -702,6 +753,7 @@ int main(int argc, char **argv)
     config.maximum_ticks = spec.termination.maximum_tick;
     config.artifact_directory = arguments.artifact_directory.value_or(
         std::filesystem::path("Artifacts") / spec.scenario_id);
+    config.generation_pointer = generation_pointer;
     if (auto applied = hs::ApplyExperimentOverrides(spec, config); !applied)
     {
         std::cerr << applied.Message() << '\n';
@@ -738,7 +790,8 @@ int main(int argc, char **argv)
             return 2;
         }
         return RunWatchedChild(executable, spec, child_spec,
-                               config.artifact_directory, config.warp);
+                               config.artifact_directory, config.warp,
+                               config.generation_pointer);
     }
 
     if (auto received = ReceiveTimelineActions(spec, config.heartbeat_path); !received)
@@ -756,7 +809,7 @@ int main(int argc, char **argv)
     const auto run = spec.mode == hs::ExperimentMode::SimulationOnly
                          ? RunSimulationExperiment(
                                spec, config.artifact_directory,
-                               executable.parent_path() / "Cooked" / "simulation_rules.hsbin")
+                               simulation_rules_path)
                          : hs::RunApplication(config);
     if (!run.result)
     {

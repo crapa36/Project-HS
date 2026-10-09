@@ -17,6 +17,57 @@
 namespace gameplay_test
 {
 
+namespace
+{
+void CheckSettingsTelemetry(hs::GameSimulation &simulation)
+{
+    hs::GraphicsSettingsUiModel receipt;
+    receipt.telemetry_status = {
+        "Monitor fixture | Refresh 59.94 Hz | Monitor HDR active | Renderer HDR10",
+        "Render 1280x720 / output 1920x1080 | Render FPS 61.5 | Display FPS unavailable",
+        "DXGI process VRAM usage / budget 128.0 / 512.0 MiB | Observed transition usage peak unavailable"};
+    for (const auto &descriptor : hs::GraphicsSettingDescriptors())
+        receipt.resolved.push_back({descriptor.id, "fixture applied value", "Fixture native applied status"});
+    hs::GameReadModelStorage model;
+    simulation.WriteReadModel(model);
+    hs::RenderSnapshotStorage snapshot(16, 2, 2, hs::kGraphicsUiSnapshotReserve);
+    auto ui = test_ui;
+    ui.settings_group = 0;
+    ui.settings_page = 0;
+    std::size_t maximum_rows{};
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto candidate = ui;
+            candidate.settings_group = group;
+            candidate.settings_page = page;
+            const auto count = hs::GraphicsSettingsVisibleRows(candidate).size();
+            if (count > maximum_rows) { maximum_rows = count; ui = candidate; }
+        }
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, ui,
+              hs::SettingsData{}, snapshot, 0xFF, nullptr, nullptr, nullptr, &receipt),
+          "settings telemetry fits the bounded production snapshot reserve");
+    Check(snapshot.View().ui.size() <= hs::kGraphicsUiSnapshotReserve,
+          "fully annotated settings rows and telemetry retain bounded capacity");
+    for (const auto &expected : receipt.telemetry_status)
+        Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+            const auto end = std::ranges::find(entry.utf8_text, '\0');
+            return entry.kind == hs::UiModel::Kind::Text &&
+                std::string_view(entry.utf8_text.data(), end - entry.utf8_text.begin()) == expected;
+        }), "settings exposes native observations and unavailable values as read-only text");
+    Check(std::ranges::none_of(snapshot.View().ui, [](const hs::UiModel &entry) {
+        return entry.kind == hs::UiModel::Kind::Button &&
+               entry.anchor_pixels.y >= 808.0f && entry.anchor_pixels.y < 900.0f;
+    }), "settings telemetry adds no editable hit boxes");
+    for (const float x : {1450.0f, 1550.0f})
+        Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+            return entry.kind == hs::UiModel::Kind::Button && entry.anchor_pixels.x == x &&
+                   entry.anchor_pixels.y == hs::kGraphicsUiRowY &&
+                   entry.size_pixels.x == 64.0f && entry.size_pixels.y == 48.0f;
+        }), "settings edit row keeps its original drawing and hit-test bounds");
+}
+} // namespace
+
 void TestCursorMovement()
 {
     auto data = QuietGameData();
@@ -59,6 +110,29 @@ void TestCursorMovement()
     Check(std::abs(negative_edge.x + 10.0f) < 0.0001f &&
               std::abs(negative_edge.y) < 0.0001f,
           "new RMB click replaces destination and reaches it");
+    hs::GameReadModelStorage movement_model;
+    simulation.WriteReadModel(movement_model);
+    Check(!movement_model.View().player.locomotion_moving &&
+              movement_model.View().player.movement_stopped_tick != 0,
+          "actual movement stop retains its presentation clock");
+    hs::RenderSnapshotStorage movement_snapshot(4, 2, 2, 64);
+    Check(WriteSnapshot(simulation, movement_snapshot), "stopped movement snapshot");
+    const auto stop_clip = hs::MakeAssetId("character/archer/animation/RunForwardStop");
+    Check(std::ranges::any_of(movement_snapshot.View().instances,
+              [&](const hs::RenderInstance &instance) {
+                  return instance.mesh == hs::RenderMesh::Archer &&
+                         instance.animation_clip_id.value == stop_clip.value;
+              }), "actual movement stop selects the authored non-looping clip");
+    held.move_target_world = {0.0f, 0.0f, 0.0f};
+    held.move_held = true;
+    (void)Tick(simulation, held);
+    movement_snapshot.Clear();
+    Check(WriteSnapshot(simulation, movement_snapshot), "resumed movement snapshot");
+    Check(std::ranges::none_of(movement_snapshot.View().instances,
+              [&](const hs::RenderInstance &instance) {
+                  return instance.mesh == hs::RenderMesh::Archer &&
+                         instance.animation_clip_id.value == stop_clip.value;
+              }), "resumed movement releases the stop clip");
     Check(simulation.Shutdown().Succeeded(), "movement shutdown");
 }
 
@@ -112,15 +186,39 @@ void TestUiHitRegionsMatchAnchors()
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(test_ui.page == hs::UiPage::MainMenuSettings, "settings anchor opens settings");
+    CheckSettingsTelemetry(simulation);
 
-    SetCursor(held, 700.0f, 348.0f);
+    std::vector<hs::SettingId> visible_ids;
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto visible_ui = test_ui;
+            visible_ui.settings_group = group;
+            visible_ui.settings_page = page;
+            const auto rows = hs::GraphicsSettingsVisibleRows(visible_ui);
+            Check(rows.size() <= hs::kGraphicsUiRowsPerPage, "settings rows remain bounded");
+            for (const auto *row : rows) visible_ids.push_back(row->id);
+        }
+    Check(visible_ids.size() == hs::kGraphicsSettingCount, "all graphics rows have a page");
+    for (std::size_t row = 0; row < visible_ids.size(); ++row)
+        Check(visible_ids[row] == hs::GraphicsSettingDescriptors()[row].id,
+              "drawing and hit testing share canonical definition order");
+
+    SetCursor(held, 450.0f, 195.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(last_ui_command && last_ui_command->kind == hs::UiCommandKind::SetVsync &&
-              last_ui_command->value == 0,
+    SetCursor(held, 1'470.0f, 430.0f);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(last_ui_command && last_ui_command->kind == hs::UiCommandKind::SetGraphicsSetting &&
+              last_ui_command->graphics_setting == hs::SettingId::Vsync &&
+              std::string_view(last_ui_command->graphics_token.data()) == "false",
           "settings VSync button emits exact target value");
 
-    SetCursor(held, 1'050.0f, 278.0f);
+    SetCursor(held, 1'560.0f, 195.0f);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    SetCursor(held, 1'470.0f, 270.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(last_ui_command && last_ui_command->kind ==
@@ -128,7 +226,7 @@ void TestUiHitRegionsMatchAnchors()
               last_ui_command->value == 90,
           "settings volume control emits clamped percent");
 
-    SetCursor(held, 1'100.0f, 578.0f);
+    SetCursor(held, 1'100.0f, 550.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(last_ui_command && last_ui_command->kind ==
@@ -316,9 +414,11 @@ void TestPauseMenuActions()
     Check(simulation.GetObservation().phase == hs::SessionPhase::Paused &&
               test_ui.page == hs::UiPage::PauseSettings,
           "pause settings keeps the game paused");
+    CheckSettingsTelemetry(simulation);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "in-game settings snapshot");
-    Check(contains_text("화면:") && !contains_text("상세 능력치") &&
+    Check(contains_text("Profile") && contains_text("Display") &&
+              contains_text("돌아가기") && !contains_text("상세 능력치") &&
               !contains_text("캐릭터 정보") && !contains_text("스킬·강화"),
           "in-game settings does not render the character information page");
 
@@ -648,7 +748,7 @@ void TestAuthoredEnvironmentProjection()
     Check(simulation.Initialize({seed}, rules).Succeeded(), "environment initialize");
     hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
     Check(WriteSnapshot(simulation, snapshot), "environment snapshot capacity");
-    const auto instances = snapshot.View().instances;
+    const auto &instances = snapshot.View().static_scene->instances;
     std::size_t trees{}, grass{}, ground{};
     for (std::size_t i = 0; i < instances.size(); ++i)
     {
@@ -707,7 +807,7 @@ void TestDenseGrassProjection()
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
                                        test_ui, hs::SettingsData{}, snapshot), "dense grass snapshot");
         std::vector<hs::RenderInstance> result;
-        for (const auto &instance : snapshot.View().instances)
+        for (const auto &instance : snapshot.View().static_scene->instances)
             if (instance.mesh == hs::RenderMesh::Grass) result.push_back(instance);
         return result;
     };
@@ -779,6 +879,48 @@ void TestProjectileProjectionCarriesAuthoritativeOwner()
               head->projectile_spawned_tick == 10 &&
               head->effect_asset.value == hs::MakeAssetId("particle.skill.charged_shot").value,
           "projectile head dropped authoritative owner fields");
+}
+
+void TestStaticEnvironmentSceneLease()
+{
+    hs::GameReadModelStorage model;
+    model.seed = 19;
+    model.session_id = 3;
+    model.arena_half_extent = 16.0f;
+    model.arena_boundary.count = 4;
+    model.arena_boundary.points[0] = {-16, -16};
+    model.arena_boundary.points[1] = {-16, 16};
+    model.arena_boundary.points[2] = {16, 16};
+    model.arena_boundary.points[3] = {16, -16};
+    hs::StaticEnvironmentSceneCache cache("test-generation");
+    hs::RenderSnapshotStorage snapshot(4, 4, 2, 128);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, hs::SettingsData{}, snapshot, 0xFF,
+                                    nullptr, &cache), "static scene projection");
+    const auto first = snapshot.View().static_scene;
+    Check(first && first->content_generation_id == "test-generation" &&
+              first->instances.size() > 1 && snapshot.View().instances.size() == 1 &&
+              snapshot.View().poses.size() == 1 &&
+              snapshot.View().poses[0].instance_index == 0,
+          "static scene lease preserves dynamic pose indices and content identity");
+    snapshot.Clear();
+    Check(!snapshot.View().static_scene && first->instances.size() > 1,
+          "clearing a slot releases only its own scene lease");
+    Check(cache.Resolve(model.View()) == first, "unchanged layout reuses static scene");
+    model.arena_half_extent = 17.0f;
+    const auto extent = cache.Resolve(model.View());
+    Check(extent != first, "arena extent invalidates static scene");
+    model.arena_boundary.points[0].x = -17.0f;
+    const auto boundary = cache.Resolve(model.View());
+    Check(boundary != extent, "boundary invalidates static scene");
+    model.arena_obstacle_count = 1;
+    model.arena_obstacles[0].center = {8.0f, 0.0f};
+    model.arena_obstacles[0].radius = 1.0f;
+    const auto obstacles = cache.Resolve(model.View());
+    Check(obstacles != boundary, "obstacle list invalidates static scene");
+    model.session_id = 4;
+    Check(cache.Resolve(model.View()) != obstacles,
+          "new simulation session invalidates static scene");
 }
 
 void TestProjectileUpgradeAttachmentEpisodes()
@@ -1240,10 +1382,12 @@ void TestPickupCollectionEndpointProjection()
         signal.position = {4.0f, 0.3f, -2.0f};
         signal.target = {-1.0f, 0.3f, 6.0f};
         signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
-        std::array<hs::PresentationEvent, 2> output{};
+        std::array<hs::PresentationEvent, 3> output{};
         const auto count = hs::ProjectDomainSignal(signal, output);
         const auto parameters = hs::DecodeVfxParameters(output[0].parameters);
-        Check(count == 2 && output[0].kind == hs::PresentationKind::Vfx &&
+        const bool opens_chest = pickup.kind == hs::DomainSignalKind::RelicCollected;
+        const auto audio_index = opens_chest ? 2u : 1u;
+        Check(count == audio_index + 1 && output[0].kind == hs::PresentationKind::Vfx &&
                   output[0].asset.value == hs::MakeAssetId(pickup.asset).value &&
                   output[0].position.x == signal.position.x &&
                   output[0].position.y == signal.position.y &&
@@ -1252,8 +1396,10 @@ void TestPickupCollectionEndpointProjection()
                   parameters.target.x == signal.target.x &&
                   parameters.target.y == signal.target.y &&
                   parameters.target.z == signal.target.z &&
-                  output[1].kind == hs::PresentationKind::Audio &&
-                  output[1].asset.value == hs::MakeAssetId(pickup.audio).value,
+                  (!opens_chest || (output[1].kind == hs::PresentationKind::Vfx &&
+                      output[1].asset.value == hs::MakeAssetId("particle.pickup.relic_chest.open").value)) &&
+                  output[audio_index].kind == hs::PresentationKind::Audio &&
+                  output[audio_index].asset.value == hs::MakeAssetId(pickup.audio).value,
               "pickup projection preserves source, player endpoint, and existing audio");
     }
 }
@@ -1466,8 +1612,103 @@ void TestPlayerAttachmentOwnerWindows()
         "a new session reused the previous player owner");
 }
 
+void TestPresentationSceneDeltaPublication()
+{
+    hs::GameReadModelStorage model;
+    model.session_id = 41;
+    model.tick = 1;
+    hs::RenderSnapshotStorage snapshot(64, 8, 4, 16);
+    hs::RenderSceneProjectionState scene_state;
+    const auto project = [&] {
+        snapshot.Clear();
+        return hs::ProjectRenderSnapshot(
+            model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{},
+            snapshot, 0xFF, nullptr, nullptr, &scene_state);
+    };
+
+    Check(project(), "initial scene delta projection");
+    const auto initial = snapshot.View().scene_delta;
+    Check(initial.published && initial.base_generation == 0 &&
+              initial.generation == 1 && initial.created == snapshot.View().instances.size() &&
+              initial.updated == 0 && initial.unchanged == 0,
+          "Presentation publishes a fresh generation-1 scene delta");
+    scene_state.Commit();
+
+    ++model.tick;
+    Check(project(), "unchanged scene delta projection");
+    const auto unchanged = snapshot.View().scene_delta;
+    Check(unchanged.published && unchanged.base_generation == 1 &&
+              unchanged.generation == 2 && unchanged.created == 0 &&
+              unchanged.updated + unchanged.unchanged ==
+                  snapshot.View().instances.size(),
+          "Presentation scene delta advances from the committed generation");
+    scene_state.Abort();
+
+    ++model.tick;
+    Check(project(), "scene delta after abort");
+    const auto after_abort = snapshot.View().scene_delta;
+    Check(after_abort.base_generation == 1 && after_abort.generation == 2,
+          "abandoned snapshot cannot advance Presentation scene history");
+    scene_state.Commit();
+
+    model.session_id = 42;
+    ++model.tick;
+    Check(project(), "new-session scene delta projection");
+    const auto reset = snapshot.View().scene_delta;
+    Check(reset.base_generation == 0 && reset.generation == 1 &&
+              reset.created == snapshot.View().instances.size() &&
+              reset.destroyed.empty(),
+          "new session publishes a fresh SceneDelta generation");
+    scene_state.Abort();
+}
+
+void TestBossDeathCaptureWithoutPriorSnapshot()
+{
+    hs::GameReadModelStorage model;
+    model.session_id = 9; model.tick = 37;
+    hs::BossDeathVisualView death;
+    death.sequence = 71; death.tick = 37;
+    death.enemy.id = {55}; death.enemy.boss = hs::BossKind::Final;
+    death.enemy.position = {8, -3}; death.enemy.velocity = {2, 1};
+    death.enemy.max_health = 100; death.enemy.health = 0;
+    death.has_action = true; death.action.boss_id = 55;
+    death.action.animation_started = 30; death.action.execute_tick = 50;
+    death.action.kind = hs::BossActionViewKind::Area;
+    model.AddEnemy(death.enemy); model.AddBossAction(death.action);
+    hs::RenderSnapshotStorage live(4, 4, 1, 16);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{}, live),
+          "live boss reference projection");
+    const auto reference = live.View();
+    const auto boss = std::ranges::find(reference.instances, hs::RenderMesh::BossFinal,
+                                       &hs::RenderInstance::mesh);
+    Check(boss != reference.instances.end(), "live boss reference instance missing");
+    const auto boss_index = static_cast<std::uint32_t>(boss - reference.instances.begin());
+    const auto boss_pose = std::ranges::find(reference.poses, boss_index,
+                                            &hs::AnimationPoseRef::instance_index);
+    Check(boss_pose != reference.poses.end(), "live boss reference pose missing");
+    const auto actual = *boss;
+    const auto pose = *boss_pose;
+    model.Clear(); model.tick = 900; model.AddBossDeathVisual(death);
+    hs::RenderSnapshotStorage captured(4, 4, 1, 16);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{}, captured),
+          "boss capture projection without live snapshot history");
+    Check(captured.View().captured_instances.size() == 1, "boss capture missing after actor removal");
+    const auto &record = captured.View().captured_instances.front();
+    Check(record.session_id == 9 && record.source_entity_id == 55 && record.sequence == 71 && record.tick == 37 &&
+          record.instance.stable_id == actual.stable_id && record.instance.asset_id.value == actual.asset_id.value &&
+          record.instance.material_id.value == actual.material_id.value && record.instance.mesh == hs::RenderMesh::BossFinal &&
+          record.instance.position.x == actual.position.x && record.instance.scale.x == actual.scale.x &&
+          record.instance.yaw == actual.yaw && record.animation_pose.clip == pose.clip &&
+          record.animation_pose.normalized_time == pose.normalized_time,
+          "death capture substituted mesh, transform, provenance or death-tick pose");
+    Check(std::ranges::none_of(captured.View().instances, [&](const auto &value) { return value.stable_id == actual.stable_id; }),
+          "capture inserted a dead actor into the ordinary snapshot scene");
+}
+
 void RunGameplayPresentationTests()
 {
+    TestBossDeathCaptureWithoutPriorSnapshot();
+    TestPresentationSceneDeltaPublication();
     TestPlayerAttachmentOwnerWindows();
     TestStatusEpisodeSnapshot();
     TestCircleWarningProjection();
@@ -1486,6 +1727,7 @@ void RunGameplayPresentationTests()
     TestEnemyAnimationStateSignals();
     TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();
+    TestStaticEnvironmentSceneLease();
     TestArrowReleaseProjectsVfxAndAudio();
     TestBossTelegraphProjectsGeometryAndAudio();
     TestDenseGrassProjection();

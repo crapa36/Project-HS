@@ -53,18 +53,29 @@ std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
                 if (output.shape == Hash("boss_crest_lance_mesh") && output.motion == VfxMotionKind::VelocityAlignedHeavyLance) mesh = 6;
                 if (mesh == 0 || !std::isfinite(output.hdr) || output.hdr <= 0 ||
                     !Range(output.parameters, program.parameters.size())) continue;
-                float fresnel{};
+                float fresnel{}, head_to_tail_ratio{}, shell_thickness{};
+                std::uint32_t seen{};
+                bool valid = true;
                 for (std::size_t pi = output.parameters.first; pi < output.parameters.first + output.parameters.count; ++pi)
                 {
                     const auto &p = program.parameters[pi];
-                    if (p.key == Hash("fresnel") && p.type == VfxParameterType::Float)
-                        fresnel = std::bit_cast<float>(p.bits);
+                    std::uint32_t bit{};
+                    if (p.type != VfxParameterType::Float) { valid = false; break; }
+                    const auto value = std::bit_cast<float>(p.bits);
+                    if (p.key == Hash("fresnel")) { bit = 1; fresnel = value; }
+                    else if (p.key == Hash("head_to_tail_ratio") && mesh != 6) { bit = 2; head_to_tail_ratio = value; }
+                    else if (p.key == Hash("shell_thickness") && mesh == 6) { bit = 4; shell_thickness = value; }
+                    if (bit == 0 || (seen & bit)) { valid = false; break; }
+                    seen |= bit;
                 }
+                if (!valid || (seen & (mesh == 6 ? 4u : 2u)) == 0 ||
+                    !std::isfinite(head_to_tail_ratio) || !std::isfinite(shell_thickness) ||
+                    (mesh == 6 ? shell_thickness != .22f : head_to_tail_ratio != (mesh == 5 ? .5f : .42f))) continue;
                 if (!std::isfinite(fresnel) || fresnel < 0 || fresnel > 1) continue;
                 const Float4 color{output.rgba[0], output.rgba[1], output.rgba[2], output.rgba[3]};
                 if (!Finite({color.x,color.y,color.z}) || !std::isfinite(color.w)) continue;
                 result.push_back({input.stable_id, position, previous, owner->velocity, color,
-                    owner->hitbox_radius, output.hdr, fresnel, mesh, output.gradient_row});
+                    owner->hitbox_radius, output.hdr, fresnel, mesh, output.gradient_row, head_to_tail_ratio, shell_thickness});
             }
         }
     }

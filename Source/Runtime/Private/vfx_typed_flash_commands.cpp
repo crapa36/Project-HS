@@ -7,6 +7,8 @@
 #include <bit>
 #include <cmath>
 #include <optional>
+#include <numbers>
+#include <limits>
 #include <string_view>
 
 namespace hs::runtime_detail
@@ -128,10 +130,12 @@ bool OitParameters(const VfxProgramData &c, const VfxOutputRecord &o, const VfxE
     {
         const bool flame=spawn.shape==VfxImpactShape::Flame;
         const auto *octaves=find("fbm_octaves");
-        if(params.size()!=(flame?2u:1u)||!octaves||octaves->type!=VfxParameterType::Int||
+        const auto *flow = flame ? find("flow_speed") : nullptr;
+        if(params.size()!=(flame?(flow?3u:2u):1u)||!octaves||octaves->type!=VfxParameterType::Int||
             octaves->bits<1||octaves->bits>8)return false;
         spawn.fbm_octaves=octaves->bits;
-        return !flame||scalar("domain_warp",spawn.domain_warp);
+        return !flame || (scalar("domain_warp",spawn.domain_warp) &&
+            (!flow || scalar("flow_speed",spawn.procedural_flow_speed)));
     }
     const auto *clip=find("clip_index"),*blend=find("motion_blend");float strength{};
     if(params.size()!=5||!clip||clip->type!=VfxParameterType::Int||clip->bits>1||
@@ -173,7 +177,8 @@ bool OitParameters(const VfxProgramData &c, const VfxOutputRecord &o, const VfxE
     return true;
 }
 
-bool Mask(const VfxProgramData &c, const VfxOutputRecord &o, const VfxEventInput &input,
+template<class Input>
+bool Mask(const VfxProgramData &c, const VfxOutputRecord &o, const Input &input,
           VfxFlashSpawnInput &spawn)
 {
     if (!ValidRange(o.textures, c.texture_bindings)) return false;
@@ -551,6 +556,121 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
                 spawn.event_tick = input.event_tick; spawn.stable_seed = input.stable_seed;
                 spawn.gradient_row = output.gradient_row; spawn.hdr = output.hdr;
                 result.push_back(spawn);
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
+    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs,
+    Tick current_tick)
+{
+    std::vector<VfxFlashSpawnInput> result;
+    const auto mix = [](std::uint32_t v) {
+        v ^= v >> 16; v *= 0x7feb352du; v ^= v >> 15; v *= 0x846ca68bu; return v ^ (v >> 16);
+    };
+    const auto random = [&](std::uint32_t seed, std::uint32_t lane) {
+        return static_cast<float>(mix(seed ^ mix(lane + 0x9e3779b9u)) >> 8) / 16777216.0f;
+    };
+    for (const auto &owner : inputs)
+    {
+        const auto *circle = std::get_if<VfxCirclePayload>(&owner.payload);
+        if (!circle || owner.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::FireArea) ||
+            owner.stable_id == 0 || owner.quality != VfxQuality::High ||
+            owner.effect_handle == 0 || owner.effect_handle > program.effects.size() ||
+            !HasUniqueIdentity(program, owner.effect_handle, Hash64("persistent.area.fire")) ||
+            !Finite(circle->center) || !std::isfinite(circle->radius) || circle->radius <= 0 || circle->inner_radius != 0 ||
+            !std::isfinite(owner.elapsed_seconds) || owner.elapsed_seconds < 0 ||
+            !std::isfinite(owner.source_duration_seconds) || owner.source_duration_seconds <= 0 ||
+            owner.elapsed_seconds >= owner.source_duration_seconds) continue;
+        const auto &effect = program.effects[owner.effect_handle - 1];
+        if (effect.handle != owner.effect_handle || effect.input_mode != 1 || effect.timing_kind != 1 ||
+            effect.payload_kind != Hash32("CircleAreaPayload") || !ValidRange(effect.sources, program.sources)) continue;
+        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60;
+        const double duration_ticks = static_cast<double>(owner.source_duration_seconds) * 60;
+        if (elapsed_ticks > static_cast<double>(current_tick) || duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
+            std::abs(elapsed_ticks - std::round(elapsed_ticks)) > .01 ||
+            std::abs(duration_ticks - std::round(duration_ticks)) > .01) continue;
+        const auto elapsed = static_cast<std::uint64_t>(std::llround(elapsed_ticks));
+        const auto duration = static_cast<std::uint64_t>(std::llround(duration_ticks));
+        const Tick started = current_tick - elapsed;
+        for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
+        {
+            const auto &source = program.sources[si];
+            if (source.effect != effect.handle || source.type != VfxSourceType::CurlMotes ||
+                source.stable_id != Hash32("high_quality_flame_tongues") || source.knot_count != 2 ||
+                source.knots[0] != 0 || source.knots[1] != 1 ||
+                !ValidRange(source.parameters, program.parameters) || source.parameters.count != 3 ||
+                !ValidRange(source.outputs, program.outputs)) continue;
+            std::uint32_t rate{}; float radius_scale{}; bool domain{};
+            bool valid = true;
+            for (const auto &parameter : std::span(program.parameters).subspan(source.parameters.first, source.parameters.count))
+            {
+                if (parameter.key == Hash32("count_per_second") && !rate && parameter.type == VfxParameterType::Int)
+                    rate = parameter.bits;
+                else if (parameter.key == Hash32("spawn_domain") && !domain && parameter.type == VfxParameterType::Enum &&
+                         parameter.bits == Hash32("inside_binding_radius")) domain = true;
+                else if (parameter.key == Hash32("spawn_radius_scale") && radius_scale == 0 && parameter.type == VfxParameterType::Float)
+                    radius_scale = std::bit_cast<float>(parameter.bits);
+                else valid = false;
+            }
+            if (!valid || rate != 8 || !domain || !std::isfinite(radius_scale) || radius_scale <= 0 || radius_scale > 1) continue;
+            for (const auto &output : std::span(program.outputs).subspan(source.outputs.first, source.outputs.count))
+            {
+                if (output.source != si || output.profile != VfxOutputProfile::SpriteFlameOit || output.min_quality != 2 ||
+                    output.motion != VfxMotionKind::ProceduralFlameTongue || output.shape != Hash32("warped_flame_disc") ||
+                    output.coverage_type != Hash32("analytic") || output.coverage_ref != Hash32("warped_flame_disc") ||
+                    !ValidRange(output.parameters, program.parameters) || output.parameters.count != 4) continue;
+                VfxFlashSpawnInput base; base.shape = VfxImpactShape::Flame; base.oit = true;
+                bool output_valid = true;
+                std::uint32_t seen{};
+                for (const auto &parameter : std::span(program.parameters).subspan(output.parameters.first, output.parameters.count))
+                {
+                    std::uint32_t bit{};
+                    if (parameter.key == Hash32("fbm_octaves") && parameter.type == VfxParameterType::Int)
+                    { bit = 1; base.fbm_octaves = parameter.bits; }
+                    else if (parameter.type == VfxParameterType::Float)
+                    {
+                        const auto value = std::bit_cast<float>(parameter.bits);
+                        if (parameter.key == Hash32("size")) { bit = 2; base.size = value; }
+                        else if (parameter.key == Hash32("domain_warp")) { bit = 4; base.domain_warp = value; }
+                        else if (parameter.key == Hash32("flow_speed")) { bit = 8; base.procedural_flow_speed = value; }
+                    }
+                    if (!bit || (seen & bit)) { output_valid = false; break; }
+                    seen |= bit;
+                }
+                if (!output_valid || seen != 15 || base.fbm_octaves < 1 || base.fbm_octaves > 4 ||
+                    !std::isfinite(base.size) || base.size <= 0 || !std::isfinite(base.domain_warp) || base.domain_warp < 0 ||
+                    !std::isfinite(base.procedural_flow_speed) || base.procedural_flow_speed < 0 ||
+                    !std::isfinite(output.hdr) || output.hdr <= 0 ||
+                    std::any_of(output.rgba.begin(), output.rgba.end(), [](float v) { return !std::isfinite(v) || v < 0; }) ||
+                    output.rgba[3] > 1 || !Mask(program, output, owner, base)) continue;
+                base.position = circle->center; base.gradient_row = output.gradient_row; base.hdr = output.hdr;
+                base.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr, output.rgba[2] * output.hdr, output.rgba[3]};
+                base.ground_base_anchor = true;
+                const auto source_seed = mix(owner.stable_seed ^ mix(source.stable_id) ^
+                    mix(static_cast<std::uint32_t>(Hash64("persistent.area.fire"))) ^
+                    mix(static_cast<std::uint32_t>(Hash64("persistent.area.fire") >> 32)));
+                const auto last = elapsed * rate / 60;
+                for (std::uint64_t ordinal = 0; ordinal <= last; ++ordinal)
+                {
+                    // Ceil at the tick boundary: a birth is never admitted early.
+                    const auto birth = (ordinal * 60 + rate - 1) / rate;
+                    if (birth > elapsed || birth >= duration) continue;
+                    auto tongue = base;
+                    tongue.stable_seed = mix(source_seed ^ mix(static_cast<std::uint32_t>(ordinal + 1)));
+                    const float angle = 2 * std::numbers::pi_v<float> * random(tongue.stable_seed, 0);
+                    const float radius = std::sqrt(random(tongue.stable_seed, 1)) * circle->radius * radius_scale;
+                    tongue.initial_offset = {std::cos(angle) * radius, 0, std::sin(angle) * radius};
+                    tongue.lifetime = static_cast<float>(duration - birth) / 60;
+                    tongue.normalized_age = static_cast<float>(elapsed - birth) / static_cast<float>(duration - birth);
+                    tongue.event_tick = started + birth;
+                    // The accepted interval owns motion and removal as well as opacity.
+                    tongue.initial_velocity = {-tongue.initial_offset.x / tongue.lifetime,
+                        base.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
+                    if (Finite(tongue.initial_velocity)) result.push_back(tongue);
+                }
             }
         }
     }

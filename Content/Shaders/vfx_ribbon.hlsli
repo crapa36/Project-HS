@@ -21,7 +21,6 @@ struct GpuRibbonOutput
 StructuredBuffer<GpuRibbonSourceUpdate> RibbonSourceUpdates : register(t2, space3);
 StructuredBuffer<GpuRibbonOutput> RibbonOutputs : register(t3, space3);
 ByteAddressBuffer RibbonHistoryRead : register(t4, space3);
-ByteAddressBuffer RibbonPreviousHistoryRead : register(t5, space3);
 Texture2DArray<float> RibbonDetail : register(t6, space3);
 RWByteAddressBuffer RibbonHistoryWrite : register(u1, space3);
 RWByteAddressBuffer RibbonPreviousHistoryWrite : register(u2, space3);
@@ -49,6 +48,7 @@ void RibbonStorePoint(RWByteAddressBuffer history, uint slot, uint index,
     history.Store4(offset + 16, uint4(sample_tick, 1, 0, 0));
 }
 
+[shader("compute")]
 [numthreads(1,1,1)]
 void RibbonUpdateCS(uint3 id : SV_DispatchThreadID)
 {
@@ -106,6 +106,7 @@ void RibbonUpdateCS(uint3 id : SV_DispatchThreadID)
     }
     RibbonHistoryWrite.Store4(base+16,asuint(source.RenderedHead));
 }
+[shader("compute")]
 [numthreads(1,1,1)]
 void RibbonArgsCS(uint3 id : SV_DispatchThreadID)
 {
@@ -161,6 +162,7 @@ struct RibbonOutput
     float2 Uv : TEXCOORD0;
     float Age : TEXCOORD1;
     nointerpolation uint OutputIndex : TEXCOORD2;
+    float3 WorldPosition : TEXCOORD3;
 };
 RibbonOutput RibbonVS(uint vertex : SV_VertexID)
 {
@@ -221,6 +223,7 @@ RibbonOutput RibbonVS(uint vertex : SV_VertexID)
     output.Uv=float2(arc,sign*0.5+0.5);
     output.Age=saturate(age);
     output.OutputIndex=output_index;
+    output.WorldPosition=world;
     return output;
 }
 float4 RibbonEnergy(RibbonOutput input)
@@ -242,13 +245,20 @@ float4 RibbonEnergy(RibbonOutput input)
     float alpha=saturate(gradient.a*material.Color.a*material.Detail.w*cross_section*detail*dashed*life_fade*pulse);
     return float4(gradient.rgb*material.Color.rgb*material.Material.x*alpha,alpha);
 }
-float4 RibbonAddPS(RibbonOutput input) : SV_Target0 { return RibbonEnergy(input); }
+float4 RibbonAddPS(RibbonOutput input) : SV_Target0
+{
+    float4 energy=RibbonEnergy(input);
+    energy.rgb=HsFogEmission(energy.rgb,input.WorldPosition,input.Position.xy);
+    return energy;
+}
 OitOutput RibbonOitPS(RibbonOutput input)
 {
     float4 energy=RibbonEnergy(input);
     float weight=clamp(pow(energy.a+0.01,3.0)*1e8,1e-2,3e3);
     OitOutput output;
-    output.Accumulation=float4(energy.rgb*weight,energy.a*weight);
+    const HsVolumetricTransport prefix=HsFogPrefix(input.WorldPosition,input.Position.xy);
+    output.Accumulation=float4((prefix.transmittance*energy.rgb+prefix.radiance*energy.a)*weight,
+        energy.a*weight);
     output.Revealage=energy.a.xxxx;
     return output;
 }

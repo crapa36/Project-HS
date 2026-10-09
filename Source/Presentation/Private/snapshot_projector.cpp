@@ -1,5 +1,5 @@
 #include <hs/presentation/projector.hpp>
-#include <hs/game_domain/arena_boundary.hpp>
+#include "environment_projector.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <format>
+#include <limits>
 #include <numbers>
 #include <ranges>
 #include <string>
@@ -16,26 +17,127 @@ constexpr Tick Seconds(float v) noexcept { return static_cast<Tick>(v*60.0f+0.5f
 constexpr Tick kRecoilClipTicks=41, kAnimationBlendOutTicks=6;
 constexpr float kPi=std::numbers::pi_v<float>;
 constexpr std::uint64_t kPlayerRenderId=1ull<<60,kEnemyRenderId=2ull<<60,kProjectileRenderId=3ull<<60,kAreaRenderId=4ull<<60,kPickupRenderId=5ull<<60;
-constexpr std::uint64_t kEnvironmentRenderId=6ull<<60;
 constexpr std::uint8_t kBossTelemetryBase =
     static_cast<std::uint8_t>(EnemyKind::Suicide) + 1u;
 bool HasUpgrade(std::uint8_t m,std::uint8_t o) noexcept{return o&&(m&(1u<<(o-1)));}
 bool HasRelic(RelicMask m,RelicKind r) noexcept{return m&(RelicMask{1}<<static_cast<unsigned>(r));}
 Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtract(Float2 a,Float2 b) noexcept{return {a.x-b.x,a.y-b.y};} Float2 Multiply(Float2 v,float s) noexcept{return {v.x*s,v.y*s};}
 float LengthSquared(Float2 v) noexcept{return v.x*v.x+v.y*v.y;} Float2 Normalize(Float2 v) noexcept{auto l=std::sqrt(LengthSquared(v));return l>.0001f?Multiply(v,1/l):Float2{0,1};} Float2 Rotate(Float2 v,float r) noexcept{auto c=std::cos(r),s=std::sin(r);return {v.x*c-v.y*s,v.x*s+v.y*c};}
-std::uint32_t EnvironmentHash(std::uint32_t value) noexcept
-{
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    return value ^ (value >> 16);
-}
-float EnvironmentUnit(std::uint32_t value) noexcept
-{
-    return static_cast<float>(EnvironmentHash(value) & 0xffffu) / 65535.0f;
-}
 } // namespace
+
+std::size_t RenderSceneProjectionState::KeyHash::operator()(
+    RenderSceneInstanceKey key) const noexcept
+{
+    auto value = key.stable_id;
+    value ^= static_cast<std::uint64_t>(key.fallback_ordinal) +
+             0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+    return static_cast<std::size_t>(value ^ (value >> 32u));
+}
+
+bool RenderSceneProjectionState::Build(std::span<const RenderInstance> instances,
+                                       std::uint64_t session_id,
+                                       RenderSceneDelta &delta)
+{
+    Abort();
+    delta = {};
+    if (instances.size() > std::numeric_limits<std::uint32_t>::max()) return false;
+
+    const bool reset_history = !initialized_ || committed_session_id_ != session_id;
+    delta.base_generation = reset_history ? 0 : generation_;
+    delta.generation = reset_history ? 1 : generation_ + 1;
+    if (delta.generation == 0) return false;
+    pending_session_id_ = session_id;
+    pending_generation_ = delta.generation;
+    pending_.reserve(instances.size());
+    delta.instances.reserve(instances.size());
+
+    for (std::size_t index = 0; index < instances.size(); ++index)
+    {
+        auto source = instances[index];
+        PopulateRenderInstanceRevisions(source);
+        RenderSceneInstanceKey key{
+            source.stable_id,
+            source.stable_id == 0 ? static_cast<std::uint32_t>(index + 1) : 0u};
+        if (!pending_.emplace(key, source.revisions).second)
+        {
+            Abort();
+            return false;
+        }
+
+        RenderSceneDeltaItem item;
+        item.key = key;
+        item.source_index = static_cast<std::uint32_t>(index);
+        item.revisions = source.revisions;
+        const auto previous = reset_history ? previous_.end() : previous_.find(key);
+        if (previous == previous_.end())
+        {
+            item.kind = RenderSceneDeltaKind::Created;
+            item.revision_mask = RenderSceneTransformChanged | RenderScenePoseChanged |
+                                 RenderSceneMaterialChanged | RenderSceneContentChanged;
+            ++delta.created;
+        }
+        else
+        {
+            const auto &before = previous->second;
+            if (before.transform != source.revisions.transform)
+                item.revision_mask |= RenderSceneTransformChanged;
+            if (before.pose != source.revisions.pose)
+                item.revision_mask |= RenderScenePoseChanged;
+            if (before.material != source.revisions.material)
+                item.revision_mask |= RenderSceneMaterialChanged;
+            if (before.content != source.revisions.content)
+                item.revision_mask |= RenderSceneContentChanged;
+            item.kind = item.revision_mask == 0 ? RenderSceneDeltaKind::Unchanged
+                                                : RenderSceneDeltaKind::Updated;
+            if (item.kind == RenderSceneDeltaKind::Updated) ++delta.updated;
+            else ++delta.unchanged;
+        }
+        delta.instances.push_back(item);
+    }
+
+    if (!reset_history)
+    {
+        delta.destroyed.reserve(previous_.size());
+        for (const auto &[key, revisions] : previous_)
+        {
+            static_cast<void>(revisions);
+            if (!pending_.contains(key)) delta.destroyed.push_back(key);
+        }
+    }
+    pending_valid_ = true;
+    return true;
+}
+
+void RenderSceneProjectionState::Commit() noexcept
+{
+    if (!pending_valid_) return;
+    previous_.swap(pending_);
+    pending_.clear();
+    committed_session_id_ = pending_session_id_;
+    generation_ = pending_generation_;
+    initialized_ = true;
+    pending_valid_ = false;
+    pending_session_id_ = 0;
+    pending_generation_ = 0;
+}
+
+void RenderSceneProjectionState::Abort() noexcept
+{
+    pending_.clear();
+    pending_valid_ = false;
+    pending_session_id_ = 0;
+    pending_generation_ = 0;
+}
+
+void RenderSceneProjectionState::Clear() noexcept
+{
+    previous_.clear();
+    Abort();
+    committed_session_id_ = 0;
+    generation_ = 0;
+    initialized_ = false;
+}
+
 void EnemyAnimationState::Update(const GameReadModel &model,
                                  std::span<const DomainSignal> signals)
 {
@@ -156,14 +258,127 @@ std::optional<float> EnemyAnimationState::CancelProgress(std::uint64_t id) const
         1.0f - static_cast<float>(tick_ - *it->second.cancel_started) / 36.0f, 0.0f, 1.0f);
 }
 
+namespace
+{
+struct EnemyProjection { RenderInstance instance; AnimationPoseRef pose; Float2 facing; };
+EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
+    std::span<const BossActionView> actions, const EnemyAnimationState *enemy_animations)
+{
+    const auto color = enemy.boss == BossKind::Final ? 0xFF4040E8u :
+                       enemy.boss == BossKind::TenMinute ? 0xFFB040E8u :
+                       enemy.boss == BossKind::FiveMinute ? 0xFFE86040u :
+                       enemy.kind == EnemyKind::Ranged ? 0xFF40B060u :
+                       enemy.kind == EnemyKind::Suicide ? 0xFF40D8E8u : 0xFF5D66E8u;
+    const auto mesh = enemy.boss == BossKind::Final ? RenderMesh::BossFinal :
+                      enemy.boss == BossKind::TenMinute ? RenderMesh::BossTenMinute :
+                      enemy.boss == BossKind::FiveMinute ? RenderMesh::BossFiveMinute :
+                      enemy.kind == EnemyKind::Ranged ? RenderMesh::MonsterRanged :
+                      enemy.kind == EnemyKind::Suicide ? RenderMesh::MonsterSuicide
+                                                       : RenderMesh::MonsterMelee;
+    const auto uniform_scale = enemy.boss == BossKind::Final ? 3.51f :
+                               enemy.boss == BossKind::TenMinute ? 4.71f :
+                               enemy.boss == BossKind::FiveMinute ? 4.23f :
+                                enemy.kind == EnemyKind::Ranged ? 1.40625f :
+                                enemy.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
+    const Float3 scale{uniform_scale, uniform_scale, uniform_scale};
+    std::uint32_t status_visual_mask{};
+    if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Bleed))
+        status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Bleed);
+    if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Burn))
+        status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Burn);
+    if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Slow))
+        status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Slow);
+    if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Mark))
+        status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Mark);
+    const auto release_tick = enemy_animations ? enemy_animations->ReleaseTick(enemy.id.value) : std::nullopt;
+    const auto release_direction = enemy_animations ? enemy_animations->ReleaseDirection(enemy.id.value) : std::nullopt;
+    const auto cancel_progress = enemy_animations ? enemy_animations->CancelProgress(enemy.id.value) : std::nullopt;
+    const auto facing = enemy.attacking && LengthSquared(enemy.locked_aim) > 0.0001f
+                            ? enemy.locked_aim
+                            : ((cancel_progress || (release_tick && *release_tick == tick) ||
+                                 (enemy_animations && enemy_animations->IsAttackRecoil(enemy.id.value))) && release_direction
+                                   ? Float2{release_direction->x, release_direction->z} : enemy.velocity);
+    RenderInstance instance
+        {{enemy.position.x, 0.0f, enemy.position.y},
+         std::atan2(facing.x, facing.y), scale, color, mesh,
+         kEnemyRenderId | enemy.id.value, status_visual_mask};
+    AnimationPoseRef enemy_pose;
+
+    const auto boss_action = std::ranges::find_if(
+        actions, [&](const BossActionView &action) {
+            return action.boss_id == enemy.id.value;
+        });
+    const auto boss_release_frame = enemy.boss_action_until == tick &&
+                                    enemy.boss_action_until > enemy.boss_action_started;
+    if (enemy.attacking || boss_action != actions.end() || boss_release_frame ||
+        (release_tick && *release_tick == tick))
+    {
+        const auto active_boss_action = boss_action != actions.end();
+        const auto recoil = boss_release_frame
+                                ? enemy.boss_action_recoil
+                            : active_boss_action
+                                ? boss_action->kind == BossActionViewKind::Area ||
+                                      boss_action->kind == BossActionViewKind::Shockwave
+                                : enemy.boss_action_recoil;
+        enemy_pose.clip = recoil ? CharacterAnimationClip::Recoil
+                                 : CharacterAnimationClip::Draw;
+        const auto start = (release_tick && *release_tick == tick) ? tick : boss_release_frame ? enemy.boss_action_started
+                           : active_boss_action ? boss_action->animation_started
+                                                : enemy.attack_started;
+        const auto until = boss_release_frame ? enemy.boss_action_until
+                           : active_boss_action ? boss_action->execute_tick
+                                                : enemy.attack_resolve;
+        enemy_pose.normalized_time = (release_tick && *release_tick == tick) ? 1.0f : until > start
+                                         ? std::clamp(
+                                               static_cast<float>(tick - start) /
+                                                   static_cast<float>(until - start),
+                                               0.0f, 1.0f)
+                                         : 0.0f;
+    }
+    else if (cancel_progress)
+    {
+        enemy_pose.clip = CharacterAnimationClip::Draw;
+        enemy_pose.normalized_time = *cancel_progress;
+    }
+    else if (!enemy.boss && enemy_animations &&
+             enemy_animations->RecoilStart(enemy.id.value))
+    {
+        enemy_pose.clip = CharacterAnimationClip::Recoil;
+        enemy_pose.normalized_time = std::clamp(
+            static_cast<float>(tick - *enemy_animations->RecoilStart(enemy.id.value)) /
+                18.0f, 0.0f, 1.0f);
+    }
+    else if (LengthSquared(enemy.velocity) > 0.0001f)
+    {
+        enemy_pose.clip = CharacterAnimationClip::Run;
+        enemy_pose.normalized_time =
+            static_cast<float>((tick + enemy.id.value * 17) % 45) / 45.0f;
+    }
+    else
+    {
+        enemy_pose.clip = CharacterAnimationClip::Idle;
+        enemy_pose.normalized_time =
+            static_cast<float>((tick + enemy.id.value * 17) % 120) / 120.0f;
+    }
+    PopulateRenderInstanceRevisions(instance);
+    enemy_pose.revision = DeriveAnimationPoseRevision(enemy_pose);
+    instance.revisions.pose = enemy_pose.revision;
+    return {instance, enemy_pose, facing};
+}
+} // namespace
+
 bool ProjectRenderSnapshot(const GameReadModel &model,
                            const PresentationCatalog &presentation,
                            const PresentationUiState &ui,
                            const SettingsData &settings,
                            RenderSnapshotStorage &snapshot,
                            std::uint8_t pending_rebind_slot,
-                           const EnemyAnimationState *enemy_animations)
+                           const EnemyAnimationState *enemy_animations,
+                           StaticEnvironmentSceneCache *environment_cache,
+                           RenderSceneProjectionState *scene_state,
+                           const GraphicsSettingsUiModel *graphics_ui)
 {
+    if (scene_state) scene_state->Abort();
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
     snapshot.header.checksum = model.checksum;
@@ -255,7 +470,12 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             model.tick < ready + Seconds(0.55f))
             add_player_attachment(PersistentVfxKind::ChargedFullReady,
                 "particle.upgrade.charged.full_ready", model.player.charge_start,
-                3, ready, ready + Seconds(0.55f), SkillKind::ChargedShot, 0);
+                3, ready, ready + Seconds(0.55f), SkillKind::ChargedShot, 0,
+                1.0f, 0.0f,
+                HasUpgrade(model.player.upgrades[static_cast<std::size_t>(
+                    SkillKind::ChargedShot)], 5) ? 4 :
+                HasUpgrade(model.player.upgrades[static_cast<std::size_t>(
+                    SkillKind::ChargedShot)], 1) ? 0 : 0xFF);
         if (HasUpgrade(model.player.upgrades[static_cast<std::size_t>(
                 SkillKind::ChargedShot)], 1) &&
             model.charge_normal_ready_tick != 0 &&
@@ -283,11 +503,36 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             model.player.active_basic_empower_started,
             model.player.active_basic_empower_until + 1, SkillKind::BasicAttack,
             0);
-    complete &= snapshot.AddInstance(
-        {{model.player.position.x, 0.0f, model.player.position.y},
+    RenderInstance player_instance{
+        {model.player.position.x, 0.0f, model.player.position.y},
          std::atan2(model.player.facing.x, model.player.facing.y),
          {0.97174913f, 0.97174913f, 0.97174913f}, 0xFFFFFFFFu, RenderMesh::Archer,
-         kPlayerRenderId});
+         kPlayerRenderId};
+    if (model.session.phase != SessionPhase::Defeat &&
+        model.player.forced_move_skill == SkillKind::Trap &&
+        model.player.active_animation_start <= model.tick &&
+        model.tick < model.player.retreat_until)
+    {
+        // CastSkill records active_animation_start on this successful Trap
+        // cast, before its forward roll is scheduled. Play the actual source
+        // clip at its authored rate; no duration is invented in Presentation.
+        player_instance.animation_clip_id = MakeAssetId("character/archer/animation/DiveForward");
+        player_instance.animation_time_seconds =
+            static_cast<double>(model.tick - model.player.active_animation_start) / 60.0;
+    }
+    else if (model.session.phase != SessionPhase::Defeat &&
+        !model.player.locomotion_moving && model.player.movement_stopped_tick != 0 &&
+        model.player.movement_stopped_tick <= model.tick && !model.player.charging &&
+        model.tick >= model.player.basic_attack_animation_until &&
+        model.tick >= model.player.active_animation_until && model.tick >= model.player.retreat_until)
+    {
+        player_instance.animation_clip_id = MakeAssetId("character/archer/animation/RunForwardStop");
+        player_instance.animation_time_seconds =
+            static_cast<double>(model.tick - model.player.movement_stopped_tick) / 60.0;
+        // The authenticated non-looping clip clamps at its authored final pose;
+        // there is no guessed duration or render-clock state transition here.
+    }
+    complete &= snapshot.AddInstance(player_instance);
     AnimationPoseRef pose;
     pose.instance_index = 0;
     pose.clip = CharacterAnimationClip::Idle;
@@ -381,170 +626,15 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              model.player.charge_start});
     }
 
-    std::uint64_t environment_id = kEnvironmentRenderId;
-    const auto add_environment = [&](Float3 position, float yaw, Float3 scale,
-                                     std::uint32_t color, RenderMesh mesh, std::uint32_t variant = 0) {
-        complete &= snapshot.AddInstance(
-            {position, yaw, scale, color, mesh, environment_id++, 0,
-             static_cast<std::uint32_t>(model.seed ^ (model.seed >> 32)), variant});
-    };
-    const auto add_tree = [&](Float2 position, std::uint32_t variation,
-                              float size_multiplier, bool fixed_scale = false) {
-        const auto size = size_multiplier * (fixed_scale ? 1.0f : 0.85f + EnvironmentUnit(variation) * 0.3f);
-        const auto yaw = EnvironmentUnit(variation + 2) * 2.0f * kPi;
-        const auto variant = variation % 3;
-        add_environment({position.x, 0.0f, position.y}, yaw, {size, size, size},
-                        0xFFFFFFFFu, RenderMesh::TreeTrunk, variant);
-        add_environment({position.x, 0.0f, position.y}, yaw, {size, size, size},
-                        0xFFFFFFFFu, RenderMesh::TreeCanopy, variant);
-    };
-
-    // Continuous slab covers authored trees outside the playable boundary.
-    const auto ground_extent = model.arena_half_extent + 16.0f;
-    add_environment({0.0f, -0.05f, 0.0f}, 0.0f,
-                    {ground_extent * 2.0f, 0.1f, ground_extent * 2.0f},
-                    0xFF527E3Du, RenderMesh::Ground);
-
-    constexpr float kGrassClusterSpacing = 2.15f;
-    const auto grass_limit = model.arena_half_extent - 2.0f;
-    const auto grass_seed = EnvironmentHash(static_cast<std::uint32_t>(model.seed) ^
-                                            EnvironmentHash(static_cast<std::uint32_t>(model.seed >> 32)));
-    std::uint32_t grass_index{};
-    for (float z = -grass_limit; z <= grass_limit; z += kGrassClusterSpacing)
-    {
-        for (float x = -grass_limit; x <= grass_limit; x += kGrassClusterSpacing)
-        {
-            const auto cluster = EnvironmentHash(grass_seed ^ (grass_index++ + 0x47524153u));
-            // Omitted patches and widely jittered centres leave irregular natural gaps.
-            if (EnvironmentUnit(cluster) < 0.2f) continue;
-            const Float2 centre{x + (EnvironmentUnit(cluster + 1) - 0.5f) * 2.0f,
-                                z + (EnvironmentUnit(cluster + 2) - 0.5f) * 2.0f};
-            const auto radius = 0.7f + EnvironmentUnit(cluster + 3) * 0.65f;
-            const auto count = 10u + EnvironmentHash(cluster + 4) % 7u;
-            for (std::uint32_t member = 0; member < count; ++member)
-            {
-                const auto variation = EnvironmentHash(cluster ^ (member + 1) * 0x9e3779b9u);
-                const auto angle = EnvironmentUnit(variation) * 2.0f * kPi;
-                // Product sampling concentrates growth inside each patch with a soft edge.
-                const auto distance = radius * std::sqrt(EnvironmentUnit(variation + 1) *
-                                                          EnvironmentUnit(variation + 2));
-                const Float2 position{centre.x + std::cos(angle) * distance,
-                                      centre.y + std::sin(angle) * distance};
-                const auto path_center = std::sin(position.y * 0.085f) * 6.5f;
-                const auto blocked = std::ranges::any_of(
-                    model.arena_obstacles, [&](const ArenaObstacle2D &obstacle) {
-                        const auto clearance = obstacle.radius + 0.45f;
-                        return LengthSquared(Subtract(position, obstacle.center)) <
-                               clearance * clearance;
-                    });
-                if (!ContainsArenaPoint(model.arena_boundary, position, 2.0f) ||
-                    std::abs(position.x - path_center) < 4.8f || blocked)
-                    continue;
-                const auto height = 0.18f + EnvironmentUnit(variation + 3) * 0.22f;
-                const auto width = 0.55f + EnvironmentUnit(variation + 3) * 0.65f;
-                add_environment({position.x, 0.0f, position.y},
-                                EnvironmentUnit(variation + 4) * 2.0f * kPi,
-                                {width, height, width},
-                                (variation & 1u) ? 0xFF4F873Du : 0xFF68A34Au,
-                                RenderMesh::Grass, variation % 4);
-            }
-        }
-    }
-
-    for (std::size_t index = 0; index < model.arena_obstacles.size(); ++index)
-    {
-        const auto &obstacle = model.arena_obstacles[index];
-        const auto variation = EnvironmentHash(static_cast<std::uint32_t>(index) +
-                                               0x524F434Bu);
-        if (obstacle.kind == ArenaObstacleKind::Tree)
-            add_tree(obstacle.center, variation,
-                     obstacle.radius / 1.0409733f, true);
-        else
-        {
-            constexpr std::array rock_radius{1.202624f, 1.155475f, 1.373369f, 1.245674f};
-            const auto scale = obstacle.radius / rock_radius[variation % 4];
-            add_environment({obstacle.center.x, 0.0f, obstacle.center.y},
-                            EnvironmentUnit(variation + 3) * 2.0f * kPi,
-                            {scale, scale, scale},
-                            (variation & 1u) ? 0xFF76766Fu : 0xFF8A897Du,
-                            RenderMesh::Rock, variation % 4);
-        }
-    }
-
-    for (std::uint32_t edge = 0; edge < model.arena_boundary.count; ++edge)
-    {
-        const auto from = model.arena_boundary.points[edge];
-        const auto to = model.arena_boundary.points[
-            (edge + 1) % model.arena_boundary.count];
-        const auto segment = Subtract(to, from);
-        const auto length = std::sqrt(LengthSquared(segment));
-        const auto tree_count = std::max(1u, static_cast<std::uint32_t>(
-                                                std::ceil(length / 2.6f)));
-        for (std::uint32_t row = 0; row < 3; ++row)
-        {
-            for (std::uint32_t tree = 0; tree < tree_count; ++tree)
-            {
-                const auto variation = EnvironmentHash(
-                    edge * 1'013u + row * 313u + tree * 37u + 0x54524545u);
-                const auto t = (static_cast<float>(tree) + 0.5f +
-                                (EnvironmentUnit(variation) - 0.5f) * 0.55f) /
-                               static_cast<float>(tree_count);
-                auto position = Add(from, Multiply(segment, t));
-                const auto outward = Normalize(position);
-                const auto tangent = Normalize(segment);
-                position = Add(position,
-                               Add(Multiply(outward, 1.0f + row * 1.75f),
-                                   Multiply(tangent,
-                                            (EnvironmentUnit(variation + 1) - 0.5f) *
-                                                1.25f)));
-                add_tree(position, variation,
-                         0.82f + EnvironmentUnit(variation + 2) * 0.48f +
-                             static_cast<float>(row) * 0.08f);
-            }
-        }
-    }
+    snapshot.SetStaticScene(environment_cache ? environment_cache->Resolve(model)
+        : BuildStaticEnvironmentScene(model, {}));
     for (const auto &enemy : model.enemies)
     {
         if (enemy.dead) continue;
-        const auto color = enemy.boss == BossKind::Final ? 0xFF4040E8u :
-                           enemy.boss == BossKind::TenMinute ? 0xFFB040E8u :
-                           enemy.boss == BossKind::FiveMinute ? 0xFFE86040u :
-                           enemy.kind == EnemyKind::Ranged ? 0xFF40B060u :
-                           enemy.kind == EnemyKind::Suicide ? 0xFF40D8E8u : 0xFF5D66E8u;
-        const auto mesh = enemy.boss == BossKind::Final ? RenderMesh::BossFinal :
-                          enemy.boss == BossKind::TenMinute ? RenderMesh::BossTenMinute :
-                          enemy.boss == BossKind::FiveMinute ? RenderMesh::BossFiveMinute :
-                          enemy.kind == EnemyKind::Ranged ? RenderMesh::MonsterRanged :
-                          enemy.kind == EnemyKind::Suicide ? RenderMesh::MonsterSuicide
-                                                           : RenderMesh::MonsterMelee;
-        const auto uniform_scale = enemy.boss == BossKind::Final ? 3.51f :
-                                   enemy.boss == BossKind::TenMinute ? 4.71f :
-                                   enemy.boss == BossKind::FiveMinute ? 4.23f :
-                                    enemy.kind == EnemyKind::Ranged ? 1.40625f :
-                                    enemy.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
-        const Float3 scale{uniform_scale, uniform_scale, uniform_scale};
-        std::uint32_t status_visual_mask{};
-        if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Bleed))
-            status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Bleed);
-        if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Burn))
-            status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Burn);
-        if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Slow))
-            status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Slow);
-        if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Mark))
-            status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Mark);
+        const auto projected = ProjectEnemy(enemy, model.tick, model.boss_actions, enemy_animations);
+        const auto facing = projected.facing;
         const auto instance_index = snapshot.InstanceCount();
-        const auto release_tick = enemy_animations ? enemy_animations->ReleaseTick(enemy.id.value) : std::nullopt;
-        const auto release_direction = enemy_animations ? enemy_animations->ReleaseDirection(enemy.id.value) : std::nullopt;
-        const auto cancel_progress = enemy_animations ? enemy_animations->CancelProgress(enemy.id.value) : std::nullopt;
-        const auto facing = enemy.attacking && LengthSquared(enemy.locked_aim) > 0.0001f
-                                ? enemy.locked_aim
-                                : ((cancel_progress || (release_tick && *release_tick == model.tick) ||
-                                     (enemy_animations && enemy_animations->IsAttackRecoil(enemy.id.value))) && release_direction
-                                       ? Float2{release_direction->x, release_direction->z} : enemy.velocity);
-        complete &= snapshot.AddInstance(
-            {{enemy.position.x, 0.0f, enemy.position.y},
-             std::atan2(facing.x, facing.y), scale, color, mesh,
-             kEnemyRenderId | enemy.id.value, status_visual_mask});
+        complete &= snapshot.AddInstance(projected.instance);
         constexpr std::array status_kinds{PersistentVfxKind::EnemyBleedStatus, PersistentVfxKind::EnemyBurnStatus,
             PersistentVfxKind::EnemySlowStatus, PersistentVfxKind::EnemyMarkStatus};
         constexpr std::array status_names{"persistent.status.bleed", "persistent.status.burn", "persistent.status.slow", "persistent.status.mark"};
@@ -609,6 +699,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 aura.yaw = std::atan2(facing.x, facing.y);
                 aura.radius = enemy.footprint_radius;
                 aura.active_tick = enemy.phase2_started;
+                aura.status_episode_generation = enemy.phase2_started;
                 aura.stable_id = identity(0xA2u, enemy.phase2_started);
                 aura.effect_asset = MakeAssetId("persistent.boss.phase2_aura");
                 aura.entity_health_fraction = enemy.max_health > 0
@@ -629,64 +720,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 }
             }
         }
-        AnimationPoseRef enemy_pose;
+        auto enemy_pose = projected.pose;
         enemy_pose.instance_index = static_cast<std::uint32_t>(instance_index);
-        const auto boss_action = std::ranges::find_if(
-            model.boss_actions, [&](const BossActionView &action) {
-                return action.boss_id == enemy.id.value;
-            });
-        const auto boss_release_frame = enemy.boss_action_until == model.tick &&
-                                        enemy.boss_action_until > enemy.boss_action_started;
-        if (enemy.attacking || boss_action != model.boss_actions.end() || boss_release_frame ||
-            (release_tick && *release_tick == model.tick))
-        {
-            const auto active_boss_action = boss_action != model.boss_actions.end();
-            const auto recoil = boss_release_frame
-                                    ? enemy.boss_action_recoil
-                                : active_boss_action
-                                    ? boss_action->kind == BossActionViewKind::Area ||
-                                          boss_action->kind == BossActionViewKind::Shockwave
-                                    : enemy.boss_action_recoil;
-            enemy_pose.clip = recoil ? CharacterAnimationClip::Recoil
-                                     : CharacterAnimationClip::Draw;
-            const auto start = (release_tick && *release_tick == model.tick) ? model.tick : boss_release_frame ? enemy.boss_action_started
-                               : active_boss_action ? boss_action->animation_started
-                                                    : enemy.attack_started;
-            const auto until = boss_release_frame ? enemy.boss_action_until
-                               : active_boss_action ? boss_action->execute_tick
-                                                    : enemy.attack_resolve;
-            enemy_pose.normalized_time = (release_tick && *release_tick == model.tick) ? 1.0f : until > start
-                                             ? std::clamp(
-                                                   static_cast<float>(model.tick - start) /
-                                                       static_cast<float>(until - start),
-                                                   0.0f, 1.0f)
-                                             : 0.0f;
-        }
-        else if (cancel_progress)
-        {
-            enemy_pose.clip = CharacterAnimationClip::Draw;
-            enemy_pose.normalized_time = *cancel_progress;
-        }
-        else if (!enemy.boss && enemy_animations &&
-                 enemy_animations->RecoilStart(enemy.id.value))
-        {
-            enemy_pose.clip = CharacterAnimationClip::Recoil;
-            enemy_pose.normalized_time = std::clamp(
-                static_cast<float>(model.tick - *enemy_animations->RecoilStart(enemy.id.value)) /
-                    18.0f, 0.0f, 1.0f);
-        }
-        else if (LengthSquared(enemy.velocity) > 0.0001f)
-        {
-            enemy_pose.clip = CharacterAnimationClip::Run;
-            enemy_pose.normalized_time =
-                static_cast<float>((model.tick + enemy.id.value * 17) % 45) / 45.0f;
-        }
-        else
-        {
-            enemy_pose.clip = CharacterAnimationClip::Idle;
-            enemy_pose.normalized_time =
-                static_cast<float>((model.tick + enemy.id.value * 17) % 120) / 120.0f;
-        }
         complete &= snapshot.AddPose(enemy_pose);
         if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking &&
             model.tick < enemy.attack_resolve)
@@ -729,8 +764,36 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 warning.active_tick = enemy.attack_started;
                 warning.expires = enemy.attack_resolve;
                 complete &= snapshot.AddPersistentVfx(warning);
+                PersistentVfxVisual countdown{};
+                countdown.kind = PersistentVfxKind::SuicideCountdownLoop;
+                countdown.effect_asset = MakeAssetId("particle.enemy.suicide.countdown_loop");
+                std::uint64_t identity = 14695981039346656037ull;
+                for (const auto value : {model.session_id, enemy.id.value,
+                                        static_cast<std::uint64_t>(enemy.attack_started),
+                                        countdown.effect_asset.value})
+                    for (unsigned byte = 0; byte < 8; ++byte)
+                    {
+                        identity ^= (value >> (byte * 8)) & 255u;
+                        identity *= 1099511628211ull;
+                    }
+                countdown.stable_id = identity ? identity : 1;
+                countdown.position = {enemy.position.x, 0.0f, enemy.position.y};
+                countdown.radius = enemy.footprint_radius;
+                countdown.active_tick = enemy.attack_started;
+                countdown.expires = enemy.attack_resolve;
+                countdown.entity_render_id = kEnemyRenderId | enemy.id.value;
+                complete &= snapshot.AddPersistentVfx(countdown);
             }
         }
+    }
+    for (const auto &death : model.boss_death_visuals)
+    {
+        if (!death.enemy.boss || death.sequence == 0 || death.tick > model.tick) continue;
+        const auto actions = death.has_action ? std::span(&death.action, 1) : std::span<const BossActionView>{};
+        // Same mesh, transform and pose path even without a prior live snapshot.
+        const auto projected = ProjectEnemy(death.enemy, death.tick, actions, nullptr);
+        complete &= snapshot.AddCapturedInstance({model.session_id, death.enemy.id.value,
+            death.sequence, death.tick, projected.instance, projected.pose});
     }
     if (enemy_animations)
     {
@@ -754,6 +817,38 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             pose.normalized_time = std::clamp(static_cast<float>(elapsed) / 48.0f, 0.0f, 1.0f);
             complete &= snapshot.AddPose(pose);
         }
+    }
+    for (const auto &delivery : model.scheduled_area_deliveries)
+    {
+        if (delivery.skill != SkillKind::ArrowRain || delivery.source_upgrade != 0 ||
+            delivery.owner_id == 0 || delivery.cast_id == 0 ||
+            delivery.scheduled_tick > model.tick || model.tick >= delivery.resolve_tick ||
+            delivery.resolve_tick <= delivery.scheduled_tick ||
+            !std::isfinite(delivery.position.x) || !std::isfinite(delivery.position.y) ||
+            !std::isfinite(delivery.landing_radius) || delivery.landing_radius <= 0)
+            continue;
+        PersistentVfxVisual visual{};
+        visual.kind = PersistentVfxKind::ScheduledAreaDelivery;
+        std::uint64_t identity = 14695981039346656037ull;
+        for (const auto value : {model.session_id, delivery.owner_id})
+            for (unsigned byte = 0; byte < 8; ++byte)
+            {
+                identity ^= (value >> (byte * 8)) & 255u;
+                identity *= 1099511628211ull;
+            }
+        visual.stable_id = identity ? identity : 1;
+        // This is the real landing circle and schedule. Runtime derives the
+        // authored final approach window from the selected cooked recipe.
+        visual.position = {delivery.position.x, 0.016f, delivery.position.y};
+        visual.radius = delivery.landing_radius;
+        visual.active_tick = delivery.scheduled_tick;
+        visual.expires = delivery.resolve_tick;
+        visual.cast_id = delivery.cast_id;
+        visual.skill = static_cast<std::uint8_t>(delivery.skill);
+        visual.source_upgrade = delivery.source_upgrade;
+        visual.projectile_owner_id = delivery.owner_id;
+        visual.effect_asset = MakeAssetId("particle.upgrade.arrow_rain.incoming_arrow");
+        complete &= snapshot.AddPersistentVfx(visual);
     }
     for (const auto &projectile : model.projectiles)
     {
@@ -817,6 +912,10 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         head.stable_id = kProjectileRenderId | owner_id;
         head.active_tick = projectile.spawned_tick;
         head.effect_asset = effect_asset;
+        head.cast_id = projectile.cast_id;
+        head.skill = static_cast<std::uint8_t>(projectile.skill);
+        head.source_upgrade = projectile.skill == SkillKind::ChargedShot &&
+            HasUpgrade(projectile.upgrade_mask, 3) ? 2 : projectile.source_upgrade;
         head.projectile_current_position = head.position;
         head.projectile_previous_position = {projectile.previous_position.x, render_height,
                                              projectile.previous_position.y};
@@ -890,6 +989,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 extend.expires = started + 21;
                 extend.skill = static_cast<std::uint8_t>(SkillKind::RicochetArrow);
                 extend.source_upgrade = 2;
+                extend.cast_id = projectile.cast_id;
                 extend.effect_asset = MakeAssetId("particle.upgrade.ricochet.bleed_extend");
                 extend.projectile_current_position = head.projectile_current_position;
                 extend.projectile_previous_position = head.projectile_previous_position;
@@ -956,6 +1056,9 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     (kProjectileRenderId | owner_id) ^ (1ull << 58)};
                 returning_link.active_tick = projectile.return_started_tick;
                 returning_link.expires = model.tick + 1;
+                returning_link.cast_id = projectile.cast_id;
+                returning_link.skill = static_cast<std::uint8_t>(SkillKind::RicochetArrow);
+                returning_link.source_upgrade = 0;
                 returning_link.projectile_owner_id = owner_id;
                 returning_link.projectile_current_position =
                     {projectile.position.x, render_height, projectile.position.y};
@@ -1181,6 +1284,9 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         visual.link_width = link.width;
         visual.active_tick = link.started;
         visual.expires = link.expires;
+        visual.cast_id = link.cast_id;
+        visual.skill = static_cast<std::uint8_t>(link.skill);
+        visual.source_upgrade = link.source_upgrade;
         complete &= snapshot.AddPersistentVfx(visual);
     }
     for (const auto &action : model.boss_actions)
@@ -1357,9 +1463,51 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         idle.effect_asset = MakeAssetId(idle_assets[kind_index]);
         idle.entity_render_id = instance.stable_id;
         complete &= snapshot.AddPersistentVfx(idle);
+        if (pickup.kind == PickupKind::Experience && pickup.moving_to_player &&
+            pickup.motion_started <= model.tick)
+        {
+            PersistentVfxVisual trail{};
+            trail.kind = PersistentVfxKind::PickupXpMagnetTrail;
+            trail.stable_id = identity ^ 0x58504d41474e4554ull ^ pickup.motion_started;
+            if (trail.stable_id == 0) trail.stable_id = 1;
+            trail.position = instance.position;
+            trail.link_target_position = {model.player.position.x, 0.55f,
+                                          model.player.position.y};
+            // Cosmetic XP render footprint, separate from collection/attraction radii.
+            trail.link_width = instance.scale.x * 0.04f;
+            trail.radius = pickup.motion_initial_distance;
+            trail.length = std::hypot(model.player.position.x - pickup.position.x,
+                                      model.player.position.y - pickup.position.y);
+            trail.active_tick = pickup.motion_started;
+            trail.expires = model.tick + 1; // Only actually moving owners survive.
+            trail.effect_asset = MakeAssetId("particle.pickup.xp.magnet_trail");
+            complete &= snapshot.AddPersistentVfx(trail);
+        }
     }
-    complete &= snapshot.AddLight(
-        {{-0.45f, -0.82f, 0.35f}, 3.0f, {1.0f, 0.92f, 0.78f}});
+    if (model.session.phase == SessionPhase::Playing && !model.session.final_boss_spawned)
+        for (const auto &wave : model.waves)
+        {
+            if (wave.start <= model.session.growth_ticks) continue;
+            PersistentVfxVisual timer{};
+            timer.kind = PersistentVfxKind::WaveTimer;
+            timer.stable_id = model.session_id ^ 0x5741564554494d45ull ^ wave.start;
+            if (timer.stable_id == 0) timer.stable_id = 1;
+            timer.position = {0, 0.025f, 0};
+            timer.radius = model.arena_half_extent;
+            timer.active_tick = model.tick;
+            timer.source_horizon_tick = model.tick + wave.start - model.session.growth_ticks;
+            timer.effect_asset = MakeAssetId("particle.session.wave_warning");
+            complete &= snapshot.AddPersistentVfx(timer);
+        }
+    LightView sun{};
+    sun.direction = {-0.45f, -0.82f, 0.35f};
+    sun.quantity = 3.0f * kLightWhiteLumensPerWatt;
+    sun.color = {1.0f, 0.92f, 0.78f};
+    sun.stable_id = 0x48535f53554e0001ull;
+    sun.type = LightType::Directional;
+    sun.unit = LightUnit::Lux;
+    sun.shadow_flags = kLightShadowRequested;
+    complete &= snapshot.AddLight(sun);
 
     const auto &probe = model.session;
     const auto add_ui = [&](UiModel::Kind kind, Float2 anchor, Float2 size,
@@ -1488,7 +1636,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
               "보스를 맞히거나 일반 적 3명 이상을 맞히면 최대 체력의 일부를 회복합니다.",
               "첫 후퇴 직후 한 번 더 물러나며 조준 방향으로 약한 추가 화살을 발사합니다."}}
         }};
-    static_assert([] {
+    static_assert([&] {
         for (const auto description : skill_descriptions)
             if (description.empty() || description.size() > 430) return false;
         for (const auto &skill : skill_upgrade_descriptions)
@@ -1552,51 +1700,79 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         else if (ui.page == UiPage::MainMenuSettings ||
                  ui.page == UiPage::PauseSettings)
         {
-            const auto enabled = [](bool value) { return value ? "켜짐" : "꺼짐"; };
-            add_ui(UiModel::Kind::Panel, {450, 180}, {1'020, 790}, 0xD0202430u,
-                   "설정");
-            constexpr std::array<float, 8> left_y{250, 320, 390, 460, 530, 600, 670, 740};
-            const std::array left_text{
-                std::format("화면: {}", settings.borderless ? "테두리 없음" : "창"),
-                std::format("VSync: {}", enabled(settings.vsync)),
-                std::format("프레임 제한: {}", settings.frame_cap == 0
-                                                   ? std::string("무제한")
-                                                   : std::to_string(settings.frame_cap)),
-                std::format("렌더 스케일: {}%", settings.render_scale_percent),
-                std::format("그림자: {}", settings.shadow_resolution),
-                std::format("파티클: {}%", settings.particle_percentage),
-                std::format("Bloom: {}", enabled(settings.bloom)),
-                std::format("외곽선: {}", enabled(settings.outline))};
-            for (std::size_t index = 0; index < left_text.size(); ++index)
-                add_ui(UiModel::Kind::Button, {500, left_y[index]}, {420, 56},
-                       0xFF34495Eu, left_text[index], 1.0f, 23);
-
-            constexpr std::array<float, 4> volume_y{250, 320, 390, 460};
-            const std::array volume_text{
-                std::format("-  Master {:3}%  +", std::lround(settings.master_volume * 100)),
-                std::format("-  BGM {:3}%  +", std::lround(settings.bgm_volume * 100)),
-                std::format("-  SFX {:3}%  +", std::lround(settings.sfx_volume * 100)),
-                std::format("-  UI {:3}%  +", std::lround(settings.ui_volume * 100))};
-            for (std::size_t index = 0; index < volume_text.size(); ++index)
-                add_ui(UiModel::Kind::Button, {1'000, volume_y[index]}, {420, 56},
-                       0xFF34495Eu, volume_text[index], 1.0f, 23);
-
-            constexpr std::array<std::string_view, 4> slots{"Q", "W", "E", "R"};
-            for (std::size_t slot = 0; slot < slots.size(); ++slot)
+            add_ui(UiModel::Kind::Panel, {190, 140}, {1540, 850}, 0xD0202430u, "설정");
+            constexpr std::array<std::string_view, 8> groups{
+                "Profile", "Display", "Reconstruction", "Frame generation", "Assets", "Lighting", "Effects", "Audio / Input"};
+            for (std::size_t group = 0; group < groups.size(); ++group)
+                add_ui(UiModel::Kind::Button, {210.0f + group * 190.0f, 175}, {180, 48},
+                       ui.settings_group == group ? 0xFF806030u : 0xFF34495Eu, groups[group], 1, 19);
+            const auto draw_row = [&](std::size_t row, std::string_view label, std::string_view value,
+                                      std::string_view reason = {}) {
+                const auto y = kGraphicsUiRowY + row * kGraphicsUiRowStride;
+                add_ui(UiModel::Kind::Text, {230, y}, {650, 24}, 0xFFFFFFFFu, label, 1, 21);
+                add_ui(UiModel::Kind::Text, {900, y}, {530, 24}, 0xFFF0D890u, value, 1, 19);
+                if (!reason.empty()) add_ui(UiModel::Kind::Text, {230, y + 27}, {1200, 20}, 0xFFB8B8C8u, reason, 1, 14);
+                add_ui(UiModel::Kind::Button, {1450, y}, {64, 48}, 0xFF34495Eu, "−", 1, 23);
+                add_ui(UiModel::Kind::Button, {1550, y}, {64, 48}, 0xFF34495Eu, "+", 1, 23);
+            };
+            if (ui.settings_group < 7)
             {
-                const auto waiting = pending_rebind_slot == slot;
-                add_ui(UiModel::Kind::Button,
-                       {1'000, 550.0f + static_cast<float>(slot) * 70.0f}, {420, 56},
-                       waiting ? 0xFF8A5A30u : 0xFF34495Eu,
-                       waiting ? std::format("{}: 새 키 입력...", slots[slot])
-                               : std::format("{}: {}", slots[slot],
-                                             key_name(settings.skill_virtual_keys[slot])),
-                       1.0f, 23);
+                const GraphicsSettings defaults;
+                const auto &requested = graphics_ui ? graphics_ui->requested : defaults;
+                const auto rows = GraphicsSettingsVisibleRows(ui);
+                for (std::size_t row = 0; row < rows.size(); ++row)
+                {
+                    const auto token = GraphicsSettingToken(requested, rows[row]->id);
+                    std::string value = token, reason;
+                    if (rows[row]->id == SettingId::TextureBudgetMib && token == "0") value = "Auto (0)";
+                    if (rows[row]->id == SettingId::FrameLimitFps && token == "0") value = "Unlimited (0)";
+                    if (graphics_ui)
+                    {
+                        const auto status = std::ranges::find(graphics_ui->resolved, rows[row]->id, &GraphicsUiStatus::setting);
+                        if (status != graphics_ui->resolved.end())
+                        {
+                            if (!status->effective.empty()) value += " → " + status->effective;
+                            reason = status->reason;
+                        }
+                        const auto choice = std::ranges::find_if(graphics_ui->choices, [&](const auto &c) {
+                            return c.setting == rows[row]->id && c.token == token;
+                        });
+                        if (choice != graphics_ui->choices.end() && !choice->reason.empty())
+                        {
+                            if (!reason.empty()) reason += "; ";
+                            if (choice->available) reason += "Available: ";
+                            reason += choice->reason;
+                        }
+                    }
+                    draw_row(row, GraphicsSettingDisplayLabel(*rows[row]), value, reason);
+                }
             }
-            add_ui(UiModel::Kind::Text, {1'000, 830}, {420, 32}, 0xFFFFFFFFu,
-                   "사용 중인 키 선택 시 서로 교환", 1.0f, 20);
-            add_ui(UiModel::Kind::Button, {760, 870}, {400, 64}, 0xFF3A5068u,
-                   "돌아가기");
+            else
+            {
+                const std::array labels{"Master volume", "BGM volume", "SFX volume", "UI volume", "Screen overlay intensity"};
+                const std::array values{settings.master_volume, settings.bgm_volume, settings.sfx_volume, settings.ui_volume, settings.screen_overlay_intensity};
+                for (std::size_t row = 0; row < values.size(); ++row)
+                    draw_row(row, labels[row], std::format("{}%", std::lround(values[row] * 100)));
+                constexpr std::array<std::string_view, 4> slots{"Q", "W", "E", "R"};
+                for (std::size_t slot = 0; slot < slots.size(); ++slot)
+                    add_ui(UiModel::Kind::Button, {950, kGraphicsUiRowY + (slot + 5) * kGraphicsUiRowStride}, {664, 48},
+                        pending_rebind_slot == slot ? 0xFF8A5A30u : 0xFF34495Eu,
+                        pending_rebind_slot == slot ? std::format("{}: 새 키 입력...", slots[slot])
+                            : std::format("{}: {}", slots[slot], key_name(settings.skill_virtual_keys[slot])), 1, 21);
+            }
+            const auto page_count = GraphicsSettingsPageCount(ui.settings_group);
+            if (graphics_ui)
+                for (std::size_t line = 0; line < graphics_ui->telemetry_status.size(); ++line)
+                    if (!graphics_ui->telemetry_status[line].empty())
+                        add_ui(UiModel::Kind::Text, {230, 808.0f + line * 19.0f}, {1380, 18},
+                               0xFFB8C2D0u, graphics_ui->telemetry_status[line], 1, 14);
+            add_ui(UiModel::Kind::Text, {230, 868}, {1380, 24}, 0xFFE0E0E0u,
+                graphics_ui ? graphics_ui->transaction_state : "Renderer status has not arrived", 1, 18);
+            add_ui(UiModel::Kind::Button, {210, 900}, {300, 56}, 0xFF3A5068u, "돌아가기", 1, 23);
+            add_ui(UiModel::Kind::Text, {1050, 913}, {180, 32}, 0xFFFFFFFFu,
+                std::format("{} / {}", std::min<std::size_t>(ui.settings_page + 1, page_count), page_count), 1, 21);
+            add_ui(UiModel::Kind::Button, {1250, 900}, {160, 56}, 0xFF34495Eu, "Previous", 1, 21);
+            add_ui(UiModel::Kind::Button, {1450, 900}, {160, 56}, 0xFF34495Eu, "Next", 1, 21);
         }
         else
         {
@@ -2087,6 +2263,19 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                1.0f, 25);
         add_ui(UiModel::Kind::Text, {550, 900}, {820, 50}, 0xFFFFFFFFu,
                "클릭: 메인 메뉴", 1.0f, 26);
+    }
+    if (complete && scene_state)
+    {
+        RenderSceneDelta delta;
+        if (!scene_state->Build(snapshot.View().instances, model.session_id, delta))
+            complete = false;
+        else
+            snapshot.SetSceneDelta(std::move(delta));
+    }
+    if (!complete)
+    {
+        snapshot.ClearSceneDelta();
+        if (scene_state) scene_state->Abort();
     }
     return complete;
 }

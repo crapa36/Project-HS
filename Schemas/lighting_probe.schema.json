@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/lighting_probe.schema.json",
+  "title": "Project HS lighting probe source v1",
+  "description": "Authored local-space Rec709 scene-linear radiance, either a hemisphere gradient or an actual Radiance RGBE equirectangular HDR file, baked into the same HDR cubemap, cosine SH9 irradiance and GGX prefilter. Runtime exposure is applied by the renderer. Authored separate_directional_light declares that the panorama excludes the direct sun. HDR EXPOSURE metadata is undone once before radiance_scale; conflicting declared primaries/profile, XYZE and nonidentity gamma/channel correction/pixel aspect are rejected. Missing/all-zero PRIMARIES require the explicit authored_rec709_if_unspecified policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "kind", "color_space", "radiance_unit", "sun_policy", "radiance_scale", "orientation_y_degrees", "bake", "author_notes"],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"const": "default_probe"},
+    "kind": {"enum": ["hemisphere_radiance", "hdr_equirectangular"]},
+    "color_space": {"const": "rec709_linear"},
+    "radiance_unit": {"const": "scene_linear_radiance_per_steradian"},
+    "sun_policy": {"const": "separate_directional_light"},
+    "bottom_radiance": {"$ref": "#/$defs/radiance"},
+    "top_radiance": {"$ref": "#/$defs/radiance"},
+    "source_path": {
+      "type": "string", "maxLength": 512,
+      "pattern": "^ContentSource/[A-Za-z0-9_./-]+\\.hdr$",
+      "not": {"pattern": "/\\.\\.?(/|$)|//"},
+      "description": "Portable source-root-relative .hdr file path, canonically contained in ContentSource. Actual bytes are a semantic Action input and are decoded from the same snapshot. Logical image is 2:1, width<=16384, height<=8192, pixels<=64 Mi and file<=512 MiB; all eight signed X/Y scan orders are supported."
+    },
+    "source_encoding": {"const": "radiance_rgbe"},
+    "source_primaries_policy": {
+      "enum": ["require_declared_rec709", "authored_rec709_if_unspecified"],
+      "description": "Default require_declared_rec709 requires valid explicit Rec709 chromaticities. Authored_rec709_if_unspecified explicitly interprets only missing or all-zero PRIMARIES as Rec709 linear. A nonzero declaration must still exactly match Rec709. This is an authored CG RGBE interpretation, not Radiance's historical absent-header primaries default. The policy is included in the hashed source Action input."
+    },
+    "panorama_mapping": {
+      "const": "longitude_atan2_z_x_latitude_acos_y",
+      "description": "u=.5+atan2(direction.z,direction.x)/(2*pi), v=acos(direction.y)/pi. +X at u=.5, +Z at u=.75, -X longitude seam, +Y at v=0. Longitude wraps and latitude clamps; source yaw remains local-to-world probe metadata."
+    },
+    "radiance_scale": {"type": "number", "minimum": 0, "maximum": 1000000},
+    "orientation_y_degrees": {"type": "number", "minimum": -180, "maximum": 180},
+    "bake": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cube_edge", "ggx_samples"],
+      "properties": {
+        "cube_edge": {"enum": [16, 32, 64, 128, 256]},
+        "ggx_samples": {"enum": [64, 128, 256, 512, 1024, 2048, 4096]}
+      }
+    },
+    "author_notes": {"type": "string", "minLength": 1, "maxLength": 2048}
+  },
+  "oneOf": [
+    {
+      "properties": {"kind": {"const": "hemisphere_radiance"}},
+      "required": ["bottom_radiance", "top_radiance"],
+      "not": {"anyOf": [{"required": ["source_path"]}, {"required": ["source_encoding"]}, {"required": ["source_primaries_policy"]}, {"required": ["panorama_mapping"]}]}
+    },
+    {
+      "properties": {"kind": {"const": "hdr_equirectangular"}},
+      "required": ["source_path", "source_encoding", "panorama_mapping"],
+      "not": {"anyOf": [{"required": ["bottom_radiance"]}, {"required": ["top_radiance"]}]}
+    }
+  ],
+  "$defs": {
+    "radiance": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"type": "number", "minimum": 0, "maximum": 1000000}
+    }
+  }
+}

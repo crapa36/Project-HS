@@ -11,4 +11,5 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
       - name: Verify core
-        run: cmake --workflow --preset verify-core
+        shell: pwsh
+        run: ./Tools/verify.ps1 -Workflow verify-core

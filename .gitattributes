@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Asset-pipeline text inputs are hashed byte-for-byte. Keep their materialized
+# bytes stable across Windows worktrees even when core.autocrlf is enabled.
+*.json text eol=lf
+*.hlsl text eol=lf
+*.hlsli text eol=lf

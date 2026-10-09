@@ -1,0 +1,205 @@
+{
+  "id": "monster_pbr",
+  "version": 7,
+  "domain": "surface",
+  "shading_model": "metallic_roughness",
+  "parameters": [
+    {
+      "id": "metallic",
+      "type": "float",
+      "default": 1
+    },
+    {
+      "id": "roughness_scale",
+      "type": "float",
+      "default": 1
+    },
+    {
+      "id": "emission_strength",
+      "type": "float",
+      "default": 80
+    }
+  ],
+  "textures": [],
+  "samplers": [],
+  "nodes": [
+    {
+      "id": "base_color",
+      "op": "context",
+      "type": "float3",
+      "name": "sampled_base_color"
+    },
+    {
+      "id": "normal",
+      "op": "context",
+      "type": "float3",
+      "name": "shading_normal"
+    },
+    {
+      "id": "roughness_sample",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_roughness"
+    },
+    {
+      "id": "alpha",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_alpha"
+    },
+    {
+      "id": "ao",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_ao"
+    },
+    {
+      "id": "metallic",
+      "op": "parameter",
+      "type": "float",
+      "name": "metallic"
+    },
+    {
+      "id": "roughness_scale",
+      "op": "parameter",
+      "type": "float",
+      "name": "roughness_scale"
+    },
+    {
+      "id": "roughness",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "roughness_sample",
+        "type": "float"
+      },
+      "b": {
+        "node": "roughness_scale",
+        "type": "float"
+      }
+    },
+    {
+      "id": "metallic_sample",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_metallic"
+    },
+    {
+      "id": "metallic_result",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "metallic_sample",
+        "type": "float"
+      },
+      "b": {
+        "node": "metallic",
+        "type": "float"
+      }
+    },
+    {
+      "id": "opacity",
+      "op": "constant",
+      "type": "float",
+      "value": 1
+    },
+    {
+      "id": "basic",
+      "op": "metallic_roughness_closure",
+      "type": "surface_closure",
+      "base_color": {
+        "node": "base_color",
+        "type": "float3"
+      },
+      "normal": {
+        "node": "normal",
+        "type": "float3"
+      },
+      "roughness": {
+        "node": "roughness",
+        "type": "float"
+      },
+      "metallic": {
+        "node": "metallic_result",
+        "type": "float"
+      },
+      "ao": {
+        "node": "ao",
+        "type": "float"
+      },
+      "opacity": {
+        "node": "opacity",
+        "type": "float"
+      }
+    },
+    {
+      "id": "emission_strength",
+      "op": "parameter",
+      "type": "float",
+      "name": "emission_strength"
+    },
+    {
+      "id": "emission_sample",
+      "op": "context",
+      "type": "float3",
+      "name": "sampled_emission"
+    },
+    {
+      "id": "emission_scale",
+      "op": "construct",
+      "type": "float3",
+      "components": [
+        {
+          "node": "emission_strength",
+          "type": "float"
+        },
+        {
+          "node": "emission_strength",
+          "type": "float"
+        },
+        {
+          "node": "emission_strength",
+          "type": "float"
+        }
+      ]
+    },
+    {
+      "id": "emission",
+      "op": "multiply",
+      "type": "float3",
+      "a": {
+        "node": "emission_sample",
+        "type": "float3"
+      },
+      "b": {
+        "node": "emission_scale",
+        "type": "float3"
+      }
+    },
+    {
+      "id": "surface",
+      "op": "emission_closure",
+      "type": "surface_closure",
+      "base": {
+        "node": "basic",
+        "type": "surface_closure"
+      },
+      "emission": {
+        "node": "emission",
+        "type": "float3"
+      }
+    }
+  ],
+  "outputs": {
+    "surface": "typed_closure",
+    "closure": {
+      "node": "surface",
+      "type": "surface_closure"
+    },
+    "normal_space": "world"
+  },
+  "render_flags": {
+    "two_sided": false,
+    "alpha_mode": "opaque"
+  }
+}

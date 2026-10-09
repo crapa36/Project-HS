@@ -7,6 +7,10 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <limits>
+#include <string>
+#include <string_view>
+#include <vector>
 
 namespace hs
 {
@@ -15,8 +19,107 @@ namespace
 
 constexpr wchar_t kWindowClass[] = L"ProjectHS.Window";
 
+Result QueryActiveDisplayConfig(std::vector<DISPLAYCONFIG_PATH_INFO> &paths,
+                                std::vector<DISPLAYCONFIG_MODE_INFO> &modes)
+{
+    LONG queried = ERROR_INSUFFICIENT_BUFFER;
+    // CCD requires a fresh size query when hot-plug changes its array size.
+    for (unsigned capture = 0; capture < 3 && queried == ERROR_INSUFFICIENT_BUFFER; ++capture)
+    {
+        UINT32 path_count{}, mode_count{};
+        queried = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
+        if (queried != ERROR_SUCCESS) break;
+        if (!path_count) { paths.clear(); modes.clear(); return Result::Success(); }
+        paths.resize(path_count); modes.resize(mode_count);
+        queried = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(),
+                                     &mode_count, modes.data(), nullptr);
+        if (queried == ERROR_SUCCESS) { paths.resize(path_count); modes.resize(mode_count); }
+    }
+    if (queried != ERROR_SUCCESS)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               "Cannot query desktop placement: " + std::to_string(queried));
+    return Result::Success();
+}
 
 } // namespace
+
+Result EnumerateWindowDisplayPlacements(std::vector<RendererDisplayOutput> &outputs)
+{
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (auto result = QueryActiveDisplayConfig(paths, modes); !result) return result;
+    std::vector<RendererDisplayOutput> candidate;
+    for (const auto &path:paths)
+    {
+        const auto index=path.sourceInfo.modeInfoIdx;
+        if (index>=modes.size()||modes[index].infoType!=DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE||
+            modes[index].id!=path.sourceInfo.id||modes[index].adapterId.HighPart!=path.sourceInfo.adapterId.HighPart||
+            modes[index].adapterId.LowPart!=path.sourceInfo.adapterId.LowPart)
+            return Result::Failure(ErrorCode::InvalidState,"hs_runtime","Desktop placement source mode is invalid.");
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME name{};
+        name.header={DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,sizeof(name),path.sourceInfo.adapterId,path.sourceInfo.id};
+        const auto queried=DisplayConfigGetDeviceInfo(&name.header);
+        if (queried!=ERROR_SUCCESS)
+            return Result::Failure(ErrorCode::InvalidState,"hs_runtime","Cannot query desktop source name: "+std::to_string(queried));
+        const std::wstring_view device_name(name.viewGdiDeviceName);
+        const int count=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,device_name.data(),int(device_name.size()),nullptr,0,nullptr,nullptr);
+        if (count<=0) return Result::Failure(ErrorCode::InvalidState,"hs_runtime","Desktop source name is not valid UTF-16.");
+        std::string utf8(std::size_t(count),'\0');
+        if (!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,device_name.data(),int(device_name.size()),utf8.data(),count,nullptr,nullptr))
+            return Result::Failure(ErrorCode::InvalidState,"hs_runtime","Cannot encode desktop source name.");
+        const auto &source=modes[index].sourceMode;
+        if (!source.width||!source.height)
+            return Result::Failure(ErrorCode::InvalidState,"hs_runtime","Active desktop source has an empty rectangle.");
+        RendererDisplayOutput display;
+        display.id=std::format("dxgi:{:08x}{:08x}:{}",std::uint32_t(path.sourceInfo.adapterId.HighPart),path.sourceInfo.adapterId.LowPart,utf8);
+        display.left=source.position.x;display.top=source.position.y;display.width=source.width;display.height=source.height;
+        if (std::ranges::find(candidate,display.id,&RendererDisplayOutput::id)==candidate.end())
+            candidate.push_back(std::move(display));
+    }
+    outputs.swap(candidate);return Result::Success();
+}
+
+Result QueryWindowDisplayRefresh(HWND window, double &refresh_hz)
+{
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!window || !GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                                    reinterpret_cast<MONITORINFO *>(&monitor)))
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               "Cannot identify the actual window monitor for refresh timing.");
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (auto result = QueryActiveDisplayConfig(paths, modes); !result) return result;
+    std::optional<DISPLAYCONFIG_RATIONAL> timing;
+    for (const auto &path : paths)
+    {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME source{};
+        source.header = {DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, sizeof(source),
+                         path.sourceInfo.adapterId, path.sourceInfo.id};
+        const auto queried = DisplayConfigGetDeviceInfo(&source.header);
+        if (queried != ERROR_SUCCESS)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   "Cannot query refresh timing source: " + std::to_string(queried));
+        if (std::wstring_view(source.viewGdiDeviceName) != std::wstring_view(monitor.szDevice)) continue;
+        if (!path.targetInfo.targetAvailable)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   "The actual window monitor target is currently unavailable.");
+        const auto current = path.targetInfo.refreshRate;
+        if (!current.Numerator || !current.Denominator)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   "The actual window monitor has no valid active refresh rational.");
+        if (timing && static_cast<std::uint64_t>(timing->Numerator) * current.Denominator !=
+                          static_cast<std::uint64_t>(current.Numerator) * timing->Denominator)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   "The actual window monitor maps to different active refresh timings.");
+        timing = current;
+    }
+    if (!timing)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               "The actual window monitor has no matching active display path.");
+    refresh_hz = static_cast<double>(timing->Numerator) / timing->Denominator;
+    return Result::Success();
+}
 
 Window::Window(RuntimeChannels &channels,
                std::array<std::uint16_t, 4> skill_virtual_keys,
@@ -242,22 +345,24 @@ Result Window::SetBorderless(bool borderless)
     if (!window_ || borderless == borderless_)
         return Result::Success();
 
+    RECT previous_rect{};
+    if (!GetWindowRect(window_, &previous_rect))
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               "Cannot query the current window rectangle.");
     RECT target{};
-    DWORD style{};
+    const DWORD current_style = static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_STYLE));
+    const DWORD style = (current_style & ~(WS_OVERLAPPEDWINDOW | WS_POPUP)) |
+                        (borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW);
     if (borderless)
     {
-        if (GetWindowRect(window_, &windowed_rect_))
-            has_windowed_rect_ = true;
         MONITORINFO monitor{sizeof(MONITORINFO)};
         if (!GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
             return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                    "Cannot query the target monitor.");
         target = monitor.rcMonitor;
-        style = WS_POPUP;
     }
     else
     {
-        style = WS_OVERLAPPEDWINDOW;
         if (has_windowed_rect_)
         {
             target = windowed_rect_;
@@ -278,8 +383,139 @@ Result Window::SetBorderless(bool borderless)
     if (!SetWindowPos(window_, nullptr, target.left, target.top,
                       target.right - target.left, target.bottom - target.top,
                       SWP_FRAMECHANGED | SWP_NOOWNERZORDER))
+    {
+        const auto apply_error = GetLastError();
+        SetLastError(ERROR_SUCCESS);
+        const auto restored_style = SetWindowLongPtrW(window_, GWL_STYLE, previous);
+        const auto style_error = restored_style == 0 ? GetLastError() : ERROR_SUCCESS;
+        const auto restored_position = SetWindowPos(
+            window_, nullptr, previous_rect.left, previous_rect.top,
+            previous_rect.right - previous_rect.left,
+            previous_rect.bottom - previous_rect.top,
+            SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        if (style_error != ERROR_SUCCESS || !restored_position)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                   std::format("SetWindowPos failed: {}; window rollback failed: {} / {}",
+                                               apply_error, style_error, GetLastError()));
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                               std::format("SetWindowPos failed: {}", GetLastError()));
+                               std::format("SetWindowPos failed: {}", apply_error));
+    }
+    if (borderless)
+    {
+        windowed_rect_ = previous_rect;
+        has_windowed_rect_ = true;
+    }
+    borderless_ = borderless;
+    return Result::Success();
+}
+
+Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borderless,
+                                     std::uint32_t client_width, std::uint32_t client_height)
+{
+    if (!window_ || !client_width || !client_height ||
+        client_width > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()) ||
+        client_height > static_cast<std::uint32_t>(std::numeric_limits<LONG>::max()))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
+                               "Display placement requires a window and valid client extent.");
+    RECT monitor_rect{};
+    if (output.value == "auto")
+    {
+        MONITORINFO monitor{sizeof(MONITORINFO)};
+        if (!GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor))
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Cannot query the current display.");
+        monitor_rect = monitor.rcMonitor;
+    }
+    else
+    {
+        std::vector<RendererDisplayOutput> displays;
+        if (auto enumerated = EnumerateWindowDisplayPlacements(displays); !enumerated) return enumerated;
+        const auto selected = std::ranges::find(displays, output.value, &RendererDisplayOutput::id);
+        if (selected == displays.end())
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Unknown display output ID: " + output.value);
+        const auto right = static_cast<std::int64_t>(selected->left) + selected->width;
+        const auto bottom = static_cast<std::int64_t>(selected->top) + selected->height;
+        if (right > std::numeric_limits<LONG>::max() || bottom > std::numeric_limits<LONG>::max())
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Display rectangle exceeds native coordinates.");
+        monitor_rect = {selected->left, selected->top, static_cast<LONG>(right), static_cast<LONG>(bottom)};
+    }
+    RECT previous_rect{};
+    if (!GetWindowRect(window_, &previous_rect))
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Cannot query the current window rectangle.");
+    const DWORD current_style = static_cast<DWORD>(GetWindowLongPtrW(window_, GWL_STYLE));
+    const DWORD style = (current_style & ~(WS_OVERLAPPEDWINDOW | WS_POPUP)) |
+                        (borderless ? WS_POPUP : WS_OVERLAPPEDWINDOW);
+    const auto windowed_rect = [&](UINT dpi, RECT &target) {
+        target = {0, 0, static_cast<LONG>(client_width), static_cast<LONG>(client_height)};
+        if (!AdjustWindowRectExForDpi(&target, style, FALSE, 0, dpi)) return false;
+        const auto outer_width = static_cast<std::int64_t>(target.right) - target.left;
+        const auto outer_height = static_cast<std::int64_t>(target.bottom) - target.top;
+        const auto left = static_cast<std::int64_t>(monitor_rect.left) +
+            (static_cast<std::int64_t>(monitor_rect.right) - monitor_rect.left - outer_width) / 2;
+        const auto top = static_cast<std::int64_t>(monitor_rect.top) +
+            (static_cast<std::int64_t>(monitor_rect.bottom) - monitor_rect.top - outer_height) / 2;
+        const auto right = left + outer_width;
+        const auto bottom = top + outer_height;
+        if (outer_width <= 0 || outer_height <= 0 ||
+            outer_width > std::numeric_limits<LONG>::max() ||
+            outer_height > std::numeric_limits<LONG>::max() ||
+            left < std::numeric_limits<LONG>::min() || top < std::numeric_limits<LONG>::min() ||
+            right > std::numeric_limits<LONG>::max() || bottom > std::numeric_limits<LONG>::max())
+        {
+            SetLastError(ERROR_ARITHMETIC_OVERFLOW);
+            return false;
+        }
+        target = {static_cast<LONG>(left), static_cast<LONG>(top),
+                  static_cast<LONG>(right), static_cast<LONG>(bottom)};
+        return true;
+    };
+    const auto previous_dpi = GetDpiForWindow(window_);
+    RECT target = monitor_rect;
+    if (!borderless && !windowed_rect(previous_dpi, target))
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Cannot calculate the requested window frame.");
+    SetLastError(ERROR_SUCCESS);
+    const auto previous_style = SetWindowLongPtrW(window_, GWL_STYLE, style);
+    if (previous_style == 0 && GetLastError() != ERROR_SUCCESS)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               std::format("SetWindowLongPtrW failed: {}", GetLastError()));
+    const auto rollback = [&](DWORD apply_error) {
+        SetLastError(ERROR_SUCCESS);
+        const auto restored_style = SetWindowLongPtrW(window_, GWL_STYLE, previous_style);
+        const auto style_error = restored_style == 0 ? GetLastError() : ERROR_SUCCESS;
+        const auto restored = SetWindowPos(window_, nullptr, previous_rect.left, previous_rect.top,
+            previous_rect.right - previous_rect.left, previous_rect.bottom - previous_rect.top,
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+        if (style_error != ERROR_SUCCESS || !restored)
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                std::format("Display placement failed: {}; rollback failed: {} / {}",
+                            apply_error, style_error, GetLastError()));
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               std::format("Display placement failed: {}", apply_error));
+    };
+    if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
+            target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
+        return rollback(GetLastError());
+    // Moving across monitors can change the HWND DPI. Recalculate the frame at
+    // that DPI so the requested client pixel extent survives the display move.
+    const auto target_dpi = GetDpiForWindow(window_);
+    if (!borderless && target_dpi != previous_dpi)
+    {
+        if (!windowed_rect(target_dpi, target)) return rollback(GetLastError());
+        if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
+                target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
+            return rollback(GetLastError());
+    }
+    if (borderless && !borderless_)
+    {
+        windowed_rect_ = previous_rect;
+        has_windowed_rect_ = true;
+    }
+    else if (!borderless)
+    {
+        windowed_rect_ = target;
+        has_windowed_rect_ = true;
+    }
+    windowed_client_width_ = client_width;
+    windowed_client_height_ = client_height;
     borderless_ = borderless;
     return Result::Success();
 }
@@ -322,6 +558,11 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
 #endif
     switch (message)
     {
+    case WM_DISPLAYCHANGE:
+        (void)channels_->window_messages.TryPush(
+            {message, static_cast<std::uintptr_t>(wparam),
+             static_cast<std::intptr_t>(lparam)});
+        return 0;
     case WM_MOUSEMOVE:
         if (ui_hover_handler_)
         {
@@ -353,7 +594,9 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         }
         return 0;
     case WM_CLOSE:
-        DestroyWindow(window);
+        // Keep the HWND alive until the render thread drains and releases DXGI.
+        // The owning Window destructor runs after RunApplication joins it.
+        channels_->stop_requested.store(true, std::memory_order_release);
         return 0;
     case WM_DESTROY:
         window_ = nullptr;

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/material.schema.json",
+  "title": "Project HS environment material definition v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "domain", "shading_model", "parameters", "textures", "nodes", "outputs", "render_flags"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^(trunk_[0-2]|leaf_[0-2]|rock_[0-3]|grass_[0-3])$"},
+    "version": {"const": 1},
+    "domain": {"const": "surface"},
+    "shading_model": {"const": "metallic_roughness"},
+    "parameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metallic", "roughness_scale"],
+      "properties": {
+        "metallic": {"type": "number", "minimum": 0, "maximum": 1},
+        "roughness_scale": {"type": "number", "minimum": 0, "maximum": 2}
+      }
+    },
+    "textures": {
+      "type": "object", "additionalProperties": false,
+      "required": ["base_color", "surface", "normal", "detail"],
+      "properties": {
+        "base_color": {"type": "string"},
+        "surface": {"type": "string"},
+        "normal": {"type": "string"},
+        "detail": {"type": "string"}
+      }
+    },
+    "nodes": {"type": "array", "maxItems": 0},
+    "outputs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["surface"],
+      "properties": {"surface": {"const": "builtin_metallic_roughness"}}
+    },
+    "render_flags": {
+      "type": "object", "additionalProperties": false,
+      "required": ["two_sided", "alpha_mode"],
+      "properties": {
+        "two_sided": {"type": "boolean"},
+        "alpha_mode": {"enum": ["opaque", "mask"]}
+      }
+    }
+  }
+}
