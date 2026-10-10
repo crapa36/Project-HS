@@ -69,7 +69,7 @@ struct ClusterPageStream
 };
 struct ClusterCatalogRange
 {
-    std::uint32_t group_base{}, group_count{}, child_base{}, child_count{};
+    std::uint32_t group_base{}, group_count{}, child_base{}, child_count{}, first_root{};
     std::uint32_t cluster_base{}, cluster_count{}, page_base{}, page_count{};
     std::uint32_t worst_cut_records{};
     bool static_error{}, roots_ready{};
@@ -91,6 +91,8 @@ struct ClusterCutBuffers
     std::uint32_t previous_history_slot{UINT32_MAX};
     std::uint64_t actual_frame_id{};
     bool readback_pending{};
+    // Cut growth and view-bank replacement reset this together with the owned resources.
+    bool descriptors_initialized{};
     GpuClusterCutStatus last_status{};
 };
 struct ClusterFrameRuntime

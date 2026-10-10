@@ -23,6 +23,7 @@
 #include "renderer_settings_projection.hpp"
 #include "window.hpp"
 #include "camera_pose.hpp"
+#include "generation_reload_watch.hpp"
 
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/process_info.hpp>
@@ -53,15 +54,115 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include <future>
+#include <nlohmann/json.hpp>
+#endif
+
 namespace hs
 {
 namespace
 {
+
+#if defined(HS_DEVELOPMENT_TOOLS)
+// Simulation retains its immutable startup scene. A full resident reload may
+// associate copies with a new generation only after its scene closure is proven unchanged.
+struct SceneGenerationBinding
+{
+    std::string source_generation_id;
+    std::string resident_generation_id;
+    struct Entry
+    {
+        std::shared_ptr<const StaticRenderScene> source, bound;
+    };
+    std::array<Entry, 2> scenes;
+
+    std::shared_ptr<const StaticRenderScene> Resolve(std::shared_ptr<const StaticRenderScene> source)
+    {
+        if (!source) return {};
+        if (source->content_generation_id != source_generation_id)
+            throw std::runtime_error("Snapshot scene does not belong to the simulation generation.");
+        if (source_generation_id == resident_generation_id) return source;
+        for (const auto &entry : scenes)
+            if (entry.source == source) return entry.bound;
+        auto bound = std::make_shared<StaticRenderScene>(*source);
+        bound->content_generation_id = resident_generation_id;
+        scenes[1] = std::move(scenes[0]);
+        scenes[0] = {std::move(source), std::move(bound)};
+        return scenes[0].bound;
+    }
+
+    void Swap(SceneGenerationBinding &other) noexcept
+    {
+        source_generation_id.swap(other.source_generation_id);
+        resident_generation_id.swap(other.resident_generation_id);
+        scenes.swap(other.scenes);
+    }
+};
+
+struct PreparedContentGeneration
+{
+    SelectedGeneration candidate;
+    Result result{Result::Success()};
+    const char *stage{"manifest"};
+    bool superseded{};
+};
+
+PreparedContentGeneration PrepareContentGeneration(std::filesystem::path pointer_path,
+    std::string pointer_text, std::string active_id, std::string active_scope)
+{
+    PreparedContentGeneration prepared;
+    try
+    {
+        std::string current;
+        prepared.result = ReadGenerationPointer(pointer_path, current);
+        if (!prepared.result) return prepared;
+        if (current != pointer_text)
+        {
+            prepared.superseded = true;
+            return prepared;
+        }
+        const auto expected = nlohmann::json::parse(pointer_text);
+        prepared.result = LoadSelectedGeneration(pointer_path, prepared.candidate);
+        if (prepared.result)
+        {
+            // Load reads the pathname again; identity checks also reject an A -> B -> A race.
+            const auto &candidate = prepared.candidate;
+            if (expected.at("schema_version") != 1 ||
+                expected.at("generation_id") != candidate.id ||
+                expected.at("scope") != candidate.scope ||
+                expected.at("manifest_locator") != "Generations/" + candidate.id + "/generation.json")
+                prepared.superseded = true;
+            else if (candidate.scope != active_scope)
+                prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    "Content Generation changes the selected scope.");
+            else if (candidate.id != active_id)
+            {
+                prepared.stage = "integrity";
+                prepared.result = VerifySelectedGenerationProducts(candidate);
+            }
+        }
+        if (const auto read = ReadGenerationPointer(pointer_path, current); !read)
+        {
+            if (prepared.result) prepared.result = read;
+        }
+        else
+            prepared.superseded |= current != pointer_text;
+    }
+    catch (const std::exception &error)
+    {
+        prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+            "Content Generation preparation failed: " + std::string(error.what()));
+    }
+    return prepared;
+}
+#endif
 
 Result PrepareVfxSpriteBindings(const VfxCatalog &catalog, RendererVfxSpriteBindings &bindings)
 {
@@ -143,27 +244,27 @@ void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
 {
     const auto extent = [](GraphicsExtent value) {
         return value.width && value.height ? std::format("{}x{}", value.width, value.height)
-                                           : std::string("unavailable");
+                                           : std::string("확인 중");
     };
     const auto view = std::ranges::find_if(diagnostics.views, [](const auto &entry) { return entry.presenting; });
     const auto *measurements = view == diagnostics.views.end() ? nullptr
         : validation ? &view->validation_on : &view->validation_off;
     const auto fps = [](const RendererDiagnosticsCadence *cadence) {
         return cadence && cadence->available && std::isfinite(cadence->fps) && cadence->fps > 0.0
-            ? std::format("{:.1f}", cadence->fps) : std::string("unavailable");
+            ? std::format("{:.1f}", cadence->fps) : std::string("확인 중");
     };
-    model.telemetry_status[1] = std::format("Render {} / output {} | Render FPS {} | Display FPS {}",
+    model.telemetry_status[1] = std::format("렌더링 {} / 출력 {} · 렌더링 {} FPS · 표시 {} FPS",
         extent(diagnostics.reconstruction.render_extent), extent(diagnostics.reconstruction.output_extent),
         fps(measurements ? &measurements->rendered_cadence : nullptr), fps(&diagnostics.displayed_cadence));
     const auto mib = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
     const auto &memory = diagnostics.current_memory;
     const auto current = memory.budget_available
         ? std::format("{:.1f} / {:.1f} MiB", mib(memory.local_usage_bytes), mib(memory.local_budget_bytes))
-        : std::string("unavailable");
+        : std::string("확인 중");
     const auto peak = diagnostics.transition_memory_peak_available && diagnostics.transition_memory_peak.budget_available
         ? std::format("{:.1f} MiB", mib(diagnostics.transition_memory_peak.local_usage_bytes))
-        : std::string("unavailable");
-    model.telemetry_status[2] = std::format("DXGI process VRAM usage / budget {} | Observed transition usage peak {}",
+        : std::string("확인 중");
+    model.telemetry_status[2] = std::format("VRAM 사용량 / 한도 {} · 설정 전환 최대 사용량 {}",
                                           current, peak);
 }
 
@@ -180,9 +281,9 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         model->requested = canonical.requested;
         model->generation = canonical.generation;
         model->transaction_state = canonical.state == SettingsApplyState::Restored
-            ? "Restored" : canonical.state == SettingsApplyState::Rejected
-                ? "Rejected" : canonical.state == SettingsApplyState::Applied
-                    ? "Applied" : "Pending";
+            ? "복원됨" : canonical.state == SettingsApplyState::Rejected
+                ? "적용 거부" : canonical.state == SettingsApplyState::Applied
+                    ? "적용됨" : "적용 중";
     }
     const auto reconstruction = renderer.GetReconstructionStatus();
     const auto presentation = renderer.GetPresentationStatus();
@@ -200,9 +301,22 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         else if (available || !found->available) { found->available = available; found->reason = std::move(reason); }
     };
     const auto status = [&](SettingId id, std::string effective, std::string reason) {
+        // Keep detailed native reasons in diagnostics; the settings page needs a short readable summary.
+        if (!reason.empty() && static_cast<unsigned char>(reason.front()) < 0x80)
+        {
+            const auto requested = GraphicsSettingToken(model->requested, id);
+            const auto selected = std::ranges::find_if(model->choices, [&](const auto &entry) {
+                return entry.setting == id && entry.token == requested;
+            });
+            reason = effective.empty() ? "적용 결과를 기다리는 중입니다"
+                : selected != model->choices.end() && !selected->available ? selected->reason
+                : requested == "auto" ? "현재 장치와 설정에 맞춰 자동으로 선택합니다"
+                : requested == effective ? "요청한 설정으로 적용했습니다"
+                : "현재 장치와 설정에서 가능한 값으로 적용했습니다";
+        }
         model->resolved.push_back({id, std::move(effective), std::move(reason)});
     };
-    constexpr std::array<std::pair<std::string_view, SettingId>, 14> capability_settings{{
+    constexpr std::array<std::pair<std::string_view, SettingId>, 15> capability_settings{{
         std::pair<std::string_view, SettingId>{"sr_provider", SettingId::ReconstructionProvider},
         {"reconstruction", SettingId::ReconstructionQuality},
         {"fg_provider", SettingId::FrameGenerationProvider},
@@ -213,20 +327,21 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         {"ao", SettingId::AoMode}, {"gi", SettingId::GiMode},
         {"reflection", SettingId::ReflectionMode}, {"shadow", SettingId::ShadowMode},
         {"adaptive_shading", SettingId::AdaptiveShading},
-        {"neural_rr", SettingId::NeuralRayReconstruction}}};
+        {"neural_rr", SettingId::NeuralRayReconstruction},
+        {"ray_tracing", SettingId::RayTracingEnabled}}};
     const auto support_reason = [](GraphicsCapabilityReason reason) -> std::string {
         switch (reason)
         {
-        case GraphicsCapabilityReason::None: return "Supported by the current device and configuration";
-        case GraphicsCapabilityReason::Unsupported: return "Unsupported by the current device or provider";
-        case GraphicsCapabilityReason::Unavailable: return "Native provider is not ready";
-        case GraphicsCapabilityReason::MissingProvider: return "Required provider is missing or excluded";
-        case GraphicsCapabilityReason::MissingDisplay: return "Required display is unavailable";
-        case GraphicsCapabilityReason::Incompatible: return "Incompatible with the current configuration";
-        case GraphicsCapabilityReason::BudgetLimited: return "Unavailable within the current resource budget";
-        case GraphicsCapabilityReason::Rejected: return "Native request was rejected";
+        case GraphicsCapabilityReason::None: return "현재 장치와 설정에서 지원합니다";
+        case GraphicsCapabilityReason::Unsupported: return "현재 장치 또는 방식에서 지원하지 않습니다";
+        case GraphicsCapabilityReason::Unavailable: return "필요한 기능이 아직 준비되지 않았습니다";
+        case GraphicsCapabilityReason::MissingProvider: return "필요한 기능이 설치되어 있지 않습니다";
+        case GraphicsCapabilityReason::MissingDisplay: return "필요한 모니터를 사용할 수 없습니다";
+        case GraphicsCapabilityReason::Incompatible: return "현재 설정과 함께 사용할 수 없습니다";
+        case GraphicsCapabilityReason::BudgetLimited: return "현재 메모리 한도를 초과합니다";
+        case GraphicsCapabilityReason::Rejected: return "장치에서 설정 변경을 거부했습니다";
         }
-        return "Native support is unavailable";
+        return "현재 사용할 수 없습니다";
     };
     for (const auto &entry : capabilities.options)
     {
@@ -254,22 +369,27 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         if (std::ranges::none_of(model->choices, [&](const auto &entry) {
                 return entry.setting == id && entry.token == token;
             }))
-            choice(id, token, false, "Saved selection is unavailable in the current capability catalog");
+            choice(id, token, false, "저장된 선택은 현재 장치에서 사용할 수 없습니다");
     }
     std::vector<RendererDisplayOutput> displays;
     const auto enumerated = EnumerateRendererDisplays(displays);
-    choice(SettingId::DisplayOutput, "auto", static_cast<bool>(enumerated), enumerated ? std::string("Current window monitor") : std::string(enumerated.Message()));
-    choice(SettingId::OutputExtent, "auto", true, "Actual window client extent");
+    choice(SettingId::DisplayOutput, "auto", static_cast<bool>(enumerated), enumerated ? std::string("현재 창이 있는 모니터") : std::string("모니터 목록을 확인할 수 없습니다"));
+    choice(SettingId::OutputExtent, "auto", true, "현재 창 크기에 맞춥니다");
     for (const auto &display : displays)
     {
-        choice(SettingId::DisplayOutput, display.id, true, "Enumerated DXGI output");
-        choice(SettingId::OutputExtent, std::format("{}x{}", display.width, display.height), true, "Enumerated desktop extent; no OS mode switch");
+        choice(SettingId::DisplayOutput, display.id, true, "사용할 수 있는 모니터");
+        const auto selected = std::ranges::find_if(model->choices, [&](const auto &entry) {
+            return entry.setting == SettingId::DisplayOutput && entry.token == display.id;
+        });
+        selected->label = std::format("모니터 {} ({}×{})", &display - displays.data() + 1,
+                                      display.width, display.height);
+        choice(SettingId::OutputExtent, std::format("{}x{}", display.width, display.height), true, "현재 모니터 해상도에 맞춥니다");
     }
     MONITORINFO monitor{sizeof(MONITORINFO)};
     const auto renderer_hdr = canonical.actual_applied_available
         ? canonical.actual_applied.hdr_mode == GraphicsHdrMode::On ? "HDR10" : "SDR"
-        : "unavailable";
-    model->telemetry_status[0] = std::format("Monitor unavailable | Refresh unavailable | Monitor HDR unavailable | Renderer {}", renderer_hdr);
+        : "확인 중";
+    model->telemetry_status[0] = std::format("모니터 확인 중 · 주사율 확인 중 · 모니터 HDR 확인 중 · 출력 {}", renderer_hdr);
     if (GetMonitorInfoW(MonitorFromWindow(window_handle, MONITOR_DEFAULTTONEAREST), &monitor))
         for (const auto &display : displays)
             if (display.left == monitor.rcMonitor.left && display.top == monitor.rcMonitor.top &&
@@ -277,33 +397,33 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
                 static_cast<std::int64_t>(display.top) + display.height == monitor.rcMonitor.bottom)
             {
                 status(SettingId::DisplayOutput, display.id, graphics.display_output.value == "auto" || graphics.display_output.value == display.id
-                    ? "Actual window monitor" : "Requested output is unavailable; current window monitor retained");
+                    ? "현재 창이 있는 모니터에 적용했습니다" : "선택한 모니터를 사용할 수 없어 현재 모니터를 유지합니다");
                 double refresh_hz{};
                 const auto refresh = QueryWindowDisplayRefresh(window_handle, refresh_hz);
-                model->telemetry_status[0] = std::format("Monitor {} | Refresh {} | Monitor HDR {} | Renderer {}",
-                    display.id, refresh ? std::format("{:.2f} Hz", refresh_hz) : std::string("unavailable"),
-                    display.hdr_active ? "active" : "inactive", renderer_hdr);
+                model->telemetry_status[0] = std::format("모니터 {} · 주사율 {} · 모니터 HDR {} · 출력 {}",
+                    std::format("{}", &display - displays.data() + 1), refresh ? std::format("{:.2f} Hz", refresh_hz) : std::string("확인 중"),
+                    display.hdr_active ? "켜짐" : "꺼짐", renderer_hdr);
                 break;
             }
     status(SettingId::HdrMode, canonical.actual_applied_available
         ? GraphicsSettingToken(canonical.actual_applied, SettingId::HdrMode) : std::string{},
         canonical.actual_applied_available
             ? canonical.actual_applied.hdr_mode == GraphicsHdrMode::On
-                ? "Actual HDR10 output (PQ / Rec.2020)" : "Actual SDR output (Rec.709)"
-            : "Waiting for the native display apply receipt");
-    choice(SettingId::DisplayOutput, graphics.display_output.value, false, "Saved output is not currently enumerated");
-    choice(SettingId::OutputExtent, GraphicsSettingToken(graphics, SettingId::OutputExtent), false, "Saved window size request");
+                ? "HDR10 화면으로 출력합니다" : "일반 SDR 화면으로 출력합니다"
+            : "화면 설정의 적용 결과를 기다리는 중입니다");
+    choice(SettingId::DisplayOutput, graphics.display_output.value, false, "저장된 모니터를 현재 찾을 수 없습니다");
+    choice(SettingId::OutputExtent, GraphicsSettingToken(graphics, SettingId::OutputExtent), false, "직접 지정한 창 크기입니다");
     status(SettingId::ReconstructionProvider, reconstruction.effective_provider.value, reconstruction.requested_availability + ": " + reconstruction.fallback_reason);
     status(SettingId::ReconstructionQuality, reconstruction.effective_quality.value, reconstruction.fallback_reason);
-    status(SettingId::OutputExtent, std::format("{}x{}", reconstruction.output_extent.width, reconstruction.output_extent.height), "Actual render output extent");
+    status(SettingId::OutputExtent, std::format("{}x{}", reconstruction.output_extent.width, reconstruction.output_extent.height), "실제로 출력하는 해상도입니다");
     status(SettingId::FrameGenerationProvider, presentation.effective_provider.value, presentation.availability + ": " + presentation.fallback_reason);
     status(SettingId::FrameGenerationMode, std::string(GraphicsEnumToken(presentation.active_mode)), presentation.fallback_reason);
     status(SettingId::FrameGenerationMultiplier, std::to_string(presentation.observed_multiplier), presentation.maximum_multiplier
-        ? std::format("Native supported range 2..{}", presentation.maximum_multiplier)
-        : presentation.requested.provider.value == "fsr" ? "Provider exposes no configurable multiplier range"
-        : "Native multiplier capability has not been queried for this profile");
+        ? std::format("지원하는 프레임 생성 배수: 2~{}배", presentation.maximum_multiplier)
+        : presentation.requested.provider.value == "fsr" ? "이 방식은 배수를 직접 설정할 수 없습니다"
+        : "프레임 생성을 켜면 지원하는 배수를 확인합니다");
     status(SettingId::LowLatency, presentation.low_latency_active ? "on" : "off", presentation.fallback_reason);
-    status(SettingId::RayTracingEnabled, lighting.active.ray_tracing_enabled ? "true" : "false", lighting.ray_scene_supported ? "Native ray scene supported" : "Native ray scene unavailable");
+    status(SettingId::RayTracingEnabled, lighting.active.ray_tracing_enabled ? "true" : "false", lighting.ray_scene_supported ? "현재 장치에서 레이 트레이싱을 지원합니다" : "현재 장치에서 레이 트레이싱을 사용할 수 없습니다");
     status(SettingId::AoMode, std::string(GraphicsEnumToken(lighting.active.ao_mode)), lighting.ao_fallback_reason);
     status(SettingId::GiMode, std::string(GraphicsEnumToken(lighting.active.gi_mode)), lighting.gi_fallback_reason.empty() ? lighting.software_gi.reason : lighting.gi_fallback_reason);
     status(SettingId::ReflectionMode, std::string(GraphicsEnumToken(lighting.active.reflection_mode)), lighting.reflection_fallback_reason);
@@ -314,7 +434,7 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
             (lighting.ray_shadows.enabled && lighting.ray_shadows.native_sigma ? "; Native NRD SIGMA shadows active" : ""));
     const auto &adaptive = lighting.adaptive_shading;
     status(SettingId::AdaptiveShading,
-        std::format("Raster {}; compute {}", adaptive.raster_applied ? "on" : "off", adaptive.compute_applied ? "on" : "off"),
+        std::format("래스터 {} · 연산 {}", adaptive.raster_applied ? "켜짐" : "꺼짐", adaptive.compute_applied ? "켜짐" : "꺼짐"),
         std::format("Requested {}; resolved raster {} / compute {}; ready raster {} / compute {}; usable {}; VRS tier {} / tile {}; {} bytes. Raster: {} Compute: {}",
             GraphicsEnumToken(adaptive.requested), adaptive.raster_resolved, adaptive.compute_resolved,
             adaptive.raster_ready, adaptive.compute_ready, adaptive.usable, adaptive.vrs_tier,
@@ -323,12 +443,12 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         streaming.ready, streaming.native_asset_io, streaming.sampler_feedback, streaming.texture_count,
         streaming.physical_bytes, streaming.reason);
     status(SettingId::TextureQuality, std::string(GraphicsEnumToken(streaming.applied_quality)), streaming_reason);
-    status(SettingId::TextureBudgetMib, streaming.applied_budget_mib ? std::to_string(streaming.applied_budget_mib) : "Auto (0)", streaming_reason);
+    status(SettingId::TextureBudgetMib, streaming.applied_budget_mib ? std::to_string(streaming.applied_budget_mib) : "0", streaming_reason);
     for (const auto &descriptor : GraphicsSettingDescriptors())
         if (std::ranges::find(model->resolved, descriptor.id, &GraphicsUiStatus::setting) == model->resolved.end())
             status(descriptor.id, canonical.actual_applied_available
                 ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{},
-                canonical.actual_applied_available ? "Applied renderer receipt" : "Waiting for the renderer apply receipt");
+                canonical.actual_applied_available ? "요청한 설정으로 적용했습니다" : "렌더러의 적용 결과를 기다리는 중입니다");
     UpdateGraphicsTelemetry(*model, renderer.GetDiagnostics(), validation);
     return model;
 }
@@ -595,7 +715,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     SettingsDocument ui_click_document = settings_commit.Requested();
     GraphicsSettingsUiModel ui_click_model;
     ui_click_model.requested = ui_click_document.graphics;
-    ui_click_model.transaction_state = "Renderer initialization pending";
+    ui_click_model.transaction_state = "렌더러를 준비하는 중입니다";
     channels.presentation_graphics_ui.store(std::make_shared<const GraphicsSettingsUiModel>(ui_click_model), std::memory_order_release);
     bool ui_command_queue_full{};
     bool ui_click_allocation_failed{};
@@ -949,7 +1069,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto active_vfx_quality = renderer_config.vfx_quality;
         bool renderer_settings_suspended{};
 #if defined(HS_DEVELOPMENT_TOOLS)
-        std::string watched_generation_pointer;
+        runtime_detail::GenerationReloadWatch generation_reload_watch;
+        // The future joins on teardown; the worker owns only file inputs and its read lease.
+        std::future<PreparedContentGeneration> generation_preparation;
+        std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
+        SceneGenerationBinding scene_generation{selected_generation.id, selected_generation.id, {}};
         auto next_generation_check = std::chrono::steady_clock::now();
         std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
             << "ready active=" << render_generation->id << '\n';
@@ -1006,18 +1130,36 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         for (;;)
         {
 #if defined(HS_DEVELOPMENT_TOOLS)
-            if (std::chrono::steady_clock::now() >= next_generation_check)
+            const auto generation_now = std::chrono::steady_clock::now();
+            const auto generation_ready = generation_preparation.valid() &&
+                generation_preparation.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+            std::string pointer_text;
+            bool pointer_read{};
+            if (generation_now >= next_generation_check || generation_ready)
             {
-                next_generation_check = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
-                std::string pointer_text;
-                if (ReadGenerationPointer(generation_pointer, pointer_text) &&
-                    pointer_text != watched_generation_pointer)
+                next_generation_check = generation_now + std::chrono::milliseconds(250);
+                pointer_read = static_cast<bool>(ReadGenerationPointer(generation_pointer, pointer_text));
+                if (pointer_read) generation_reload_watch.Observe(pointer_text, generation_now);
+            }
+            if (generation_ready)
+            {
+                PreparedContentGeneration prepared;
+                try
                 {
-                    watched_generation_pointer = pointer_text;
-                    SelectedGeneration candidate;
-                    auto reloaded = Result::Success();
+                    prepared = generation_preparation.get();
+                }
+                catch (const std::exception &error)
+                {
+                    prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Content Generation worker failed: " + std::string(error.what()));
+                }
+                auto &candidate = prepared.candidate;
+                auto reloaded = std::move(prepared.result);
+                bool current = pointer_read && !prepared.superseded &&
+                    generation_reload_watch.IsCurrent(pointer_text);
+                {
                     std::string candidate_id = "unresolved";
-                    const char *stage = "manifest";
+                    const char *stage = prepared.stage;
                     const auto pipeline_revision = renderer.PipelineRevision();
                     const auto parameter_revision = renderer.MaterialParameterRevision();
                     bool applied{}, catalog_changed{};
@@ -1025,15 +1167,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     std::uint64_t retired_legacy{}, retired_movements{}, retired_sparks{};
                     try
                     {
-                        reloaded = LoadSelectedGeneration(generation_pointer, candidate);
                         if (!candidate.id.empty()) candidate_id = candidate.id;
-                        if (reloaded && candidate.scope != render_generation->scope)
+                        if (current && reloaded && candidate.scope != render_generation->scope)
                             reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                                        "Content Generation changes the selected scope.");
-                        if (reloaded && candidate.id != render_generation->id)
+                        if (current && reloaded && candidate.id != render_generation->id)
                         {
-                            stage = "integrity";
-                            reloaded = VerifySelectedGenerationProducts(candidate);
                             std::filesystem::path next_particle_path, next_program_path;
                             VfxCatalog replacement;
                             RendererVfxSpriteBindings sprite_bindings;
@@ -1128,9 +1267,33 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             {
                                 stage = "renderer_prepare";
                                 auto next_generation = std::make_shared<const SelectedGeneration>(candidate);
-                                reloaded = renderer.ReloadContentGeneration(candidate.id, candidate.product_paths,
-                                    candidate.product_digests, next_generation, catalog_changed ? &sprite_bindings : nullptr);
-                                if (reloaded)
+                                // The closure includes shader/parameter leaves: the renderer alone
+                                // classifies narrow reloads, which keep the existing scene association.
+                                bool scene_compatible = true;
+                                for (const std::string_view id : std::array<std::string_view, 4>{"game-data/simulation-rules",
+                                         "game-data/presentation-catalog", "game-data/arena-layout",
+                                         std::string_view(renderer_config.scene_hlod_product_id)})
+                                    scene_compatible &= runtime_detail::SameCapturedAssetClosure(
+                                        *render_generation, candidate, MakeAssetId(id));
+                                SceneGenerationBinding next_scene_generation{selected_generation.id, candidate.id, {}};
+                                const auto scene_snapshots = snapshot_consumer.AcquireLatest();
+                                if (scene_snapshots.has_previous)
+                                    (void)next_scene_generation.Resolve(scene_snapshots.previous.static_scene);
+                                if (scene_snapshots.has_current)
+                                    (void)next_scene_generation.Resolve(scene_snapshots.current.static_scene);
+                                bool resident_replaced{};
+                                pointer_read = static_cast<bool>(ReadGenerationPointer(generation_pointer, pointer_text));
+                                if (pointer_read)
+                                    generation_reload_watch.Observe(pointer_text, std::chrono::steady_clock::now());
+                                current = pointer_read && generation_reload_watch.IsCurrent(pointer_text);
+                                if (current)
+                                {
+                                    if (!scene_compatible) stage = "scene_closure";
+                                    reloaded = renderer.ReloadContentGeneration(candidate.id, candidate.product_paths,
+                                        candidate.product_digests, next_generation, catalog_changed ? &sprite_bindings : nullptr,
+                                        &resident_replaced, scene_compatible);
+                                }
+                                if (current && reloaded)
                                 {
                                     // All allocation, decoding and rebinding preceded the
                                     // renderer commit. Publish only prepared owned state.
@@ -1148,7 +1311,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     cooked_particle_effects_path.swap(next_particle_path);
                                     cooked_vfx_program_path.swap(next_program_path);
                                     render_generation.swap(next_generation);
+                                    if (resident_replaced) scene_generation.Swap(next_scene_generation);
                                     active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
+                                    generation_awaiting_frame = render_generation;
                                     applied = true;
                                 }
                             }
@@ -1159,6 +1324,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                                    "Content Generation preparation failed: " + std::string(error.what()));
                     }
+                    generation_reload_watch.Complete(static_cast<bool>(reloaded), current,
+                        std::chrono::steady_clock::now());
                     if (applied)
                     {
                         record_renderer_features(0);
@@ -1172,10 +1339,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             << " expanded_legacy_retired=" << retired_legacy
                             << "; temporal/HZB history invalidated\n";
                     }
-                    if (!reloaded)
+                    if (current && !reloaded)
                         std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
                             << "rejected candidate=" << candidate_id << " active=" << render_generation->id
                             << " stage=" << stage << ' ' << reloaded.Message() << "; previous content retained\n";
+                }
+            }
+            if (pointer_read && generation_reload_watch.TryBegin(std::chrono::steady_clock::now()))
+            {
+                try
+                {
+                    generation_preparation = std::async(std::launch::async, PrepareContentGeneration,
+                        generation_pointer, pointer_text, render_generation->id, render_generation->scope);
+                }
+                catch (const std::exception &error)
+                {
+                    generation_reload_watch.Complete(false, true, std::chrono::steady_clock::now());
+                    std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
+                        << "rejected candidate=unresolved active=" << render_generation->id
+                        << " stage=worker " << error.what() << "; previous content retained\n";
                 }
             }
 #endif
@@ -1385,7 +1567,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 event.asset.value, event.position.x, event.position.y,
                                 event.position.z));
             }
-            const auto snapshots = snapshot_consumer.AcquireLatest();
+            auto snapshots = snapshot_consumer.AcquireLatest();
+#if defined(HS_DEVELOPMENT_TOOLS)
+            if (snapshots.has_previous)
+                snapshots.previous.static_scene = scene_generation.Resolve(snapshots.previous.static_scene);
+            if (snapshots.has_current)
+                snapshots.current.static_scene = scene_generation.Resolve(snapshots.current.static_scene);
+#endif
             if (snapshots.has_current &&
                 (!config.smoke_render_lockstep ||
                  snapshots.current.header.tick > rendered_tick.load(std::memory_order_acquire)))
@@ -1406,6 +1594,28 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 {
                     record_thread_failure(dispatched);
                     break;
+                }
+                const bool inject_pickup_showcase = config.vfx_showcase && !vfx_showcase_injected;
+                if (inject_pickup_showcase)
+                {
+                    constexpr std::array pickup_effects{
+                        "particle.pickup.xp_collect", "particle.pickup.heal_collect",
+                        "particle.pickup.magnet_collect", "particle.pickup.relic_collect"};
+                    for (std::size_t index = 0; index < pickup_effects.size(); ++index)
+                    {
+                        PresentationEvent event;
+                        event.sequence = 0xF100u + index;
+                        event.tick = current_snapshot.header.tick;
+                        event.session_id = current_snapshot.header.session_id;
+                        event.kind = PresentationKind::Vfx;
+                        event.asset = MakeAssetId(pickup_effects[index]);
+                        event.position = {(static_cast<float>(index % 2) - .5f) * 4.0f,
+                                          .35f, (static_cast<float>(index / 2) - .5f) * 4.0f};
+                        event.parameters = EncodeVfxParameters({{0, 0, 1}, 1,
+                            {event.position.x + .9f, .6f, event.position.z + .6f},
+                            static_cast<std::uint32_t>(VfxEventFlag::HasTarget)});
+                        frame_events.push_back(event);
+                    }
                 }
                 for (const auto &ready_event : frame_events)
                     if (auto expanded = vfx_catalog.ExpandEvent(
@@ -1851,8 +2061,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         if (legacy.sequence == tick.event_sequence) legacy.count = 0;
                     active_vfx_flashes.push_back(tick.flash);
                 }
+                std::vector<Sequence> superseded_pickup_sequences;
                 const auto new_flashes = runtime_detail::BuildVfxTypedFlashCommands(
-                    vfx_catalog.Program(), unpaired_flash_events);
+                    vfx_catalog.Program(), unpaired_flash_events, &superseded_pickup_sequences);
+                if (inject_pickup_showcase && std::ranges::count_if(superseded_pickup_sequences,
+                        [](Sequence sequence) { return sequence >= 0xF100u && sequence < 0xF104u; }) != 4)
+                {
+                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Pickup showcase did not convert all four collection bursts."));
+                    break;
+                }
+                for (const auto sequence : superseded_pickup_sequences)
+                    for (auto &legacy : pending_particle_spawns)
+                        if (!legacy.authored_ballistic && legacy.sequence == sequence)
+                            legacy.count = 0;
                 active_vfx_flashes.insert(active_vfx_flashes.end(),
                                           new_flashes.begin(), new_flashes.end());
                 const auto owned_status_motes = runtime_detail::BuildVfxOwnedStatusTickMoteCommands(
@@ -2004,6 +2226,16 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     record_thread_failure(rendered);
                     break;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
+                if (generation_awaiting_frame)
+                {
+                    std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
+                        << "rendered active=" << generation_awaiting_frame->id << " frame=" << frame.frame
+                        << " pipelines=" << renderer.PipelineRevision()
+                        << " scene_generation=" << scene_generation.resident_generation_id << '\n';
+                    generation_awaiting_frame.reset();
+                }
+#endif
                 if (config.smoke_render_lockstep)
                     rendered_tick.store(snapshots.current.header.tick, std::memory_order_release);
                 const auto receipt_phase = channels.session_phase.load(std::memory_order_acquire);
@@ -3056,7 +3288,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 case UiCommandKind::SetOutline:
                 case UiCommandKind::SetGraphicsSetting:
                 case UiCommandKind::SetVfxScreenOverlayIntensityPercent:
-                    graphics_ui_phase.store(settings_commit.EditGraphics(ui_command)
+                    graphics_ui_phase.store((ui_command.kind != UiCommandKind::SetGraphicsSetting ||
+                        GraphicsSettingTokenAvailable(ui_command.graphics_setting,
+                            std::string_view(ui_command.graphics_token.data(),
+                                std::ranges::find(ui_command.graphics_token, '\0') - ui_command.graphics_token.begin()), &ui_click_model)) &&
+                        settings_commit.EditGraphics(ui_command)
                         ? GraphicsUiPhase::Requested : GraphicsUiPhase::ApplyFailed,
                                             std::memory_order_release);
                     presentation_settings_changed = true;
@@ -3290,19 +3526,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                      : std::make_shared<GraphicsSettingsUiModel>();
                 model->requested = settings_commit.Requested().graphics;
                 model->pending = pending || settings_commit.HasUnsentEdits();
-                const auto state = settings_commit.TimedOut() ? "Apply timed out; waiting for native completion before restore"
-                    : settings_commit.PreparationFailed() ? "Settings snapshot allocation failed; renderer and confirmed document retained"
-                    : settings_commit.IsRecovering() ? "Restoring last persisted graphics profile"
-                    : phase == GraphicsUiPhase::Requested ? "Requested"
-                    : phase == GraphicsUiPhase::Pending ? "Applying"
-                    : phase == GraphicsUiPhase::AwaitingDisplayConfirmation ? "Awaiting display confirmation (15 seconds)"
-                    : phase == GraphicsUiPhase::RestoringDisplay ? "Restoring display"
-                    : phase == GraphicsUiPhase::ApplyFailed ? "Apply rejected; previous confirmed profile retained"
-                    : receipt ? "Renderer acknowledged" : "Renderer status has not arrived";
-                model->transaction_state = std::string(state) + (save_failure ? " / Save failed" : " / Confirmed settings save unchanged");
+                const auto state = settings_commit.TimedOut() ? "적용 시간이 초과되어 장치 작업 완료 후 복원합니다"
+                    : settings_commit.PreparationFailed() ? "메모리가 부족해 이전 설정을 유지합니다"
+                    : settings_commit.IsRecovering() ? "마지막으로 저장한 설정을 복원하는 중입니다"
+                    : phase == GraphicsUiPhase::Requested ? "설정 변경을 요청했습니다"
+                    : phase == GraphicsUiPhase::Pending ? "설정을 적용하는 중입니다"
+                    : phase == GraphicsUiPhase::AwaitingDisplayConfirmation ? "화면 변경을 15초 안에 확인해 주세요"
+                    : phase == GraphicsUiPhase::RestoringDisplay ? "이전 화면 설정을 복원하는 중입니다"
+                    : phase == GraphicsUiPhase::ApplyFailed ? "적용할 수 없어 이전 설정을 유지합니다"
+                    : receipt ? "적용 및 저장 완료 · 값이나 − / + 버튼으로 변경하세요" : "렌더러 상태를 확인하는 중입니다";
+                model->transaction_state = std::string(state) + (save_failure ? " · 저장 실패: 이전 설정을 복원합니다" : "");
                 if (receipt && receipt->generation != settings_commit.CommittedGeneration())
-                    model->transaction_state += " / Detailed renderer receipt is from a different acknowledgement generation";
-                if (settings_commit.FollowupRejected()) model->transaction_state += " / Dependent follow-up edit rejected by complete validation";
+                    model->transaction_state += " · 새 적용 결과를 기다리는 중입니다";
+                if (settings_commit.FollowupRejected()) model->transaction_state += " · 함께 사용할 수 없는 변경은 취소했습니다";
                 ui_click_document = settings_commit.Requested();
                 ui_click_settings = settings_commit.UiInput();
                 ui_click_model = *model;

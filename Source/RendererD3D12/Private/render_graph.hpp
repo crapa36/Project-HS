@@ -227,6 +227,7 @@ struct GraphExecutionOptions
 
 struct GraphExecutionStats
 {
+    // Native ExecuteCommandLists calls, which may contain several Enhanced lists.
     std::uint32_t direct_batches{};
     std::uint32_t compute_batches{};
     std::uint32_t copy_batches{};

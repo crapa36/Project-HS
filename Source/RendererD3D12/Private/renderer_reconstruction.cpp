@@ -152,11 +152,13 @@ Result D3D12Renderer::Impl::PrepareReconstructionProvider(
             {
                 if (dynamic)
                 {
-                    const auto scaled = [](std::uint32_t pixels, float percent) {
-                        return static_cast<std::uint32_t>(std::max(1.0, std::ceil(double(pixels) * percent / 100.0)));
-                    };
-                    minimum = {std::max(minimum.width, scaled(output.width, minimum_percent)), std::max(minimum.height, scaled(output.height, minimum_percent))};
-                    maximum = {std::min(maximum.width, scaled(output.width, maximum_percent)), std::min(maximum.height, scaled(output.height, maximum_percent))};
+                    ViewExtent requested_minimum, requested_maximum;
+                    if (minimum_percent > maximum_percent ||
+                        !ResolveDynamicResolutionExtent(output, minimum_percent, requested_minimum) ||
+                        !ResolveDynamicResolutionExtent(output, maximum_percent, requested_maximum))
+                        return Result::Failure(ErrorCode::InvalidArgument, "hs_reconstruction", "Invalid integer DRS bounds.");
+                    minimum = {std::max(minimum.width, requested_minimum.width), std::max(minimum.height, requested_minimum.height)};
+                    maximum = {std::min(maximum.width, requested_maximum.width), std::min(maximum.height, requested_maximum.height)};
                 }
                 if (minimum.width > maximum.width || minimum.height > maximum.height)
                 {

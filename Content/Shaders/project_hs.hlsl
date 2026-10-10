@@ -1884,9 +1884,9 @@ ParticleOutput ParticleVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
     sincos(rotation, sine, cosine);
     float2 rotated = float2(
         corner.x * cosine - corner.y * sine, corner.x * sine + corner.y * cosine);
-    float3 camera_forward = normalize(CameraForwardSoftness.xyz);
-    float3 axis_x = normalize(cross(float3(0, 1, 0), camera_forward));
-    float3 axis_y = normalize(cross(camera_forward, axis_x));
+    float3 camera_forward = LodViewForward.xyz;
+    float3 axis_x = LodViewRight.xyz;
+    float3 axis_y = LodViewUp.xyz;
     if (renderer == 1)
     {
         axis_x = float3(1, 0, 0);
@@ -3498,9 +3498,8 @@ VfxFlashOutput VfxFlashVS(uint vertex_id : SV_VertexID, uint instance_id : SV_In
     };
     ParticleSpawnCommandGpu flash = ParticleSpawnCommands[instance_id];
     float2 corner = corners[vertex_id];
-    float3 forward = normalize(CameraForwardSoftness.xyz);
-    float3 axis_x = normalize(cross(float3(0, 1, 0), forward));
-    float3 axis_y = normalize(cross(forward, axis_x));
+    float3 axis_x = LodViewRight.xyz;
+    float3 axis_y = LodViewUp.xyz;
     uint shape = flash.Metadata.x;
     float age = flash.SizeRange.z;
     float size = flash.SizeRange.x * ImpactCurve(flash.Metadata.z, age);
@@ -3759,9 +3758,9 @@ OitOutput VfxSpriteOitPS(VfxFlashOutput input)
                                      VfxSmokePositive.Sample(LinearClamp, float3(uv1, frame1)), blend);
         const float4 negative = lerp(VfxSmokeNegative.Sample(LinearClamp, float3(uv0, frame0)),
                                      VfxSmokeNegative.Sample(LinearClamp, float3(uv1, frame1)), blend);
-        const float3 forward = normalize(CameraForwardSoftness.xyz);
-        const float3 right = normalize(cross(float3(0, 1, 0), forward));
-        const float3 up = normalize(cross(forward, right));
+        const float3 forward = LodViewForward.xyz;
+        const float3 right = LodViewRight.xyz;
+        const float3 up = LodViewUp.xyz;
         // Shadow palette colors the scattering; only baked emissive follows the hot gradient.
         const float3 scattering=HsLightListSixWay(input.WorldPosition,right,up,forward,
             positive.rgb,negative.rgb,HsLightAllMask,false);
@@ -3828,8 +3827,7 @@ float3 BloomBrightPass(float3 color)
 
 float4 PreExposurePS(FullScreenOutput input) : SV_Target0
 {
-    const int2 pixel = HsSurfacePixel(input.Uv);
-    return float4(CompositeHdr.Load(int3(pixel, 0)).rgb * CurrentExposure[0], 1.0);
+    return float4(CompositeHdr.Load(int3(HsSurfacePixel(input.Uv), 0)).rgb * CurrentExposure[0], 1);
 }
 
 struct TemporalMrtOutput
@@ -3895,7 +3893,7 @@ TemporalMrtOutput TemporalPS(FullScreenOutput input)
     resolve.previous_unjittered_view_projection = PreviousUnjitteredViewProjection;
 
     const HsTemporalResult resolved = HsResolveTemporal(resolve, SceneWork, TemporalInput,
-        TemporalNormalInput, TemporalMaterialInput, LinearClamp);
+        TemporalNormalInput, TemporalMaterialInput);
     TemporalMrtOutput output;
     output.ColorDepth = resolved.color_depth;
     output.Normal = resolved.normal_oct;
@@ -4004,14 +4002,15 @@ float4 FxaaPS(FullScreenOutput input) : SV_Target0
     float3 east = PostB.SampleLevel(LinearClamp, input.Uv + float2(texel.x, 0), 0).rgb;
     float3 west = PostB.SampleLevel(LinearClamp, input.Uv - float2(texel.x, 0), 0).rgb;
     float luma_center = dot(center, float3(0.299, 0.587, 0.114));
-    float luma_range = max(max(dot(north, float3(0.299, 0.587, 0.114)),
+    float luma_max = max(max(dot(north, float3(0.299, 0.587, 0.114)),
                                dot(south, float3(0.299, 0.587, 0.114))),
                            max(dot(east, float3(0.299, 0.587, 0.114)),
-                               dot(west, float3(0.299, 0.587, 0.114)))) -
-                       min(min(dot(north, float3(0.299, 0.587, 0.114)),
+                               dot(west, float3(0.299, 0.587, 0.114))));
+    float luma_min = min(min(dot(north, float3(0.299, 0.587, 0.114)),
                                dot(south, float3(0.299, 0.587, 0.114))),
                            min(dot(east, float3(0.299, 0.587, 0.114)),
                                dot(west, float3(0.299, 0.587, 0.114))));
+    float luma_range = max(luma_center, luma_max) - min(luma_center, luma_min);
     float3 filtered = (north + south + east + west + center * 2.0) / 6.0;
     return float4(lerp(center, filtered, saturate((luma_range - 0.08) * 4.0)), 1.0);
 }
@@ -4046,9 +4045,8 @@ VfxDistortionOutput VfxDistortionVS(uint vertex_id : SV_VertexID, uint instance_
 {
     static const float2 corners[6] = {float2(-1,-1),float2(-1,1),float2(1,1),float2(-1,-1),float2(1,1),float2(1,-1)};
     const DistortionGpu source = VfxDistortions[instance_id];
-    const float3 forward = normalize(CameraForwardSoftness.xyz);
-    const float3 right = normalize(cross(abs(forward.y) > .999 ? float3(0,0,1) : float3(0,1,0),forward));
-    const float3 up = normalize(cross(forward,right));
+    const float3 right = LodViewRight.xyz;
+    const float3 up = LodViewUp.xyz;
     float2 aim = float2(dot(source.DirectionStrength.xyz,right),dot(source.DirectionStrength.xyz,up));
     aim = dot(aim,aim) > .00001 ? normalize(aim) : float2(1,0);
     const uint shape = (uint)source.PhaseAlphaShapeSeed.z;

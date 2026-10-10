@@ -702,7 +702,8 @@ struct GameSimulation::SimulationWorld
     std::uint8_t IncrementCastHit(std::uint64_t cast, std::uint64_t target);
     std::uint8_t IncrementAreaHit(std::uint64_t area, std::uint64_t target);
     CastRuntime &FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill);
-    void OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
+    // True means the remaining tick must be swept again in the new direction.
+    bool OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
                          Float2 contact_position);
     void ExplodeProjectile(ProjectileActor &projectile);
     void CollisionHitPhase();

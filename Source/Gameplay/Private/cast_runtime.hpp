@@ -16,6 +16,7 @@ struct CastRuntime
     std::uint16_t kills{};
     std::uint8_t transfer_count{};
     std::uint8_t spawn_count{};
+    Tick cooldown_ticks_saved{};
     bool triggered{};
     std::uint32_t basic_relic_triggers{};
     bool refund_triggered{};

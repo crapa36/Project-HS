@@ -231,7 +231,9 @@ Result D3D12Renderer::Impl::PrepareLocalProbes(const RendererConfig &candidate_c
 {
     RendererConfig selected;
     if (auto prepared = SelectTextureFeedbackShaders(candidate_config, selected); !prepared) return prepared;
-    return local_probes.Prepare(device.Get(), allocator, root_signature.Get(), selected, candidate, &pipeline_cache);
+    // Shader/parameter adoption preserves the resident geometry and immutable scene owner.
+    return local_probes.Prepare(device.Get(), allocator, root_signature.Get(), selected,
+        resource_generation_id, candidate, &pipeline_cache);
 }
 Result D3D12Renderer::Impl::PrepareVolumetrics(const RendererConfig &candidate_config,
     ViewExtent capacity, VolumetricPrepared &candidate) const

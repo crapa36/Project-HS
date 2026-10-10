@@ -229,8 +229,13 @@ struct LocalProbeCaptureState
     ComPtr<ID3D12PipelineState> sky;
     rd::SceneProbeRevisions baseline;
     std::vector<rd::SceneProbeRecord> probes;
-    std::string generation,probe_digest;
+    std::string scene_generation,probe_digest;
     Identities environment,material_products;
+    std::shared_ptr<const StaticRenderScene> revision_scene;
+    std::uint32_t revision_instance_generation{};
+    float revision_foliage_density{};
+    std::string layout_identity,shadow_identity;
+    StaticShadowView revision_shadow;
 };
 struct LocalProbeCaptureFrame
 {
@@ -258,6 +263,8 @@ struct LocalProbeCaptureFrame
         bind(list);
         ID3D12DescriptorHeap *heaps[]{descriptors.Get(),samplers.Get()}; list->SetDescriptorHeaps(2,heaps);
         list->SetGraphicsRootSignature(capture->root.Get());
+        list->SetGraphicsRootConstantBufferView(15,
+            constants.resource->GetGPUVirtualAddress()+UINT64(bank)*kConstantsStride);
         const auto table=[&](UINT offset) {
             auto handle=descriptors->GetGPUDescriptorHandleForHeapStart();
             handle.ptr+=(UINT64(bank)*kCaptureDescriptorCount+offset)*stride; return handle;
@@ -341,18 +348,20 @@ LocalProbeRuntime::LocalProbeRuntime():impl_(std::make_unique<Impl>()) {}
 LocalProbeRuntime::~LocalProbeRuntime()=default;
 
 Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
-    const RendererConfig &config,LocalProbeRuntimeCandidate &candidate,RendererPipelineCache *pipeline_cache) const
+    const RendererConfig &config,std::string_view scene_generation,
+    LocalProbeRuntimeCandidate &candidate,RendererPipelineCache *pipeline_cache) const
 {
     candidate=LocalProbeRuntimeCandidate{};
     if(config.gi_mode==GraphicsGiMode::Off && config.reflection_mode==GraphicsReflectionMode::Off)
     { candidate.prepared_=true; return Result::Success(); }
     try
     {
-        Require(device && allocator && root && pipeline_cache && !config.content_generation_id.empty(),"Active local probes need native owners, pipeline cache and a selected Generation");
+        Require(device && allocator && root && pipeline_cache && !config.content_generation_id.empty() && !scene_generation.empty(),
+            "Active local probes need native owners, pipeline cache and selected/resident scene Generations");
         const auto bytes=ReadProduct(config,kProduct); const auto package=rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct));
         auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
         capture->baseline=package.description.revisions; capture->probes=package.probes;
-        capture->generation=config.content_generation_id; capture->probe_digest=config.product_digests.at(std::string(kProduct));
+        capture->scene_generation=scene_generation; capture->probe_digest=config.product_digests.at(std::string(kProduct));
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
         (void)rd::ReadLightingProbePackage(environment,MakeAssetId(kEnvironment));
@@ -440,18 +449,27 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     out={}; const auto capture=impl_->capture; if(!capture || !in.scene) return Result::Success();
     try
     {
-        Require(in.scene && in.frame_constants && in.scene->content_generation_id==capture->generation && in.static_instance_generation &&
+        Require(in.scene && in.frame_constants && in.scene->content_generation_id==capture->scene_generation && in.static_instance_generation &&
             in.pages.size()==rd::kAuthoredMaterialNames.size(),"Native local-probe scene/page generation does not match adoption");
-        Identity layout; layout.Text("local-probe.actual-static-scene.v1"); layout.Text(in.scene->content_generation_id);
-        layout.Integer(in.static_instance_generation,4); layout.Integer(in.scene->layout_abi,4);
-        layout.Integer(in.scene->instances.size()); layout.Float(in.foliage_density);
-        for(const auto &instance:in.scene->instances)
+        // The retained scene is immutable; revalidate its layout only when its adoption or density changes.
+        if(capture->revision_scene!=in.scene || capture->revision_instance_generation!=in.static_instance_generation ||
+            capture->revision_foliage_density!=in.foliage_density)
         {
-            (void)MaterialOrdinal(instance); layout.Integer(instance.stable_id); layout.Integer(static_cast<std::uint32_t>(instance.mesh),4);
-            layout.Vector(instance.position); layout.Vector(instance.scale); layout.Float(instance.yaw);
-            layout.Integer(instance.color_rgba,4); layout.Integer(instance.environment_seed,4); layout.Integer(instance.environment_variant,4);
-            layout.Integer(instance.asset_id.value); layout.Integer(instance.material_id.value);
-            layout.Integer(instance.revisions.transform); layout.Integer(instance.revisions.material); layout.Integer(instance.revisions.content);
+            Identity layout; layout.Text("local-probe.actual-static-scene.v1"); layout.Text(in.scene->content_generation_id);
+            layout.Integer(in.static_instance_generation,4); layout.Integer(in.scene->layout_abi,4);
+            layout.Integer(in.scene->instances.size()); layout.Float(in.foliage_density);
+            for(const auto &instance:in.scene->instances)
+            {
+                (void)MaterialOrdinal(instance); layout.Integer(instance.stable_id); layout.Integer(static_cast<std::uint32_t>(instance.mesh),4);
+                layout.Vector(instance.position); layout.Vector(instance.scale); layout.Float(instance.yaw);
+                layout.Integer(instance.color_rgba,4); layout.Integer(instance.environment_seed,4); layout.Integer(instance.environment_variant,4);
+                layout.Integer(instance.asset_id.value); layout.Integer(instance.material_id.value);
+                layout.Integer(instance.revisions.transform); layout.Integer(instance.revisions.material); layout.Integer(instance.revisions.content);
+            }
+            capture->layout_identity=layout.Finish();
+            capture->revision_scene=in.scene;
+            capture->revision_instance_generation=in.static_instance_generation;
+            capture->revision_foliage_density=in.foliage_density;
         }
         Identity material; material.Text("local-probe.actual-material-state.v1");
         material.Integer(in.material_parameter_revision); material.Integer(in.pipeline_revision);
@@ -482,15 +500,25 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             material.Vector(in.frame_constants->material_quality_options);
             lights.Vector(in.frame_constants->light_direction_intensity); lights.Vector(in.frame_constants->light_color);
         }
-        const auto shadow=MakeStaticShadowView(in.scene,in.pages,in.lights);
+        const auto material_identity=material.Finish();
+        auto shadow_key=lights;
+        shadow_key.Text(capture->layout_identity); shadow_key.Text(material_identity);
+        const auto shadow_identity=shadow_key.Finish();
+        if(capture->shadow_identity!=shadow_identity)
+        {
+            const auto shadow=MakeStaticShadowView(in.scene,in.pages,in.lights);
+            capture->revision_shadow=shadow;
+            capture->shadow_identity=shadow_identity;
+        }
+        const auto &shadow=capture->revision_shadow;
         lights.Text("local-probe.pure-static-directional-shadow.v1"); lights.Integer(kShadowEdge,4);
         lights.Integer(shadow.enabled,1); lights.Integer(shadow.light_id); lights.Integer(shadow.light_generation,4);
         lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
         if(shadow.enabled)
             for(const auto &row:shadow.view.view_projection.m) for(float value:row) lights.Float(value);
-        auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material.Finish();
+        auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
         const Identities light_inputs{{std::string(kProduct),capture->probe_digest},{"native/authoritative-light-view",lights.Finish()}};
-        const Identities layout_inputs{{std::string(kProduct),capture->probe_digest},{"native/immutable-static-scene",layout.Finish()}};
+        const Identities layout_inputs{{std::string(kProduct),capture->probe_digest},{"native/immutable-static-scene",capture->layout_identity}};
         out={Revision(rd::SceneProbeRevisionDomain::Environment,capture->environment),Revision(rd::SceneProbeRevisionDomain::Material,materials),
             Revision(rd::SceneProbeRevisionDomain::Light,light_inputs),Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs)};
         return Result::Success();
@@ -605,9 +633,6 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
             // The opacity-only depth shader never reads ShadowMap. Its bank uses
             // a typed null to avoid an SRV/DSV alias while the map is written.
             device->CreateShaderResourceView(bank<kFaceCount?frame->shadow_map.resource.Get():nullptr,&shadow_srv,shadow_descriptor);
-            destination.ptr+=SIZE_T(renderer_detail::kViewDescriptorOffset+10)*frame->stride;
-            const D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{frame->constants.resource->GetGPUVirtualAddress()+UINT64(bank)*kConstantsStride,kConstantsStride};
-            device->CreateConstantBufferView(&cbv,destination);
         }
         frame->constants_handle=graph.ImportBuffer({frame->constants.resource.Get(),{},QueueHint::Direct},Access::AllShaderRead,"LocalProbe.PrivateFaceConstants");
         std::vector<LocalProbeSceneRead> reads(in.scene_reads.begin(),in.scene_reads.end());

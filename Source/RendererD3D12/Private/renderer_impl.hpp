@@ -112,6 +112,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -427,6 +428,11 @@ struct FrameConstants
 };
 
 constexpr std::uint32_t kExposureConstantsOffset = kInstanceDataOffset - 256;
+static_assert(sizeof(FrameConstants) == 11728);
+static_assert(offsetof(FrameConstants, screen_size) == 192);
+static_assert(offsetof(FrameConstants, lod_clock) == 11200);
+static_assert(offsetof(FrameConstants, output_size) == 11392);
+static_assert(offsetof(FrameConstants, probe_options) == 11712);
 static_assert(sizeof(FrameConstants) <= kExposureConstantsOffset);
 
 struct ExposureConstants
@@ -569,6 +575,17 @@ using namespace renderer_detail;
 
 struct D3D12Renderer::Impl
 {
+    struct ShadowCasterKeyHash
+    {
+        std::size_t operator()(const std::tuple<bool, std::uint64_t, std::uint32_t> &key) const noexcept
+        {
+            auto hash = std::hash<std::uint64_t>{}(std::get<1>(key));
+            hash ^= std::hash<std::uint32_t>{}(std::get<2>(key)) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+            return hash ^ (std::get<0>(key) + 0x9e3779b9u + (hash << 6) + (hash >> 2));
+        }
+    };
+    using ShadowCasterMap = std::unordered_map<std::tuple<bool, std::uint64_t, std::uint32_t>,
+        VirtualShadowCaster, ShadowCasterKeyHash>;
     struct UiResources
     {
         ~UiResources();
@@ -680,7 +697,7 @@ struct D3D12Renderer::Impl
         GpuLodStateBuffer static_lod_states;
         std::uint32_t lod_session_epoch{};
         VolumetricCamera previous_volumetric_camera;
-        std::map<std::tuple<bool, std::uint64_t, std::uint32_t>, VirtualShadowCaster> previous_shadow_casters;
+        ShadowCasterMap previous_shadow_casters;
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
         std::uint32_t exposure_read_index{}, temporal_read_index{}, hzb_read_index{};
@@ -1365,7 +1382,7 @@ struct D3D12Renderer::Impl
     std::vector<VolumetricVolume> volumetric_media;
     std::uint64_t volumetric_revision{};
     VolumetricCamera previous_volumetric_camera;
-    std::map<std::tuple<bool, std::uint64_t, std::uint32_t>, VirtualShadowCaster> previous_shadow_casters;
+    ShadowCasterMap previous_shadow_casters;
     LightListSystem light_list;
     DecalSurfaceSystem decal_surface;
     ScreenReflectionsSystem screen_reflections;

@@ -35,10 +35,88 @@ std::vector<const GraphicsSettingDescriptor *> GraphicsSettingsVisibleRows(const
 }
 std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &descriptor)
 {
-    std::string label(descriptor.key);
-    std::replace(label.begin(), label.end(), '_', ' ');
-    if (!label.empty() && label.front() >= 'a' && label.front() <= 'z') label.front() -= 'a' - 'A';
-    return label;
+    static constexpr std::array<std::string_view, kGraphicsSettingCount> labels{
+        "그래픽 품질", "화면 모드", "모니터", "출력 해상도", "수직 동기화", "최대 프레임",
+        "HDR 모드", "HDR 기준 밝기", "HDR 최대 밝기", "업스케일링 방식", "업스케일링 품질",
+        "해상도 설정 방식", "렌더링 해상도 비율", "동적 해상도", "목표 프레임",
+        "동적 해상도 최소 비율", "동적 해상도 최대 비율", "선명도", "프레임 생성 방식",
+        "프레임 생성 모드", "프레임 생성 배수", "입력 지연 줄이기", "텍스처 품질",
+        "텍스처 메모리 한도", "이방성 필터링", "모델 품질", "식생 품질", "재질 품질",
+        "표면 입체감 품질", "조명 품질", "그림자 방식", "그림자 품질", "그림자 표시 거리",
+        "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식", "간접 조명 품질",
+        "반사 방식", "반사 품질", "레이 트레이싱", "레이 트레이싱 거리", "신경망 광선 복원",
+        "광선 복원 방식", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
+        "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도", "외곽선", "외곽선 두께",
+        "색 보정", "적응형 셰이딩"};
+    const auto index = static_cast<std::size_t>(descriptor.id);
+    return index > 0 && index <= labels.size() ? std::string(labels[index - 1]) : std::string(descriptor.key);
+}
+std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
+{
+    if (token == "0" && id == SettingId::FrameLimitFps) return "제한 없음";
+    if (token == "0" && id == SettingId::TextureBudgetMib) return "자동";
+    if (token == "internal" && id == SettingId::RayReconstructionProvider) return "기본 광선 노이즈 제거";
+    static constexpr std::pair<std::string_view, std::string_view> values[]{
+        {"true", "켜짐"}, {"false", "꺼짐"}, {"on", "켜짐"}, {"off", "꺼짐"}, {"auto", "자동"},
+        {"low", "낮음"}, {"medium", "보통"}, {"high", "높음"}, {"ultra", "최고"},
+        {"ultra_rt", "최고 + 레이 트레이싱"}, {"custom", "사용자 설정"}, {"windowed", "창 모드"},
+        {"borderless_fullscreen", "테두리 없는 전체 화면"}, {"manual", "직접 설정"},
+        {"provider_quality", "업스케일링 품질에 맞춤"}, {"quality", "품질 우선"},
+        {"balanced", "균형"}, {"performance", "성능 우선"}, {"ultra_performance", "최대 성능"},
+        {"native", "기본 해상도"}, {"internal", "기본 TAA"}, {"native_taa", "기본 해상도 TAA"},
+        {"internal_taau", "기본 TAA 업스케일링"}, {"dlss", "NVIDIA DLSS"}, {"dlss_sr", "NVIDIA DLSS"},
+        {"dlss_rr", "NVIDIA DLSS 광선 복원"}, {"fsr", "AMD FSR"}, {"xess", "Intel XeSS"},
+        {"fsr_sr", "AMD FSR"}, {"fsr_rr", "AMD FSR 광선 복원"}, {"xess_sr", "Intel XeSS"},
+        {"nrd_reblur", "NRD REBLUR 광선 노이즈 제거"}, {"nrd_relax", "NRD RELAX 광선 노이즈 제거"},
+        {"directsr", "DirectSR"}, {"nrd", "NRD 광선 노이즈 제거"}, {"fixed", "고정 배수"},
+        {"dynamic", "동적 배수"}, {"raster", "기본 그림자"}, {"hybrid_rt", "레이 트레이싱 혼합"},
+        {"gtao", "화면 기반 음영 (GTAO)"}, {"rtao", "레이 트레이싱 음영"},
+        {"probe", "미리 계산한 조명"}, {"software_hybrid", "소프트웨어 혼합"},
+        {"ray_traced", "레이 트레이싱"}, {"screen_space", "화면 기반 반사"}};
+    for (const auto &[value, label] : values) if (token == value) return std::string(label);
+    std::string display_number;
+    const auto descriptors = GraphicsSettingDescriptors();
+    const auto descriptor = std::ranges::find(descriptors, id, &GraphicsSettingDescriptor::id);
+    if (descriptor != descriptors.end() && (descriptor->type == GraphicsSettingType::Float ||
+                                            descriptor->type == GraphicsSettingType::AutoFloat))
+    {
+        float value{};
+        const auto parsed = std::from_chars(token.data(), token.data() + token.size(), value);
+        if (parsed.ec == std::errc{} && parsed.ptr == token.data() + token.size() && std::isfinite(value))
+        {
+            std::array<char, 64> buffer{};
+            const auto written = std::to_chars(buffer.data(), buffer.data() + buffer.size(), value,
+                                               std::chars_format::fixed, 3);
+            if (written.ec == std::errc{})
+            {
+                auto end = written.ptr;
+                while (end > buffer.data() && end[-1] == '0') --end;
+                if (end > buffer.data() && end[-1] == '.') --end;
+                display_number.assign(buffer.data(), end);
+                token = display_number;
+            }
+        }
+    }
+    switch (id)
+    {
+    case SettingId::ManualScalePercent: case SettingId::DynamicMinPercent:
+    case SettingId::DynamicMaxPercent: return std::string(token) + "%";
+    case SettingId::FrameLimitFps: case SettingId::TargetRenderFps: return std::string(token) + " FPS";
+    case SettingId::TextureBudgetMib: return std::string(token) + " MiB";
+    case SettingId::ShadowDistanceM: case SettingId::RtTraceDistanceM: return std::string(token) + " m";
+    case SettingId::HdrPaperWhiteNits: case SettingId::HdrPeakNits: return std::string(token) + " nit";
+    case SettingId::OutlineWidthPx: return std::string(token) + " px";
+    case SettingId::FrameGenerationMultiplier: case SettingId::AnisotropicFiltering: return std::string(token) + "배";
+    default: return std::string(token);
+    }
+}
+Float2 ReferenceUiCursor(Float2 client_pixels, GraphicsExtent extent) noexcept
+{
+    const auto width = static_cast<float>(std::max(extent.width, 1u));
+    const auto height = static_cast<float>(std::max(extent.height, 1u));
+    const auto scale = std::min(width / 1920.0f, height / 1080.0f);
+    return {(client_pixels.x - width * 0.5f) / (scale * 960.0f),
+            (height * 0.5f - client_pixels.y) / (scale * 540.0f)};
 }
 namespace
 {
@@ -57,7 +135,6 @@ double NumericStep(SettingId id)
 {
     switch (id)
     {
-    case SettingId::FrameLimitFps: return 30;
     case SettingId::TargetRenderFps: return 5;
     case SettingId::TextureBudgetMib: return 128;
     case SettingId::HdrPaperWhiteNits: return 10;
@@ -70,6 +147,33 @@ double NumericStep(SettingId id)
     default: return 1;
     }
 }
+}
+bool GraphicsSettingTokenAvailable(SettingId id, std::string_view token, const GraphicsSettingsUiModel *model)
+{
+    if (id == SettingId::Preset && token == "ultra_rt")
+        return GraphicsSettingTokenAvailable(SettingId::RayTracingEnabled, "true", model) &&
+            GraphicsSettingTokenAvailable(SettingId::AoMode, "auto", model) &&
+            GraphicsSettingTokenAvailable(SettingId::GiMode, "ray_traced", model) &&
+            GraphicsSettingTokenAvailable(SettingId::ReflectionMode, "hybrid_rt", model) &&
+            GraphicsSettingTokenAvailable(SettingId::ShadowMode, "hybrid_rt", model);
+    if (model)
+    {
+        const auto choice = std::ranges::find_if(model->choices, [&](const auto &entry) {
+            return entry.setting == id && entry.token == token;
+        });
+        if (choice != model->choices.end()) return choice->available;
+        if (std::ranges::any_of(model->choices, [&](const auto &entry) { return entry.setting == id; })) return false;
+    }
+    switch (id)
+    {
+    case SettingId::HdrMode: case SettingId::ReconstructionProvider: case SettingId::ReconstructionQuality:
+    case SettingId::FrameGenerationProvider: case SettingId::FrameGenerationMode: case SettingId::FrameGenerationMultiplier:
+    case SettingId::LowLatency: case SettingId::AoMode: case SettingId::GiMode: case SettingId::ReflectionMode:
+    case SettingId::ShadowMode: case SettingId::RayTracingEnabled: case SettingId::NeuralRayReconstruction:
+    case SettingId::RayReconstructionProvider: case SettingId::AdaptiveShading:
+        return token == "off" || token == "auto" || token == "false";
+    default: return true;
+    }
 }
 std::optional<std::string> NextGraphicsSettingToken(const GraphicsSettings &settings, SettingId id,
                                                    int direction, const GraphicsSettingsUiModel *model)
@@ -84,10 +188,10 @@ std::optional<std::string> NextGraphicsSettingToken(const GraphicsSettings &sett
         if (!model || !model->frame_generation_maximum || *model->frame_generation_maximum < 2)
             return {}; // The pinned FSR API exposes no configurable multiplier.
         const auto maximum = *model->frame_generation_maximum;
-        const auto next = direction < 0 ? (settings.frame_generation_multiplier > 2 ? settings.frame_generation_multiplier - 1 : 2)
-            : (settings.frame_generation_multiplier < maximum ? settings.frame_generation_multiplier + 1 : maximum);
-        const auto token = std::to_string(std::clamp(next, 2u, maximum));
-        return token == current ? std::nullopt : std::optional(token);
+        for (auto next = static_cast<std::int64_t>(settings.frame_generation_multiplier) + direction;
+             next >= 2 && next <= maximum; next += direction)
+            if (auto token = std::to_string(next); GraphicsSettingTokenAvailable(id, token, model)) return token;
+        return {};
     }
     if (d->type == GraphicsSettingType::Boolean) values = {"false", "true"};
     else if (d->type == GraphicsSettingType::Enum)
@@ -98,6 +202,14 @@ std::optional<std::string> NextGraphicsSettingToken(const GraphicsSettings &sett
 #include <hs/core/graphics_settings.def>
 #undef HS_GRAPHICS_SETTING
         }
+    }
+    else if (id == SettingId::FrameLimitFps)
+    {
+        std::vector<std::uint32_t> limits{0, 30, 60, 90, 120, 144, 165, 180, 240, 360, 480, 1000};
+        const auto position = std::ranges::lower_bound(limits, settings.frame_limit_fps);
+        if (position == limits.end() || *position != settings.frame_limit_fps)
+            limits.insert(position, settings.frame_limit_fps);
+        for (const auto limit : limits) values.push_back(std::to_string(limit));
     }
     else if (id == SettingId::AnisotropicFiltering) values = {"1", "2", "4", "8", "16"};
     else if (d->type == GraphicsSettingType::DisplayId || d->type == GraphicsSettingType::ProviderId ||
@@ -131,6 +243,7 @@ std::optional<std::string> NextGraphicsSettingToken(const GraphicsSettings &sett
         auto candidate = settings;
         return SetGraphicsSettingToken(candidate, id, token) ? std::optional(token) : std::nullopt;
     }
+    std::erase_if(values, [&](const auto &token) { return !GraphicsSettingTokenAvailable(id, token, model); });
     if (values.empty()) return {};
     const auto selected = std::ranges::find(values, current);
     const auto index = selected == values.end() ? (direction > 0 ? 0 : values.size() - 1)
@@ -180,7 +293,8 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
             for (std::size_t index = 0; index < rows.size(); ++index)
             {
                 const auto y = kGraphicsUiRowY + index * kGraphicsUiRowStride;
-                const int direction = clicked(1450, y, 64, 48) ? -1 : clicked(1550, y, 64, 48) ? 1 : 0;
+                const int direction = clicked(1450, y, 64, 48) ? -1
+                    : (clicked(1550, y, 64, 48) || clicked(900, y, 530, 48)) ? 1 : 0;
                 if (!direction) continue;
                 const auto token = NextGraphicsSettingToken(requested, rows[index]->id, direction, graphics_ui);
                 if (!token || token->size() >= UiCommand{}.graphics_token.size()) return {std::nullopt, std::nullopt, true};
@@ -199,17 +313,19 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
         for (std::size_t index = 0; index < volumes.size(); ++index)
         {
             const auto y = kGraphicsUiRowY + index * kGraphicsUiRowStride;
-            if (!clicked(1450, y, 64, 48) && !clicked(1550, y, 64, 48)) continue;
-            const auto delta = cursor.x < 1514 ? -0.1f : 0.1f;
+            if (!clicked(1450, y, 64, 48) && !clicked(1550, y, 64, 48) &&
+                !clicked(900, y, 530, 48)) continue;
+            const auto delta = clicked(1450, y, 64, 48) ? -0.1f : 0.1f;
             const auto value = std::round(std::clamp(volumes[index] + delta,
                                                      0.0f, 1.0f) * 10.0f) / 10.0f;
             return command(volume_kinds[index],
                            static_cast<std::uint32_t>(std::lround(value * 100.0f)));
         }
         if (clicked(1450, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 64, 48) ||
-            clicked(1550, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 64, 48))
+            clicked(1550, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 64, 48) ||
+            clicked(900, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 530, 48))
         {
-            const auto delta = cursor.x < 1514 ? -10 : 10;
+            const auto delta = clicked(1450, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 64, 48) ? -10 : 10;
             return command(UiCommandKind::SetVfxScreenOverlayIntensityPercent,
                 static_cast<std::uint32_t>(std::clamp(static_cast<int>(std::lround(settings.screen_overlay_intensity * 100)) + delta, 0, 100)));
         }

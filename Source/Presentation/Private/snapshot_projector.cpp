@@ -1700,20 +1700,24 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         else if (ui.page == UiPage::MainMenuSettings ||
                  ui.page == UiPage::PauseSettings)
         {
-            add_ui(UiModel::Kind::Panel, {190, 140}, {1540, 850}, 0xD0202430u, "설정");
+            add_ui(UiModel::Kind::Panel, {190, 140}, {1540, 850}, 0xD0202430u, "");
+            add_ui(UiModel::Kind::Text, {210, 142}, {300, 26}, 0xFFFFFFFFu, "설정", 1, 22);
             constexpr std::array<std::string_view, 8> groups{
-                "Profile", "Display", "Reconstruction", "Frame generation", "Assets", "Lighting", "Effects", "Audio / Input"};
+                "품질", "화면", "업스케일링", "프레임 생성", "모델·텍스처", "조명", "효과", "소리·조작"};
             for (std::size_t group = 0; group < groups.size(); ++group)
                 add_ui(UiModel::Kind::Button, {210.0f + group * 190.0f, 175}, {180, 48},
                        ui.settings_group == group ? 0xFF806030u : 0xFF34495Eu, groups[group], 1, 19);
             const auto draw_row = [&](std::size_t row, std::string_view label, std::string_view value,
-                                      std::string_view reason = {}) {
+                                      std::string_view reason = {}, bool decrease = true, bool increase = true) {
                 const auto y = kGraphicsUiRowY + row * kGraphicsUiRowStride;
                 add_ui(UiModel::Kind::Text, {230, y}, {650, 24}, 0xFFFFFFFFu, label, 1, 21);
-                add_ui(UiModel::Kind::Text, {900, y}, {530, 24}, 0xFFF0D890u, value, 1, 19);
-                if (!reason.empty()) add_ui(UiModel::Kind::Text, {230, y + 27}, {1200, 20}, 0xFFB8B8C8u, reason, 1, 14);
-                add_ui(UiModel::Kind::Button, {1450, y}, {64, 48}, 0xFF34495Eu, "−", 1, 23);
-                add_ui(UiModel::Kind::Button, {1550, y}, {64, 48}, 0xFF34495Eu, "+", 1, 23);
+                add_ui(increase ? UiModel::Kind::Button : UiModel::Kind::Text, {900, y}, {530, 48},
+                    increase ? 0xFF2D4058u : 0xFF687080u, value, 1, 19);
+                if (!reason.empty()) add_ui(UiModel::Kind::Text, {230, y + 27}, {650, 20}, 0xFFB8B8C8u, reason, 1, 14);
+                add_ui(decrease ? UiModel::Kind::Button : UiModel::Kind::Text, {1450, y}, {64, 48},
+                    decrease ? 0xFF34495Eu : 0xFF687080u, "−", 1, 23);
+                add_ui(increase ? UiModel::Kind::Button : UiModel::Kind::Text, {1550, y}, {64, 48},
+                    increase ? 0xFF34495Eu : 0xFF687080u, "+", 1, 23);
             };
             if (ui.settings_group < 7)
             {
@@ -1723,33 +1727,44 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 for (std::size_t row = 0; row < rows.size(); ++row)
                 {
                     const auto token = GraphicsSettingToken(requested, rows[row]->id);
-                    std::string value = token, reason;
-                    if (rows[row]->id == SettingId::TextureBudgetMib && token == "0") value = "Auto (0)";
-                    if (rows[row]->id == SettingId::FrameLimitFps && token == "0") value = "Unlimited (0)";
+                    const auto display_value = [&](std::string_view raw) {
+                        if (graphics_ui)
+                        {
+                            const auto choice = std::ranges::find_if(graphics_ui->choices, [&](const auto &entry) {
+                                return entry.setting == rows[row]->id && entry.token == raw;
+                            });
+                            if (choice != graphics_ui->choices.end() && choice->label != raw) return choice->label;
+                        }
+                        return GraphicsSettingDisplayValue(rows[row]->id, raw);
+                    };
+                    std::string value = display_value(token), reason;
                     if (graphics_ui)
                     {
                         const auto status = std::ranges::find(graphics_ui->resolved, rows[row]->id, &GraphicsUiStatus::setting);
                         if (status != graphics_ui->resolved.end())
                         {
-                            if (!status->effective.empty()) value += " → " + status->effective;
+                            if (!graphics_ui->pending && !status->effective.empty() && status->effective != token)
+                                value += " (적용: " + display_value(status->effective) + ")";
                             reason = status->reason;
                         }
                         const auto choice = std::ranges::find_if(graphics_ui->choices, [&](const auto &c) {
                             return c.setting == rows[row]->id && c.token == token;
                         });
-                        if (choice != graphics_ui->choices.end() && !choice->reason.empty())
+                        if (choice != graphics_ui->choices.end() && !choice->reason.empty() && choice->reason != reason)
                         {
                             if (!reason.empty()) reason += "; ";
-                            if (choice->available) reason += "Available: ";
+                            if (choice->available) reason += "지원됨: ";
                             reason += choice->reason;
                         }
                     }
-                    draw_row(row, GraphicsSettingDisplayLabel(*rows[row]), value, reason);
+                    draw_row(row, GraphicsSettingDisplayLabel(*rows[row]), value, reason,
+                        NextGraphicsSettingToken(requested, rows[row]->id, -1, graphics_ui).has_value(),
+                        NextGraphicsSettingToken(requested, rows[row]->id, 1, graphics_ui).has_value());
                 }
             }
             else
             {
-                const std::array labels{"Master volume", "BGM volume", "SFX volume", "UI volume", "Screen overlay intensity"};
+                const std::array labels{"전체 음량", "배경음 음량", "효과음 음량", "UI 음량", "화면 효과 강도"};
                 const std::array values{settings.master_volume, settings.bgm_volume, settings.sfx_volume, settings.ui_volume, settings.screen_overlay_intensity};
                 for (std::size_t row = 0; row < values.size(); ++row)
                     draw_row(row, labels[row], std::format("{}%", std::lround(values[row] * 100)));
@@ -1767,12 +1782,12 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                         add_ui(UiModel::Kind::Text, {230, 808.0f + line * 19.0f}, {1380, 18},
                                0xFFB8C2D0u, graphics_ui->telemetry_status[line], 1, 14);
             add_ui(UiModel::Kind::Text, {230, 868}, {1380, 24}, 0xFFE0E0E0u,
-                graphics_ui ? graphics_ui->transaction_state : "Renderer status has not arrived", 1, 18);
+                graphics_ui ? graphics_ui->transaction_state : "렌더러 상태를 확인하는 중입니다", 1, 18);
             add_ui(UiModel::Kind::Button, {210, 900}, {300, 56}, 0xFF3A5068u, "돌아가기", 1, 23);
             add_ui(UiModel::Kind::Text, {1050, 913}, {180, 32}, 0xFFFFFFFFu,
                 std::format("{} / {}", std::min<std::size_t>(ui.settings_page + 1, page_count), page_count), 1, 21);
-            add_ui(UiModel::Kind::Button, {1250, 900}, {160, 56}, 0xFF34495Eu, "Previous", 1, 21);
-            add_ui(UiModel::Kind::Button, {1450, 900}, {160, 56}, 0xFF34495Eu, "Next", 1, 21);
+            add_ui(UiModel::Kind::Button, {1250, 900}, {160, 56}, 0xFF34495Eu, "이전", 1, 21);
+            add_ui(UiModel::Kind::Button, {1450, 900}, {160, 56}, 0xFF34495Eu, "다음", 1, 21);
         }
         else
         {

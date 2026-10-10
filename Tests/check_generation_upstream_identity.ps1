@@ -4,8 +4,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Keep the nested immutable product paths below Windows MAX_PATH.
 $fixtureRoot = Join-Path ([IO.Path]::GetFullPath($FixtureParent)) (
-    'generation-upstream-' + [Guid]::NewGuid().ToString('N'))
+    'up-' + [IO.Path]::GetRandomFileName())
 [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
 $utf8 = [Text.UTF8Encoding]::new($false)
 

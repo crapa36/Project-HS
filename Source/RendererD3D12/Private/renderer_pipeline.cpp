@@ -83,7 +83,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     gradient_range.NumDescriptors = kVfxGradientDescriptorCount;
     gradient_range.BaseShaderRegister = 1;
     gradient_range.RegisterSpace = 3;
-    gradient_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+    // Shared bindings can precede the graph pass that first samples these textures.
+    gradient_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     gradient_range.OffsetInDescriptorsFromTableStart =
         kCharacterDescriptorCount + kMonsterPbrDescriptorCount + kEnvironmentDescriptorCount;
     D3D12_DESCRIPTOR_RANGE1 ribbon_detail_range{};
@@ -129,7 +130,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     D3D12_DESCRIPTOR_RANGE1 decal_range = distortion_range;
     decal_range.NumDescriptors = 2;
     decal_range.BaseShaderRegister = 20;
-    decal_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
+    decal_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     D3D12_DESCRIPTOR_RANGE1 bloom_range = distortion_range;
     bloom_range.BaseShaderRegister = 22;
     bloom_range.NumDescriptors = 3;
@@ -187,9 +188,12 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     exposure_cbv_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
     exposure_cbv_range.NumDescriptors = 1;
     exposure_cbv_range.OffsetInDescriptorsFromTableStart += 2;
-    D3D12_DESCRIPTOR_RANGE1 frame_cbv_range = exposure_cbv_range;
-    frame_cbv_range.RegisterSpace = 0;
-    ++frame_cbv_range.OffsetInDescriptorsFromTableStart;
+    D3D12_DESCRIPTOR_RANGE1 monster_skin_range = geometry_range;
+    monster_skin_range.NumDescriptors = 1;
+    monster_skin_range.BaseShaderRegister = 18;
+    monster_skin_range.RegisterSpace = 0;
+    monster_skin_range.OffsetInDescriptorsFromTableStart =
+        kViewDescriptorOffset + 10 - kTemporalTextureDescriptorOffset;
     D3D12_DESCRIPTOR_RANGE1 ambient_range = view_range;
     ambient_range.NumDescriptors = 2;
     ambient_range.BaseShaderRegister = 5;
@@ -219,7 +223,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     const std::array history_geometry_ranges{
         temporal_input_range, geometry_range, surface_range,
         visibility_srv_range, visibility_uav_range, material_parameter_range,
-        view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, frame_cbv_range, ambient_range, hero_binding_range, probe_range, light_range,
+        view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, monster_skin_range, ambient_range, hero_binding_range, probe_range, light_range,
         ray_ranges[0], ray_ranges[1], ray_ranges[2],
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
@@ -375,9 +379,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     parameters[14].Descriptor = {17, 0,
                                  D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[14].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    parameters[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    parameters[15].Descriptor = {18, 0,
-                                 D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
+    parameters[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[15].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     parameters[15].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[16].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     parameters[16].Descriptor = {0, 3, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
@@ -412,7 +415,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
 
     parameters[26].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     parameters[26].DescriptorTable = {1, &distortion_range};
-    parameters[26].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    parameters[26].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[27].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     parameters[27].Descriptor = {18, 3, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
     parameters[27].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
@@ -1023,7 +1026,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     particle.BlendState.RenderTarget[1].BlendOpAlpha = D3D12_BLEND_OP_ADD;
     particle.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
     particle.NumRenderTargets = 2;
-    particle.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    particle.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
     particle.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
     std::fill(std::begin(particle.RTVFormats) + 2, std::end(particle.RTVFormats),
               DXGI_FORMAT_UNKNOWN);
@@ -1230,6 +1233,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     ribbon_oit.PS = {ribbon_oit_ps.data(), ribbon_oit_ps.size()};
     ribbon_oit.BlendState.IndependentBlendEnable = TRUE;
     ribbon_oit.NumRenderTargets = 2;
+    ribbon_oit.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
     ribbon_oit.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
     ribbon_oit.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
     ribbon_oit.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;

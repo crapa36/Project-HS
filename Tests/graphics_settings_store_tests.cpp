@@ -509,9 +509,14 @@ void TestV2RoundTrip()
               edited.graphics.ao_mode == hs::GraphicsAoMode::RTAO &&
               edited.opaque_optional_json.find("future_quality") != std::string::npos,
           "UI edit preserves unsupported requests and unknown fields across restart");
+    edited.opaque_optional_json = R"({"graphics":{"future_quality":"latest"}})";
+    Check(store.SaveSettingsV2(edited).Succeeded(), "update optional value and retain older backup");
     Check(store.SaveSettingsV2(hs::SettingsDocument{}).Succeeded() &&
               Read(root / "settings.json").find("future_quality") != std::string::npos,
           "save merges unknown optional fields from current v2");
+    Check(store.LoadSettingsV2(edited).Succeeded() &&
+              edited.opaque_optional_json.find("latest") != std::string::npos,
+          "primary optional value takes precedence over an older backup");
     std::filesystem::remove_all(root);
 }
 

@@ -80,9 +80,11 @@ float3 RtHitDirectLighting(HsSurfaceClosure closure,HsRayHitContext hit,float3 v
             distance=light.identity.w==0u?max(RtGiParameters.x,RtSpecularParameters.x):
                 length(light.position_range.xyz-hit.vertex.WorldPosition);
         }
-        float shadowConfidence;
-        float visibility=RtShadowVisibility(hit.vertex.WorldPosition,hit.geometricNormal,direction,
-            distance,footprint,bias,shadowConfidence);
+        float shadowConfidence=1.0;
+        float visibility=1.0;
+        if((light.metadata.z&1u)!=0u)
+            visibility=RtShadowVisibility(hit.vertex.WorldPosition,hit.geometricNormal,direction,
+                distance,footprint,bias,shadowConfidence);
         confidence=min(confidence,shadowConfidence);
         float3 diffuse,specular;HsBsdfEvaluateComponents(closure,view,direction,diffuse,specular);
         result+=(diffuse+specular)*radiance*(abs(dot(closure.normal,direction))*visibility*float(count)/(pdf*float(samples)));

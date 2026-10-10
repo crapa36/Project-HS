@@ -11,6 +11,7 @@
 namespace hs
 {
 
+// Single producer and single consumer; slots retain snapshot storage for readers.
 class RenderSnapshotExchange
 {
   public:
@@ -37,6 +38,8 @@ class RenderSnapshotExchange
         Consumer(const Consumer &) = delete;
         Consumer &operator=(const Consumer &) = delete;
 
+        // Repeated reads retain the pair until a strictly newer publication is
+        // claimed. Returned spans remain owned until the next accepted update.
         [[nodiscard]] ReadPair AcquireLatest() noexcept;
 
       private:
@@ -49,6 +52,8 @@ class RenderSnapshotExchange
                            std::size_t light_capacity, std::size_t ui_capacity);
 
     [[nodiscard]] std::optional<WriteSlot> TryBeginWrite() noexcept;
+    // One producer supplies increasing publication sequences independently of
+    // simulation ticks. Reset/wrap requires a new exchange and consumer.
     void Publish(WriteSlot slot, Sequence publish_sequence) noexcept;
     void Abandon(WriteSlot slot) noexcept;
     [[nodiscard]] std::uint64_t DroppedPublishes() const noexcept;

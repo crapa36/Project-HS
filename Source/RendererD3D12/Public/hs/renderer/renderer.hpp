@@ -585,12 +585,16 @@ class D3D12Renderer
         const std::unordered_map<std::string, std::string> &product_digests);
     // Caller validates the selected immutable manifest/products. Preparation
     // keeps its actual reader lease; publication occurs after all queue uses drain.
+    // resident_replaced is false on failure/no-op/narrow and true after a full commit;
+    // allow_resident_replacement=false rejects only the full path before preparation.
     [[nodiscard]] Result ReloadContentGeneration(
         const std::string &generation_id,
         const std::unordered_map<std::string, std::filesystem::path> &product_paths,
         const std::unordered_map<std::string, std::string> &product_digests,
         std::shared_ptr<const void> reader_lease,
-        const RendererVfxSpriteBindings *sprite_bindings = nullptr);
+        const RendererVfxSpriteBindings *sprite_bindings = nullptr,
+        bool *resident_replaced = nullptr,
+        bool allow_resident_replacement = true);
     [[nodiscard]] std::uint64_t MaterialParameterRevision() const noexcept;
     [[nodiscard]] std::uint64_t PipelineRevision() const noexcept;
     void HandleWindowMessage(const NativeWindowMessage &message) noexcept;

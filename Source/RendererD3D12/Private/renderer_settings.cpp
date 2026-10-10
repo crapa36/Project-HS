@@ -761,6 +761,8 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
                 (inline_queries && !impl_->feature_capabilities.hardware.inline_ray_queries) ? unsupported :
                 consumer ? available : CapabilityAdmission{false, GraphicsCapabilityReason::Unavailable};
         };
+        option("ray_tracing", "false", available);
+        option("ray_tracing", "true", ray_hardware);
         for (const auto token : {"off", "auto", "gtao"}) option("ao", token, available);
         option("ao", "rtao", ray(true, impl_->feature_capabilities.rtao_consumer));
         for (const auto token : {"off", "probe"}) option("gi", token, available);

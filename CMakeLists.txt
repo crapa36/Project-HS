@@ -75,7 +75,6 @@ if(HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RUNTIME)
         directxtex
         GIT_REPOSITORY https://github.com/microsoft/DirectXTex.git
         GIT_TAG 4feb3e1
-        GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(directxtex)
 endif()
@@ -135,7 +134,6 @@ if(HS_BUILD_RUNTIME)
         d3d12ma
         GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git
         GIT_TAG 1d86c1130f61453634b1df85782e1fecfd59a525
-        GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(d3d12ma)
 endif()
@@ -1944,6 +1942,29 @@ if(HS_BUILD_TESTS)
         target_include_directories(hs_render_feature_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_render_feature_tests)
         add_test(NAME rendering.feature-signals COMMAND hs_render_feature_tests)
+        add_executable(hs_dynamic_resolution_tests
+            Tests/dynamic_resolution_tests.cpp
+            Source/RendererD3D12/Private/view_state.cpp
+            Source/RendererD3D12/Private/reconstruction_plan.cpp)
+        target_link_libraries(hs_dynamic_resolution_tests PRIVATE hs_core)
+        target_include_directories(hs_dynamic_resolution_tests PRIVATE
+            Source/RendererD3D12/Private Source/RendererD3D12/Public)
+        hs_configure_target(hs_dynamic_resolution_tests)
+        add_test(NAME rendering.dynamic-resolution COMMAND hs_dynamic_resolution_tests)
+        add_executable(hs_render_instance_order_tests Tests/render_instance_order_tests.cpp)
+        target_link_libraries(hs_render_instance_order_tests PRIVATE hs_core)
+        target_include_directories(hs_render_instance_order_tests PRIVATE Source/RendererD3D12/Private)
+        hs_configure_target(hs_render_instance_order_tests)
+        add_test(NAME rendering.instance-order COMMAND hs_render_instance_order_tests)
+        find_package(Python3 QUIET COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            add_test(NAME rendering.shader-reconstruction-contracts
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shader_reconstruction.py")
+            add_test(NAME rendering.oit-capture-analyzer-selfcheck
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py")
+        endif()
     endif()
     if(HS_BUILD_ASSET_PIPELINE_TESTS AND CMAKE_GENERATOR MATCHES "Ninja")
         find_package(Python3 QUIET COMPONENTS Interpreter)
@@ -2155,6 +2176,13 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation
     )
     set_tests_properties(rendering.render-only PROPERTIES TIMEOUT 120)
+    add_test(NAME rendering.local-probe-revisions
+        COMMAND hs_render_test_runner
+            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/local-probe-revisions
+            --frames=96 --barriers=enhanced --validation --local-probe-revision-probe
+        BUILD_DEPENDS hs_render_test_runner hs_content_generation)
+    set_tests_properties(rendering.local-probe-revisions PROPERTIES TIMEOUT 180)
     add_test(
         NAME rendering.skin-cache-gpu
         COMMAND
@@ -2189,6 +2217,26 @@ if(HS_BUILD_TESTS)
             --require-multi-queue
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
     set_tests_properties(rendering.residency-streaming-gpu PROPERTIES TIMEOUT 600)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME rendering.oit-overdraw
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py"
+                "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/oit-overdraw"
+                "--runner=$<TARGET_FILE:hs_render_test_runner>"
+                "--generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json"
+                --require-finite
+            BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+        add_test(NAME rendering.vfx-camera-basis
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py"
+                "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/vfx-camera-basis"
+                "--runner=$<TARGET_FILE:hs_render_test_runner>"
+                "--generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json"
+                --camera-basis
+            BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+        set_tests_properties(rendering.oit-overdraw rendering.vfx-camera-basis PROPERTIES
+            TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
+    endif()
     if(HS_BUILD_CONTENT_TOOLS)
         add_test(NAME rendering.material-parameter-reload
             COMMAND "${Python3_EXECUTABLE}"
@@ -2216,7 +2264,7 @@ if(HS_BUILD_TESTS)
     # These tests create D3D12 devices. Keep GPU captures serialized while
     # independent CPU validation runs alongside them under parallel CTest.
     set_tests_properties(
-        integration.render-smoke vfx.showcase rendering.barriers rendering.render-only
+        integration.render-smoke vfx.showcase rendering.barriers rendering.render-only rendering.local-probe-revisions
         rendering.skin-cache-gpu
         rendering.dynamic-lod-skin-growth
         rendering.residency-streaming-gpu
@@ -2502,6 +2550,10 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_graphics_settings_store_tests)
     add_test(NAME runtime.graphics-settings-store
         COMMAND hs_graphics_settings_store_tests)
+    add_executable(hs_generation_reload_watch_tests Tests/generation_reload_watch_tests.cpp)
+    target_include_directories(hs_generation_reload_watch_tests PRIVATE Source/Runtime/Private)
+    hs_configure_target(hs_generation_reload_watch_tests)
+    add_test(NAME runtime.generation-reload-watch COMMAND hs_generation_reload_watch_tests)
     if(HS_BUILD_CONTENT_TOOLS)
         add_executable(hs_audio_generation_consumer_tests
             Tests/audio_generation_consumer_tests.cpp)
@@ -2551,8 +2603,15 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_COMBAT_TEST_GENERATION_TARGET}
     )
     set_tests_properties(experiment.pipe PROPERTIES TIMEOUT 30)
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    get_property(HS_SHADER_HOT_RELOAD_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(HS_SHADER_HOT_RELOAD_MULTI_CONFIG OR NOT CMAKE_BUILD_TYPE STREQUAL "Release")
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        # Single-config CTest presets need no -C; only multi-config tests need
+        # a runtime configuration filter to exclude Release.
+        set(HS_SHADER_HOT_RELOAD_CONFIGURATIONS)
+        if(HS_SHADER_HOT_RELOAD_MULTI_CONFIG)
+            set(HS_SHADER_HOT_RELOAD_CONFIGURATIONS CONFIGURATIONS Debug RelWithDebInfo MinSizeRel)
+        endif()
         add_test(
             NAME rendering.shader-hot-reload
             COMMAND
@@ -2564,6 +2623,8 @@ if(HS_BUILD_TESTS)
                 -GenerationVerifier "$<TARGET_FILE:hs_generation>"
                 -Artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/shader-hot-reload"
                 -GenerationPointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json"
+            ${HS_SHADER_HOT_RELOAD_CONFIGURATIONS}
+            BUILD_DEPENDS hs_content_generation
         )
         set_tests_properties(rendering.shader-hot-reload PROPERTIES TIMEOUT 300
             RESOURCE_LOCK projecths_d3d12)

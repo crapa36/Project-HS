@@ -10,6 +10,42 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# Process.CloseMainWindow ignores the hidden HWND used by this fixture.
+# Match Runtime's exact main-window class and child PID, excluding console/auxiliary windows.
+if (-not ('HsShaderReloadWindow' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class HsShaderReloadWindow {
+    private delegate bool WindowCallback(IntPtr window, IntPtr state);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumWindows(WindowCallback callback, IntPtr state);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int GetClassNameW(IntPtr window, StringBuilder className, int capacity);
+    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
+    private static extern bool PostMessageW(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    public static bool Close(uint processId) {
+        bool posted = false;
+        if (!EnumWindows((window, state) => {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) != 0 && owner == processId) {
+                var className = new StringBuilder(256);
+                if (GetClassNameW(window, className, className.Capacity) > 0 &&
+                    className.ToString() == "ProjectHS.Window")
+                    posted = PostMessageW(window, 0x0010, IntPtr.Zero, IntPtr.Zero) || posted;
+            }
+            return true;
+        }, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return posted;
+    }
+}
+'@
+}
+
 $process = $null
 $sourcePointerPath = $null
 $sourcePointerBytes = $null
@@ -20,6 +56,7 @@ $renderPath = Join-Path $Artifacts "render.json"
 $validationPath = Join-Path $Artifacts "d3d12_validation.log"
 $stdoutPath = Join-Path $Artifacts "runtime.stdout.log"
 $stderrPath = Join-Path $Artifacts "runtime.stderr.log"
+$previousLocalAppData = $env:LOCALAPPDATA
 
 function Read-ArtifactText([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -81,7 +118,7 @@ function Stop-Gracefully([switch]$RequireSuccess) {
         return 0
     }
 
-    $closed = $process.CloseMainWindow()
+    $closed = [HsShaderReloadWindow]::Close([uint32]$process.Id)
     if (-not $closed -and $RequireSuccess) {
         throw "ProjectHS did not accept WM_CLOSE for graceful shutdown."
     }
@@ -111,6 +148,7 @@ function Stop-Gracefully([switch]$RequireSuccess) {
 }
 
 try {
+    $env:LOCALAPPDATA = Join-Path $Artifacts "ProfileRoot"
     New-Item -ItemType Directory -Force -Path $Artifacts | Out-Null
     Remove-Item -LiteralPath $logPath, $adapterPath, $renderPath, $validationPath,
         $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
@@ -125,7 +163,11 @@ try {
         "prepare",
         "--source-pointer", $sourcePointerPath,
         "--root", $fixtureRoot,
-        "--generation-verifier", $GenerationVerifier
+        "--generation-verifier", $GenerationVerifier,
+        # This leaf belongs to the HLOD closure: a narrow reload must remain
+        # supported even when that broad closure is no longer byte-identical.
+        "--target-logical-id", "render/shader/leaf_0_scene.dxil",
+        "--replacement-logical-id", "render/shader/leaf_1_scene.dxil"
     )
     Invoke-Fixture $fixtureArguments
 
@@ -134,14 +176,18 @@ try {
     $baselineId = [string]$fixtureMetadata.baseline_id
     $invalidId = [string]$fixtureMetadata.invalid_id
     $validId = [string]$fixtureMetadata.valid_id
+    $residentId = [string]$fixtureMetadata.resident_id
+    $incompatibleId = [string]$fixtureMetadata.incompatible_id
     $activePointer = [string]$fixtureMetadata.active_pointer
     if ([string]::IsNullOrWhiteSpace($baselineId) -or
         [string]::IsNullOrWhiteSpace($invalidId) -or
         [string]::IsNullOrWhiteSpace($validId) -or
+        [string]::IsNullOrWhiteSpace($residentId) -or
+        [string]::IsNullOrWhiteSpace($incompatibleId) -or
         -not (Test-Path -LiteralPath $activePointer -PathType Leaf)) {
         throw "Shader reload fixture metadata is incomplete."
     }
-    if ($baselineId -eq $invalidId -or $baselineId -eq $validId -or $invalidId -eq $validId) {
+    if (@($baselineId, $invalidId, $validId, $residentId, $incompatibleId | Select-Object -Unique).Count -ne 5) {
         throw "Shader reload fixture did not create distinct Generation IDs."
     }
 
@@ -163,22 +209,64 @@ try {
     $escapedInvalid = [regex]::Escape($invalidId)
     Wait-For {
         $text = Read-ArtifactText $logPath
-        $text -match "rejected candidate=$escapedInvalid active=$escapedBaseline stage=integrity .*previous PSO retained"
+        $text -match "rejected candidate=$escapedInvalid active=$escapedBaseline stage=integrity .*previous content retained"
     } "Invalid shader Generation was not rejected during integrity verification."
     if ($process.HasExited) {
         throw "ProjectHS exited after rejecting the invalid shader Generation."
     }
 
-    $selectArguments = @($FixtureScript, "select", "--root", $fixtureRoot, "--candidate", "valid")
-    Invoke-Fixture $selectArguments
     $escapedValid = [regex]::Escape($validId)
+    $validManifest = Get-Content -LiteralPath (Join-Path $fixtureRoot "Generations/$validId/generation.json") -Raw | ConvertFrom-Json
+    $targetProduct = @($validManifest.products | Where-Object { $_.logical_id -eq $fixtureMetadata.target_logical_id })
+    if ($targetProduct.Count -ne 1) { throw "Valid fixture omits the replacement shader." }
+    $pendingShader = [IO.Path]::GetFullPath((Join-Path $fixtureRoot $targetProduct[0].locator))
+    $fixturePrefix = [IO.Path]::GetFullPath($fixtureRoot).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (!$pendingShader.StartsWith($fixturePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Replacement shader escaped the isolated fixture."
+    }
+    $heldShader = $pendingShader + '.pending'
+    Move-Item -LiteralPath $pendingShader -Destination $heldShader
+    try {
+        $selectArguments = @($FixtureScript, "select", "--root", $fixtureRoot, "--candidate", "valid")
+        Invoke-Fixture $selectArguments
+        $pointerBeforeRecovery = [IO.File]::ReadAllText($activePointer)
+        Wait-For {
+            (Read-ArtifactText $logPath) -match "rejected candidate=(?:$escapedValid|unresolved) active=$escapedBaseline stage=(?:manifest|integrity) .*previous content retained"
+        } "Missing candidate shader was not rejected while preserving the baseline."
+    }
+    finally {
+        if (Test-Path -LiteralPath $heldShader -PathType Leaf) {
+            Move-Item -LiteralPath $heldShader -Destination $pendingShader
+        }
+    }
+    if ([IO.File]::ReadAllText($activePointer) -cne $pointerBeforeRecovery) {
+        throw "Recovery fixture unexpectedly republished the pointer."
+    }
     Wait-For {
         $text = Read-ArtifactText $logPath
-        $text -match "applied candidate=$escapedValid active=$escapedValid pipelines=1->2 parameters=1->1; temporal/HZB history invalidated"
-    } "Valid shader Generation was not adopted."
+        $text -match "applied candidate=$escapedValid active=$escapedValid pipelines=1->2 parameters=1->1\b.*; temporal/HZB history invalidated"
+    } "Recovered shader Generation was not adopted without republishing its pointer."
     if ($process.HasExited) {
         throw "ProjectHS exited after adopting the valid shader Generation."
     }
+    Wait-For {
+        (Read-ArtifactText $logPath) -match "rendered active=$escapedValid frame=[1-9][0-9]* pipelines=2 scene_generation=$escapedBaseline(?:\r?\n|$)"
+    } "Adopted shader Generation did not render a frame with the retained resident scene."
+
+    $escapedResident = [regex]::Escape($residentId)
+    $escapedIncompatible = [regex]::Escape($incompatibleId)
+    Invoke-Fixture @($FixtureScript, "select", "--root", $fixtureRoot, "--candidate", "incompatible")
+    Wait-For {
+        (Read-ArtifactText $logPath) -match "rejected candidate=$escapedIncompatible active=$escapedValid stage=scene_closure .*Scene dependency closure changed.*previous content retained"
+    } "Changed arena layout was not rejected before resident adoption."
+
+    Invoke-Fixture @($FixtureScript, "select", "--root", $fixtureRoot, "--candidate", "resident")
+    Wait-For {
+        (Read-ArtifactText $logPath) -match "applied candidate=$escapedResident active=$escapedResident pipelines=2->3 parameters=1->2\b.*vfx_changed=1\b"
+    } "Compatible VFX catalog Generation was not adopted through the full resident path."
+    Wait-For {
+        (Read-ArtifactText $logPath) -match "rendered active=$escapedResident frame=[1-9][0-9]* pipelines=3 scene_generation=$escapedResident(?:\r?\n|$)"
+    } "Full resident Generation did not render a frame with its prepared immutable scene."
 
     $exitCode = Stop-Gracefully -RequireSuccess
     $process = $null
@@ -196,6 +284,7 @@ try {
     }
 }
 finally {
+    $env:LOCALAPPDATA = $previousLocalAppData
     if ($process) {
         Stop-Gracefully
     }

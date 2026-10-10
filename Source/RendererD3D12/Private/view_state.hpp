@@ -40,13 +40,18 @@ struct ViewHistoryKey
 [[nodiscard]] bool UpdateViewState(ViewState &state, ViewExtent output,
                                    ViewExtent capacity, ViewExtent active) noexcept;
 
+// Percent bounds include the partially covered edge pixel (ceil, minimum 1).
+// Preparation, provider domains and frame selection must use the same rule.
+[[nodiscard]] bool ResolveDynamicResolutionExtent(ViewExtent output, double percent,
+                                                  ViewExtent &extent) noexcept;
+
 struct DynamicResolutionConfig
 {
     bool enabled{};
     double target_render_fps{60.0};
     double min_scale_percent{50.0};
     double max_scale_percent{100.0};
-    std::uint32_t extent_quantum{8};
+    std::uint32_t extent_quantum{8}; // Preferred alignment; hard bounds take priority.
     double hysteresis_fraction{0.05};
     double smoothing{0.2};
     double max_scale_change_percent{2.0};

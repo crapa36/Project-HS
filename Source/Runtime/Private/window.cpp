@@ -1,5 +1,6 @@
 #include "window.hpp"
 #include "camera_pose.hpp"
+#include <hs/presentation/projector.hpp>
 
 #include <hidusage.h>
 
@@ -238,19 +239,6 @@ bool Window::PumpMessages()
             const auto normalized_y =
                 1.0f - static_cast<float>(cursor.y) / static_cast<float>(client_height_) * 2.0f;
             held_.cursor_normalized = {normalized_x, normalized_y};
-            constexpr float reference_aspect = 1920.0f / 1080.0f;
-            const auto output_aspect = static_cast<float>(client_width_) /
-                                       static_cast<float>(client_height_);
-            auto reference_u = (normalized_x + 1.0f) * 0.5f;
-            auto reference_v = (1.0f - normalized_y) * 0.5f;
-            if (output_aspect > reference_aspect)
-                reference_u = (reference_u - 0.5f) * output_aspect /
-                              reference_aspect + 0.5f;
-            else
-                reference_v = (reference_v - 0.5f) * reference_aspect /
-                              output_aspect + 0.5f;
-            ui_cursor_normalized_ = {reference_u * 2.0f - 1.0f,
-                                     1.0f - reference_v * 2.0f};
             const auto yaw = camera_.yaw_degrees * 3.14159265358979323846f / 180.0f;
             const auto zoom_percent = static_cast<float>(channels_->camera_zoom_percent.load(std::memory_order_acquire));
             const auto pose = ComputeRuntimeCameraPose(camera_.distance_m, camera_.pitch_degrees, zoom_percent);
@@ -568,9 +556,16 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         {
             const auto x = static_cast<float>(static_cast<short>(LOWORD(lparam)));
             const auto y = static_cast<float>(static_cast<short>(HIWORD(lparam)));
-            const Float2 cursor{(x / static_cast<float>(std::max(client_width_, 1u))) * 2.0f - 1.0f,
-                                1.0f - (y / static_cast<float>(std::max(client_height_, 1u))) * 2.0f};
-            ui_hover_handler_(cursor);
+            ui_hover_handler_(ReferenceUiCursor({x, y}, {client_width_, client_height_}));
+        }
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (accepting_input_ && ui_click_handler_ && GetForegroundWindow() == window_ &&
+            !channels_->devtools_capture_mouse.load(std::memory_order_acquire))
+        {
+            const auto x = static_cast<float>(static_cast<short>(LOWORD(lparam)));
+            const auto y = static_cast<float>(static_cast<short>(HIWORD(lparam)));
+            ui_click_handler_(ReferenceUiCursor({x, y}, {client_width_, client_height_}));
         }
         return 0;
     case WM_INPUT:
@@ -666,7 +661,6 @@ void Window::HandleRawInput(HRAWINPUT input)
         if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_DOWN)
         {
             held_.basic_attack_held = true;
-            if (ui_click_handler_) ui_click_handler_(ui_cursor_normalized_);
             PushAction(GameAction::BasicAttack, EdgeKind::Pressed);
         }
         if (raw.data.mouse.usButtonFlags & RI_MOUSE_LEFT_BUTTON_UP)

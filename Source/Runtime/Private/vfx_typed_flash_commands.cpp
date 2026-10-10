@@ -389,7 +389,8 @@ bool StatusTickTextures(const VfxProgramData &cooked, const VfxOutputRecord &out
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData &cooked,
-                                                         std::span<const VfxEventInput> inputs)
+                                                         std::span<const VfxEventInput> inputs,
+                                                         std::vector<Sequence> *superseded_pickup_sequences)
 {
     std::vector<VfxFlashSpawnInput> result;
     for (const auto &input : inputs)
@@ -402,6 +403,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
         Float3 position{}, direction{};
         float scale = 1;
         bool circle_geometry=false, cone_geometry=false, projectile_geometry=false, boss_energy_geometry=false;
+        bool pickup_collect = false;
         std::uint64_t projectile_effect_id{};
         if (const auto *point = std::get_if<VfxPointPayload>(&input.payload))
         {
@@ -490,6 +492,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
             direction = {link->target_position.x - position.x,
                          link->target_position.y - position.y,
                          link->target_position.z - position.z};
+            pickup_collect = true;
         }
         else continue;
         if (!Finite(position) || !Finite(direction) || !std::isfinite(scale) || scale <= 0) continue;
@@ -497,6 +500,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
         if (!std::isfinite(magnitude) || (cone_geometry && magnitude <= 0.0001f)) continue;
         direction = magnitude > 0.0001f ? Float3{direction.x / magnitude, direction.y / magnitude, direction.z / magnitude}
                                       : Float3{0, 0, 1};
+        const auto first_flash = result.size();
         for (std::uint32_t source_index = effect.sources.first; source_index < effect.sources.first + effect.sources.count; ++source_index)
         {
             const auto &source = cooked.sources[source_index];
@@ -558,6 +562,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
                 result.push_back(spawn);
             }
         }
+        if (pickup_collect && result.size() != first_flash && superseded_pickup_sequences)
+            superseded_pickup_sequences->push_back(input.sequence);
     }
     return result;
 }

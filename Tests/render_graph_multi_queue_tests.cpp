@@ -179,6 +179,28 @@ struct ExternalGateRelease
     ~ExternalGateRelease() { if (fence) static_cast<void>(fence->Signal(1)); }
 };
 
+void RunRemovedFenceSentinel(Fixture &fixture)
+{
+    hs::RenderGraphQueueExecutor executor;
+    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(),
+          "sentinel executor initialize");
+    auto *fence = executor.NativeFence(hs::QueueHint::Direct);
+    Hr(fence->Signal(UINT64_MAX), "inject device-removed fence sentinel");
+    struct RestoreFence
+    {
+        ID3D12Fence *fence;
+        ~RestoreFence() { static_cast<void>(fence->Signal(0)); }
+    } restore{fence};
+    Check(SUCCEEDED(fixture.device->GetDeviceRemovedReason()), "sentinel does not remove the device");
+    Check(executor.Completed().direct == 0, "removed fence cannot retire submitted work");
+    hs::CompletionSet pending;
+    pending.Include(hs::QueueHint::Direct, 1);
+    const auto waited = executor.Wait(pending);
+    Check(!waited && waited.Message().find(std::to_string(static_cast<std::int64_t>(DXGI_ERROR_DEVICE_REMOVED))) != std::string_view::npos,
+          "removed fence wait reports device removal instead of completion");
+    Check(!executor.Drain(), "drain cannot prove completion from the removed fence sentinel");
+}
+
 void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
 {
     constexpr std::size_t max_capacity = 2048;
@@ -633,50 +655,67 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
     // Two Direct passes with disjoint lifetimes exercise real placed-resource
     // aliasing. The views must remain distinct even though their backing block
     // is shared, and both barrier modes must activate the second view safely.
-    graph.Reset();
-    const auto alias_first = graph.CreateBuffer(buffer_desc, "alias first");
-    const auto alias_second = graph.CreateBuffer({kSize * 2, D3D12_RESOURCE_FLAG_NONE}, "alias second");
-    auto alias_pass_first = graph.AddPass(60, "alias first write", hs::QueueHint::Direct);
-    (void)alias_pass_first.Write(graph.Version(alias_first), hs::Access::CopyDest);
-    alias_pass_first.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_first)),
-                                   0, upload.Get(), 0, kSize);
-    });
-    auto alias_pass_second = graph.AddPass(70, "alias second write", hs::QueueHint::Direct);
-    const auto alias_second_v1 = alias_pass_second.Write(graph.Version(alias_second),
-                                                       hs::Access::CopyDest);
-    alias_pass_second.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_second)),
-                                   0, upload.Get(), 0, kSize);
-    });
-    auto alias_read = graph.AddPass(75, "alias readback", hs::QueueHint::Direct);
-    alias_read.Read(alias_second_v1, hs::Access::CopySource, hs::BufferRange{0, kSize});
-    alias_read.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        commands->CopyBufferRegion(readback.Get(), 0,
-            static_cast<ID3D12Resource *>(context.Resolve(alias_second)), 0, kSize);
-    });
-    Check(graph.Prepare(pool).Succeeded(), "prepare serial alias graph");
-    Check(graph.Resolve(alias_first) && graph.Resolve(alias_second) &&
-              graph.Resolve(alias_first) != graph.Resolve(alias_second),
-          "serial aliases expose distinct native views");
-    hs::CompletionSet alias_completion;
-    fixture.Execute(graph, frame_slot, barriers, alias_completion, "execute serial alias graph");
-    const auto alias_stats = fixture.executor.LastExecutionStats();
-    Check(alias_stats.alias_activation_count == 1 &&
-              alias_stats.transient_backing_bytes < alias_stats.transient_bytes_without_aliasing,
-          "serial alias graph reports reduced transient backing");
-    Check(fixture.executor.Wait(alias_completion).Succeeded(), "wait serial alias graph");
-    std::byte *alias_bytes{};
-    D3D12_RANGE alias_range{0, kSize};
-    Hr(readback->Map(0, &alias_range, reinterpret_cast<void **>(&alias_bytes)), "map alias readback");
-    for (std::size_t index = 0; index < kSize; ++index)
-        Check(alias_bytes[index] == static_cast<std::byte>((index * 37 + 11) & 0xff),
-              "alias successor preserves uploaded bytes");
-    readback->Unmap(0, &no_read);
-    pool.ResetCompletedClaims(fixture.executor.Completed());
+    for (const bool timing_boundaries : {false, true})
+    {
+        graph.Reset();
+        const auto alias_first = graph.CreateBuffer(buffer_desc, "alias first");
+        const auto alias_second = graph.CreateBuffer({kSize * 2, D3D12_RESOURCE_FLAG_NONE}, "alias second");
+        auto alias_pass_first = graph.AddPass(60, "alias first write", hs::QueueHint::Direct);
+        (void)alias_pass_first.Write(graph.Version(alias_first), hs::Access::CopyDest);
+        alias_pass_first.SetExecute([&](hs::RenderPassContext &context) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_first)),
+                                       0, upload.Get(), 0, kSize);
+        });
+        auto alias_pass_second = graph.AddPass(70, "alias second write", hs::QueueHint::Direct);
+        const auto alias_second_v1 = alias_pass_second.Write(graph.Version(alias_second),
+                                                           hs::Access::CopyDest);
+        alias_pass_second.SetExecute([&](hs::RenderPassContext &context) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_second)),
+                                       0, upload.Get(), 0, kSize);
+        });
+        auto alias_read = graph.AddPass(75, "alias readback", hs::QueueHint::Direct);
+        alias_read.Read(alias_second_v1, hs::Access::CopySource, hs::BufferRange{0, kSize});
+        alias_read.SetExecute([&](hs::RenderPassContext &context) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            commands->CopyBufferRegion(readback.Get(), 0,
+                static_cast<ID3D12Resource *>(context.Resolve(alias_second)), 0, kSize);
+        });
+        if (timing_boundaries)
+        {
+            graph.AddPass(37, "critical begin", hs::QueueHint::Direct).SetExecute([](auto &) {});
+            graph.AddPass(38, "critical end", hs::QueueHint::Direct).SetExecute([](auto &) {});
+            for (const auto id : {60u, 70u, 75u})
+            {
+                graph.AddOrderingDependency(37, id);
+                graph.AddOrderingDependency(id, 38);
+            }
+        }
+        Check(graph.Prepare(pool).Succeeded(), "prepare serial alias graph");
+        Check(graph.Resolve(alias_first) && graph.Resolve(alias_second) &&
+                  graph.Resolve(alias_first) != graph.Resolve(alias_second),
+              "serial aliases expose distinct native views");
+        hs::CompletionSet alias_completion;
+        fixture.Execute(graph, frame_slot, barriers, alias_completion, "execute serial alias graph");
+        const auto alias_stats = fixture.executor.LastExecutionStats();
+        const auto expected_batches = (barriers == hs::BarrierMode::Enhanced ? 1u : 3u) +
+            (timing_boundaries ? 2u : 0u);
+        Check(alias_stats.direct_batches == expected_batches,
+              "Enhanced batches Direct lists and preserves explicit timing/Legacy decay boundaries");
+        Check(alias_stats.alias_activation_count == 1 &&
+                  alias_stats.transient_backing_bytes < alias_stats.transient_bytes_without_aliasing,
+              "serial alias graph reports reduced transient backing");
+        Check(fixture.executor.Wait(alias_completion).Succeeded(), "wait serial alias graph");
+        std::byte *alias_bytes{};
+        D3D12_RANGE alias_range{0, kSize};
+        Hr(readback->Map(0, &alias_range, reinterpret_cast<void **>(&alias_bytes)), "map alias readback");
+        for (std::size_t index = 0; index < kSize; ++index)
+            Check(alias_bytes[index] == static_cast<std::byte>((index * 37 + 11) & 0xff),
+                  "alias successor preserves uploaded bytes");
+        readback->Unmap(0, &no_read);
+        pool.ResetCompletedClaims(fixture.executor.Completed());
+    }
 
     // A texture whose first use is on Copy must use COMMON layout on the copy
     // queue. The Direct consumer then exercises the cross-queue acquire in both
@@ -748,6 +787,7 @@ int main(int argc, char **argv)
         const bool hardware =
             argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware);
+        RunRemovedFenceSentinel(fixture);
         Run(fixture, hs::BarrierMode::Legacy, 0);
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);
         RunPlanReuse(fixture, hs::BarrierMode::Legacy, 0);

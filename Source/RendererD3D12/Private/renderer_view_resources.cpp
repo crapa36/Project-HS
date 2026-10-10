@@ -310,9 +310,15 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
     cbv.SizeInBytes = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     device->CreateConstantBufferView(exposure_cb_gpu_address ? &cbv : nullptr, descriptor);
     descriptor.ptr += srv_stride;
-    cbv.BufferLocation = exposure_cb_gpu_address ? exposure_cb_gpu_address - kExposureConstantsOffset : 0;
-    cbv.SizeInBytes = (sizeof(FrameConstants) + 255u) & ~255u;
-    device->CreateConstantBufferView(exposure_cb_gpu_address ? &cbv : nullptr, descriptor);
+    D3D12_SHADER_RESOURCE_VIEW_DESC skin_srv{};
+    skin_srv.Format = DXGI_FORMAT_UNKNOWN;
+    skin_srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    skin_srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    skin_srv.Buffer.StructureByteStride = sizeof(DirectX::XMFLOAT4X4);
+    skin_srv.Buffer.NumElements = monster_skin_matrices.resource
+        ? static_cast<UINT>(monster_skin_matrices.resource->GetDesc().Width / sizeof(DirectX::XMFLOAT4X4))
+        : 1;
+    device->CreateShaderResourceView(monster_skin_matrices.resource.Get(), &skin_srv, descriptor);
     auto sampler = sampler_heap->GetCPUDescriptorHandleForHeapStart();
     descriptor.ptr += srv_stride;
     create_texture_srv(nullptr, DXGI_FORMAT_R16_FLOAT);

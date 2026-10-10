@@ -18,7 +18,7 @@ struct Caster
     float4 current_bounds, previous_bounds;
     uint4 draw; // instance, generation, source ref, canonical geometry record
     uint4 indexed; // group, index count, first index, signed base vertex
-    uint4 properties; // flags, meshlet count, frontend, reserved
+    uint4 properties; // flags, meshlet count, frontend, next changed static caster
 };
 struct Receiver { float4 minimum, maximum; };
 struct DrawRecord
@@ -179,7 +179,7 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
         if (p >= Counts.w) return;
         PageEntry resident = Residents[p];
         if (resident.epoch != Identity.w) return;
-        if ((resident.flags & 32u) != 0u) for (uint c = 0; c < Counts.x; ++c)
+        if ((resident.flags & 32u) != 0u) for (uint c = Limits.x; c < Counts.x; c = Casters[c].properties.w)
         {
             const uint f = Casters[c].properties.x;
             if ((f & 16u) != 0u && (((f & 12u) != 0u) &&

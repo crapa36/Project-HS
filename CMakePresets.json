@@ -90,6 +90,14 @@
         "HS_BUILD_RUNTIME": "OFF",
         "HS_BUILD_CONTENT_TOOLS": "OFF"
       }
+    },
+    {
+      "name": "msvc-portable-tests",
+      "inherits": "msvc-core",
+      "cacheVariables": {
+        "HS_BUILD_RENDER_DATA_TESTS": "ON",
+        "HS_BUILD_ASSET_PIPELINE_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -132,6 +140,14 @@
     {
       "name": "linux-core",
       "configurePreset": "linux-core"
+    },
+    {
+      "name": "msvc-portable-tests",
+      "configurePreset": "msvc-portable-tests",
+      "targets": [
+        "all",
+        "hs_audio_content_recipe_identity"
+      ]
     }
   ],
   "testPresets": [
@@ -189,6 +205,13 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "msvc-portable-tests",
+      "configurePreset": "msvc-portable-tests",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ],
   "workflowPresets": [
@@ -240,6 +263,23 @@
         {
           "type": "test",
           "name": "linux-core"
+        }
+      ]
+    },
+    {
+      "name": "verify-portable",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-portable-tests"
+        },
+        {
+          "type": "build",
+          "name": "msvc-portable-tests"
+        },
+        {
+          "type": "test",
+          "name": "msvc-portable-tests"
         }
       ]
     }

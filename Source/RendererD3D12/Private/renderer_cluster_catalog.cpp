@@ -197,6 +197,31 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
             }
         }
         for (const auto child : hierarchy_.child_groups) prepared.children.push_back(group_base + child);
+        // Thread each subtree to its successor, so GPU cuts need no fixed-depth stack.
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> pending;
+        for (std::size_t root = 0; root < hierarchy_.root_groups.size(); ++root)
+            pending.emplace_back(hierarchy_.root_groups[root], root + 1 < hierarchy_.root_groups.size()
+                ? hierarchy_.root_groups[root + 1] : UINT32_MAX);
+        while (!pending.empty())
+        {
+            const auto [id, next] = pending.back();
+            pending.pop_back();
+            auto &group = prepared.groups[id];
+            group.next_subtree = next == UINT32_MAX ? UINT32_MAX : group_base + next;
+            for (std::uint32_t child = 0; child < group.child_count; ++child)
+                pending.emplace_back(hierarchy_.child_groups[group.first_child - child_base + child],
+                    child + 1 < group.child_count
+                        ? hierarchy_.child_groups[group.first_child - child_base + child + 1] : next);
+        }
+        std::size_t visited{};
+        for (auto id = group_base + hierarchy_.root_groups.front(); id != UINT32_MAX;)
+        {
+            Require(id >= group_base && id - group_base < prepared.groups.size() &&
+                visited++ < prepared.groups.size(), "invalid GPU hierarchy traversal link or cycle");
+            const auto &group = prepared.groups[id - group_base];
+            id = group.child_count ? prepared.children[group.first_child - child_base] : group.next_subtree;
+        }
+        Require(visited == prepared.groups.size(), "GPU hierarchy traversal loses a subtree");
         for (auto &page : prepared.pages) page.generation = generation_tag;
         output = std::move(prepared);
         return Result::Success();

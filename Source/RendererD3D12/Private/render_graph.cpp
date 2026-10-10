@@ -127,6 +127,34 @@ void AppendPlanUse(PlanKey &key, const ResourceUse &use)
             std::to_string(static_cast<std::int64_t>(result)) + ").");
 }
 
+[[nodiscard]] Result RemovedFenceFailure(ID3D12Device *device, std::string_view operation)
+{
+    const auto reason = device->GetDeviceRemovedReason();
+    return QueueFailure(operation, FAILED(reason) ? reason : DXGI_ERROR_DEVICE_REMOVED);
+}
+
+[[nodiscard]] Result WaitForFence(ID3D12Device *device, ID3D12Fence *fence,
+                                  std::uint64_t required, HANDLE event,
+                                  std::string_view operation)
+{
+    auto completed = fence->GetCompletedValue();
+    // Device removal wakes fence events with UINT64_MAX, without retiring work.
+    if (completed == UINT64_MAX) return RemovedFenceFailure(device, operation);
+    if (completed >= required) return Result::Success();
+    const auto watched = fence->SetEventOnCompletion(required, event);
+    if (FAILED(watched)) return QueueFailure(operation, watched);
+    const auto wake = WaitForSingleObject(event, INFINITE);
+    completed = fence->GetCompletedValue();
+    if (completed == UINT64_MAX) return RemovedFenceFailure(device, operation);
+    if (wake != WAIT_OBJECT_0)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               std::string(operation) + " event failed.");
+    if (completed < required)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               std::string(operation) + " event did not complete the required fence value.");
+    return Result::Success();
+}
+
 [[nodiscard]] D3D12_RESOURCE_DESC NativeDesc(ResourceKind kind, const TextureDesc &texture,
                                                const BufferDesc &buffer) noexcept
 {
@@ -977,7 +1005,11 @@ CompletionSet RenderGraphQueueExecutor::Completed() const noexcept
     for (const auto queue_hint : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
     {
         const auto &state = impl_->queues[QueueIndex(queue_hint)];
-        if (state.fence) completed.Include(queue_hint, state.fence->GetCompletedValue());
+        if (state.fence)
+        {
+            const auto value = state.fence->GetCompletedValue();
+            if (value != UINT64_MAX) completed.Include(queue_hint, value);
+        }
     }
     return completed;
 }
@@ -1002,18 +1034,9 @@ Result RenderGraphQueueExecutor::Wait(const CompletionSet &completion)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "RenderGraph queue executor is missing a queue fence.");
         }
-        if (state.fence->GetCompletedValue() >= required) continue;
-        const auto result =
-            state.fence->SetEventOnCompletion(required, impl_->completion_event);
-        if (FAILED(result))
-            return QueueFailure(std::string("Wait for ") + QueueName(queue_hint) + " fence",
-                                result);
-        if (WaitForSingleObject(impl_->completion_event, INFINITE) != WAIT_OBJECT_0)
-        {
-            return Result::Failure(
-                ErrorCode::InvalidState, "hs_renderer_d3d12",
-                std::string("Wait for ") + QueueName(queue_hint) + " fence event failed.");
-        }
+        if (auto waited = WaitForFence(impl_->device.Get(), state.fence.Get(), required,
+                impl_->completion_event, std::string("Wait for ") + QueueName(queue_hint) + " fence");
+            !waited) return waited;
     }
     impl_->ReleaseCompletedExternal(Completed());
     return Result::Success();
@@ -1053,21 +1076,19 @@ Result RenderGraphQueueExecutor::Drain()
         {
             if (!retained.provider.native_fence_owner) continue;
             auto *fence = static_cast<ID3D12Fence *>(retained.provider.native_fence_owner.get());
-            const auto watched = fence->SetEventOnCompletion(retained.provider.value, impl_->completion_event);
-            if (FAILED(watched)) return QueueFailure("RenderGraph imported provider drain event", watched);
-            if (WaitForSingleObject(impl_->completion_event, INFINITE) != WAIT_OBJECT_0)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                       "RenderGraph imported provider drain event failed.");
+            if (auto waited = WaitForFence(impl_->device.Get(), fence, retained.provider.value,
+                    impl_->completion_event, "RenderGraph imported provider drain");
+                !waited) return waited;
             continue;
         }
+        if (retained.retirement_fence->GetCompletedValue() == UINT64_MAX)
+            return RemovedFenceFailure(impl_->device.Get(), "RenderGraph provider drain");
         const auto value = retained.next_value++;
         const auto signaled = retained.queue->Signal(retained.retirement_fence.Get(), value);
         if (FAILED(signaled)) return QueueFailure("RenderGraph provider drain Signal", signaled);
-        const auto watched = retained.retirement_fence->SetEventOnCompletion(value, impl_->completion_event);
-        if (FAILED(watched)) return QueueFailure("RenderGraph provider drain event", watched);
-        if (WaitForSingleObject(impl_->completion_event, INFINITE) != WAIT_OBJECT_0)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "RenderGraph provider drain event failed.");
+        if (auto waited = WaitForFence(impl_->device.Get(), retained.retirement_fence.Get(), value,
+                impl_->completion_event, "RenderGraph provider drain");
+            !waited) return waited;
     }
     // Fresh signals also cover work on a supplied Direct queue and work whose
     // original Signal failed. Only this complete drain restores safe teardown.
@@ -1075,6 +1096,8 @@ Result RenderGraphQueueExecutor::Drain()
     for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
     {
         auto &state = impl_->queues[QueueIndex(queue)];
+        if (state.fence->GetCompletedValue() == UINT64_MAX)
+            return RemovedFenceFailure(impl_->device.Get(), "RenderGraph drain");
         const auto value = state.next_fence++;
         const auto result = state.queue->Signal(state.fence.Get(), value);
         if (FAILED(result)) return QueueFailure("RenderGraph drain Signal", result);
@@ -1545,6 +1568,42 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     }
 
     std::vector<std::uint64_t> signals(batches.size());
+    std::vector<bool> waits_before(batches.size()), signal_after(batches.size());
+    std::vector<std::size_t> ordering_predecessor(batches.size(), SIZE_MAX);
+    std::vector<std::pair<std::uint32_t, std::size_t>> pass_positions;
+    pass_positions.reserve(g.passes.size());
+    for (std::size_t position = 0; position < submission_order.size(); ++position)
+    {
+        const auto index = submission_order[position];
+        const auto &batch = batches[index];
+        if (batch.pass != UINT32_MAX)
+            pass_positions.emplace_back(g.passes[batch.pass].id, position);
+        for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
+            if (queue != batch.queue && batch.imported.Required(queue)) waits_before[index] = true;
+        for (const auto producer : batch.dependencies)
+            if (batches[producer].queue != batch.queue)
+            {
+                waits_before[index] = true;
+                signal_after[producer] = true;
+            }
+    }
+    std::sort(pass_positions.begin(), pass_positions.end());
+    for (const auto &[producer_id, consumer_id] : g.ordering_dependencies)
+    {
+        const auto producer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
+            std::pair{producer_id, std::size_t{0}})->second;
+        const auto consumer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
+            std::pair{consumer_id, std::size_t{0}})->second;
+        auto &previous = ordering_predecessor[submission_order[consumer]];
+        previous = previous == SIZE_MAX ? producer : std::max(previous, producer);
+    }
+    const auto standalone = [&](std::uint32_t index) {
+        const auto &batch = batches[index];
+        return !batch.external_imports.empty() || batch.external_finish != UINT32_MAX ||
+            batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].external);
+    };
+    std::vector<ID3D12CommandList *> lists;
+    lists.reserve(submission_order.size());
     const auto retain = [&](std::uint32_t index, std::uint64_t value) {
         const auto &batch = batches[index];
         completion.Include(batch.queue, value);
@@ -1570,10 +1629,24 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 g.pool->entries[resource.pool_index].completion.Include(batch.queue, value);
         }
     };
-    for (const auto index : submission_order)
+    for (std::size_t first = 0; first < submission_order.size();)
     {
+        const auto index = submission_order[first];
         const auto &batch = batches[index];
         auto &state = impl_->queues[QueueIndex(batch.queue)];
+        auto end = first + 1;
+        // Legacy buffer decay needs each ExecuteCommandLists boundary. Enhanced
+        // lists can share a call without moving queue waits or delaying signals.
+        if (barriers == BarrierMode::Enhanced && !standalone(index))
+            while (end < submission_order.size())
+            {
+                const auto next = submission_order[end];
+                const auto predecessor = ordering_predecessor[next];
+                if (batches[next].queue != batch.queue || standalone(next) || waits_before[next] ||
+                    signal_after[submission_order[end - 1]] ||
+                    (predecessor != SIZE_MAX && predecessor >= first)) break;
+                ++end;
+            }
         for (const auto resource : batch.external_imports)
         {
             if (import_retention[resource] == SIZE_MAX)
@@ -1604,19 +1677,27 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             operation_retention[index] = impl_->external_retained.size();
             impl_->external_retained.push_back(std::move(pending_operations[index]));
         }
-        auto &recorder = slot.recorders[QueueIndex(batch.queue)][batch.recorder];
-        ID3D12CommandList *lists[] = {recorder.commands.Get()};
-        state.queue->ExecuteCommandLists(1, lists);
+        lists.clear();
+        for (auto position = first; position < end; ++position)
+        {
+            const auto &submitted_batch = batches[submission_order[position]];
+            lists.push_back(slot.recorders[QueueIndex(batch.queue)][submitted_batch.recorder].commands.Get());
+        }
+        state.queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
         const auto value = state.next_fence++;
         const auto result = state.queue->Signal(state.fence.Get(), value);
         if (FAILED(result))
         {
             impl_->reliable = false;
-            retain(index, UINT64_MAX);
+            for (auto position = first; position < end; ++position)
+                retain(submission_order[position], UINT64_MAX);
             return QueueFailure("RenderGraph queue Signal after ExecuteCommandLists", result);
         }
-        signals[index] = value;
-        retain(index, value);
+        for (auto position = first; position < end; ++position)
+        {
+            signals[submission_order[position]] = value;
+            retain(submission_order[position], value);
+        }
         Result provider_result = Result::Success();
         if (batch.pass != UINT32_MAX && g.passes[batch.pass].external)
         {
@@ -1662,39 +1743,43 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         // Commit only batches that were actually submitted and signaled. A
         // later queue Wait failure preserves a usable partial completion and
         // the exact resource state left by those successful batches.
-        for (const auto resource_index : batch.resources)
+        for (auto position = first; position < end; ++position)
         {
-            auto &resource = g.resources[resource_index];
-            Access access = resource.current;
-            Access physical = access;
-            for (const auto &barrier : batch.before)
-                if (barrier.resource == resource_index)
-                    access = physical = barrier.after;
-            if (batch.pass != UINT32_MAX)
-                for (const auto &use : g.passes[batch.pass].uses)
-                    if (use.predecessor.resource.value == resource_index + 1)
-                    {
-                        const auto *boundary = ExternalAccess(g.passes[batch.pass], use.predecessor.resource);
-                        access = physical = boundary ? boundary->outgoing : use.access;
-                    }
-            for (const auto &barrier : batch.after)
-                if (barrier.resource == resource_index)
-                {
-                    physical = barrier.after;
-                    if (barrier.operation != BarrierOperation::Release) access = barrier.after;
-                }
-            resource.current = access;
-            resource.final_queue = batch.queue;
-            if (!resource.imported && resource.pool_index != SIZE_MAX)
+            const auto &submitted_batch = batches[submission_order[position]];
+            for (const auto resource_index : submitted_batch.resources)
             {
-                auto &entry = g.pool->entries[resource.pool_index];
-                entry.state = barriers == BarrierMode::Legacy && BufferDecays(resource)
-                    ? Access::Common : physical;
-                entry.queue = batch.queue;
-                if (resource.pool_view_index < entry.active_view_states.size())
+                auto &resource = g.resources[resource_index];
+                Access access = resource.current;
+                Access physical = access;
+                for (const auto &barrier : submitted_batch.before)
+                    if (barrier.resource == resource_index)
+                        access = physical = barrier.after;
+                if (submitted_batch.pass != UINT32_MAX)
+                    for (const auto &use : g.passes[submitted_batch.pass].uses)
+                        if (use.predecessor.resource.value == resource_index + 1)
+                        {
+                            const auto *boundary = ExternalAccess(g.passes[submitted_batch.pass], use.predecessor.resource);
+                            access = physical = boundary ? boundary->outgoing : use.access;
+                        }
+                for (const auto &barrier : submitted_batch.after)
+                    if (barrier.resource == resource_index)
+                    {
+                        physical = barrier.after;
+                        if (barrier.operation != BarrierOperation::Release) access = barrier.after;
+                    }
+                resource.current = access;
+                resource.final_queue = batch.queue;
+                if (!resource.imported && resource.pool_index != SIZE_MAX)
                 {
-                    entry.active_view_states[resource.pool_view_index] = entry.state;
-                    entry.active_view_queues[resource.pool_view_index] = batch.queue;
+                    auto &entry = g.pool->entries[resource.pool_index];
+                    entry.state = barriers == BarrierMode::Legacy && BufferDecays(resource)
+                        ? Access::Common : physical;
+                    entry.queue = batch.queue;
+                    if (resource.pool_view_index < entry.active_view_states.size())
+                    {
+                        entry.active_view_states[resource.pool_view_index] = entry.state;
+                        entry.active_view_queues[resource.pool_view_index] = batch.queue;
+                    }
                 }
             }
         }
@@ -1702,6 +1787,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             batch.queue == QueueHint::Compute ? &impl_->stats.compute_batches : &impl_->stats.copy_batches;
         ++*count;
         if (!provider_result) return provider_result;
+        first = end;
     }
     return Result::Success();
 }

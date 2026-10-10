@@ -78,6 +78,9 @@ inline constexpr float kGraphicsUiRowY = 250, kGraphicsUiRowStride = 56;
     const PresentationUiState &);
 [[nodiscard]] std::size_t GraphicsSettingsPageCount(std::uint8_t group);
 [[nodiscard]] std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &);
+[[nodiscard]] std::string GraphicsSettingDisplayValue(SettingId, std::string_view);
+[[nodiscard]] Float2 ReferenceUiCursor(Float2 client_pixels, GraphicsExtent client_extent) noexcept;
+[[nodiscard]] bool GraphicsSettingTokenAvailable(SettingId, std::string_view, const GraphicsSettingsUiModel *);
 [[nodiscard]] std::optional<std::string> NextGraphicsSettingToken(
     const GraphicsSettings &, SettingId, int direction, const GraphicsSettingsUiModel *);
 

@@ -12,6 +12,26 @@ namespace
 constexpr D3D12_RESOURCE_STATES kAllShaderRead =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+Result CheckOitFormats(ID3D12Device *device)
+{
+    for (const auto format : {DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16_FLOAT})
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
+        const auto queried = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                                                         &support, sizeof(support));
+        if (FAILED(queried)) return HResultFailure("Query OIT target format support", queried);
+        const auto required = D3D12_FORMAT_SUPPORT1_TEXTURE2D |
+                              D3D12_FORMAT_SUPPORT1_RENDER_TARGET |
+                              D3D12_FORMAT_SUPPORT1_BLENDABLE |
+                              D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE;
+        if ((support.Support1 & required) != required)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                std::format("OIT target format {} lacks texture, render, blend or sample support.",
+                    static_cast<unsigned>(format)));
+    }
+    return Result::Success();
+}
 } // namespace
 
 Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
@@ -234,6 +254,7 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
 
 Result D3D12Renderer::Impl::CreatePostProcessTargets()
 {
+    if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
     transient_textures_common = enhanced;
     gbuffer_base.Reset();
     gbuffer_normal.Reset();
@@ -308,7 +329,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
              std::tuple{&subsurface_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&environment_specular, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&indirect_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&oit_accumulation, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
+             std::tuple{&oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
              std::tuple{&gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
@@ -364,7 +385,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
              std::pair{gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
              std::pair{gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
              std::pair{hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
              std::pair{oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
              std::pair{post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
@@ -450,7 +471,7 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
             create_srv(gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
             create_srv(shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
             create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
             create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
             create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -580,6 +601,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
                                                  std::uint32_t output_height,
                                                  bool native_resolve, bool outline)
 {
+    if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC description{};
@@ -640,7 +662,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
              std::tuple{&targets.subsurface_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&targets.environment_specular, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&targets.indirect_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&targets.oit_accumulation, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
+             std::tuple{&targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
              std::tuple{&targets.gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&targets.gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
@@ -802,7 +824,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
              std::pair{gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
              std::pair{gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT},
              std::pair{hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
+             std::pair{oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
              std::pair{oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
              std::pair{post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
@@ -871,7 +893,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
             create_srv(gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32G32_UINT);
             create_srv(shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
             create_srv(hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+            create_srv(oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
             create_srv(oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
             create_srv(post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);

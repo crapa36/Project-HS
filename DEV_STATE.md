@@ -167,17 +167,41 @@ review, independently review the separate hair study, then continue layered part
 Do not import a hair candidate without inspecting front/side/back/three-quarter
 renders. Engine/runtime files were not changed by this part-modeling work.
 
-### Engine and content migration (2026-10-08)
+### Engine and content migration (2026-10-10)
 
 Requirements: `Docs/Plans/ENGINE_RENDERER_V7.md` and
 `Docs/Plans/CONTENT_GENERATION_DIRECTIVE.md`; execution map:
 `Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. Whole-plan completion remains
-unclaimed. Preserve the dirty migration; after completion perform the single
-whole-592-path backup commit on branch `codex/engine-v7-backup-20261008`, push it,
-then restore `main` to its original HEAD, index and working-tree bytes.
+unclaimed. The migration from `fecc13c0f0922c2b70b88a251f50ceea5d93a6a5`
+is staged on `main`; its HEAD remains `5ee6bf8d41c1ea8114ee12c0583d671fd25b8ff2`.
+Preserve the source commit and `codex/engine-v7-backup-20261009`. Current fixes
+remain unstaged above the migration; do not commit or rewrite either branch.
 
 #### Current source contracts
 
+- Local-probe native layout identities and static shadow bounds are cached by
+  the retained immutable scene, instance generation, foliage density, complete
+  material-page state and authoritative lights. Mutable inputs still validate
+  every frame. Capture reuse keeps the original revision serialization.
+- Probe recapture waits on cube users separately from the immutable zero-count
+  metadata. Full graph/resource completion still gates replacement and release.
+- Owned views only override and restore the devtools visibility flag; per-frame
+  copies of the complete renderer/content product configuration are removed.
+  Visible environment textures request their shared material once per frame.
+- GPU cluster cuts traverse validated roots and skip inactive subtrees instead
+  of scanning every node and repeating ancestor refinement. Immutable successor
+  links and the first root reuse reserved GPU words; record sizes and stable
+  group/cluster identities remain unchanged. Preparation proves full traversal
+  coverage; shaders retain bounded range/generation/residency/error checks and
+  complete-cut publication. Quality/error thresholds are unchanged.
+- Settings hit testing uses message-time client coordinates and the renderer's
+  reference UI letterbox transform. Labels, values and status summaries are
+  Korean; canonical persistence tokens and detailed native diagnostics remain
+  intact. Unknown settings extensions retain current-file values before backup.
+- Unavailable native settings are filtered from cycling and guarded at Runtime
+  command consumption using the same renderer capability catalog. Controls with
+  no available alternative are disabled; saved unavailable intent can be turned
+  off. RT presets require their actual constituent modes, including automatic AO.
 - Core, RenderData, Presentation, Renderer and Runtime retain their Public API
   boundaries. Internal environment-layout and generation-lock targets compile
   their existing implementation once; unrelated producers avoid whole
@@ -270,17 +294,53 @@ then restore `main` to its original HEAD, index and working-tree bytes.
   execution is recorded, while runtime_ready and high-quality admission remain
   gated on the full gate and package acceptance.
 
+#### Consolidated review contracts (2026-10-10)
+
+- Snapshot acquisition claims a slot before rejecting publication sequences at or
+  below the held current sequence. Sequence numbers are strictly increasing for
+  the exchange lifetime; simulation ticks are not publication identities.
+- Additional retreat uses the existing disc sweep before firing. Projectile
+  redirects recompute contacts and walls over the remaining tick; straight
+  piercing retains ordered hits. A tick permits 64 redirects, then resumes from
+  the last verified contact next tick. Original casts retain their actual saved
+  cooldown budget while live projectiles can still spend it. Exact enemy overlap
+  uses stable opposite separation directions without imposing hard collision.
+- DRS preparation and control share inclusive integer extent bounds. Feasible
+  unaligned extents outrank 8-pixel alignment; invalid provider/capacity domains
+  are rejected. Per-view history and capacity ownership are unchanged.
+- Temporal reconstruction validates all contributing history taps. Spatial AA
+  includes center luminance. Camera-facing VFX use the uploaded camera basis;
+  secondary RT shadows honor the requested bit and dynamic entity emission uses
+  the same generation-qualified surface inputs as raster rendering.
+- Weighted OIT accumulation uses blendable RGBA32F throughout allocation, views,
+  PSOs and capture; revealage remains R16F and existing weights are unchanged.
+  The extra accumulation payload is 15.82MiB per FHD view; bandwidth cost is not
+  inferred from format size. Stable instance buckets replace repeated scans while
+  preserving canonical indices, foliage retention and per-view preparation.
+- Development reload tracks observed and applied pointers separately. One CPU
+  preparation future validates immutable captured inputs; stale/ABA results are
+  discarded and failures retry with 250ms–30s capped backoff. GPU/VFX commit stays
+  on the render thread. Pending I/O is not cancellable and shutdown joins it.
+  Probe preparation uses the resident scene generation independently of selected
+  shaders. Compatible full reload prepares immutable scene copies before commit;
+  narrow retains the scene identity and incompatible full closures are rejected.
+- Commit-pinned DirectXTex/D3D12MA fetches use full clones. Portable CPU CI includes
+  render-data and asset-pipeline checks without runtime/content SDK prerequisites.
+  Review decisions and conditional limits: `Docs/Consolidated_Review_Resolution.md`.
+
 #### Current evidence and next checkpoint
 
-- Current source-specific receipts are retained at [completion-evidence-current.md](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/completion-evidence-current.md>). The current [test-render generation](<C:/Users/crapa/Documents/GitHub/Project HS/Build/msvc-validation/GenerationState/test-render.json>) is `17033091346d606984da01ef9a918dab8045a72933e1cb105326bc11f3c06e0c`; the [runtime-full generation](<C:/Users/crapa/Documents/GitHub/Project HS/Build/msvc-validation/GenerationState/runtime-full.json>) is `02534e5493be816e0d9034e73662bc8ac19ae24cd10d641c691697414bcf73ed`. VSM admission source/content build PASS is recorded in [vsm-admission-build.stdout.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/vsm-admission-build.stdout.json>); the latest strict verification is [verify-20261008T122351645Z-56864.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/verification/verify-20261008T122351645Z-56864.json>).
-- The retained [checkpoint-D-20261008T091106Z receipt](<C:/Users/crapa/Documents/GitHub/Project HS/Build/Artifacts/checkpoint-D-20261008T091106Z/receipt.json>) is PASS for lighting7, FSRRR3 and DLSSRR3: each has `execution_valid=true`, validation errors0 and normal shutdown. Lighting is active native RT with no fallback. DLSS RR is active native/available. FSR RR requested provider is unsupported by the signed SDK on this device, so its active reconstruction is internal and is not native FSR RR execution evidence.
-- Skin ABI evidence is [post-repair.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/skin-palette-abi-current/post-repair.json>) (bdec2327ddd2): both selected matrices are row-major with stride64. The grid receipt is [result.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/Artifacts/checkpoint-D-20261008T065418Z/grid/result.json>) (ff0c97727d19): 25/25 frames completed, validation errors0, captures at1/9/17/25. Owned-view receipts are [result.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/Artifacts/checkpoint-D-20261008T071800Z/owned/result.json>) and [receipt.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/Artifacts/checkpoint-D-20261008T071800Z/receipt.json>) (7761d5eae70b): 9 submissions completed with validation errors0, named clips, decals and HDR capture metadata.
-- Current [verify-core receipt](<C:/Users/crapa/Documents/GitHub/Project HS/Build/verification/verify-core-20261008T105844062Z-52824.json>) is PASS10/10 in Debug with RuntimeOFF/ContentToolsOFF, including enabled navigation assertions. Retained CPU coverage also includes composed source-scoped D/E/G receipts (12 checks), portable2/2, scoped GameData9 and structured CLI8/8. The full59/71 gate is historical; incremental receipts remain source-specific.
-- VSM admission is source/content build-complete: actual overflow cap256, maximum765, with249 pages rejected by arrival order. Deterministic Count → Admit Complete Pages → Scatter preserves capacity and PSO modes; the checked allocation is about3.4MiB across3 slots and the per-node predicate cost doubles. Independent review accepted the per-segment proof that admitted pages remain within capacity.
-- The latest strict [verification receipt](<C:/Users/crapa/Documents/GitHub/Project HS/Build/verification/verify-20261008T122351645Z-56864.json>) reports a Legacy/Enhanced final-image pair with changed pixels0; 23 diagnostic resources/raw buffers are byte-identical and D3D12 validation errors are zero. Its retained CTest failures are final-options no-bloom mapping and particle10000 expected5000; the CLI source fix is complete and independent read-only review found no blocker, but final-options GPU CTest was not rerun. The separate [material receipt](<C:/Users/crapa/Documents/GitHub/Project HS/Build/verification/verify-20261008T113013133Z-14044.json>) records the classified-variant GPU material PASS273.892s with zero errors, while dependencies8.27583s PASS is recorded by [verify-20261008T105858699Z-8056.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/verification/verify-20261008T105858699Z-8056.json>). HLOD equivalence is closed at2.71x across1245 unchanged products. The latest incremental [ordinary Debug receipt](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/ordinary-debug-build.receipt.json>) records validation OFF/GPU OFF, `ProjectHS` exit0 in7.0041335s, exported runtime-full generation `02534e5493be816e0d9034e73662bc8ac19ae24cd10d641c691697414bcf73ed`, 4524 products, and executable SHA256 `B7AA8906D78A4D1D3156E8A6049107C492A2AAFF1414598EC6828DC33C036D08`; the first fresh build remains [ordinary-debug-first-build.receipt.json](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/ordinary-debug-first-build.receipt.json>). Source compilation was fully Debug `/Od/-Zi/-MTd/-RTC1`. The [window lifecycle proof](<C:/Users/crapa/Documents/GitHub/Project HS/Build/tooling/window-startup-after.json>) records `Source/Runtime/Private/window.cpp` preserving existing non-frame bits when `SetBorderless`/`ApplyDisplayPlacement` replace `WS_POPUP|WS_OVERLAPPEDWINDOW`: init-ready PID58420 `ProjectHS.Window` had renderer-ready artifacts before normal `WM_CLOSE`; the earlier PID58440 visible-window observation later hit the display-output error and is not stable proof. `Source/Runtime/Private/application.cpp` now resolves Auto output through HWND-aware Win32 enumeration before vendor initialization, maps the requested ID or current monitor rectangle to a concrete ID, preserves canonical Auto, and uses the actual resolved ID for rollback tracking. Latest no-args relaunch PID59344 at21:56:05 is pending root HWND/log validation. No package or performance result is claimed.
-- The final finish path is one whole-592-path backup commit on branch `codex/engine-v7-backup-20261008`, push, and restoration of `main` to its original HEAD, index and working-tree bytes. The 592-path backup dry-run passes, but the remote name is absent. Original main ref prefix is `5ee6bf8`; pending `Build/tooling/backup-and-restore-main.receipt.json` is the outcome authority. Do not claim commit, push or restoration until that receipt exists.
-
-- Current scope limits: DirectSR preview DLL support is deliberately excluded at `cmake/RenderSDKs.cmake:133` because of redistribution licensing and is not shipped in the package. FSR RR is device-unsupported. The FSR FG provider result is `executed=false` and `coverage=false` with Auto suppressed for this generation; this is provider status/coverage evidence, not an unimplemented-feature claim. No measured native cadence, display latency or global old-engine baseline is available.
+- Work remains on `main` at `5ee6bf8d41c1ea8114ee12c0583d671fd25b8ff2`: staged migration equals source commit `fecc13c0f0922c2b70b88a251f50ceea5d93a6a5`, index tree `f545c39df35df3562abcb06f261ff821be794731`. The backup branch `codex/engine-v7-backup-20261009` records review checkpoints on top of that unchanged source commit. Main's index and working files remain in place, with fixes unstaged above the migration.
+- The b0 table lookup failure was isolated by same-draw raw-SRV/direct-CBV probes. FrameConstants now uses root15 direct CBV, including private probe banks; immutable t18 occupies the former b0 slot without changing HLSL registers, heap stride or the 64-DWORD budget. All 2,077 sampled ROI frames were finite/nonblack (`Build/tooling/flicker-binding-fix.json`). Fence UINT64_MAX is rejected by Completed/Wait/Drain, preserving DeviceRemoved HRESULT instead of consuming unfinished readbacks. The original DeviceHung cause remains unconfirmed; these fixes do not establish all-scene stability.
+- Settings use message-time click coordinates and the reference letterbox transform, Korean labels/values, shared UI/Runtime capability guards, working 144/165/custom caps and current-file extension preservation. Unsupported HDR/DLSS/FG cannot be enabled. Presentation/settings-store checks pass in the current full execution; title and float display fixes are included.
+- Unhandled WaveTimer/pickup-idle owners no longer fall through to white legacy ground commands. Typed pickup bursts replace legacy collection layers only after successful conversion; malformed/unsupported fallback and ballistic debris remain. `Build/tooling/vfx-final-comparison.json` records white pixels 117756→1986, zero in scene rows 200–899, with unchanged depth/GBuffer/LightingHDR. The eight-frame Enhanced pickup fixture confirms 4 events/4 flashes/4 ribbons and zero drops/unsupported/validation errors (`Build/verification/vfx-pickup-enhanced-8.log`). Package-wide VFX qualification remains incomplete; keep `runtime_ready=false` and admission flags truthful.
+- Review decisions cover 28 IDs: 18 corrections/verification improvements and 10 conditional/retained decisions (`Docs/Consolidated_Review_Resolution.md`). Existing core 10/10 and portable 23/23 pass (`Build/verification/review-portable-final.log`). Full execution `verify-20261010T094257223Z-4768` passed 76/77; only camera fixture occlusion/clipping failed. Isolating those inputs retained the original aspect/extent criteria, and camera/analyzer passed 2/2 in `verify-20261010T101003093Z-34424`. These are combined valid receipts, not one 78/78 full-gate run.
+- Actual FP32 OIT surfaces have 43,431 nonempty pixels, 22-layer alpha 66000 and 64-layer alpha 192000; accumulation/revealage/composite nonfinite and out-of-tolerance linearity mismatches are 0 (`Build/reviews/consolidated-20261010/oit-after-analysis.json`). This resolves observed FP16 saturation, not reproduced Inf/NaN. Added storage/bandwidth cost remains unmeasured.
+- Development reload separates selected shader and resident scene generations. CTest registers the single-config shader reload; hidden-window shutdown targets only the child PID's `ProjectHS.Window`. `verify-20261010T102630399Z-33072` passed shader/material/local-probe 3/3. Full-resident Runtime scene binding and closure admission passed expanded shader reload/watch/architecture 3/3 in `verify-20261010T104523795Z-9732`: narrow frame59 keeps the original resident ID, incompatible layout is rejected before commit, full VFX frame156 uses the new ID. Native exit0/validation0/static scene uploads2; original pointer preserved. Prepare/commit, immutable snapshot leases and strict scene/page checks remain; no generic transaction framework.
+- Latest recorded Release runtime-full generation is `86c6bb06570d2b8c6b4199eb0418247b776b482b0dd1aaafd9cd6498a70381f1` with 3,680 products. Two FHD Ultra 240-tick runs, excluding 60 warmup frames, have render-scope p50 60.5075/60.7185ms and p95 68.699/68.683ms (`Build/reviews/consolidated-20261010/performance-after.json`). Lockstep drains all GPU queues each frame inside this scope; final readback is outside it. Release optimization/RTX4080/validation and GBV OFF are confirmed. These are not display FPS or a controlled source-equivalent A/B; 144FPS is not established. Native reconstruction/GI SDKs remain disabled; software-hybrid GI uses its probe fallback.
+- Final Release ProjectHS/render runner rebuild and 3,680-product verification passed (`Build/verification/review-release-completed.log`). Normal Runtime's existing 60-second input ran FHD Ultra without lockstep, VSync or frame cap: exit0, 1,021frames, checksum15682705976600721736, validation/dropped inputs/dropped presentation/unsupported VFX0 (`Build/verification/review-final-normal.log`). The 456 Render scopes with300<=tick<1818 have p50 55.37ms/p95 60.41ms, excluding CPU preparation before Render; no actual present-interval or144FPS claim (`Build/reviews/consolidated-20261010/normal-play-after.json`).
+- A02's 1,200 randomized order/range cases and CPU microbenchmark cover dynamic classification only. A04's approximately 0.082ms sums two separate function p50s; it does not justify a broader dirty-bank cache or prove an FPS gain. A08's 2.513–2.674s measures whole CLI Verify for3,680 products; render-thread VFX/commit cost and shutdown join remain unmeasured. Exact boss RT secondary-hit and dedicated TAA/FXAA edge GPU oracles are unexecuted; conditional decisions remain in the 28-ID document.
+- Next: investigate normal-play throughput separately from lockstep drains and obtain paired pass-level measurements for remaining CSM/GBuffer/GTAO cost. Full VFX changes combined with scene shader/geometry/layout changes require new scene projection and are currently rejected before adoption. Retain strict prepare/commit/abort, GPU waits and ownership checks. Use `Build/tooling/performance-investigation-current.md` and the consolidated review reports for unresolved technical work.
 
 ### VFX v4 runtime execution (2026-09-27)
 
@@ -294,7 +354,7 @@ Current integrated evidence: `Build/verification/verify-20260927T121907542Z-3320
 
 The retained strict payload and GPU receipts remain source-specific evidence for their exercised paths; static source alignment does not replace runtime qualification or add unexecuted GPU coverage.
 
-Next: keep `runtime_ready=false` until the exercised production outputs and live bindings are individually qualified. Final gates remain pending; use targeted runtime/GPU evidence for qualification without converting the static 534-path audit into GPU claims. `Docs/VFX_V4_EXECUTION_CONTEXT.md` remains the concise continuation map; category commits wait.
+Current targeted corrections additionally passed the16/16 VFX contracts,3/3 native routing/integration checks and1/1 expanded pickup showcase recorded above. These receipts qualify their exercised paths; they do not qualify all534 outputs. Keep `runtime_ready=false` and admission flags unchanged until package-wide production outputs and live bindings are individually qualified. Use current source/specification and retained receipts for continuation; the previously referenced `Docs/VFX_V4_EXECUTION_CONTEXT.md` is absent from this checkout.
 ### Metre scale, contact and slime motion (2026-09-16)
 
 User confirmed 1 unit = 1 metre and standing character height 1.75m. Player scale is .97174913; cooked bind body measures 1.750000057m after scaling. Normal slime body heights are .8/.9/1m, with per-role collision radii .63/.71/.79m. Tree/rock visual footprints match obstacle radii; grass retains cluster width with .15–.35m height. Projectile presentation originates at 1.05m for player arrows and .45m for enemy globes; simulation distances remain metres.

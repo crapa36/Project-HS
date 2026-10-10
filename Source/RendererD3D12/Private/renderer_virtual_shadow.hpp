@@ -98,9 +98,9 @@ struct alignas(16) VirtualShadowConstants
     std::array<DirectX::XMFLOAT4,3> clipmaps{}; // Page world side, world texel, extent, reserved.
     std::array<DirectX::XMINT4,3> windows{}; // Absolute minimum page XY, side, table base.
     DirectX::XMUINT4 counts{}; // Casters, receivers, virtual entries, physical pages.
-    DirectX::XMUINT4 limits{}; // Commands, groups, active width, active height.
+    DirectX::XMUINT4 limits{}; // First changed static caster (UINT32_MAX if none), groups, active width, active height.
     DirectX::XMUINT4 identity{}; // Light stable ID lo/hi, generation, depth epoch.
-    DirectX::XMUINT4 frame{}; // Rendered frame ID lo/hi, request words, segment count.
+    DirectX::XMUINT4 frame{}; // Rendered frame ID lo/hi, request words, active draw-group segment count.
     DirectX::XMUINT4 options{}; // Reset cache, enabled, segment capacity, filter samples.
 };
 static_assert(sizeof(VirtualShadowConstants)==336);

@@ -132,22 +132,35 @@ Current isolated venv is 0.27.0. Evidence:
 `Build/tooling/usage/query-027-error.log`.
 Upstream: https://github.com/douglasmonsky/codex-usage-tracker
 
-## RenderDoc / rdc-cli: qualification incomplete, not adopted
+## RenderDoc / rdc-cli: startup qualified, game capture blocked, not adopted
 
-RenderDoc 1.44 portable CLI help succeeded; rdc-cli 0.6.3 installed in an isolated
-Python 3.13 environment. `rdc doctor` could not import the RenderDoc replay module:
-the portable package did not provide matching `renderdoc.pyd` bindings. Its
-renderdoccmd discovery also failed in that probe. A bounded qrenderdoc Python
-startup probe timed out. Task-owned GUI processes were stopped afterward.
-No `.rdc` capture or replay analysis succeeded, so no GPU diagnosis benefit has
-been demonstrated. Do not replace existing GPU-validation/render-smoke gates.
-Future qualification requires matching Python bindings, successful doctor replay
-checks, an actual game capture, and a verified event/resource query. Vulkan
-registration is not needed to qualify this D3D12 game.
+RenderDoc 1.46 portable CLI help and qrenderdoc's pre-UI `--python` startup
+succeeded. Its built-in RenderDoc module uses Python 3.8.20; import, version,
+capture-control and descriptor/buffer query API availability checks passed.
+This path needs no separately built `renderdoc.pyd` or standalone Python wrapper.
+rdc-cli 0.6.3 remains isolated and is not the qualified replay entry point.
 
-Evidence: `Build/tooling/renderdoc/doctor.log`; portable package SHA-256:
-`67a6cfabd5041c2d646b66b6dfE90f94272457c5410084b71f652f9f9cff8f96`.
-Upstreams: https://renderdoc.org/builds and https://github.com/BANANASJIM/rdc-cli
+The startup launcher temporarily sets `Analytics_TotalOptOut=true` to bypass the
+first-run dialog, then restores the original UI.config bytes in a finally block.
+Restoration was verified. Tools, scripts and artifacts stay in
+`Build/tooling/renderdoc`; no global installation or Vulkan registration is
+required. Capture and replay are separate, explicitly requested operations.
+
+Actual Project-HS capture did not succeed. Injection returned success, but the
+game exited with code 1 before the requested frame. Suspended launch with
+redirected stdout/stderr exposed `Create DirectWrite UI surface failed:
+0x80004002` (E_NOINTERFACE) during software Direct2D/WIC UI surface creation.
+That shared error label covers bitmap, render-target and brush creation, so the
+individual failing call is not established. No `.rdc` or actual GPU event/resource
+query was obtained. API availability is not replay qualification; do not replace
+existing GPU-validation/render-smoke gates. Do not upload raw captures.
+
+Evidence: `Build/tooling/renderdoc/headless-qualification.json`,
+`headless-process.json`, `capture-result-3.json` and `capture-result-3.target.log`.
+Portable package SHA-256:
+`9CA4D09ECABA2CC791168660D6FC2A7E3D70FE67146E87EC05C5F8DEA70772F7`.
+Upstreams: https://renderdoc.org/builds and
+https://github.com/baldurk/renderdoc/blob/v1.46/docs/python_api/faq.rst
 
 ## Build and experiment loop
 

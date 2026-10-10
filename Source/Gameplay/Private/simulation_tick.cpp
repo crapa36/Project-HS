@@ -567,7 +567,11 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
         return record.cast_id + 256 < next_cast_id;
     });
     std::erase_if(combat_state->cast_runtimes, [this](const CastRuntime &runtime) {
-        return runtime.cast_id + 256 < next_cast_id;
+        if (runtime.cast_id + 256 >= next_cast_id) return false;
+        if (runtime.cooldown_ticks_saved == 0) return true;
+        return std::ranges::none_of(actors->projectiles, [&](const ProjectileActor &projectile) {
+            return projectile.cast_id == runtime.cast_id;
+        });
     });
     std::erase_if(combat_state->area_hits, [this](const AreaHitRecord &record) {
         return std::ranges::none_of(actors->areas, [&](const AreaActor &area) {
@@ -945,6 +949,8 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(runtime.kills);
         value(runtime.transfer_count);
         value(runtime.spawn_count);
+        // Unused budgets preserve the checksum stream of unaffected casts.
+        if (runtime.cooldown_ticks_saved != 0) value(runtime.cooldown_ticks_saved);
         value(runtime.basic_relic_triggers);
         value(runtime.triggered);
         value(runtime.refund_triggered);

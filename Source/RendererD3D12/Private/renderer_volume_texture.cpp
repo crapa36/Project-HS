@@ -123,13 +123,23 @@ Result D3D12Renderer::Impl::UploadVfxNoiseVolume(std::vector<AllocationResource>
         }
     uploads.back().resource->Unmap(0, nullptr);
 
+    D3D12_TEXTURE_COPY_LOCATION destination_location{};
+    destination_location.pResource = volume.resource.Get();
+    destination_location.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION source_location{};
+    source_location.pResource = uploads.back().resource.Get();
+    source_location.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    source_location.PlacedFootprint = footprint;
+    command_list->CopyTextureRegion(&destination_location, 0, 0, 0, &source_location, nullptr);
+
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = volume.resource.Get();
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = kAllShaderRead;
+    barrier.Transition.StateAfter = enhanced ? D3D12_RESOURCE_STATE_COMMON : kAllShaderRead;
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     command_list->ResourceBarrier(1, &barrier);
+    volume.graph_access = enhanced ? Access::Common : Access::AllShaderRead;
     vfx_noise_volume = std::move(volume);
     D3D12_SHADER_RESOURCE_VIEW_DESC view{};
     view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;

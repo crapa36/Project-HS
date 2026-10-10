@@ -33,7 +33,7 @@ struct alignas(16) GpuClusterGroup
     std::array<float, 4> sphere{};
     std::array<float, 4> minimum_error{};
     std::array<float, 4> maximum_reserved{};
-    std::uint32_t catalog_index{}, generation{}, ancestor_steps{}, reserved{};
+    std::uint32_t catalog_index{}, generation{}, ancestor_steps{}, next_subtree{UINT32_MAX};
 };
 struct alignas(16) GpuClusterRecord
 {
@@ -50,7 +50,7 @@ struct alignas(16) GpuClusterCandidate
     std::uint32_t instance_index{}, instance_generation{}, catalog_index{}, view_mask{};
     std::uint32_t first_group{}, group_count{}, mesh_id{}, policy_flags{};
     float deformation_radius{}; // proven conservative world-space displacement radius
-    std::uint32_t mesh_flags{}, reserved0{}, reserved1{}; // existing StaticDrawRef flags are preserved
+    std::uint32_t mesh_flags{}, first_root{}, reserved{}; // existing StaticDrawRef flags are preserved
 };
 struct alignas(16) GpuClusterCutStatus
 {

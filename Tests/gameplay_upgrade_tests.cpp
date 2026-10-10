@@ -519,4 +519,119 @@ void TestHighFanoutChainsTerminate()
     (void)run(hs::SkillKind::ExplosiveArrow, {0, 1, 2, 4}, 204);
 }
 
+void TestSecondRetreatRespectsCollision()
+{
+    for (const auto scenario : {0, 1, 2, 3, 4})
+    {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = scenario == 1 ? 1 : 0;
+        data.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {-1.25f, 0}, 0.3f};
+        if (scenario == 2)
+        {
+            data.arena_boundary.count = 4;
+            data.arena_boundary.points = {hs::Float2{-2, -2}, hs::Float2{-2, 2},
+                                         hs::Float2{2, 2}, hs::Float2{2, -2}};
+        }
+        hs::SimulationConfig config{0xC04u};
+        config.scenario.player_stationary = scenario == 3;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize(config, data).Succeeded(), "second retreat initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill,
+              static_cast<std::uint64_t>(hs::SkillKind::RetreatShot));
+        Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::RetreatShot), 7);
+        hs::HeldInputState held; held.aim_world = {20, 0, 0};
+        held.move_held = scenario == 4;
+        held.move_target_world = {20, 0, 0};
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
+                       sequence, held);
+        bool found{};
+        hs::GameReadModelStorage model;
+        for (int step = 0; step < 30 && !found; ++step)
+        {
+            const auto before = simulation.GetObservation().player_position;
+            (void)Tick(simulation, held);
+            simulation.WriteReadModel(model);
+            const auto view = model.View();
+            const auto arrow = std::ranges::find_if(view.projectiles, [](const auto &p) {
+                return p.skill == hs::SkillKind::RetreatShot &&
+                       p.origin == hs::EffectOrigin::Derived && p.source_upgrade == 7;
+            });
+            if (simulation.GetObservation().balance.upgrade_effects[8][7][
+                    static_cast<std::size_t>(hs::UpgradeEffectMetric::ProjectilesCreated)] == 0) continue;
+            found = true;
+            const auto after = simulation.GetObservation().player_position;
+            // The authored arrow is wider than the player and can hit this adjacent rock immediately.
+            if (arrow == view.projectiles.end()) Check(scenario == 1, "unobstructed second arrow survives");
+            else Check(std::abs(arrow->previous_position.x - after.x) < 0.0001f &&
+                           std::abs(arrow->previous_position.y - after.y) < 0.0001f,
+                       "second arrow starts at the collision-resolved player position");
+            Check(hs::ContainsArenaPoint(data.arena_boundary, after,
+                                         data.stats.player_collision_radius - 0.0001f),
+                  "second retreat remains inside the arena");
+            if (scenario == 1) Check(after.x >= -0.56f, "second retreat cannot cross the rock");
+            if (scenario == 3) Check(after.x == 0 && after.y == 0, "stationary second retreat stays put");
+            const auto millimetres = static_cast<std::uint64_t>(std::llround(
+                std::hypot(after.x - before.x, after.y - before.y) * 1000.0f));
+            Check(simulation.GetObservation().balance.upgrade_effects[8][7][
+                      static_cast<std::size_t>(hs::UpgradeEffectMetric::DisplacementMillimetres)] == millimetres,
+                  "second retreat telemetry measures resolved displacement");
+            bool line{};
+            for (const auto &signal : simulation.PendingDomainSignals())
+                if (signal.tick == simulation.GetObservation().tick &&
+                    signal.upgrade_skill == static_cast<std::uint8_t>(hs::SkillKind::RetreatShot) &&
+                    signal.upgrade_index == 7 && signal.geometry.kind == hs::DomainSignalGeometryKind::Line)
+                {
+                    line = true;
+                    Check(std::abs(signal.geometry.end_position.x - after.x) < 0.0001f &&
+                              std::abs(signal.geometry.end_position.z - after.y) < 0.0001f,
+                          "second retreat VFX ends at the resolved position");
+                }
+            if (millimetres > 0) Check(line, "actual second movement emits its line VFX");
+        }
+        Check(found, "second retreat still creates its extra arrow");
+        Check(simulation.Shutdown().Succeeded(), "second retreat shutdown");
+    }
+}
+
+void TestRicochetCooldownBudget()
+{
+    for (const hs::Tick maximum : {hs::Tick{60}, hs::Tick{25}})
+    {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = 0;
+        data.enemies[0].health = 10000;
+        data.enemies[0].move_speed = 0;
+        data.enemies[0].damage = 0;
+        data.skills[1].cooldown_ticks = 600;
+        data.skills[5].cooldown_ticks = 1;
+        data.skills[5].projectile_speed = 2400;
+        data.upgrades.ricochet_arrow.ricochet_cooldown_reduction.maximum_reduction_ticks = maximum;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xC06u}, data).Succeeded(), "ricochet budget initialize");
+        for (const auto skill : {hs::SkillKind::PiercingShot, hs::SkillKind::RicochetArrow})
+            Debug(simulation, hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(skill));
+        for (const auto upgrade : {2u, 6u})
+            Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+                  static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow), upgrade);
+        hs::HeldInputState held; held.aim_world = {0, 0, 20};
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        for (int i = 0; i < 20; ++i) (void)Tick(simulation, held);
+        for (int i = 0; i < 9; ++i)
+            Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {2.0f + i * 2.0f, 0});
+        held.aim_world = {20, 0, 0};
+        for (std::uint64_t cast = 1; cast <= 2; ++cast)
+        {
+            (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed, sequence, held);
+            for (int i = 0; i < 25; ++i) (void)Tick(simulation, held);
+            Check(simulation.GetObservation().balance.upgrade_effects[5][6][
+                      static_cast<std::size_t>(hs::UpgradeEffectMetric::CooldownTicksSaved)] == cast * maximum,
+                  "extended ricochets consume one actual-saved budget and new casts reset it");
+        }
+        Check(simulation.Shutdown().Succeeded(), "ricochet budget shutdown");
+    }
+}
+
 } // namespace gameplay_test

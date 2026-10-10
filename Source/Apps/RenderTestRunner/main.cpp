@@ -15,6 +15,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -974,6 +975,10 @@ int main(int argc, char **argv)
         bool surface_motion_resize_probe{};
         bool lighting_transport_probe{};
         bool world_transport_probe{};
+        bool gameplay_scene{};
+        bool local_probe_revision_probe{};
+        bool oit_overdraw_probe{};
+        bool camera_basis_probe{};
         bool software_gi_probe{};
         std::string ray_reconstruction_probe;
         bool require_multi_queue{};
@@ -1029,6 +1034,10 @@ int main(int argc, char **argv)
             else if (arg == "--surface-motion-resize-probe") surface_motion_resize_probe = true;
             else if (arg == "--lighting-transport-probe") lighting_transport_probe = true;
             else if (arg == "--world-transport-probe") world_transport_probe = true;
+            else if (arg == "--gameplay-scene") gameplay_scene = true;
+            else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
+            else if (arg == "--oit-overdraw-probe") oit_overdraw_probe = true;
+            else if (arg == "--camera-basis-probe") camera_basis_probe = true;
             else if (arg == "--software-gi-probe") software_gi_probe = world_transport_probe = true;
             else if (arg.starts_with("--ray-reconstruction="))
             {
@@ -1089,6 +1098,28 @@ int main(int argc, char **argv)
                                            !material_reload_invalid_pointer.empty();
         const bool surface_motion_resize_fixture =
             surface_motion_resize_probe || (lighting_transport_probe && ray_reconstruction_probe.empty());
+        if (oit_overdraw_probe || camera_basis_probe)
+        {
+            const auto required_frames = camera_basis_probe ? 6u : 4u;
+            if (!frames_explicit) frames = required_frames;
+            if (frames != required_frames || (oit_overdraw_probe && camera_basis_probe) ||
+                owned_view_probe || grid_floor_probe || gameplay_scene ||
+                surface_motion_resize_fixture || world_transport_probe || provider_switch_probe)
+                throw std::runtime_error("OIT/camera-basis probes require their own four/six ordinary render frames");
+            config.temporal_reconstruction = false;
+            config.bloom = config.outline = false;
+            config.ray_tracing_enabled = false;
+            config.ao_mode = hs::GraphicsAoMode::Off;
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.reflection_mode = hs::GraphicsReflectionMode::Off;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+            if (oit_overdraw_probe)
+                receipt["oit_overdraw"] = {{"writer", "VfxSpriteOitPS/RadialEnergy"},
+                    {"layers", {1, 22, 11, 64}}, {"hdr", {1, 1, 2, 5.5}},
+                    {"opacity_scale", 1000}, {"frames", Json::array()}};
+            else receipt["camera_basis"] = {{"cameras", {"front", "roll90", "vertical_down"}},
+                {"writers", {"RadialEnergy", "Smoke6Way"}}, {"frames", Json::array()}};
+        }
         if (lighting_transport_probe)
         {
             config.ray_tracing_enabled = true;
@@ -1157,6 +1188,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("--persistent-scene-probe requires at least 9 frames");
         if (skin_cache_monster_probe && frames < 2)
             throw std::runtime_error("--skin-cache-monster-probe requires at least 2 frames");
+        if (local_probe_revision_probe && frames < 96)
+            throw std::runtime_error("--local-probe-revision-probe requires at least 96 frames");
         if (dynamic_lod_skin_growth_probe && frames < 8)
             throw std::runtime_error("--dynamic-lod-skin-growth-probe requires at least 8 frames");
         if (gpu_lod_probe && frames < 10)
@@ -1171,9 +1204,12 @@ int main(int argc, char **argv)
                 static_cast<unsigned>(residency_streaming_probe) +
                 static_cast<unsigned>(surface_motion_resize_fixture) +
                 static_cast<unsigned>(world_transport_probe) +
+                static_cast<unsigned>(gameplay_scene) +
                 static_cast<unsigned>(material_reload_probe) +
                 static_cast<unsigned>(owned_view_probe) +
                 static_cast<unsigned>(provider_switch_probe) +
+                static_cast<unsigned>(oit_overdraw_probe) +
+                static_cast<unsigned>(camera_basis_probe) +
                 static_cast<unsigned>(grid_floor_probe) > 1)
             throw std::runtime_error("render-only probes are mutually exclusive");
         if (grid_floor_probe)
@@ -1222,7 +1258,8 @@ int main(int argc, char **argv)
              : residency_streaming_probe ? "residency-streaming-v3"
               : lighting_transport_probe ? "lighting-transport-v1"
               : software_gi_probe ? "software-gi-world-v1"
-              : world_transport_probe ? "world-transport-v1"
+            : world_transport_probe ? "world-transport-v1"
+            : gameplay_scene ? "gameplay-arena-v1"
               : surface_motion_resize_probe ? "surface-motion-resize-v1"
              : grid_floor_probe ? "grid-floor-probe-v1"
              : material_reload_probe ? "material-parameter-reload-v1"
@@ -1265,7 +1302,7 @@ int main(int argc, char **argv)
         config.product_paths = generation.product_paths;
         config.product_digests = generation.product_digests;
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
-        if (world_transport_probe || owned_view_probe)
+        if (world_transport_probe || owned_view_probe || gameplay_scene)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
             std::filesystem::path product_path;
@@ -1432,15 +1469,58 @@ int main(int argc, char **argv)
         }
         hs::RenderSnapshotExchange::ReadPair pair;
         pair.has_current = true;
-        pair.current.static_scene = world_transport_probe || owned_view_probe ? world_scene
+        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
+        // The camera-basis oracle measures an unoccluded silhouette. Ordinary
+        // fixture terrain/rocks otherwise occlude different pixels after roll.
+        if (camera_basis_probe) pair.current.static_scene.reset();
         pair.current.header.session_id = 1;
+        constexpr std::uint64_t kShadowHistoryCasterId = 0x5348434153540001ull;
+        hs::RenderInstance shadow_history_caster;
+        std::array<hs::PersistentVfxVisual, 3> authored_owner_fixture{};
+        if (local_probe_revision_probe)
+        {
+            constexpr std::array kinds{hs::PersistentVfxKind::WaveTimer,
+                hs::PersistentVfxKind::PickupXpIdle, hs::PersistentVfxKind::PlayerBowDraw};
+            for (std::size_t index = 0; index < kinds.size(); ++index)
+            {
+                auto &owner = authored_owner_fixture[index];
+                owner.kind = kinds[index];
+                owner.stable_id = 0x415554484f520001ull + index;
+                owner.position = {0.0f, 0.025f, 0.0f};
+                owner.radius = index == 0 ? 40.0f : 0.34f;
+                owner.source_horizon_tick = 10800;
+            }
+            // Authored snapshot owners without typed outputs must not become legacy white quads.
+            pair.current.persistent_vfx = authored_owner_fixture;
+            auto fixture = std::make_shared<hs::StaticRenderScene>(*world_scene);
+            const auto rock = std::ranges::find(fixture->instances, hs::RenderMesh::Rock,
+                &hs::RenderInstance::mesh);
+            if (rock == fixture->instances.end() || std::ranges::any_of(fixture->instances,
+                    [](const auto &instance) { return instance.stable_id == kShadowHistoryCasterId; }))
+                throw std::runtime_error("Shadow history fixture requires a rock and an unused stable ID.");
+            shadow_history_caster = *rock;
+            shadow_history_caster.position = {3.0f, 0.0f, 3.0f};
+            shadow_history_caster.stable_id = kShadowHistoryCasterId;
+            ++shadow_history_caster.revisions.transform;
+            fixture->instances.push_back(shadow_history_caster);
+            // Appended leaf casters leave the authenticated HLOD members and digest unchanged.
+            auto anonymous = shadow_history_caster;
+            anonymous.stable_id = 0;
+            anonymous.position.x = -3.0f;
+            fixture->instances.push_back(anonymous);
+            anonymous.position.z = -3.0f;
+            fixture->instances.push_back(anonymous);
+            anonymous.position.x = 3.0f;
+            current.push_back(anonymous);
+            pair.current.static_scene = std::move(fixture);
+        }
         pair.current.camera.target = {0, 1, 0};
         pair.current.camera.yaw_degrees = 0;
         pair.current.camera.pitch_degrees = 22;
         pair.current.camera.distance = dynamic_lod_skin_growth_probe ? 28.0f : 22.0f;
         std::array<hs::LightView, 3> world_lights{};
-        if (world_transport_probe || lighting_transport_probe)
+        if (world_transport_probe || lighting_transport_probe || local_probe_revision_probe)
         {
             auto &sun = world_lights[0];
             sun.stable_id = 0x57544c0000000001ull;
@@ -1472,6 +1552,21 @@ int main(int argc, char **argv)
         hs::RendererQueueStats queue_totals;
         std::map<std::uint64_t, hs::GpuPassTimings> world_gpu_history;
         std::map<std::uint64_t, hs::GpuPassTimings> provider_gpu_history;
+        std::array<std::uint32_t, 3> probe_capture_frames{};
+        std::uint64_t observed_probe_frame{};
+        std::uint32_t settled_probe_frames{};
+        const auto observe_probe_revisions = [&] {
+            if (!local_probe_revision_probe) return;
+            const auto timings = renderer.LastGpuPassTimings();
+            if (!timings.valid || timings.completed_frame_id <= observed_probe_frame) return;
+            observed_probe_frame = timings.completed_frame_id;
+            const auto capture = std::ranges::any_of(timings.passes, [](const auto &pass) {
+                return pass.name == "LocalProbeStaticCubeCapture" && pass.measured;
+            });
+            const auto phase = std::min<std::uint64_t>((observed_probe_frame - 1) / 32, 2);
+            if (capture) ++probe_capture_frames[phase];
+            if (observed_probe_frame >= 24 && observed_probe_frame <= 32 && !capture) ++settled_probe_frames;
+        };
         std::uint32_t fsr_fg_suppressed{}, fsr_fg_insufficient{}, fsr_fg_generated_evidence_count{};
         bool fsr_fg_callback_observed{}, fsr_fg_generated_evidence{};
         const auto observe_world_timings = [&] {
@@ -1767,7 +1862,6 @@ int main(int argc, char **argv)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                 }
-                pair.current.instances = current;
                 pair.current.header.tick = material_reload_probe || grid_floor_probe ? 1 : frame;
                 pair.current.header.simulation_time = material_reload_probe || grid_floor_probe || persistent_scene_probe
                     ? std::chrono::nanoseconds::zero()
@@ -1775,9 +1869,74 @@ int main(int argc, char **argv)
                         static_cast<std::int64_t>(frame) * 1000000000ll / 60);
                 observe_world_timings();
                 observe_provider_timings();
-                const auto main_view = renderer.MainViewInput(pair.current.camera);
+                if (local_probe_revision_probe && frame == 33) world_lights[0].direction.x += 0.2f;
+                if (local_probe_revision_probe && frame == 65)
+                {
+                    auto changed = std::make_shared<hs::StaticRenderScene>(*pair.current.static_scene);
+                    changed->layout_abi = 0;
+                    changed->eligible_layout_digest = {};
+                    changed->eligible_static_members.clear();
+                    changed->instances.resize(world_scene->instances.size());
+                    changed->instances.back().position.x += 1.0f;
+                    pair.current.static_scene = std::move(changed);
+                    current.push_back(shadow_history_caster);
+                }
+                if (local_probe_revision_probe && frame == 80)
+                    std::erase_if(current, [](const auto &instance) { return instance.stable_id == 0; });
+                if (local_probe_revision_probe && frame == 81)
+                    std::erase_if(current, [](const auto &instance) { return instance.stable_id == kShadowHistoryCasterId; });
+                pair.current.instances = current;
+                auto main_view = renderer.MainViewInput(pair.current.camera);
+                if (camera_basis_probe)
+                {
+                    pair.current.instances = {};
+                    pair.previous.instances = {};
+                    const auto camera_case = (frame - 1) % 3;
+                    main_view.camera.position = camera_case == 2
+                        ? hs::RenderWorldPosition{0, 6, 0} : hs::RenderWorldPosition{0, 2, -6};
+                    main_view.camera.target = camera_case == 2
+                        ? hs::RenderWorldPosition{0, 0, 0} : hs::RenderWorldPosition{0, 2, 0};
+                    main_view.camera.up = camera_case == 0 ? hs::Float3{0, 1, 0}
+                        : camera_case == 1 ? hs::Float3{1, 0, 0} : hs::Float3{0, 0, 1};
+                    main_view.view_origin = main_view.camera.position;
+                    main_view.camera_cut = true;
+                }
+                std::vector<hs::VfxFlashSpawnInput> oit_flashes;
+                if (oit_overdraw_probe || camera_basis_probe)
+                {
+                    constexpr std::array layers{1u, 22u, 11u, 64u};
+                    constexpr std::array hdr{1.0f, 1.0f, 2.0f, 5.5f};
+                    hs::VfxFlashSpawnInput flash;
+                    const auto &camera = main_view.camera;
+                    const double dx = camera.target.x - camera.position.x;
+                    const double dy = camera.target.y - camera.position.y;
+                    const double dz = camera.target.z - camera.position.z;
+                    const double distance = std::hypot(dx, dy, dz);
+                    flash.position = {static_cast<float>(camera.position.x + 3.0 * dx / distance),
+                        static_cast<float>(camera.position.y + 3.0 * dy / distance),
+                        static_cast<float>(camera.position.z + 3.0 * dz / distance)};
+                    flash.color = {1, 1, 1, 1}; flash.size = .8f; flash.lifetime = 1;
+                    flash.event_tick = pair.current.header.tick; flash.stable_seed = 17;
+                    flash.hdr = oit_overdraw_probe ? hdr[frame - 1] : 1.0f;
+                    flash.normalized_age = .2f;
+                    flash.shape = hs::VfxImpactShape::RadialEnergy;
+                    flash.oit = true; flash.opacity_scale = 1000;
+                    if (camera_basis_probe)
+                    {
+                        // Keep the full aspect3 silhouette inside the viewport.
+                        flash.size = .5f;
+                        flash.aspect = 3;
+                        if (frame > 3)
+                        {
+                            flash.shape = hs::VfxImpactShape::Smoke6Way;
+                            flash.smoke_frame_count = 64; flash.smoke_fps = 30;
+                        }
+                    }
+                    oit_flashes.assign(oit_overdraw_probe ? layers[frame - 1] : 1u, flash);
+                }
                 const hs::RenderFrameInput render_input{
                     .views = std::span(&main_view, 1), .snapshots = pair,
+                    .vfx = {.flashes = oit_flashes},
                     .delta_seconds = persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt};
                 if (provider_switch_probe)
@@ -1791,6 +1950,17 @@ int main(int argc, char **argv)
                     }
                 }
                 Require(renderer.Render(render_input, frame_result));
+                if (oit_overdraw_probe || camera_basis_probe)
+                {
+                    if (frame_result.typed_vfx_flash_count != oit_flashes.size())
+                        throw std::runtime_error("OIT overdraw fixture did not admit every actual writer");
+                    const auto capture = std::format("{}-{}.json",
+                        oit_overdraw_probe ? "oit-overdraw" : "camera-basis", frame);
+                    Require(renderer.CaptureSurfaceDiagnostics(artifacts / capture));
+                    receipt[oit_overdraw_probe ? "oit_overdraw" : "camera_basis"]["frames"].push_back({{"frame", frame},
+                        {"flashes", frame_result.typed_vfx_flash_count}, {"surface", capture}});
+                }
+                observe_probe_revisions();
                 observe_provider_timings();
                 if (provider_switch_probe)
                 {
@@ -2155,6 +2325,22 @@ int main(int argc, char **argv)
             };
         }
         receipt["diagnostics"] = DiagnosticsReceipt(renderer.GetDiagnostics());
+        if (local_probe_revision_probe)
+        {
+            observe_probe_revisions();
+            receipt["local_probe_revisions"] = {{"capture_frames", probe_capture_frames},
+                {"settled_frames_before_change", settled_probe_frames},
+                {"authored_owner_legacy_particles", renderer.LastParticleCount()},
+                {"shadow_history", {{"anonymous_static_casters", 2}, {"anonymous_dynamic_casters", 1},
+                    {"static_removal_and_dynamic_transfer_frame", 65},
+                    {"anonymous_dynamic_removal_frame", 80}, {"named_dynamic_removal_frame", 81}}}};
+            if (settled_probe_frames == 0 || std::ranges::any_of(probe_capture_frames, [](auto count) { return count == 0; }))
+                throw std::runtime_error("Local probes must settle, then recapture changed lights and a replacement static scene.");
+            if (frame_result.static_scene_upload_count != 2)
+                throw std::runtime_error("Shadow history fixture must upload exactly the initial and replacement static scenes.");
+            if (renderer.LastParticleCount() != 0)
+                throw std::runtime_error("Authored WaveTimer/pickup/bow owners leaked into legacy GPU particles.");
+        }
         if (world_transport_probe)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_PASSES_FAILED";

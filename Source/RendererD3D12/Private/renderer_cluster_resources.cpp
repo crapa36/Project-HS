@@ -197,6 +197,7 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
             if (auto result = catalog.PrepareGpu(ordinal, generation_tag, range.group_base,
                 range.child_base, range.cluster_base, range.page_base, ordinal, tables); !result) return result;
             range.group_count = static_cast<std::uint32_t>(tables.groups.size());
+            range.first_root = range.group_base + catalog.Hierarchy().root_groups.front();
             range.child_count = static_cast<std::uint32_t>(tables.children.size());
             range.cluster_count = static_cast<std::uint32_t>(tables.clusters.size());
             range.page_count = static_cast<std::uint32_t>(tables.pages.size());
@@ -508,7 +509,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         {
             const auto &range = runtime.catalogs[ordinal];
             if (candidate.catalog_index != ordinal || candidate.first_group != range.group_base ||
-                candidate.group_count != range.group_count || candidate.reserved0 || candidate.reserved1 ||
+                candidate.group_count != range.group_count || candidate.first_root != range.first_root || candidate.reserved ||
                 candidate.instance_generation == 0 || candidate.view_mask > 15u ||
                 (candidate.policy_flags & ~kClusterCandidateFineOnlyDeformationBound) ||
                 !std::isfinite(candidate.deformation_radius) || candidate.deformation_radius < 0.0f ||
@@ -761,14 +762,18 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(std::uint32_t frame_slot,
         constexpr std::array<std::uint32_t, kClusterCutSrvCount> srv_strides{96, 4, 32, 32, 48, 4, 4, 32, 0, 4};
         for (std::size_t i = 0; i < srvs.size(); ++i)
         {
-            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-            view.Format = srv_strides[i] ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
-            view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Buffer.NumElements = static_cast<UINT>(srvs[i]->resource->GetDesc().Width / (srv_strides[i] ? srv_strides[i] : 4u));
-            view.Buffer.StructureByteStride = srv_strides[i];
-            if (!srv_strides[i]) view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-            device->CreateShaderResourceView(srvs[i]->resource.Get(), &view, handle);
+            // Tables/pages live with the view bank; candidates live with this cut.
+            if (!cut.descriptors_initialized || i >= 5u)
+            {
+                D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+                view.Format = srv_strides[i] ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                view.Buffer.NumElements = static_cast<UINT>(srvs[i]->resource->GetDesc().Width / (srv_strides[i] ? srv_strides[i] : 4u));
+                view.Buffer.StructureByteStride = srv_strides[i];
+                if (!srv_strides[i]) view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                device->CreateShaderResourceView(srvs[i]->resource.Get(), &view, handle);
+            }
             handle.ptr += srv_stride;
         }
         const std::array<const AllocationResource *, kClusterCutUavCount> uavs{&cut.counts, &cut.offsets, &cut.block_sums,
@@ -780,25 +785,34 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(std::uint32_t frame_slot,
         constexpr std::array<std::uint32_t, kClusterCutUavCount> strides{8, 8, 8, 8, 4, 0, 0, 16, 0, 0, 0, 0, 4, 4, 16, 4, 0, 0};
         for (std::size_t i = 0; i < uavs.size(); ++i)
         {
-            D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-            view.Format = strides[i] ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
-            view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            view.Buffer.NumElements = static_cast<UINT>(uavs[i]->resource->GetDesc().Width / (strides[i] ? strides[i] : 4));
-            view.Buffer.StructureByteStride = strides[i];
-            if (!strides[i]) view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-            device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &view, handle);
-            D3D12_UNORDERED_ACCESS_VIEW_DESC clear_view{};
-            clear_view.Format = DXGI_FORMAT_R32_TYPELESS;
-            clear_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            clear_view.Buffer.NumElements = static_cast<UINT>(uavs[i]->resource->GetDesc().Width / 4u);
-            clear_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-            device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &clear_view, gpu_clear_handle);
-            device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &clear_view, clear_handle);
+            // Shared geometry/refs/raster scratch may grow without replacing this cut.
+            if (!cut.descriptors_initialized || i == 6u || i == 7u || i == 11u)
+            {
+                const auto bytes = uavs[i]->resource->GetDesc().Width;
+                D3D12_UNORDERED_ACCESS_VIEW_DESC clear_view{};
+                clear_view.Format = DXGI_FORMAT_R32_TYPELESS;
+                clear_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                clear_view.Buffer.NumElements = static_cast<UINT>(bytes / 4u);
+                clear_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &clear_view, clear_handle);
+                device->CopyDescriptorsSimple(1, gpu_clear_handle, clear_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                if (strides[i])
+                {
+                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                    view.Format = DXGI_FORMAT_UNKNOWN;
+                    view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                    view.Buffer.NumElements = static_cast<UINT>(bytes / strides[i]);
+                    view.Buffer.StructureByteStride = strides[i];
+                    device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &view, handle);
+                }
+                else device->CopyDescriptorsSimple(1, handle, clear_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            }
             handle.ptr += srv_stride;
             gpu_clear_handle.ptr += srv_stride;
             clear_handle.ptr += srv_stride;
         }
     }
+    cut.descriptors_initialized = true;
 }
 
 const GeometryPageGpu *D3D12Renderer::Impl::FindClusterGeometryPage(std::uint32_t physical_slot) const noexcept

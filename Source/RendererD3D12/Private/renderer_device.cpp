@@ -580,7 +580,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     // services replace the nulls with their native resource views, retaining
     // the existing waited frame-bank leases and immutable pass suffixes.
     constexpr std::array cbv_offsets{
-        kViewDescriptorOffset + 9, kViewDescriptorOffset + 10,
+        kViewDescriptorOffset + 9,
         kRayDescriptorOffset, kRayTransportDescriptorOffset,
         kVolumetricDescriptorOffset, kRayShadowDescriptorOffset,
         kRayReconstructionDescriptorOffset, kBrixelizerDescriptorOffset,
@@ -614,6 +614,10 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         };
         for (const auto offset : cbv_offsets)
             device->CreateConstantBufferView(nullptr, cpu(offset));
+        auto empty_skin = empty;
+        empty_skin.Format = DXGI_FORMAT_UNKNOWN;
+        empty_skin.Buffer.StructureByteStride = sizeof(DirectX::XMFLOAT4X4);
+        device->CreateShaderResourceView(nullptr, &empty_skin, cpu(kViewDescriptorOffset + 10));
         for (const auto range : uav_ranges)
             for (UINT index = 0; index < range.count; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));

@@ -30,7 +30,7 @@ struct ClusterGroup
     float4 Sphere;
     float4 MinimumError;
     float4 MaximumReserved;
-    uint CatalogIndex, Generation, AncestorSteps, Reserved;
+    uint CatalogIndex, Generation, AncestorSteps, NextSubtree;
 };
 struct ClusterRecord
 {
@@ -47,7 +47,7 @@ struct ClusterCandidate
     uint InstanceIndex, InstanceGeneration, CatalogIndex, ViewMask;
     uint FirstGroup, GroupCount, MeshId, PolicyFlags;
     float DeformationRadius;
-    uint MeshFlags, Reserved0, Reserved1;
+    uint MeshFlags, FirstRoot, Reserved;
 };
 struct ClusterInstanceRef
 {
@@ -191,12 +191,14 @@ bool CandidateValid(ClusterCandidate candidate, out InstanceData instance)
     uint4 h0, h1, h2, h3;
     if (!Range(candidate.FirstGroup, candidate.GroupCount, GroupCount) || candidate.GroupCount == 0u ||
         (candidate.ViewMask & ~15u) != 0u || (candidate.PolicyFlags & ~FineOnlyDeformationBound) != 0u ||
-        candidate.Reserved0 != 0u || candidate.Reserved1 != 0u || candidate.InstanceIndex >= HistoryInstanceCapacity ||
+        candidate.FirstRoot < candidate.FirstGroup || candidate.FirstRoot - candidate.FirstGroup >= candidate.GroupCount ||
+        candidate.Reserved != 0u || candidate.InstanceIndex >= HistoryInstanceCapacity ||
         !isfinite(candidate.DeformationRadius) || candidate.DeformationRadius < 0.0 ||
         !HsGpuSceneSlotValid(candidate.InstanceIndex, h0, h1, h2, h3))
     {
         Fault(FailureCatalog); return false;
     }
+    if (Groups[candidate.FirstRoot].Parent != Invalid) { Fault(FailureCatalog); return false; }
     const uint address = h1.x + candidate.InstanceIndex * h2.z;
     if (HsGpuSceneTables.Load(address + 20u) != candidate.InstanceGeneration)
     {
@@ -218,7 +220,9 @@ bool GroupValid(uint id, ClusterCandidate candidate, out ClusterGroup group)
     }
     group = Groups[id];
     if (group.CatalogIndex != candidate.CatalogIndex || group.Generation != ContentGeneration ||
-        group.Reserved != 0u || (group.Flags & ~ReferencePose) != 0u ||
+        (group.NextSubtree != Invalid && (group.NextSubtree < candidate.FirstGroup ||
+            group.NextSubtree - candidate.FirstGroup >= candidate.GroupCount)) ||
+        (group.Flags & ~ReferencePose) != 0u ||
         group.AncestorSteps == 0u || group.AncestorSteps > MaxAncestorSteps ||
         group.ClusterCount == 0u || !Range(group.FirstCluster, group.ClusterCount, ClusterCount) ||
         !Range(group.FirstChild, group.ChildCount, ChildCount) ||
@@ -302,7 +306,7 @@ uint Projection(ClusterGroup group, ClusterCandidate candidate, InstanceData ins
     const float radius = sphere.w;
     const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
     if (!all(isfinite(center)) || !isfinite(radius)) { Fault(FailureCatalog); priority = 0.0; return 0u; }
-    uint mask = candidate.ViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
+    uint mask = candidate.ViewMask;
     [unroll] for (uint view = 0u; view < 4u; ++view)
         [unroll] for (uint plane = 0u; plane < 6u; ++plane)
         {
@@ -359,23 +363,6 @@ bool Refinement(uint group_id, ClusterGroup group, ClusterCandidate candidate, I
     }
     return complete;
 }
-bool ActiveAncestorPath(uint group_id, ClusterGroup group, ClusterCandidate candidate, InstanceData instance)
-{
-    uint parent_id = group.Parent;
-    uint step = 0u;
-    while (parent_id != Invalid && step < group.AncestorSteps)
-    {
-        ClusterGroup parent;
-        if (!GroupValid(parent_id, candidate, parent)) return false;
-        uint mask; float priority; bool desired;
-        if (!Refinement(parent_id, parent, candidate, instance, mask, priority, desired)) return false;
-        parent_id = parent.Parent;
-        ++step;
-    }
-    if (parent_id != Invalid) { Fault(FailureAncestorRange); return false; }
-    return true;
-}
-
 [numthreads(64, 1, 1)]
 void CountCuts(uint3 dispatch : SV_DispatchThreadID)
 {
@@ -383,17 +370,20 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
     if (candidate_index >= CandidateCount) return;
     if (!ConstantsValid()) return;
     CutCounts[candidate_index] = uint2(0u, 0u);
-    const ClusterCandidate candidate = Candidates[candidate_index];
+    ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
+    candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     uint count = 0u;
-    for (uint offset = 0u; offset < candidate.GroupCount; ++offset)
+    uint node = candidate.FirstRoot;
+    for (uint visited = 0u; node != Invalid && visited < candidate.GroupCount; ++visited)
     {
-        const uint id = candidate.FirstGroup + offset;
+        const uint id = node;
         ClusterGroup group;
-        if (!GroupValid(id, candidate, group) || !ActiveAncestorPath(id, group, candidate, instance)) continue;
+        if (!GroupValid(id, candidate, group)) return;
         uint mask; float priority; bool desired;
         const bool refined = Refinement(id, group, candidate, instance, mask, priority, desired);
+        node = refined ? Children[group.FirstChild] : group.NextSubtree;
         if (mask == 0u) continue;
         if (desired)
             for (uint child = 0u; child < group.ChildCount; ++child)
@@ -412,6 +402,7 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
         if (group.ClusterCount > Invalid - count) { Fault(FailureCapacity); return; }
         count += group.ClusterCount;
     }
+    if (node != Invalid) { Fault(FailureAncestorRange); return; }
     CutCounts[candidate_index] = uint2(count, 0u);
 }
 
@@ -553,19 +544,23 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
 {
     const uint candidate_index = LinearThread(dispatch);
     if (candidate_index >= CandidateCount || CutStatus.Load(16u) != 0u) return;
-    const ClusterCandidate candidate = Candidates[candidate_index];
+    ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
+    candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
     uint count = 0u;
-    for (uint offset = 0u; offset < candidate.GroupCount; ++offset)
+    uint node = candidate.FirstRoot;
+    for (uint visited = 0u; node != Invalid && visited < candidate.GroupCount; ++visited)
     {
-        const uint id = candidate.FirstGroup + offset;
+        const uint id = node;
         ClusterGroup group;
-        if (!GroupValid(id, candidate, group) || !ActiveAncestorPath(id, group, candidate, instance)) continue;
+        if (!GroupValid(id, candidate, group)) return;
         uint mask; float priority; bool desired;
-        if (Refinement(id, group, candidate, instance, mask, priority, desired) || mask == 0u) continue;
+        const bool refined = Refinement(id, group, candidate, instance, mask, priority, desired);
+        node = refined ? Children[group.FirstChild] : group.NextSubtree;
+        if (refined || mask == 0u) continue;
         if (!CompleteRepresentation(id, group) || ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u))
         {
             Fault(FailureMissingPage | FailureErrorDomain); return;
@@ -579,6 +574,7 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
             ++count;
         }
     }
+    if (node != Invalid) { Fault(FailureAncestorRange); return; }
     if (CutCounts[candidate_index].y != 0u || count != CutCounts[candidate_index].x) Fault(FailureCatalog);
 }
 

@@ -2,8 +2,9 @@
 """Create an isolated immutable Generation set for the Debug reload test.
 
 The fixture is deliberately made from hard links to the selected build output.
-Only the one replacement shader is copied, so the test never writes a source
-ProductSet or a payload that another test may be using.
+Changed payloads are copied, so the test never writes a source ProductSet or a
+payload that another test may be using. A catalog edit also exercises full
+resident adoption, and a changed arena layout must be rejected before it.
 """
 
 from __future__ import annotations
@@ -12,10 +13,12 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import struct
 import sys
 from typing import Any
 
@@ -25,6 +28,8 @@ SCOPE = "runtime-full"
 TARGET_LOGICAL_ID = "render/shader/bloom_ps.dxil"
 REPLACEMENT_LOGICAL_ID = "render/shader/bloom_upsample_ps.dxil"
 ZERO_DIGEST = "sha256:" + ("0" * 64)
+CATALOG_LOGICAL_ID = "vfx/particle_effects.hsbin"
+LAYOUT_LOGICAL_ID = "game-data/arena-layout"
 
 
 def fail(message: str) -> "NoReturn":
@@ -212,7 +217,49 @@ def copy_payload_from_bytes(data: bytes, destination: Path) -> None:
     try:
         destination.write_bytes(data)
     except OSError as error:
-        fail(f"cannot write fixture shader payload {destination}: {error}")
+        fail(f"cannot write fixture payload {destination}: {error}")
+
+
+def fnv1a64(data: bytes) -> int:
+    value = 14695981039346656037
+    for byte in data:
+        value = ((value ^ byte) * 1099511628211) & 0xffffffffffffffff
+    return value
+
+
+def changed_particle_catalog(data: bytes) -> bytes:
+    # CookedParticleEffects v4 is a little-endian raw struct stream. Change a
+    # real line width, preserving all handles, sprite indices and program links.
+    if len(data) < 40:
+        fail("particle catalog fixture has no header")
+    magic, version, effects, emitters, sprites, schema, payload_hash = struct.unpack_from("<8sIIIIQQ", data)
+    if (magic != b"HSPFX\0\0\0" or version != 4 or schema != 0x4853504658563034 or
+            len(data) != 40 + effects * 56 + emitters * 144 + sprites * 16 or
+            fnv1a64(data[40:]) != payload_hash):
+        fail("particle catalog fixture has an unsupported cooked ABI or hash")
+    edited = bytearray(data)
+    for index in range(effects):
+        offset = 40 + index * 56
+        if data[offset + 14] != 1:  # VfxDefinitionKind::Line
+            continue
+        width = struct.unpack_from("<f", data, offset + 32)[0]
+        if not math.isfinite(width) or width <= 0:
+            fail("particle catalog fixture has an invalid line width")
+        struct.pack_into("<f", edited, offset + 32, width * 1.125)
+        struct.pack_into("<Q", edited, 32, fnv1a64(edited[40:]))
+        return bytes(edited)
+    fail("particle catalog fixture has no line effect to edit")
+
+
+def changed_arena_layout(data: bytes) -> bytes:
+    layout = json.loads(data)
+    if layout.get("abi") != 1 or not isinstance(layout.get("half_extent_bits"), int):
+        fail("arena layout fixture has an unsupported ABI")
+    extent = struct.unpack("<f", struct.pack("<I", layout["half_extent_bits"]))[0]
+    if not math.isfinite(extent) or extent <= 0:
+        fail("arena layout fixture has an invalid extent")
+    layout["half_extent_bits"] = struct.unpack("<I", struct.pack("<f", extent + 1.0))[0]
+    return canonical_json(layout)
 
 
 def prepare(args: argparse.Namespace) -> None:
@@ -242,10 +289,6 @@ def prepare(args: argparse.Namespace) -> None:
         fail(f"selected Generation lacks {target_id} or {replacement_id}")
     if target_id == replacement_id:
         fail("target and replacement products must differ")
-    for edge in source_manifest.get("upstream_product_dependencies", []):
-        if isinstance(edge, dict) and edge.get("logical_id") == target_id:
-            fail(f"target product unexpectedly has an upstream identity: {target_id}")
-
     replacement_path = source_root / Path(source_products[replacement_id]["locator"])
     try:
         replacement = replacement_path.read_bytes()
@@ -278,11 +321,16 @@ def prepare(args: argparse.Namespace) -> None:
     write_json(candidate_pointers / "baseline.json", baseline_pointer)
     candidates["baseline"] = "Candidates/baseline.json"
 
-    def candidate_manifest(digest: str) -> dict[str, Any]:
-        manifest = copy.deepcopy(source_manifest)
-        target = product_map(manifest)[target_id]
+    def candidate_manifest(digest: str, base: dict[str, Any] = source_manifest,
+                           logical_id: str = target_id, size: int = replacement_size) -> dict[str, Any]:
+        manifest = copy.deepcopy(base)
+        target = product_map(manifest)[logical_id]
         target["digest"] = digest
-        target["size"] = replacement_size
+        target["size"] = size
+        for edge in manifest["upstream_product_dependencies"]:
+            if edge["logical_id"] == logical_id:
+                edge["digest"] = digest
+                edge["size"] = size
         # Snapshot locators are part of the immutable manifest identity.
         candidate = generation_id(manifest)
         manifest["generation_id"] = candidate
@@ -304,6 +352,25 @@ def prepare(args: argparse.Namespace) -> None:
     write_json(candidate_pointers / "invalid.json", invalid_pointer)
     candidates["invalid"] = "Candidates/invalid.json"
 
+    for logical_id in (CATALOG_LOGICAL_ID, LAYOUT_LOGICAL_ID):
+        if logical_id not in source_products:
+            fail(f"selected Generation lacks {logical_id}")
+    catalog = changed_particle_catalog(
+        (source_root / Path(source_products[CATALOG_LOGICAL_ID]["locator"])).read_bytes())
+    resident_manifest = candidate_manifest(sha256_bytes(catalog), valid_manifest, CATALOG_LOGICAL_ID, len(catalog))
+    resident_id = write_generation(root, resident_manifest, root, valid_manifest,
+                                   catalog, CATALOG_LOGICAL_ID)
+    write_json(candidate_pointers / "resident.json", make_pointer(source_pointer, resident_id))
+    candidates["resident"] = "Candidates/resident.json"
+
+    layout = changed_arena_layout(
+        (source_root / Path(source_products[LAYOUT_LOGICAL_ID]["locator"])).read_bytes())
+    incompatible_manifest = candidate_manifest(sha256_bytes(layout), resident_manifest, LAYOUT_LOGICAL_ID, len(layout))
+    incompatible_id = write_generation(root, incompatible_manifest, root, resident_manifest,
+                                       layout, LAYOUT_LOGICAL_ID)
+    write_json(candidate_pointers / "incompatible.json", make_pointer(source_pointer, incompatible_id))
+    candidates["incompatible"] = "Candidates/incompatible.json"
+
     metadata = {
         "fixture_kind": "shader-reload",
         "schema_version": 1,
@@ -311,6 +378,8 @@ def prepare(args: argparse.Namespace) -> None:
         "baseline_id": baseline_id,
         "valid_id": valid_id,
         "invalid_id": invalid_id,
+        "resident_id": resident_id,
+        "incompatible_id": incompatible_id,
         "target_logical_id": target_id,
         "replacement_logical_id": replacement_id,
         "source_pointer": str(pointer_path),
@@ -322,6 +391,10 @@ def prepare(args: argparse.Namespace) -> None:
     verifier = absolute(args.generation_verifier)
     verify(root, verifier, SCOPE)
     atomic_publish(root, "valid")
+    verify(root, verifier, SCOPE)
+    atomic_publish(root, "resident")
+    verify(root, verifier, SCOPE)
+    atomic_publish(root, "incompatible")
     verify(root, verifier, SCOPE)
     atomic_publish(root, "baseline")
     print(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
@@ -340,7 +413,7 @@ def main() -> int:
 
     select_parser = subparsers.add_parser("select")
     select_parser.add_argument("--root", required=True)
-    select_parser.add_argument("--candidate", choices=("baseline", "invalid", "valid"), required=True)
+    select_parser.add_argument("--candidate", choices=("baseline", "invalid", "valid", "resident", "incompatible"), required=True)
     select_parser.set_defaults(handler=lambda args: atomic_publish(absolute(args.root), args.candidate))
 
     args = parser.parse_args()

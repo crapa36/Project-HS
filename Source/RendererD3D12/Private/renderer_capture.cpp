@@ -715,6 +715,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"scene_work", &impl_->scene_work,
                        DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
+        SurfaceCapture{"oit_accumulation", &impl_->oit_accumulation,
+                       DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
+        SurfaceCapture{"oit_revealage", &impl_->oit_revealage,
+                       DXGI_FORMAT_R16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"shadow_atlas", &impl_->shadow,
                        DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
     };

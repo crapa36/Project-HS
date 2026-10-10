@@ -44,6 +44,8 @@ void TestUpgradeDamageAttribution();
 void TestSelectiveUpgradeInheritance();
 void TestHighFanoutChainsTerminate();
 void TestRetreatSlowTrailUsesPath();
+void TestSecondRetreatRespectsCollision();
+void TestRicochetCooldownBudget();
 void TestRelicCombinations();
 void TestAlternatingSkillRelicTelemetry();
 void TestRemadeRelics();
@@ -450,6 +452,187 @@ void TestAttacksRespectTerrain()
     }
 }
 
+void TestRedirectedArrowUsesRemainingTick()
+{
+    std::array<hs::GameplayChecksum, 2> checksums{};
+    for (const auto repeat : {false, true})
+    for (const bool returning : {false, true})
+    {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = 1;
+        data.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {1.1f, -0.5f}, 0.1f};
+        data.enemies[0].health = 1000;
+        data.enemies[0].move_speed = 0;
+        data.enemies[0].damage = 0;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xC05u}, data).Succeeded(), "redirected arrow initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantSkill,
+              static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+        Debug(simulation, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow), returning ? 0 : 1);
+        hs::HeldInputState held; held.aim_world = {20, 0, 0};
+        hs::Sequence sequence{};
+        (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+        hs::GameReadModelStorage model;
+        hs::ProjectileView before;
+        for (int i = 0; i < 30 && before.id.value == 0; ++i)
+        {
+            simulation.WriteReadModel(model);
+            if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
+            else (void)Tick(simulation, held);
+        }
+        Check(before.id.value != 0 && std::abs(before.position.x - 28.0f / 60.0f) < 0.0001f,
+              "fixture launches one unhomed authored-speed arrow");
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.7f, 1.069f});
+        if (!returning)
+            Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {-1.3f, 2});
+        const auto result = Tick(simulation, held);
+        simulation.WriteReadModel(model);
+        const auto view = model.View();
+        const auto arrow = std::ranges::find_if(view.projectiles, [&](const auto &p) {
+            return p.id.value == before.id.value;
+        });
+        Check(arrow != view.projectiles.end(), "redirected arrow survives the obsolete wall intersection");
+        Check(arrow->returning == returning && arrow->position.x < 0.66f,
+              "redirect uses its contact point and travels only the remaining tick");
+        Check(std::abs(arrow->previous_position.x - before.position.x) < 0.0001f,
+              "render interpolation retains the real tick start");
+        if (returning)
+        {
+            Check(std::abs(arrow->return_start_position.x - 0.6537507f) < 0.0001f &&
+                      std::abs(arrow->position.y) < 0.0001f,
+                  "return starts at contact and heads back toward the player");
+        }
+        else
+        {
+            Check(std::abs(arrow->position.x - 0.4583818f) < 0.0002f &&
+                      std::abs(arrow->position.y - 0.1999937f) < 0.0002f,
+                  "ricochet endpoint matches the contact-to-target remaining-time segment");
+            const auto child = std::ranges::find_if(view.projectiles, [](const auto &p) {
+                return p.origin == hs::EffectOrigin::Derived && p.source_upgrade == 1;
+            });
+            Check(child != view.projectiles.end() && child->spawned_tick == result.tick &&
+                      std::abs(child->position.x - 0.6537507f) < 0.0001f &&
+                      child->position.x == child->previous_position.x &&
+                      child->position.y == child->previous_position.y,
+                  "split child starts at contact and cannot travel during its spawn tick");
+        }
+        Check(simulation.GetObservation().damage_by_skill[5] > 0, "first enemy still receives damage");
+        Check(std::ranges::count_if(simulation.PendingDomainSignals(), [&](const auto &signal) {
+                  return signal.tick == result.tick && signal.kind == hs::DomainSignalKind::RicochetArrowHit;
+              }) == 1, "redirect departure cannot immediately rehit the same contact");
+        if (repeat) Check(checksums[returning] == result.checksum, "redirected paths replay deterministically");
+        else checksums[returning] = result.checksum;
+        Check(simulation.Shutdown().Succeeded(), "redirected arrow shutdown");
+    }
+}
+
+void TestPiercingAndWallContactOrder()
+{
+    const auto run = [](bool tie, bool wall) {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = wall ? 1 : 0;
+        data.arena_obstacles[0] = tie
+            ? hs::ArenaObstacle2D{hs::ArenaObstacleKind::Rock, {5, 1}, 0.63f}
+            : hs::ArenaObstacle2D{hs::ArenaObstacleKind::Rock, {6, 0}, 0.3f};
+        data.enemies[0].health = 1000;
+        data.enemies[0].move_speed = 0;
+        data.enemies[0].damage = 0;
+        data.skills[0].projectile_speed = 600;
+        data.skills[0].collision_radius = 0.44f;
+        data.skills[0].pierce_count = 3;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({0xC051u}, data).Succeeded(), "piercing order initialize");
+        if (tie) Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, -1});
+        else
+            for (const auto x : {2.0f, 4.0f, 8.0f})
+                Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {x, 0});
+        hs::HeldInputState held; held.aim_world = {20, 0, 0}; held.basic_attack_held = true;
+        (void)Tick(simulation, held); held.basic_attack_held = false;
+        for (int i = 0; i < 30; ++i) (void)Tick(simulation, held);
+        hs::GameReadModelStorage model;
+        simulation.WriteReadModel(model);
+        std::vector<std::int32_t> health;
+        for (const auto &enemy : model.View().enemies) health.push_back(enemy.health);
+        Check(simulation.Shutdown().Succeeded(), "piercing order shutdown");
+        return health;
+    };
+    const auto pierce = run(false, true);
+    Check(pierce.size() == 3 && pierce[0] < 1000 && pierce[1] < 1000 && pierce[2] == 1000,
+          "one straight segment pierces both front enemies and stops at the wall");
+    const auto tie = run(true, true), clear = run(true, false);
+    Check(tie.size() == 1 && clear.size() == 1 && tie[0] == 1000 && clear[0] < 1000,
+          "opaque terrain wins an equal actor TOI without dropping the clear control hit");
+}
+
+void TestZeroTimeRicochetsAreBounded()
+{
+    auto data = QuietGameData();
+    data.arena_obstacle_count = 0;
+    data.enemies[0].health = 10000;
+    data.enemies[0].move_speed = 0;
+    data.enemies[0].damage = 0;
+    data.skills[5].collision_radius = 100;
+    data.skills[5].pierce_count = 200;
+    data.skills[5].ricochet_search_radius = 32;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0xC052u}, data).Succeeded(), "zero-time ricochet initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+    for (int i = 0; i < 80; ++i)
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+              {2.0f + static_cast<float>(i % 10), static_cast<float>(i / 10)});
+    hs::HeldInputState held; held.aim_world = {20, 0, 0};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+    bool progressed{};
+    hs::GameReadModelStorage model;
+    for (int i = 0; i < 30 && !progressed; ++i)
+    {
+        (void)Tick(simulation, held);
+        simulation.WriteReadModel(model);
+        const auto enemies = model.View().enemies;
+        const auto hits = std::ranges::count_if(enemies, [](const auto &enemy) { return enemy.health < 10000; });
+        if (hits == 0) continue;
+        Check(hits < 80, "zero-time chains leave remaining contacts for a later tick");
+        progressed = true;
+    }
+    Check(progressed, "zero-time fixture reaches its first contacts");
+    for (int i = 0; i < 4; ++i) (void)Tick(simulation, held);
+    simulation.WriteReadModel(model);
+    Check(std::ranges::all_of(model.View().enemies, [](const auto &enemy) { return enemy.health < 10000; }),
+          "a bounded zero-time chain resumes and eventually visits every target");
+    Check(simulation.Shutdown().Succeeded(), "zero-time ricochet shutdown");
+}
+
+void TestSoftSeparationRecoversCoincidentCenters()
+{
+    for (const auto distance : {0.0f, 0.005f, 1.0f})
+    {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = 0;
+        data.enemies[0].move_speed = 0;
+        hs::GameSimulation first, repeat;
+        Check(first.Initialize({0x503u}, data).Succeeded() &&
+                  repeat.Initialize({0x503u}, data).Succeeded(), "soft separation initialize");
+        for (auto *simulation : {&first, &repeat})
+        {
+            Debug(*simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {4, 0});
+            Debug(*simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {4 + distance, 0});
+        }
+        Check(Tick(first).checksum == Tick(repeat).checksum, "coincident recovery is deterministic");
+        hs::GameReadModelStorage model;
+        first.WriteReadModel(model);
+        const auto enemies = model.View().enemies;
+        Check(enemies.size() == 2, "soft separation keeps both enemies");
+        const auto separated = std::hypot(enemies[0].position.x - enemies[1].position.x,
+                                         enemies[0].position.y - enemies[1].position.y);
+        Check(std::abs(separated - (distance < 0.8f ? 0.8f : distance)) < 0.0001f,
+              "coincident centers recover without changing the compressible soft radius");
+        Check(first.Shutdown().Succeeded() && repeat.Shutdown().Succeeded(), "soft separation shutdown");
+    }
+}
+
 void TestChargeBufferAndRecovery()
 {
     const auto player = [](hs::GameSimulation &simulation) {
@@ -800,6 +983,12 @@ void RunGameplayCombatTests()
     TestExplosionUpgradesRespectTerrain();
     TestSuccessfulInputReplacesOldBuffer();
     TestAttacksRespectTerrain();
+    TestRedirectedArrowUsesRemainingTick();
+    TestPiercingAndWallContactOrder();
+    TestZeroTimeRicochetsAreBounded();
+    TestSoftSeparationRecoversCoincidentCenters();
+    TestSecondRetreatRespectsCollision();
+    TestRicochetCooldownBudget();
     TestChargeBufferAndRecovery();
     TestCombatVfxCoverage();
     TestArrowReleaseCarriesAuthoritativeDirection();

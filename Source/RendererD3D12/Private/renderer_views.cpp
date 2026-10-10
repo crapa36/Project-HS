@@ -36,6 +36,7 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input) co
     if (streamline_session && streamline_session->Initialized() && render_package_id >= UINT32_MAX)
         return ViewFailure("Native rendered-package identity is exhausted; reinitialize the renderer.");
     std::vector<std::uint32_t> identities;
+    const bool dynamic_resolution_active = config.dynamic_resolution && !ResolveFeatures(config).software_gi_enabled;
     const auto origin = input.views.front().scene_origin;
     if (native_input_phase && std::ranges::none_of(input.views, [](const auto &view) { return view.role == RenderViewRole::Main; }))
         return ViewFailure("An outstanding main input token must be completed by a packet containing the main view.");
@@ -53,6 +54,13 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input) co
             !ExtentValid(view.render_active) || view.render_active.width > view.render_capacity.width ||
             view.render_active.height > view.render_capacity.height)
             return ViewFailure("View output, capacity and active extents are outside the native limits.");
+        if (dynamic_resolution_active)
+        {
+            ViewExtent minimum;
+            if (!ResolveDynamicResolutionExtent(view.output_extent, config.dynamic_min_percent, minimum) ||
+                view.render_capacity.width < minimum.width || view.render_capacity.height < minimum.height)
+                return ViewFailure("View capacity cannot cover the configured integer DRS minimum extent.");
+        }
         if (view.role == RenderViewRole::Main &&
             (view.output_extent != ViewExtent{width, height} || view.render_capacity != view_state.render_capacity))
             return ViewFailure("Main output/capacity must match the current presentation; use Resize or ApplyOptions first.");
@@ -1120,7 +1128,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         impl_->temporal_history_valid = false; impl_->hzb_history_valid = false;
         impl_->RecordViewHistoryKeys(kMainRenderViewId);
     }
-    const auto saved_config = impl_->config;
+    const auto saved_devtools_visible = impl_->config.devtools_visible;
     const auto saved_identity = impl_->sdk_frame_identity;
     const auto saved_input_phase = impl_->native_input_phase;
     impl_->active_render_package_id = impl_->render_package_id + 1;
@@ -1139,9 +1147,8 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         const auto &view = *view_pointer;
         if (auto r = impl_->ActivateView(view.id); !r) { result = r; break; }
         impl_->explicit_view = &view;
-        impl_->config = saved_config;
-        if (view.role != RenderViewRole::Main) impl_->config.devtools_visible = false;
-        else { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
+        impl_->config.devtools_visible = saved_devtools_visible && view.role == RenderViewRole::Main;
+        if (view.role == RenderViewRole::Main) { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
         const bool active_changed = view.render_active != impl_->view_state.render_active;
         (void)UpdateViewState(impl_->view_state, view.output_extent, view.render_capacity, view.render_active);
         impl_->render_width = view.render_active.width; impl_->render_height = view.render_active.height;
@@ -1197,7 +1204,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         impl_->skin_cache.Clear();
     }
     impl_->explicit_view = nullptr; impl_->explicit_frame = nullptr;
-    impl_->config = saved_config;
+    impl_->config.devtools_visible = saved_devtools_visible;
     if (auto restored = impl_->ActivateView(kMainRenderViewId); !restored) return restored;
     if (!rendered_main) { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
     if (rendered_main) frame_result = main_result;

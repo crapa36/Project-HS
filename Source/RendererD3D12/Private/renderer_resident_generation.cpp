@@ -418,8 +418,11 @@ Result D3D12Renderer::ReloadContentGeneration(
     const std::unordered_map<std::string, std::filesystem::path> &product_paths,
     const std::unordered_map<std::string, std::string> &product_digests,
     std::shared_ptr<const void> reader_lease,
-    const RendererVfxSpriteBindings *sprite_bindings)
+    const RendererVfxSpriteBindings *sprite_bindings,
+    bool *resident_replaced,
+    bool allow_resident_replacement)
 {
+    if (resident_replaced) *resident_replaced = false;
     if (!impl_->initialized || impl_->frame_submission_faulted || generation_id.empty() ||
         !reader_lease || product_paths.empty() || product_paths.size() != product_digests.size())
         return ResidentReloadFailure("Resident Generation adoption requires an active renderer and complete validated leased products.");
@@ -461,6 +464,10 @@ Result D3D12Renderer::ReloadContentGeneration(
         if (result) impl_->config.content_generation_lease = std::move(candidate.content_generation_lease);
         return result;
     }
-    return impl_->ReloadResidentGeneration(std::move(candidate));
+    if (!allow_resident_replacement)
+        return ResidentReloadFailure("Scene dependency closure changed; resident adoption requires a newly projected scene.");
+    auto result = impl_->ReloadResidentGeneration(std::move(candidate));
+    if (result && resident_replaced) *resident_replaced = true;
+    return result;
 }
 } // namespace hs

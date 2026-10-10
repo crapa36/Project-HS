@@ -4,6 +4,7 @@
 #include "renderer_pipeline_cache.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -109,7 +110,7 @@ struct VirtualShadowTargets
     };
     VirtualShadowProfile profile;
     ViewExtent extent;
-    std::uint32_t columns{}, entries{}, words{}, segment_capacity{}, descriptor_stride{}, dsv_stride{};
+    std::uint32_t columns{}, entries{}, words{}, descriptor_stride{}, dsv_stride{};
     std::uint64_t allocated{}, upload_bytes{}, caster_offset{512}, receiver_offset{};
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
@@ -303,7 +304,7 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
         UINT64(rows)*kVirtualShadowTile > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION)
         return Invalid("Virtual shadow physical bank exceeds the native texture extent.");
     t->extent = {t->columns*kVirtualShadowTile, rows*kVirtualShadowTile};
-    t->words = (t->entries+31)/32; t->segment_capacity = profile.command_capacity/(profile.max_draw_groups*2);
+    t->words = (t->entries+31)/32;
     t->receiver_offset = t->caster_offset+UINT64(profile.max_casters)*sizeof(GpuCaster);
     t->upload_bytes = t->receiver_offset+UINT64(profile.max_receivers)*sizeof(VirtualShadowReceiver);
     t->descriptor_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -494,14 +495,19 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     constants.identity = {std::uint32_t(in.light.stable_id), std::uint32_t(in.light.stable_id>>32u), in.light.generation,
         reset ? previous_epoch+1u : previous_epoch};
     constants.counts = {std::uint32_t(in.casters.size()), std::uint32_t(in.receivers.size()), t->entries, t->profile.physical_pages};
-    constants.limits = {t->profile.command_capacity, std::uint32_t(in.draw_groups.size()), in.render_active.width, in.render_active.height};
-    constants.frame = {std::uint32_t(in.rendered_frame_id), std::uint32_t(in.rendered_frame_id>>32u), t->words, t->profile.max_draw_groups*2};
-    constants.options = {reset ? 1u : 0u, requested ? 1u : 0u, t->segment_capacity, t->profile.filter_samples};
+    constants.limits = {UINT32_MAX, std::uint32_t(in.draw_groups.size()), in.render_active.width, in.render_active.height};
+    const auto group_count = static_cast<std::uint32_t>(in.draw_groups.size());
+    const auto segment_count = group_count*2;
+    // Reuse the fixed command allocation across active groups, rather than reserving it for absent groups.
+    const auto segment_capacity = segment_count ? t->profile.command_capacity/segment_count : 0u;
+    assert(UINT64(segment_count)*segment_capacity <= t->profile.command_capacity);
+    constants.frame = {std::uint32_t(in.rendered_frame_id), std::uint32_t(in.rendered_frame_id>>32u), t->words, segment_count};
+    constants.options = {reset ? 1u : 0u, requested ? 1u : 0u, segment_capacity, t->profile.filter_samples};
     void *mapped{}; const D3D12_RANGE no_read{};
     const auto mapped_hr = f.upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(mapped_hr)) return HResultFailure("Map immutable virtual shadow frame snapshot", mapped_hr);
     auto *bytes = static_cast<std::byte *>(mapped);
-    std::memcpy(bytes, &constants, sizeof(constants));
+    [[maybe_unused]] std::uint32_t changed_static_count{};
     for (std::size_t i = 0; i < in.casters.size(); ++i)
     {
         const auto &c = in.casters[i];
@@ -515,19 +521,40 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         GpuCaster gpu{c.current_bounds, c.previous_bounds,
             {c.instance_index, c.instance_generation, c.source_ref, c.geometry_record},
             {c.draw_group, c.index_count, c.first_index, std::uint32_t(c.base_vertex)},
-            {flags, c.meshlet_count, c.present ? std::uint32_t(in.draw_groups[c.draw_group].frontend) : 0u, 0u}};
+            {flags, c.meshlet_count, c.present ? std::uint32_t(in.draw_groups[c.draw_group].frontend) : 0u, constants.limits.x}};
         std::memcpy(bytes+t->caster_offset+i*sizeof(GpuCaster), &gpu, sizeof(gpu));
+        if (changed && (is_static || was_static))
+        {
+            constants.limits.x = static_cast<std::uint32_t>(i);
+            ++changed_static_count;
+        }
     }
+    // Link only cache-invalidating changes; preserve caster order and draw identities.
+#ifndef NDEBUG
+    std::uint32_t linked_count{};
+    for (auto index = constants.limits.x; index != UINT32_MAX; )
+    {
+        assert(index < in.casters.size());
+        GpuCaster caster;
+        std::memcpy(&caster, bytes+t->caster_offset+index*sizeof(GpuCaster), sizeof(caster));
+        assert((caster.properties.x & 16u) != 0 && (caster.properties.x & 12u) != 0);
+        assert(caster.properties.w == UINT32_MAX || caster.properties.w < index);
+        index = caster.properties.w;
+        ++linked_count;
+    }
+    assert(linked_count == changed_static_count);
+#endif
+    std::memcpy(bytes, &constants, sizeof(constants));
     if (!in.receivers.empty()) std::memcpy(bytes+t->receiver_offset, in.receivers.data(), in.receivers.size_bytes());
     const D3D12_RANGE written{0, static_cast<SIZE_T>(t->upload_bytes)}; f.upload.resource->Unmap(0, &written);
     f.batches.clear();
     for (std::uint32_t layer = 0; layer < 2; ++layer)
         for (std::uint32_t group = 0; group < in.draw_groups.size(); ++group)
         {
-            const auto segment = layer*t->profile.max_draw_groups+group;
+            const auto segment = layer*group_count+group;
             const auto stride = in.draw_groups[group].frontend == VirtualShadowFrontend::Indexed ? kIndexedStride : kMeshStride;
-            f.batches.push_back({in.draw_groups[group], group, layer, t->segment_capacity,
-                UINT64(segment)*t->segment_capacity*stride, UINT64(segment)*4});
+            f.batches.push_back({in.draw_groups[group], group, layer, segment_capacity,
+                UINT64(segment)*segment_capacity*stride, UINT64(segment)*4});
         }
     TextureSrv(t->device.Get(), in.depth_resource, DXGI_FORMAT_R32_FLOAT,
         Cpu(t->compute_heap.Get(), in.frame_slot*kComputeDescriptors, t->descriptor_stride));
@@ -619,12 +646,12 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         auto pass = graph.AddPass(225, "VirtualShadow.AdmitCompletePages", QueueHint::Compute);
         pass.Read(page_draw_counts, Access::UnorderedRead);
         pages = pass.ReadWrite(pages, Access::UnorderedWrite);
-        pass.SetExecute([t, slot=in.frame_slot](RenderPassContext &ctx)
+        pass.SetExecute([t, slot=in.frame_slot, segment_count](RenderPassContext &ctx)
         {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
             list->SetComputeRoot32BitConstant(3, 1, 0);
-            list->Dispatch((t->profile.max_draw_groups*2+63)/64, 1, 1);
+            if (segment_count) list->Dispatch((segment_count+63)/64, 1, 1);
         });
     }
     {
@@ -678,7 +705,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
             list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             list->ExecuteIndirect(t->clear_signature.Get(), t->profile.physical_pages, frame.clear.resource.Get(),
                 UINT64(layer)*t->profile.physical_pages*kClearStride, frame.counts.resource.Get(),
-                UINT64(t->profile.max_draw_groups*2+layer)*4);
+                UINT64(group_count*2+layer)*4);
             return callback(ctx, outputs, std::span<const VirtualShadowDrawBatch>{frame.batches}.subspan(layer*group_count, group_count));
         });
     }

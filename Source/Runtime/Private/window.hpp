@@ -64,7 +64,6 @@ class Window
     HWND window_{};
     HINSTANCE instance_{};
     HeldInputState held_{};
-    Float2 ui_cursor_normalized_{};
     std::array<std::uint16_t, 4> skill_virtual_keys_{};
     PresentationCamera camera_{};
     std::optional<std::uint8_t> pending_rebind_slot_;

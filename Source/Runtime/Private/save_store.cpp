@@ -995,8 +995,8 @@ template <typename Data>
                 }
             }
         };
-        if (backup_status == ReadStatus::Valid) retain(existing_backup);
         if (status == ReadStatus::Valid) retain(existing);
+        if (backup_status == ReadStatus::Valid) retain(existing_backup);
         to_write.opaque_optional_json = selected.dump();
         if (!ValidSettingsDocument(to_write))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",

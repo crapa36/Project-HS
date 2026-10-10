@@ -190,7 +190,12 @@ HsSurfaceClosure HsRayEvaluateSurface(HsRayHitContext hit)
         h.MaterialId=HsHeroOpaqueMaterialId(h.Mesh,h.Material);
         HsMaterialContext ctx=HsHeroMaterialContext(h,hit.front,hit.gradients,ordinal);
         ctx.view_direction=hit.outgoing;ctx.eye_distance=hit.distance;
-        return HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
+        HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
+        // Ray identity stores a zero-based slot; raster entity keys reserve zero.
+        // Static ray slots carry the high bit and have no dynamic surface payload.
+        if((g.identity.x&0x80000000u)==0u)
+            surface.emission+=HsEntitySurface(h.Mesh,uint2(g.identity.x+1u,g.identity.y),h.WorldPosition).rgb;
+        return surface;
     }
     // Diagnostic terrain and canonical runtime primitives retain their raster
     // material evaluation, including procedural grid gradients and tint.

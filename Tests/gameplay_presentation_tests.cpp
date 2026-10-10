@@ -21,7 +21,94 @@ namespace
 {
 void CheckSettingsTelemetry(hs::GameSimulation &simulation)
 {
+    for (const auto &descriptor : hs::GraphicsSettingDescriptors())
+    {
+        const auto label = hs::GraphicsSettingDisplayLabel(descriptor);
+        Check(std::ranges::any_of(label, [](unsigned char byte) { return byte >= 0x80; }),
+              "every graphics setting has a Korean display label");
+    }
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Vsync, "true") == "켜짐" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "0") == "제한 없음" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::ManualScalePercent, "75") == "75%" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::ReconstructionProvider, "internal_taau") == "기본 TAA 업스케일링" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::RayReconstructionProvider, "internal") == "기본 광선 노이즈 제거",
+          "settings localize values and show meaningful units");
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Sharpening, "0.200000003") == "0.2" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::BloomStrength, "0.100000001") == "0.1" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::OutlineWidthPx, "1.23456789") == "1.235 px",
+          "float display removes binary precision noise and retains three decimal places");
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "1000.12500001") == "1000.125 nit" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "auto") == "자동" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "144") == "144 FPS",
+          "auto-float display keeps units while automatic and integer values stay intact");
+    hs::GraphicsSettings capped;
+    capped.frame_limit_fps = 120;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "144",
+          "common high-refresh frame caps are selectable");
+    capped.frame_limit_fps = 144;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, -1, nullptr) == "120" &&
+              hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "165",
+          "144 FPS has adjacent high-refresh choices");
+    capped.frame_limit_fps = 138;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, -1, nullptr) == "120" &&
+              hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "144",
+          "custom saved frame caps retain their numeric position");
+    for (const auto extent : {hs::GraphicsExtent{1920, 1080}, {2560, 1080}, {1280, 1024}})
+    {
+        const auto scale = std::min(extent.width / 1920.0f, extent.height / 1080.0f);
+        const hs::Float2 pixels{extent.width * 0.5f + (1560 - 960) * scale,
+                               extent.height * 0.5f + (270 - 540) * scale};
+        const auto cursor = hs::ReferenceUiCursor(pixels, extent);
+        Check(std::abs(cursor.x - 0.625f) < 0.0001f &&
+                  std::abs(cursor.y - 0.5f) < 0.0001f,
+              "current click coordinates match letterboxed UI on every aspect ratio");
+    }
+    hs::GraphicsSettingsUiModel clicks;
+    auto click_ui = test_ui;
+    click_ui.settings_group = 1;
+    const auto click = hs::ResolveUiInteraction({}, click_ui, {},
+        hs::ReferenceUiCursor({1000, 430}, {1920, 1080}), &clicks);
+    Check(click.runtime_command && click.runtime_command->graphics_setting == hs::SettingId::Vsync &&
+              std::string_view(click.runtime_command->graphics_token.data()) == "false",
+          "clicking a setting value changes its canonical setting");
     hs::GraphicsSettingsUiModel receipt;
+    receipt.choices = {
+        {hs::SettingId::HdrMode, "off", "off", "", true},
+        {hs::SettingId::HdrMode, "auto", "auto", "", true},
+        {hs::SettingId::HdrMode, "on", "on", "HDR 미지원", false},
+        {hs::SettingId::ReconstructionProvider, "auto", "auto", "", true},
+        {hs::SettingId::ReconstructionProvider, "dlss", "dlss", "DLSS 미지원", false},
+        {hs::SettingId::ReconstructionProvider, "internal_taau", "internal_taau", "", true},
+        {hs::SettingId::FrameGenerationMode, "off", "off", "", true},
+        {hs::SettingId::FrameGenerationMode, "auto", "auto", "프레임 생성 미지원", false}};
+    Check(!hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", nullptr) &&
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::ReconstructionProvider, "dlss", &receipt) &&
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::Preset, "ultra_rt", &receipt),
+          "unsupported features and RT presets cannot be enabled before or after capability discovery");
+    receipt.requested.hdr_mode = hs::GraphicsHdrMode::Off;
+    receipt.requested.frame_generation_mode = hs::GraphicsFrameGenerationMode::Off;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "auto" &&
+              hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "internal_taau" &&
+              !hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::FrameGenerationMode, 1, &receipt),
+          "settings skip unsupported choices and disable controls with no available alternative");
+    receipt.requested.hdr_mode = hs::GraphicsHdrMode::On;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "off",
+          "an unavailable saved setting can still be turned off");
+    receipt.choices[2].available = true;
+    receipt.choices[4].available = true;
+    Check(hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
+              hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "dlss",
+          "capability changes immediately restore supported choices");
+    for (const auto choice : std::array{
+             hs::GraphicsUiChoice{hs::SettingId::RayTracingEnabled, "true", "", "", true},
+             hs::GraphicsUiChoice{hs::SettingId::AoMode, "auto", "", "", true},
+             hs::GraphicsUiChoice{hs::SettingId::GiMode, "ray_traced", "", "", true},
+             hs::GraphicsUiChoice{hs::SettingId::ReflectionMode, "hybrid_rt", "", "", true},
+             hs::GraphicsUiChoice{hs::SettingId::ShadowMode, "hybrid_rt", "", "", true}})
+        receipt.choices.push_back(choice);
+    Check(hs::GraphicsSettingTokenAvailable(hs::SettingId::Preset, "ultra_rt", &receipt),
+          "the RT preset requires the exact modes it applies, including automatic AO");
     receipt.telemetry_status = {
         "Monitor fixture | Refresh 59.94 Hz | Monitor HDR active | Renderer HDR10",
         "Render 1280x720 / output 1920x1080 | Render FPS 61.5 | Display FPS unavailable",
@@ -417,7 +504,7 @@ void TestPauseMenuActions()
     CheckSettingsTelemetry(simulation);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "in-game settings snapshot");
-    Check(contains_text("Profile") && contains_text("Display") &&
+    Check(contains_text("품질") && contains_text("화면") &&
               contains_text("돌아가기") && !contains_text("상세 능력치") &&
               !contains_text("캐릭터 정보") && !contains_text("스킬·강화"),
           "in-game settings does not render the character information page");

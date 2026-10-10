@@ -32,18 +32,11 @@ bool ValidConfig(const DynamicResolutionConfig &config) noexcept
            std::isfinite(config.max_scale_change_percent) && config.max_scale_change_percent > 0.0;
 }
 
-// Quantize inside the requested scale, capacity and per-sample rate bounds.
-// If a rate interval contains no aligned dimension, retain that dimension;
-// the controller must not violate the rate bound just to reach an 8px boundary.
-std::uint32_t SelectDimension(std::uint32_t output, std::uint32_t capacity,
-                              std::uint32_t current, double desired_scale,
-                              double minimum_scale, double maximum_scale,
+// Alignment is a preference, never a reason to keep an out-of-domain extent.
+std::uint32_t SelectDimension(std::uint32_t output, std::uint32_t current,
+                              double desired_scale, double global_minimum, double global_maximum,
                               double rate, std::uint32_t quantum) noexcept
 {
-    const auto alignment = quantum <= capacity ? quantum : 1u;
-    const double global_minimum = std::max(1.0, std::ceil(output * minimum_scale));
-    const double global_maximum = std::min<double>(capacity, std::floor(output * maximum_scale));
-    if (global_minimum > global_maximum) return current;
     // Configuration changes first establish a feasible interval. Ordinary DRS
     // samples additionally remain within the configured change from this extent.
     const bool current_in_range = current >= global_minimum && current <= global_maximum;
@@ -51,13 +44,30 @@ std::uint32_t SelectDimension(std::uint32_t output, std::uint32_t capacity,
         ? std::max(global_minimum, std::ceil(current - output * rate)) : global_minimum;
     const double maximum = current_in_range
         ? std::min(global_maximum, std::floor(current + output * rate)) : global_maximum;
-    const double aligned_minimum = std::ceil(minimum / alignment) * alignment;
-    const double aligned_maximum = std::floor(maximum / alignment) * alignment;
-    if (aligned_minimum > aligned_maximum) return current;
-    const double desired = std::round(output * desired_scale / alignment) * alignment;
-    return static_cast<std::uint32_t>(std::clamp(desired, aligned_minimum, aligned_maximum));
+    const double aligned_minimum = std::ceil(minimum / quantum) * quantum;
+    const double aligned_maximum = std::floor(maximum / quantum) * quantum;
+    if (aligned_minimum <= aligned_maximum)
+    {
+        const double desired = std::round(output * desired_scale / quantum) * quantum;
+        return static_cast<std::uint32_t>(std::clamp(desired, aligned_minimum, aligned_maximum));
+    }
+    return static_cast<std::uint32_t>(std::clamp(std::round(output * desired_scale), minimum, maximum));
 }
 } // namespace
+
+bool ResolveDynamicResolutionExtent(ViewExtent output, double percent, ViewExtent &extent) noexcept
+{
+    if (!ValidExtent(output) || !std::isfinite(percent) || percent <= 0.0) return false;
+    const auto scaled = [percent](std::uint32_t pixels) {
+        return std::max(1.0, std::ceil(static_cast<double>(pixels) * percent / 100.0));
+    };
+    const auto width = scaled(output.width), height = scaled(output.height);
+    if (!std::isfinite(width) || !std::isfinite(height) ||
+        width > std::numeric_limits<std::uint32_t>::max() ||
+        height > std::numeric_limits<std::uint32_t>::max()) return false;
+    extent = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+    return true;
+}
 
 bool UpdateViewState(ViewState &state, ViewExtent output,
                      ViewExtent capacity, ViewExtent active) noexcept
@@ -114,15 +124,22 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     selection.filtered_critical_path_ms = filtered_ms_;
 
     const double target_ms = 1000.0 / config.target_render_fps;
-    const double minimum_scale = config.min_scale_percent * 0.01;
-    const double maximum_scale = std::min({config.max_scale_percent * 0.01,
+    ViewExtent minimum, maximum;
+    if (!ResolveDynamicResolutionExtent(view.output_extent, config.min_scale_percent, minimum) ||
+        !ResolveDynamicResolutionExtent(view.output_extent, config.max_scale_percent, maximum)) return selection;
+    maximum.width = std::min(maximum.width, view.render_capacity.width);
+    maximum.height = std::min(maximum.height, view.render_capacity.height);
+    if (minimum.width > maximum.width || minimum.height > maximum.height) return selection;
+    const double minimum_scale = config.min_scale_percent / 100.0;
+    const double maximum_scale = std::min({config.max_scale_percent / 100.0,
         static_cast<double>(view.render_capacity.width) / view.output_extent.width,
         static_cast<double>(view.render_capacity.height) / view.output_extent.height});
     if (minimum_scale > maximum_scale) return selection;
     const double current_scale = std::min(
         static_cast<double>(view.render_active.width) / view.output_extent.width,
         static_cast<double>(view.render_active.height) / view.output_extent.height);
-    if (current_scale >= minimum_scale && current_scale <= maximum_scale &&
+    if (view.render_active.width >= minimum.width && view.render_active.width <= maximum.width &&
+        view.render_active.height >= minimum.height && view.render_active.height <= maximum.height &&
         std::abs(filtered_ms_ - target_ms) <= target_ms * config.hysteresis_fraction)
         return selection;
 
@@ -135,10 +152,10 @@ DynamicResolutionSelection DynamicResolutionController::Select(
     const double desired_scale = std::clamp(current_scale * std::sqrt(target_ms / filtered_ms_),
                                             lower_scale, upper_scale);
     selection.active_extent = {
-        SelectDimension(view.output_extent.width, view.render_capacity.width,
-            view.render_active.width, desired_scale, minimum_scale, maximum_scale, rate, config.extent_quantum),
-        SelectDimension(view.output_extent.height, view.render_capacity.height,
-            view.render_active.height, desired_scale, minimum_scale, maximum_scale, rate, config.extent_quantum)};
+        SelectDimension(view.output_extent.width, view.render_active.width, desired_scale,
+            minimum.width, maximum.width, rate, config.extent_quantum),
+        SelectDimension(view.output_extent.height, view.render_active.height, desired_scale,
+            minimum.height, maximum.height, rate, config.extent_quantum)};
     selection.changed = selection.active_extent != view.render_active;
     return selection;
 }

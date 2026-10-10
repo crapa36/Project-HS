@@ -104,7 +104,7 @@ struct LocalProbeStorage
     std::uint32_t mip_count{},srv_stride{},rtv_stride{},captured_views{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
-    CompletionSet completion,bake_completion;
+    CompletionSet completion,capture_completion,bake_completion;
     bool uploaded{},package_baked{},bake_submitted{},published{},usable{true};
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(ID3D12DescriptorHeap *heap,std::uint32_t index,std::uint32_t stride) const
     { auto h=heap->GetCPUDescriptorHandleForHeapStart(); h.ptr+=SIZE_T(index)*stride; return h; }
@@ -308,14 +308,14 @@ Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInpu
     if(!in.scene)
     {
         s->published=false;
-        if(s->completion.IsSatisfiedBy(in.completed))
+        if(s->capture_completion.IsSatisfiedBy(in.completed))
         { s->scene.reset(); s->revisions={}; s->captured_views=0; s->bake_submitted=false; }
     }
     const bool same=s->scene==in.scene && s->revisions==in.revisions;
     if(!same)
     {
         s->published=false;
-        if(s->completion.IsSatisfiedBy(in.completed))
+        if(s->capture_completion.IsSatisfiedBy(in.completed))
         {
             const bool initial=!s->scene;
             s->scene=in.scene; s->revisions=in.revisions; s->captured_views=0; s->bake_submitted=false;
@@ -462,7 +462,7 @@ bool LocalProbeSystem::NativeCaptureRequired(const std::shared_ptr<const StaticR
     if(!s || !s->usable || !scene) return false;
     if(s->scene!=scene || s->revisions!=revisions)
     {
-        if(!s->completion.IsSatisfiedBy(completed)) return false;
+        if(!s->capture_completion.IsSatisfiedBy(completed)) return false;
         return !(!s->scene && s->package_baked && s->description.revisions==revisions);
     }
     return !s->published && !s->bake_submitted && s->captured_views<s->probes.size()*6;
@@ -477,6 +477,8 @@ Result LocalProbeSystem::CompleteSubmission(const RenderGraphBuilder &graph,cons
     for(const auto &item:p.imports)
     {
         const auto c=graph.ResourceCompletion(item.handle); s->completion.Merge(c); item.allocation->graph_completion.Merge(c); item.allocation->graph_completion.Merge(completion);
+        // Zero-count metadata stays readable while a stale cube capture waits for its own users to finish.
+        if(item.allocation!=&s->disabled_records) { s->capture_completion.Merge(c); s->capture_completion.Merge(completion); }
         if(success) { item.allocation->graph_access=graph.FinalAccess(item.handle); item.allocation->graph_queue=graph.FinalQueue(item.handle); }
     }
     if(success)

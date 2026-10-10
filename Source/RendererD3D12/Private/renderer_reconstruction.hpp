@@ -4,8 +4,6 @@
 #include <hs/renderer/renderer.hpp>
 
 #include <algorithm>
-#include <cmath>
-#include <limits>
 
 namespace hs
 {
@@ -33,20 +31,17 @@ Result ResolveNativeReconstruction(const Options &options, ViewExtent output,
     if (auto resolved = ResolveInternalReconstruction(request, output, plan); !resolved) return resolved;
     capacity = plan.render_active;
     if (!options.dynamic_resolution) return Result::Success();
-    const auto scaled = [](std::uint32_t pixels, float percent, std::uint32_t &result) {
-        const auto value = std::max(1.0, std::ceil(static_cast<double>(pixels) * percent / 100.0));
-        if (value > std::numeric_limits<std::uint32_t>::max()) return false;
-        result = static_cast<std::uint32_t>(value);
-        return true;
-    };
     ViewExtent minimum;
-    if (!scaled(output.width, options.dynamic_max_percent, capacity.width) ||
-        !scaled(output.height, options.dynamic_max_percent, capacity.height) ||
-        !scaled(output.width, options.dynamic_min_percent, minimum.width) ||
-        !scaled(output.height, options.dynamic_min_percent, minimum.height))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_reconstruction", "DRS render capacity overflows.");
+    if (options.dynamic_min_percent > options.dynamic_max_percent ||
+        !ResolveDynamicResolutionExtent(output, options.dynamic_min_percent, minimum) ||
+        !ResolveDynamicResolutionExtent(output, options.dynamic_max_percent, capacity))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_reconstruction",
+            "DRS bounds must be finite, positive, ordered and fit integer render extents.");
     plan.render_active.width = std::clamp(plan.render_active.width, minimum.width, capacity.width);
     plan.render_active.height = std::clamp(plan.render_active.height, minimum.height, capacity.height);
+    plan.input_minimum = minimum;
+    plan.input_maximum = capacity;
+    plan.effective_scale_percent = 100.0f * plan.render_active.width / output.width;
     if (plan.effective_provider.value == "native_taa" && options.dynamic_min_percent != 100.0f)
     {
         plan.effective_provider.value = "internal_taau";

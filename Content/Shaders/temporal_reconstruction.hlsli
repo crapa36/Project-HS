@@ -110,7 +110,7 @@ bool HsTemporalSkyPreviousUv(HsTemporalInput input, out float2 previous_uv)
 HsTemporalResult HsResolveTemporal(
     HsTemporalInput input, Texture2D<float4> scene_color,
     Texture2D<float4> history_color_depth, Texture2D<float2> history_normal_oct,
-    Texture2D<uint2> history_material, SamplerState linear_clamp)
+    Texture2D<uint2> history_material)
 {
     HsTemporalResult result = (HsTemporalResult)0;
     bool surface_valid = input.current_depth > 0.0;
@@ -119,9 +119,10 @@ HsTemporalResult HsResolveTemporal(
     result.color_depth = float4(current, surface_valid ? input.current_depth : 0.0);
     result.normal_oct = surface_valid ? HsTemporalEncodeNormal(normalize(input.current_normal)) : 0.0;
     result.material_key = surface_valid ? input.material_key : uint2(0, 0);
-    if (!input.history_valid || input.previous_pre_exposure <= 0.0 ||
+    if (!input.history_valid || !isfinite(input.previous_pre_exposure) ||
+        !isfinite(input.current_pre_exposure) || input.previous_pre_exposure <= 0.0 ||
         input.current_pre_exposure <= 0.0 ||
-        (surface_valid && input.history_confidence <= 0.0)) return result;
+        (surface_valid && (!isfinite(input.history_confidence) || input.history_confidence <= 0.0))) return result;
 
     float2 previous_uv;
     if (surface_valid)
@@ -135,24 +136,41 @@ HsTemporalResult HsResolveTemporal(
     float2 half_texel = 0.5 / float2(input.output_extent);
     if (!all(isfinite(previous_uv)) || any(previous_uv < half_texel) || any(previous_uv > 1.0 - half_texel))
         return result;
-    int2 previous_pixel = min(int2(previous_uv * float2(input.output_extent)), int2(input.output_extent) - 1);
-    float history_depth = history_color_depth.Load(int3(previous_pixel, 0)).a;
-    if (surface_valid)
+    const float2 history_position = previous_uv * float2(input.output_extent) - 0.5;
+    const int2 history_base = int2(floor(history_position));
+    const float2 history_fraction = frac(history_position);
+    float3 history = 0.0;
+    float valid_history_weight = 0.0;
+    // Validate the same bilinear footprint that contributes history radiance.
+    [unroll] for (int y = 0; y < 2; ++y)
     {
-        if (history_depth <= 0.0 || abs(history_depth - input.expected_previous_depth) > 0.002)
-            return result;
-        uint2 previous_material = history_material.Load(int3(previous_pixel, 0));
-        if (any(previous_material != input.material_key)) return result;
-        float3 previous_normal = HsTemporalDecodeNormal(history_normal_oct.Load(int3(previous_pixel, 0)));
-        if (dot(normalize(input.current_normal), previous_normal) < 0.85) return result;
+        [unroll] for (int x = 0; x < 2; ++x)
+        {
+            const float weight = (x == 0 ? 1.0 - history_fraction.x : history_fraction.x) *
+                (y == 0 ? 1.0 - history_fraction.y : history_fraction.y);
+            if (weight <= 0.0) continue;
+            const int3 coordinate = int3(clamp(history_base + int2(x, y),
+                int2(0, 0), int2(input.output_extent) - 1), 0);
+            const float4 sample = history_color_depth.Load(coordinate);
+            if (!all(isfinite(sample))) continue;
+            if (surface_valid)
+            {
+                if (sample.a <= 0.0 || !isfinite(input.expected_previous_depth) ||
+                    abs(sample.a - input.expected_previous_depth) > 0.002) continue;
+                if (any(history_material.Load(coordinate) != input.material_key)) continue;
+                const float2 previous_oct = history_normal_oct.Load(coordinate);
+                if (!all(isfinite(previous_oct))) continue;
+                const float3 previous_normal = HsTemporalDecodeNormal(previous_oct);
+                const float agreement = dot(normalize(input.current_normal), previous_normal);
+                if (!isfinite(agreement) || agreement < 0.85) continue;
+            }
+            else if (sample.a > 0.0) continue;
+            history += sample.rgb * weight;
+            valid_history_weight += weight;
+        }
     }
-    else if (history_depth > 0.0)
-    {
-        return result;
-    }
-
-    float3 history = history_color_depth.SampleLevel(linear_clamp, previous_uv, 0).rgb
-        * (input.current_pre_exposure / input.previous_pre_exposure);
+    if (valid_history_weight <= 0.00001) return result;
+    history = (history / valid_history_weight) * (input.current_pre_exposure / input.previous_pre_exposure);
     if (!all(isfinite(history))) return result;
     int2 current_pixel = clamp(int2(current_render_uv * float2(input.render_extent)),
         int2(0, 0), int2(input.render_extent) - 1);
@@ -170,7 +188,7 @@ HsTemporalResult HsResolveTemporal(
     }
     float3 clipped_history = clamp(history, minimum, maximum);
     float change = saturate(length(current - clipped_history) / max(1.0, length(current)));
-    float confidence = surface_valid ? saturate(input.history_confidence) : 1.0;
+    float confidence = (surface_valid ? saturate(input.history_confidence) : 1.0) * saturate(valid_history_weight);
     float history_weight = 0.88 * confidence * (1.0 - saturate(input.reactive)) * (1.0 - change);
     result.color_depth.rgb = lerp(current, clipped_history, history_weight);
     return result;

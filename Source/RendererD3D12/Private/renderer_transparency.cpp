@@ -272,7 +272,8 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         else if (index == 2)
         {
-            pipeline.NumRenderTargets = 2; pipeline.RTVFormats[0] = kColor; pipeline.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
+            pipeline.NumRenderTargets = 2; pipeline.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            pipeline.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
             pipeline.BlendState.IndependentBlendEnable = TRUE;
             auto &accumulation = pipeline.BlendState.RenderTarget[0];
             accumulation.BlendEnable = TRUE; accumulation.SrcBlend = accumulation.DestBlend = D3D12_BLEND_ONE;
@@ -380,7 +381,8 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     if (!ValidExtent(active) || active.width > storage->capacity.width || active.height > storage->capacity.height ||
         inputs.frame_slot >= storage->frame_slot_count || !storage->slot_completion[inputs.frame_slot].IsSatisfiedBy(inputs.completed) ||
         !FitsDepth(inputs.opaque_depth, active) || !Fits(inputs.hdr, active, kColor) ||
-        !Fits(inputs.accumulation, active, kColor) || !Fits(inputs.revealage, active, DXGI_FORMAT_R16_FLOAT) ||
+        !Fits(inputs.accumulation, active, DXGI_FORMAT_R32G32B32A32_FLOAT) ||
+        !Fits(inputs.revealage, active, DXGI_FORMAT_R16_FLOAT) ||
         !inputs.accumulation_rtv.ptr || !inputs.revealage_rtv.ptr || !inputs.shader_heap ||
         !inputs.table_cpu.ptr || !inputs.table_gpu.ptr || inputs.descriptor_stride != storage->srv_stride || !inputs.draw)
         return Failure(ErrorCode::InvalidArgument, "Hero transparency frame, guides, native table or draw callback is invalid.");

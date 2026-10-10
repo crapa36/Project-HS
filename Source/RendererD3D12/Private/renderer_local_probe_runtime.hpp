@@ -8,6 +8,7 @@
 #include <wrl/client.h>
 
 #include <string>
+#include <string_view>
 
 namespace hs
 {
@@ -84,7 +85,8 @@ class LocalProbeRuntime
     LocalProbeRuntime(const LocalProbeRuntime &) = delete;
     LocalProbeRuntime &operator=(const LocalProbeRuntime &) = delete;
     [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *, ID3D12RootSignature *,
-        const RendererConfig &, LocalProbeRuntimeCandidate &, RendererPipelineCache *) const;
+        const RendererConfig &, std::string_view scene_generation,
+        LocalProbeRuntimeCandidate &, RendererPipelineCache *) const;
     [[nodiscard]] Result Commit(LocalProbeRuntimeCandidate &&, const CompletionSet &completed);
     [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
         render_data::SceneProbeRevisions &) const;

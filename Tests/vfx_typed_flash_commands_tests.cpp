@@ -1191,22 +1191,48 @@ void PickupCollectorImpactUsesLinkSource()
         link.source_position = {3, .4f, 4};
         link.target_position = {7, .4f, 9};
         input.payload = link;
-        const auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(
-            cooked, std::span(&input, 1)); };
+        std::vector<hs::Sequence> superseded;
+        const auto run = [&] {
+            superseded.clear();
+            return hs::runtime_detail::BuildVfxTypedFlashCommands(
+                cooked, std::span(&input, 1), &superseded);
+        };
         auto commands = run();
         Require(commands.size() == 1 && commands[0].shape == hs::VfxImpactShape::StarRing &&
                 Near(commands[0].position.x, 3) && Near(commands[0].position.z, 4) &&
                 Near(commands[0].direction.x, 4.0f / std::sqrt(41.0f)) &&
-                Near(commands[0].lifetime, .08f),
+                Near(commands[0].lifetime, .08f) && superseded == std::vector<hs::Sequence>{12},
                 "pickup link impact did not start at authoritative pickup position");
+        cooked.outputs[0].shape = Hash32("unsupported_pickup_shape");
+        Require(run().empty() && superseded.empty(),
+                "unsupported pickup burst suppressed its legacy fallback");
+        cooked.outputs[0].shape = output.shape;
+        cooked.outputs[0].hdr = std::numeric_limits<float>::quiet_NaN();
+        Require(run().empty() && superseded.empty(),
+                "malformed pickup burst suppressed its legacy fallback");
+        cooked.outputs[0].hdr = output.hdr;
+        auto rejected = input;
+        rejected.sequence = 13;
+        std::get<hs::VfxLinkPayload>(rejected.payload).target_position.x =
+            std::numeric_limits<float>::quiet_NaN();
+        const std::array mixed{input, rejected};
+        superseded.clear();
+        Require(hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, mixed, &superseded).size() == 1 &&
+                    superseded == std::vector<hs::Sequence>{12},
+                "partially rejected pickup batch suppressed an unconverted event");
         link.target_position = link.source_position;
         input.payload = link;
-        Require(run().size() == 1, "coincident collector dropped pickup burst");
+        Require(run().size() == 1 && superseded == std::vector<hs::Sequence>{12},
+                "coincident collector dropped pickup burst");
         input.sequence = 0;
-        Require(run().empty(), "unidentified pickup collector event accepted");
+        Require(run().empty() && superseded.empty(), "unidentified pickup collector event accepted");
         input.sequence = 12;
         cooked.effect_lookup[0].effect_id = Hash64("particle.player.arrow_release");
-        Require(run().empty(), "unrelated link effect accepted as pickup impact");
+        Require(run().empty() && superseded.empty(), "unrelated link effect accepted as pickup impact");
+        cooked.effects[0].payload_kind = Hash32("PointEventPayload");
+        input.payload = hs::VfxPointPayload{};
+        Require(run().size() == 1 && superseded.empty(),
+                "non-pickup typed flash suppressed compatibility layers");
     }
 }
 
@@ -1258,9 +1284,10 @@ void ProductionStatusAndPickupOutputsDecode()
         link.source_position = {3, .3f, 4};
         link.target_position = {7, .3f, 9};
         event.payload = link;
+        std::vector<hs::Sequence> superseded;
         const auto commands = hs::runtime_detail::BuildVfxTypedFlashCommands(
-            cooked, std::span(&event, 1));
-        Require(commands.size() == 1,
+            cooked, std::span(&event, 1), &superseded);
+        Require(commands.size() == 1 && superseded == std::vector<hs::Sequence>{event.sequence},
                 "production pickup link did not decode its collection burst");
     }
 }

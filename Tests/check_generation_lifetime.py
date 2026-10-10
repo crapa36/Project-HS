@@ -92,7 +92,9 @@ def main():
     args = parser.parse_args()
     processes = []
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix='hs-reader-lifetime-') as temporary:
+    # Quarantined paths contain two SHA256 names plus a native temporary suffix.
+    # Keep fixture names compact so ordinary Windows I/O stays below MAX_PATH.
+    with tempfile.TemporaryDirectory(prefix='hs-gen-') as temporary:
         base = Path(temporary)
         root = base / 'build'
         def compose(scope='test', result=None, success=True):
@@ -438,7 +440,7 @@ def main():
 
             # Both rename boundaries in repair must recover without losing evidence.
             for moved_tree in (False, True):
-                repairing = base / f'interrupted-repair-{moved_tree}'
+                repairing = base / f'repair-{int(moved_tree)}'
                 repair_result = publish(repairing, 'f' * 64, b'F')
                 repair_command = [args.generation, '--compose', '--build-root', repairing,
                     '--scope', 'repair', '--result', repair_result]
