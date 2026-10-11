@@ -82,6 +82,19 @@ GameSimulation::GameSimulation() : impl_(std::make_unique<SimulationWorld>())
 
 GameSimulation::~GameSimulation() = default;
 
+void GameSimulation::SimulationWorld::RebuildNavigation()
+{
+    const auto obstacles = ArenaObstacles();
+    navigation->player_navigation.Rebuild(rules.arena_boundary, obstacles,
+                                          rules.stats.player_collision_radius);
+    navigation->enemy_navigation.Rebuild(rules.arena_boundary, obstacles,
+                                         rules.enemies.front().collision_radius);
+    navigation->boss_navigation.Rebuild(rules.arena_boundary, obstacles,
+                                        rules.boss_common.collision_radius);
+    navigation->player_navigation_target = {-1, -1};
+    navigation->enemy_navigation_target = {-1, -1};
+}
+
 Result GameSimulation::Initialize(const SimulationConfig &config)
 {
     return Initialize(config, SimulationRules::Defaults());
@@ -95,15 +108,13 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "GameSimulation already initialized.");
     }
+    if (rules.relics.movement_echo.position_history_age_ticks >=
+        impl_->actors->player_position_history.max_size())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
+                               "Movement echo history age exceeds storage capacity.");
     impl_->config = config;
     impl_->rules = rules;
-    const auto obstacles = impl_->ArenaObstacles();
-    impl_->navigation->player_navigation.Rebuild(rules.arena_boundary, obstacles,
-                                     rules.stats.player_collision_radius);
-    impl_->navigation->enemy_navigation.Rebuild(rules.arena_boundary, obstacles,
-                                     rules.enemies.front().collision_radius);
-    impl_->navigation->boss_navigation.Rebuild(rules.arena_boundary, obstacles,
-                                    rules.boss_common.collision_radius);
+    impl_->RebuildNavigation();
     impl_->session_phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
     impl_->InitializePlayerState();
     impl_->initialized = true;
@@ -353,7 +364,12 @@ Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
     if (!impl_->initialized || impl_->session_phase != SessionPhase::MainMenu)
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "Gameplay data Hot Reload requires the main menu.");
+    if (rules.relics.movement_echo.position_history_age_ticks >=
+        impl_->actors->player_position_history.max_size())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
+                               "Movement echo history age exceeds storage capacity.");
     impl_->rules = rules;
+    impl_->RebuildNavigation();
     return Result::Success();
 }
 

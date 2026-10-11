@@ -1,9 +1,11 @@
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_session_state.hpp"
+#include "vfx_typed_screen_commands.hpp"
 
 #include <hs/game_domain/domain_signal.hpp>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -1410,6 +1412,97 @@ void TestPlayerStateOwners()
               .persistent.empty(), "unidentified player shell accepted");
 }
 
+void TestLowHealthPulseClock()
+{
+    auto program = Program({{Hash64("post.player.low_health_vignette"), 1, 1,
+                             Hash32("PresentationContextPayload")}});
+    program.effects[0].timing_kind = 1;
+    program.effects[0].sources = {0, 1};
+    hs::VfxSourceRecord source;
+    source.effect = 1; source.type = hs::VfxSourceType::Direct;
+    source.knot_count = 2; source.knots = {0, 1}; source.outputs = {0, 1};
+    program.sources.push_back(source);
+    hs::VfxOutputRecord overlay;
+    overlay.profile = hs::VfxOutputProfile::ScreenOverlay;
+    overlay.shape = Hash32("screen_vignette"); overlay.shape_component_kind = Hash32("screen");
+    overlay.coverage_type = Hash32("analytic_screen");
+    overlay.motion = hs::VfxMotionKind::SlowPulseStateLocked;
+    overlay.rgba = {1, .1f, .1f, .5f}; overlay.hdr = 1;
+    overlay.parameters = {0, 2}; overlay.textures = {0, 1};
+    program.outputs.push_back(overlay);
+    program.parameters = {
+        {Hash32("center_clear"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(.5f)},
+        {Hash32("edge_power"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(2.0f)}};
+    hs::VfxTextureBindingRecord texture; texture.role = Hash32("profile.global");
+    program.texture_bindings.push_back(texture);
+    constexpr std::string_view path = "Content/Textures/VFX/vfx_gradient_lut.dds";
+    for (const auto byte : path) program.strings.push_back(static_cast<std::byte>(byte));
+    program.texture_resources.push_back({0, {0, static_cast<std::uint32_t>(path.size())}});
+    hs::VfxPersistentInput health;
+    health.stable_id = 11; health.effect_handle = 1;
+    health.payload = hs::VfxContextPayload{10, {}, .30f, 0, 0};
+    hs::runtime_detail::VfxLowHealthPulseState pulse;
+    std::vector<hs::VfxScreenInput> output;
+    const auto emit = [&](hs::Tick tick, bool present = true) {
+        Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedScreenCommands(
+            program, {}, present ? std::span(&health, 1) : std::span<hs::VfxPersistentInput>{},
+            tick, hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
+    };
+    emit(1000);
+    Check(output.size() == 1 && output[0].envelope == 0 && pulse.phase == 0,
+          "health entry did not start its own short transition");
+    emit(1050);
+    const auto prior = output[0];
+    const double prior_phase = pulse.phase;
+    std::get<hs::VfxContextPayload>(health.payload).ratio01 = .29f;
+    emit(1050); // HP changes at the same simulation instant, including paused renders.
+    Check(output[0].gradient_age == prior.gradient_age && output[0].envelope == prior.envelope &&
+              pulse.phase == prior_phase && std::get<hs::VfxContextPayload>(health.payload).ratio01 == .29f,
+          "HP update moved accrued pulse phase or delayed live HP");
+    const double frequency = pulse.frequency;
+    emit(1051);
+    Check(std::abs(pulse.phase - std::fmod(prior_phase + frequency / 60.0, 1.0)) < 1e-12,
+          "new HP frequency did not control subsequent tick integration");
+    const auto paused = output[0];
+    for (unsigned i = 0; i < 8; ++i) emit(1051);
+    Check(output[0].gradient_age == paused.gradient_age && output[0].envelope == paused.envelope,
+          "render/view repetition advanced the paused simulation clock");
+    const auto retained_pulse = pulse;
+    program.outputs[0].shape = Hash32("invalid_screen_shape");
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, std::span(&health, 1),
+              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
+          "rejected output published a partial pulse clock update");
+    program.outputs[0].shape = Hash32("screen_vignette");
+    const std::array duplicate_health{health, health};
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, duplicate_health,
+              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
+          "rejected later owner published a partial pulse clock update");
+    emit(1052, false);
+    Check(output.empty() && pulse.stable_id == 0, "low-health exit retained a live phase owner");
+    emit(1060);
+    Check(pulse.phase == 0 && output[0].envelope == 0, "re-entry resumed an absent episode");
+    emit(1069);
+    Check(pulse.EntryFade() == 1, "entry transition did not finish after nine ticks");
+    health.stable_id = 12; emit(1070);
+    Check(pulse.phase == 0 && pulse.entered_tick == 1070, "new owner inherited pulse history");
+    emit(2);
+    Check(pulse.phase == 0 && pulse.last_tick == 2, "clock rollback underflowed pulse history");
+    hs::runtime_detail::VfxLowHealthPulseState dense, sparse;
+    dense.Advance(1, 2, 100, .29f); sparse = dense;
+    for (hs::Tick tick = 101; tick <= 700; ++tick) dense.Advance(1, 2, tick, .29f);
+    sparse.Advance(1, 2, 700, .29f);
+    Check(std::abs(dense.phase - sparse.phase) < 1e-11,
+          "skipped constant-HP snapshots changed integrated phase");
+    hs::runtime_detail::VfxSessionState session;
+    session.session_id = 1; session.low_health_pulse = dense;
+    session.ClearDecoded();
+    Check(session.low_health_pulse.stable_id == 1, "catalog retention clear reset simulation phase");
+    Check(session.Synchronize(2) && session.low_health_pulse.stable_id == 0,
+          "session reset retained the previous player's pulse");
+}
+
 void TestPickupIdleOwners()
 {
     const auto xp_id = Hash64("particle.pickup.xp.idle");
@@ -1798,10 +1891,32 @@ void TestProcStampedProjectileBindings()
               std::abs(decoded.persistent[0].elapsed_seconds - 10.0f / 60.0f) < 0.00001f &&
               std::abs(decoded.persistent[0].source_duration_seconds - 0.30f) < 0.00001f &&
               entity.render_instance_id == ricochet.entity_render_id &&
+              decoded.persistent[1].previous_transform[12] == 2.0f &&
               entity.footprint_radius == ricochet.radius &&
               std::abs(decoded.persistent[1].normalized_age - 5.0f / 21.0f) < 0.00001f &&
               std::abs(decoded.persistent[1].source_duration_seconds - 0.35f) < 0.00001f,
           "fixed proc owner lost projectile path, entity attachment, or episode clock");
+    auto stale = owners;
+    for (auto &owner : stale)
+    {
+        owner.projectile_current_position = {-99, 0, -99};
+        owner.projectile_owner_id = 999;
+    }
+    const auto skipped = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, owners, stale, 110);
+    Check(skipped.persistent.size() == 2 &&
+              std::get<hs::VfxProjectilePathPayload>(skipped.persistent[0].payload).previous_position.x == 2.0f &&
+              skipped.persistent[1].previous_transform[12] == 2.0f,
+          "skipped/new-owner snapshot substituted stale attachment history");
+    auto spawned = owners;
+    for (auto &owner : spawned)
+        owner.projectile_previous_position = owner.projectile_current_position;
+    const auto born = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, spawned, stale, 110);
+    Check(born.persistent.size() == 2 &&
+              std::get<hs::VfxProjectilePathPayload>(born.persistent[0].payload).previous_position.x == 3.0f &&
+              born.persistent[1].previous_transform[12] == 3.0f,
+          "new/discontinuous owner lost its authoritative collapsed endpoints");
     const auto run = [&](const hs::PersistentVfxVisual &owner, hs::Tick tick,
                          const hs::VfxProgramData &content) {
         return hs::runtime_detail::BuildVfxTypedFrameInputs(
@@ -1844,6 +1959,7 @@ int main()
         TestEnemyStatusOwners();
         TestBossStateOwners();
         TestPlayerStateOwners();
+        TestLowHealthPulseClock();
         TestPickupIdleOwners();
         TestPlayerStampedEntityBindings();
         TestChargedOverchargeOwner();

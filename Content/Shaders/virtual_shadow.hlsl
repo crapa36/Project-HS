@@ -239,9 +239,9 @@ bool DrawCandidate(PageEntry page, Caster caster, out uint layer, out uint segme
 {
     layer = (caster.properties.x & 4u) != 0u ? 0u : 1u;
     segment = layer * (Frame.w / 2u) + caster.indexed.x;
-    return page.physical != 0xffffffffu && (page.flags & 1u) != 0u &&
-        (caster.properties.x & 1u) != 0u && SphereOverlaps(caster.current_bounds, page) &&
-        (layer != 0u || (page.flags & 2u) != 0u);
+    if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u ||
+        (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
+    return SphereOverlaps(caster.current_bounds, page);
 }
 [numthreads(64, 1, 1)]
 void CullCS(uint3 tid : SV_DispatchThreadID)
@@ -269,6 +269,8 @@ void CullCS(uint3 tid : SV_DispatchThreadID)
     if (tid.x >= Counts.x || tid.y >= Counts.z) return;
     const uint entry = tid.y, caster_index = tid.x;
     const PageEntry page = PageTable[entry];
+    // Reject the whole page before fetching its per-caster data.
+    if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u) return;
     const Caster caster = Casters[caster_index];
     uint layer, segment;
     if (!DrawCandidate(page, caster, layer, segment)) return;

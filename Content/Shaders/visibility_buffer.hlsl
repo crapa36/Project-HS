@@ -303,6 +303,7 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
 {
     HsSceneVertexContext context = (HsSceneVertexContext)0;
     context.draw = draw;
+    context.instanceKey = uint2(draw.InstanceIndex + 1u, draw.InstanceGeneration);
     context.skinSlot = 0xffffffffu;
     context.gpuSceneRefs = true;
     context.cachedSkin = (draw.MeshFlags & 0x40000u) != 0u;
@@ -410,7 +411,8 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
                                      HsTriangleSample sample, uint2 pixel)
 {
     SceneOutput output = (SceneOutput)0;
-    output.Position = float4((float2)pixel + 0.5, sample.ndcDepth, rcp(sample.clipW));
+    output.Position = float4((float2)pixel + 0.5,
+        SurfaceDepth.Load(int3(pixel, 0)), rcp(sample.clipW));
     output.WorldNormal = normalize(HsInterpolate3(a.WorldNormal, b.WorldNormal,
                                                    c.WorldNormal, sample.barycentric));
     output.WorldPosition = HsInterpolate3(a.WorldPosition, b.WorldPosition,
@@ -437,6 +439,7 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
     output.SurfaceFlags = a.SurfaceFlags;
     output.HistoryConfidence = a.HistoryConfidence;
     output.RasterDrawRecordId = a.RasterDrawRecordId;
+    output.InstanceKey = a.InstanceKey;
     return output;
 }
 

@@ -1,6 +1,8 @@
 #include "renderer_impl.hpp"
 #include "renderer_quality.hpp"
 #include "renderer_instance_order.hpp"
+#include "renderer_caster_storage.hpp"
+#include "vfx_ribbon_resources.hpp"
 #include <DirectXPackedVector.h>
 #include "renderer_post_subgraphs.hpp"
 #include "renderer_named_animation.hpp"
@@ -8,6 +10,7 @@
 #include "renderer_entity_surface.hpp"
 #include <DirectXPackedVector.h>
 #include <bit>
+#include <cassert>
 #include <cfloat>
 #include <limits>
 #include <map>
@@ -15,12 +18,14 @@
 #include <tuple>
 
 #include <numbers>
+#include <optional>
 #include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace hs
 {
+
 
 Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                              std::span<const PresentationEvent> events,
@@ -69,6 +74,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                "Renderer not initialized.");
     }
     const bool wait_for_streaming = impl_->explicit_frame && impl_->explicit_frame->wait_for_streaming;
+    struct GrassHistoryAttempt
+    {
+        DirectX::XMFLOAT4 &state;
+        bool succeeded{};
+        ~GrassHistoryAttempt() { if (!succeeded) state.z = 0.0f; }
+    } grass_history_attempt{impl_->previous_grass_state};
     impl_->asset_io.SetWaitForReads(wait_for_streaming);
     if (wait_for_streaming)
         if (auto waited = impl_->WaitForGpu(); !waited) return waited;
@@ -202,6 +213,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->temporal_history_valid = false;
         impl_->hzb_history_valid = false;
     }
+    // A rewound simulation clock starts a fresh shared particle schedule/pool.
+    if (impl_->particles_initialized && snapshot.header.tick < impl_->last_particle_tick)
+        impl_->particles_initialized = false;
     const bool same_previous_session = snapshots.has_previous &&
         snapshots.previous.header.session_id == snapshot.header.session_id;
     std::unordered_map<std::uint64_t, const RenderInstance *> previous_by_id;
@@ -469,11 +483,30 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     DirectX::XMStoreFloat3(&lod_eye, eye);
     const Float3 ribbon_eye{lod_eye.x, lod_eye.y, lod_eye.z};
     if (scene_new_session || impl_->rendered_submission_count == 0) impl_->previous_ribbon_eye = ribbon_eye;
+    const auto ribbon_sources = impl_->config.slime_family_preview_count == 0
+        ? typed_ribbons.sources : std::span<const VfxRibbonSourceInput>{};
+    const std::array<std::uint64_t, 3> ribbon_buffer_widths{
+        impl_->ribbon_history.resource ? impl_->ribbon_history.resource->GetDesc().Width : 0,
+        impl_->ribbon_previous.resource ? impl_->ribbon_previous.resource->GetDesc().Width : 0,
+        impl_->ribbon_arguments.resource ? impl_->ribbon_arguments.resource->GetDesc().Width : 0};
+    const auto expected_history_bytes = static_cast<std::uint64_t>(
+        impl_->config.ribbon_history_points / kRibbonHistorySamples) * kRibbonHistoryStride;
+    // Failed allocation must not consume a slot's pending GPU history reset.
+    std::optional<VfxRibbonState> ribbon_checkpoint;
+    if (impl_->render_scene_inputs &&
+        (ribbon_buffer_widths[0] != expected_history_bytes || ribbon_buffer_widths[1] != expected_history_bytes ||
+         ribbon_buffer_widths[2] == 0 || impl_->ribbon_state.OutputsMayExceed(
+             ribbon_sources, ribbon_buffer_widths[2] / kRibbonArgumentStride)))
+        ribbon_checkpoint = impl_->ribbon_state;
+    const auto reject_ribbon_update = [&](Result failure) {
+        if (ribbon_checkpoint) impl_->ribbon_state = std::move(*ribbon_checkpoint);
+        return failure;
+    };
     if (impl_->render_scene_inputs && !impl_->ribbon_state.Update(
-            impl_->config.slime_family_preview_count == 0 ? typed_ribbons.sources : std::span<const VfxRibbonSourceInput>{},
+            ribbon_sources,
             snapshot.header.tick, snapshot.header.session_id, typed_ribbons.catalog_generation,
             impl_->config.ribbon_history_points, interpolation, impl_->previous_ribbon_eye, vfx_error))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error);
+        return reject_ribbon_update(Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error));
     const auto ribbon_updates = impl_->ribbon_state.Updates();
     const auto ribbon_outputs = impl_->ribbon_state.Outputs();
     std::unordered_set<std::uint64_t> ribbon_head_ids;
@@ -484,25 +517,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ribbon_projectile_ids.insert(visual.projectile_owner_id);
     const auto ribbon_history_bytes = static_cast<UINT64>(impl_->ribbon_state.Capacity()) * kRibbonHistoryStride;
     const auto ribbon_args_bytes = std::max<std::size_t>(ribbon_outputs.size(), 1) * kRibbonArgumentStride;
-    if (!impl_->ribbon_history.resource || impl_->ribbon_history.resource->GetDesc().Width != ribbon_history_bytes ||
-        !impl_->ribbon_arguments.resource || impl_->ribbon_arguments.resource->GetDesc().Width < ribbon_args_bytes)
+    const auto ribbon_replacements = RibbonBufferReplacements(ribbon_buffer_widths, ribbon_history_bytes, ribbon_args_bytes);
+    if (std::ranges::any_of(ribbon_replacements, [](bool replace) { return replace; }))
     {
-        if (auto waited = impl_->WaitForGpu(); !waited) return waited;
+        if (auto waited = impl_->WaitForGpu(); !waited) return reject_ribbon_update(waited);
         D3D12MA::ALLOCATION_DESC allocation{};
         allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
         const auto allocate = [&](AllocationResource &resource, UINT64 bytes) {
-            resource.Reset();
             return impl_->CreateAllocation(resource, allocation,
                 BufferDescription(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         };
-        if (!impl_->ribbon_history.resource || impl_->ribbon_history.resource->GetDesc().Width != ribbon_history_bytes)
-        {
-            if (auto allocated = allocate(impl_->ribbon_history, ribbon_history_bytes); !allocated) return allocated;
-            if (auto allocated = allocate(impl_->ribbon_previous, ribbon_history_bytes); !allocated) return allocated;
-        }
-        if (!impl_->ribbon_arguments.resource || impl_->ribbon_arguments.resource->GetDesc().Width < ribbon_args_bytes)
-            if (auto allocated = allocate(impl_->ribbon_arguments, ribbon_args_bytes); !allocated) return allocated;
+        if (auto allocated = ReplaceRibbonBuffers(
+                std::array{&impl_->ribbon_history, &impl_->ribbon_previous, &impl_->ribbon_arguments},
+                ribbon_replacements, ribbon_history_bytes, ribbon_args_bytes, allocate); !allocated)
+            return reject_ribbon_update(allocated);
     }
+    ribbon_checkpoint.reset();
     const auto is_environment_mesh = [](RenderMesh mesh) {
         return mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass;
     };
@@ -884,7 +914,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         dynamic_visibility_ref_count += count;
     }
     const bool new_persistent_tick =
-        snapshot.header.tick != impl_->last_status_visual_tick;
+        !impl_->particles_initialized || snapshot.header.tick != impl_->last_particle_tick;
     const auto environment_pipeline = [&](std::size_t asset, bool shadow_draw) {
         const auto &mesh = impl_->environment_meshes[asset];
         const bool masked = render_data::ClassifyEnvironmentMaterial(mesh.material) ==
@@ -1104,9 +1134,24 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     if (new_persistent_tick)
     {
-        impl_->last_status_visual_tick = snapshot.header.tick;
+        std::unordered_map<std::uint64_t, std::array<const PersistentVfxVisual *, 4>> status_episodes;
+        for (const auto &visual : snapshot.persistent_vfx)
+        {
+            std::size_t index;
+            switch (visual.kind)
+            {
+            case PersistentVfxKind::EnemyBleedStatus: index = 0; break;
+            case PersistentVfxKind::EnemyBurnStatus: index = 1; break;
+            case PersistentVfxKind::EnemySlowStatus: index = 2; break;
+            case PersistentVfxKind::EnemyMarkStatus: index = 3; break;
+            default: continue;
+            }
+            auto &episode = status_episodes[visual.entity_render_id][index];
+            if (!episode) episode = &visual;
+        }
         for (const auto &source : snapshot.instances)
         {
+            const auto episodes = status_episodes.find(source.stable_id);
             const auto add_status = [&](StatusVisual status,
                                         const ParticleSpriteBinding &binding,
                                         ParticleFacing facing, VfxRenderer renderer,
@@ -1134,14 +1179,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                         });
                     if (authored) return;
                 }
-                const auto cadence = status == StatusVisual::Bleed ? 6u
-                                   : status == StatusVisual::Burn ? 3u
-                                                                  : 1u;
-                if ((snapshot.header.tick + source.stable_id) % cadence != 0) return;
                 ParticleSpawnCommand command;
-                command.sequence = source.stable_id ^ snapshot.header.tick ^
-                                   static_cast<std::uint32_t>(status);
-                command.tick = snapshot.header.tick;
                 command.position = {source.position.x, source.position.y + height,
                                     source.position.z};
                 command.shape = ParticleShape::Point;
@@ -1158,7 +1196,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 command.start_size_min = command.start_size_max = size;
                 command.end_size_min = command.end_size_max = size;
                 command.count = count;
-                command.seed = static_cast<std::uint32_t>(command.sequence);
                 if (status == StatusVisual::Bleed)
                 {
                     command.position.y = source.position.y + source.scale.y * 0.85f;
@@ -1193,7 +1230,23 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     command.end_size_max = size * 0.6f;
                     command.gravity = -0.4f;
                 }
-                frame_particle_spawns.push_back(command);
+                const auto *episode = episodes == status_episodes.end() ? nullptr
+                    : episodes->second[std::countr_zero(static_cast<std::uint32_t>(status))];
+                const auto births = renderer_detail::StatusParticleBirths(episode,
+                    source.stable_id, status, snapshot.header.tick, impl_->last_particle_tick,
+                    !impl_->particles_initialized,
+                    static_cast<Tick>(std::ceil(command.lifetime_max * 60.0f)));
+                if (!births) return;
+                for (Tick birth = births->first;; birth += births->cadence)
+                {
+                    command.tick = birth;
+                    command.sequence = source.stable_id ^ birth ^ static_cast<std::uint32_t>(status);
+                    command.seed = static_cast<std::uint32_t>(command.sequence);
+                    // Older owner poses are not retained: preserve the observed
+                    // owner position while GPU spawn reconstructs the known age.
+                    frame_particle_spawns.push_back(command);
+                    if (births->last - birth < births->cadence) break;
+                }
             };
             add_status(StatusVisual::Bleed, impl_->config.bleed_status_sprite,
                        ParticleFacing::Velocity, VfxRenderer::Sprite,
@@ -2102,6 +2155,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (source.oit != oit_group) continue;
         const auto finite = std::isfinite(source.position.x) &&
             std::isfinite(source.position.y) && std::isfinite(source.position.z) &&
+            (!source.interpolate_owner_position ||
+             (std::isfinite(source.previous_position.x) && std::isfinite(source.previous_position.y) &&
+              std::isfinite(source.previous_position.z))) &&
             std::isfinite(source.color.x) && std::isfinite(source.color.y) &&
             std::isfinite(source.color.z) && std::isfinite(source.color.w) &&
             std::isfinite(source.size) && source.size > 0.0f &&
@@ -2150,8 +2206,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (!source.oit) ++flash_add_count;
         auto &flash = gpu_flashes[flash_count++];
         flash = {};
-        flash.position_lifetime_min = {source.position.x, source.position.y,
-                                       source.position.z, source.ground_base_anchor ? 1.0f : 0.0f};
+        const float attachment_alpha = source.interpolate_owner_position ? interpolation : 1.0f;
+        // Avoid touching unused burst history (including caller sentinel values).
+        const auto previous_position = source.interpolate_owner_position ? source.previous_position : source.position;
+        flash.position_lifetime_min = {
+            std::lerp(previous_position.x, source.position.x, attachment_alpha),
+            std::lerp(previous_position.y, source.position.y, attachment_alpha),
+            std::lerp(previous_position.z, source.position.z, attachment_alpha),
+            source.ground_base_anchor ? 1.0f : 0.0f};
         flash.start_color = {source.color.x, source.color.y,
                              source.color.z, source.color.w};
         flash.size_range.x = source.size;
@@ -3353,6 +3415,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         constants->grass_bender_count = {};
     }
+    constants->previous_grass_benders = impl_->previous_grass_benders;
+    constants->previous_grass_state = impl_->previous_grass_state;
+    if (new_session || view_input.camera_cut || !previous_instance_snapshot ||
+        constants->surface_view_origin.w < 0.5f ||
+        (static_scene && impl_->owned_views.at(impl_->active_view_id.value)->scene_lease != static_scene))
+        constants->previous_grass_state.z = 0.0f;
+    constants->previous_grass_origin_delta = {
+        static_cast<float>(view_input.scene_origin.x - impl_->previous_scene_origin.x),
+        static_cast<float>(view_input.scene_origin.y - impl_->previous_scene_origin.y),
+        static_cast<float>(view_input.scene_origin.z - impl_->previous_scene_origin.z), 0.0f};
     // BendGrass adds wind plus delta * (1 - |delta| / radius) * 0.42.
     // Each bender's maximum displacement is 0.42 * radius / 4, and its
     // height weight is at most one. Keep this per-frame allowance separate
@@ -3420,6 +3492,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     if (auto prepared = impl_->PrepareClusterFrame(back_buffer_index, cluster_inputs); !prepared) return prepared;
     std::array<float, kEnvironmentMaterialNames.size()> geometry_demand{};
+    const float shadow_demand_projection[]{constants->lod_projection.y,
+        constants->lod_projection.z, constants->lod_projection.w};
     const auto accumulate_geometry_demand = [&](const auto &source) {
         if (!is_environment_mesh(source.mesh)) return;
         const auto ordinal = environment_mesh_index(source);
@@ -3430,11 +3504,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto radius = impl_->environment_variant_radii[ordinal] * scale + deformation;
         const auto error = coarse.metadata.geometric_error * scale + 2.0f * deformation;
         const auto &center = source.position;
-        DirectX::XMFLOAT3 view_center{};
-        DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3TransformCoord(
-            DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
         for (std::size_t consumer = 0; consumer < demand_planes.size(); ++consumer)
         {
+            const float shadow_error = consumer == 0 ? 0.0f
+                : error * shadow_demand_projection[consumer - 1];
+            // A shadow view cannot raise the per-catalog maximum after a
+            // larger visible instance/view has already supplied its demand.
+            if (consumer != 0 && shadow_error <= geometry_demand[ordinal]) continue;
             bool visible = true;
             for (const auto &plane : demand_planes[consumer])
                 visible = visible && center.x * plane.x + center.y * plane.y +
@@ -3443,19 +3519,24 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             float projected_error{};
             if (consumer == 0)
             {
+                DirectX::XMFLOAT3 view_center{};
+                DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3TransformCoord(
+                    DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
                 const auto distance = view_center.z - radius - error;
-                const auto safe_distance = std::max(distance, constants->lod_options.z);
-                const auto rho = std::hypot(std::abs(view_center.x) + radius + error,
-                                            std::abs(view_center.y) + radius + error) / safe_distance;
-                projected_error = distance <= constants->lod_options.z
-                    ? constants->lod_options.x * 2.0f
-                    : error * constants->lod_projection.x * std::sqrt(1.0f + rho * rho) / safe_distance;
+                if (distance <= constants->lod_options.z)
+                    projected_error = constants->lod_options.x * 2.0f;
+                else
+                {
+                    const auto safe_distance = std::max(distance, constants->lod_options.z);
+                    const auto rho = std::hypot(std::abs(view_center.x) + radius + error,
+                                                std::abs(view_center.y) + radius + error) / safe_distance;
+                    projected_error = error * constants->lod_projection.x *
+                        std::sqrt(1.0f + rho * rho) / safe_distance;
+                }
             }
             else
             {
-                const float shadow_projection[]{constants->lod_projection.y,
-                    constants->lod_projection.z, constants->lod_projection.w};
-                projected_error = error * shadow_projection[consumer - 1];
+                projected_error = shadow_error;
             }
             geometry_demand[ordinal] = std::max(geometry_demand[ordinal], projected_error);
         }
@@ -3710,6 +3791,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             ? (ordered_lods[index].complement ? 0x20000u : 0u)
             : dynamic_pose_flags[index];
         if (skinned) draw_flags |= kCachedSkinFlag;
+        if (source.mesh == RenderMesh::Grass && previous_instance_snapshot &&
+            slot.index < previous_gpu_instances.size() &&
+            slot.index < previous_instance_snapshot->generations.size() &&
+            previous_instance_snapshot->generations[slot.index] == slot.generation &&
+            previous_gpu_instances[slot.index].mesh == next_draw_instances[index].mesh)
+            draw_flags |= 0x200000u;
         if (skinned && dynamic_skin_history[index] &&
             slot.index < previous_gpu_instances.size() && previous_instance_snapshot &&
             slot.index < previous_instance_snapshot->generations.size() &&
@@ -3839,6 +3926,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Failure(
             ErrorCode::InvalidArgument, "hs_renderer_d3d12",
             "Dynamic split GPU scene table size overflow.");
+    constants->scene_table_bounds = {
+        static_cast<std::uint32_t>(dynamic_scene_layout.total_bytes), 0u, 0u, 0u};
     if (required_slots > impl_->dynamic_instance_capacity ||
         !impl_->dynamic_instances.resource ||
         impl_->dynamic_instances.resource->GetDesc().Width < dynamic_scene_layout.total_bytes)
@@ -4013,6 +4102,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->WriteViewDescriptors(back_buffer_index, temporal_read_index, temporal_write_index,
         exposure_read_index, exposure_write_index,
         frame.upload.resource->GetGPUVirtualAddress() + kExposureConstantsOffset);
+    // Optional fog sampling reads VmCounts even when fog is Off. Replace the
+    // view's null default before descriptor clones; active fog overrides this.
+    constexpr std::size_t disabled_volumetric_offset =
+        (sizeof(FrameConstants) + 255u) & ~std::size_t{255u};
+    constexpr UINT disabled_volumetric_size =
+        (sizeof(VolumetricConstants) + 255u) & ~UINT{255u};
+    static_assert(disabled_volumetric_offset + disabled_volumetric_size <= kExposureConstantsOffset);
+    static_assert(kExposureConstantsOffset < kInstanceDataOffset);
+    std::memset(frame.mapped + disabled_volumetric_offset, 0, disabled_volumetric_size);
+    const D3D12_CONSTANT_BUFFER_VIEW_DESC disabled_volumetric_cbv{
+        frame.upload.resource->GetGPUVirtualAddress() + disabled_volumetric_offset,
+        disabled_volumetric_size};
+    auto volumetric_cbv = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    volumetric_cbv.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
+        kVolumetricDescriptorOffset) * impl_->srv_stride;
+    impl_->device->CreateConstantBufferView(&disabled_volumetric_cbv, volumetric_cbv);
     const bool initialize_temporal_targets = impl_->temporal_history[0].resource &&
         !impl_->temporal_targets_initialized;
     const bool initialize_offscreen_output = !presented_view &&
@@ -4122,6 +4227,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto bind_surface_compute = [&](ID3D12GraphicsCommandList *list) {
         bind_compute(list);
         list->SetComputeRootDescriptorTable(13, character_table);
+        list->SetComputeRootDescriptorTable(26, distortion_table);
         list->SetComputeRootShaderResourceView(18, previous_skin_frame_valid
             ? previous_skin_frame->skin_cache_vertices.resource->GetGPUVirtualAddress()
             : frame.upload.resource->GetGPUVirtualAddress());
@@ -4408,9 +4514,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto gbuffer_normal = import_texture(impl_->gbuffer_normal, initial_color_access, "GBufferNormal");
     const auto gbuffer_metadata = import_texture(impl_->gbuffer_metadata, initial_color_access, "GBufferMetadata");
     const auto hdr = import_texture(impl_->hdr_color, initial_color_access, "HdrColor");
-    const auto subsurface_diffuse = import_texture(impl_->subsurface_diffuse, initial_color_access, "SubsurfaceDiffuse");
-    const auto environment_specular = import_texture(impl_->environment_specular, initial_color_access, "EnvironmentSpecular");
-    const auto indirect_diffuse = import_texture(impl_->indirect_diffuse, initial_color_access, "IndirectDiffuse");
+    const auto subsurface_diffuse = impl_->subsurface_diffuse.resource
+        ? import_texture(impl_->subsurface_diffuse, initial_color_access, "SubsurfaceDiffuse") : TextureHandle{};
+    const auto environment_specular = impl_->environment_specular.resource
+        ? import_texture(impl_->environment_specular, initial_color_access, "EnvironmentSpecular") : TextureHandle{};
+    const auto indirect_diffuse = impl_->indirect_diffuse.resource
+        ? import_texture(impl_->indirect_diffuse, initial_color_access, "IndirectDiffuse") : TextureHandle{};
     const auto oit_accumulation = import_texture(impl_->oit_accumulation, initial_color_access, "OitAccumulation");
     const auto oit_revealage = import_texture(impl_->oit_revealage, initial_color_access, "OitRevealage");
     const auto post_a = import_texture(impl_->post_a, initial_color_access, "PostA");
@@ -4992,7 +5101,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (std::size_t asset = 0; asset < static_environment_ranges.size(); ++asset)
             {
                 const auto [begin, count] = static_environment_ranges[asset];
-                if (count == 0) continue;
+                if (count == 0 || visibility_ranges[asset].count == 0) continue;
                 set_environment_material(asset, 1);
                 list->SetGraphicsRootShaderResourceView(
                     35, frame.static_visible_refs.resource->GetGPUVirtualAddress());
@@ -5155,62 +5264,80 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return prepared;
     if (auto prepared = impl_->AddClusterOcclusionPass(back_buffer_index, cluster_graph,
             previous_hzb_version, false); !prepared) return prepared;
-    auto shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
-    read_material_sampling(shadow_pass, has_masked_material_draw);
-    impl_->ReadClusterFrame(shadow_pass, cluster_graph, true);
-    impl_->ReadHlodFrame(shadow_pass, hlod_graph, true);
-    shadow_pass.Read(geometry_records_version, Access::ShaderRead);
-    shadow_pass.Read(material_parameter_version, Access::ShaderRead);
-    shadow_pass.Read(hero_binding_version, Access::ShaderRead);
-    read_geometry_pages(shadow_pass);
-    shadow_pass.Read(dynamic_instances_version, Access::ShaderRead);
-    if (have_skinned_instances)
-        shadow_pass.Read(skin_cache_version, Access::ShaderRead);
-    if (have_skinned_instances && previous_skin_frame_valid)
-        shadow_pass.Read(previous_skin_cache_version, Access::ShaderRead);
-    if (static_instances_buffer) shadow_pass.Read(static_instances_version, Access::ShaderRead);
-    shadow_pass.Read(static_visible_refs_version, Access::ShaderRead);
-    shadow_pass.Read(static_draw_args_version, Access::IndirectArgs);
-    shadow_pass.Read(dynamic_visible_refs_version, Access::ShaderRead);
-    shadow_pass.Read(dynamic_draw_args_version, Access::IndirectArgs);
-    shadow_version = shadow_pass.Write(shadow_version, Access::DepthWrite);
-    shadow_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        bind_graphics(list);
-        bind_scene_roots(list);
-        const auto shadow_size =
-            static_cast<float>(std::clamp(impl_->config.shadow_resolution, 1024u, 2048u));
-        const D3D12_VIEWPORT shadow_viewport{0, 0, shadow_size, shadow_size, 0, 1};
-        const D3D12_RECT shadow_scissor{0, 0, static_cast<LONG>(shadow_size),
-                                        static_cast<LONG>(shadow_size)};
-        list->RSSetViewports(1, &shadow_viewport);
-        list->RSSetScissorRects(1, &shadow_scissor);
-        list->SetPipelineState(impl_->shadow_pipeline.Get());
-        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        auto handle = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += impl_->dsv_stride;
-        list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-        for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
-        {
-            list->OMSetRenderTargets(0, nullptr, FALSE, &handle);
-            const UINT tile = static_cast<UINT>(shadow_size);
-            const UINT x = cascade == 1 ? tile : 0u;
-            const UINT y = cascade == 2 ? tile : 0u;
-            const D3D12_VIEWPORT tile_view{static_cast<float>(x), static_cast<float>(y), static_cast<float>(tile), static_cast<float>(tile), 0, 1};
-            const D3D12_RECT tile_rect{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + tile), static_cast<LONG>(y + tile)};
-            list->RSSetViewports(1, &tile_view );
-            list->RSSetScissorRects(1, &tile_rect);
-            list->SetGraphicsRoot32BitConstant(6, cascade, 0);
-            draw_character_instances(list, true, cascade);
-            if (auto drawn = impl_->DrawClusterGeometry(list, back_buffer_index, cascade + 1); !drawn)
-                return drawn;
-            if (auto drawn = impl_->DrawHlodGeometry(list, back_buffer_index, cascade + 1); !drawn) return drawn;
+    const auto ao_csm_adaptive_status = impl_->adaptive_shading.Status();
+    const bool overlap_ao_csm = presented_view &&
+        impl_->explicit_frame->views.size() == 1 && !impl_->config.environment_preview &&
+        !impl_->mesh_shader_enabled && !use_visibility && impl_->enhanced &&
+        active_features.ao_mode == GraphicsAoMode::GTAO &&
+        active_features.gi_mode == GraphicsGiMode::Probe &&
+        active_features.reflection_mode == GraphicsReflectionMode::ScreenSpace &&
+        active_features.shadow_mode == GraphicsShadowMode::Raster &&
+        !active_features.ray_scene_enabled && !active_features.software_gi_enabled &&
+        active_features.adaptive_compute_enabled && ao_csm_adaptive_status.compute_ready &&
+        ao_csm_adaptive_status.usable && impl_->ambient_occlusion.AdaptiveComputeApplied() &&
+        !(impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized()) &&
+        impl_->ray_reconstruction.Mode() == RayReconstructionMode::Off &&
+        !impl_->sdk_presentation.IsEnabled() && impl_->sdk_presentation.LatencyOwner() == SdkLatencyOwner::None;
+    // Overlap reads post-Retest versions; all CSM draws and sampling declarations stay intact.
+    const auto register_cascaded_shadow = [&] {
+        auto shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
+        read_material_sampling(shadow_pass, has_masked_material_draw);
+        impl_->ReadClusterFrame(shadow_pass, cluster_graph, true);
+        impl_->ReadHlodFrame(shadow_pass, hlod_graph, true);
+        shadow_pass.Read(geometry_records_version, Access::ShaderRead);
+        shadow_pass.Read(material_parameter_version, Access::ShaderRead);
+        shadow_pass.Read(hero_binding_version, Access::ShaderRead);
+        read_geometry_pages(shadow_pass);
+        shadow_pass.Read(dynamic_instances_version, Access::ShaderRead);
+        if (have_skinned_instances)
+            shadow_pass.Read(skin_cache_version, Access::ShaderRead);
+        if (have_skinned_instances && previous_skin_frame_valid)
+            shadow_pass.Read(previous_skin_cache_version, Access::ShaderRead);
+        if (static_instances_buffer) shadow_pass.Read(static_instances_version, Access::ShaderRead);
+        shadow_pass.Read(static_visible_refs_version, Access::ShaderRead);
+        shadow_pass.Read(static_draw_args_version, Access::IndirectArgs);
+        shadow_pass.Read(dynamic_visible_refs_version, Access::ShaderRead);
+        shadow_pass.Read(dynamic_draw_args_version, Access::IndirectArgs);
+        shadow_version = shadow_pass.Write(shadow_version, Access::DepthWrite);
+        shadow_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            bind_graphics(list);
+            bind_scene_roots(list);
+            const auto shadow_size =
+                static_cast<float>(std::clamp(impl_->config.shadow_resolution, 1024u, 2048u));
+            const D3D12_VIEWPORT shadow_viewport{0, 0, shadow_size, shadow_size, 0, 1};
+            const D3D12_RECT shadow_scissor{0, 0, static_cast<LONG>(shadow_size),
+                                            static_cast<LONG>(shadow_size)};
+            list->RSSetViewports(1, &shadow_viewport);
+            list->RSSetScissorRects(1, &shadow_scissor);
+            list->SetPipelineState(impl_->shadow_pipeline.Get());
+            list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            auto handle = impl_->dsv_heap->GetCPUDescriptorHandleForHeapStart();
             handle.ptr += impl_->dsv_stride;
-        }
-        list->RSSetViewports(1, &viewport);
-        list->RSSetScissorRects(1, &scissor);
-        return Result::Success();
-    });
+            list->ClearDepthStencilView(handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+            for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
+            {
+                list->OMSetRenderTargets(0, nullptr, FALSE, &handle);
+                const UINT tile = static_cast<UINT>(shadow_size);
+                const UINT x = cascade == 1 ? tile : 0u;
+                const UINT y = cascade == 2 ? tile : 0u;
+                const D3D12_VIEWPORT tile_view{static_cast<float>(x), static_cast<float>(y), static_cast<float>(tile), static_cast<float>(tile), 0, 1};
+                const D3D12_RECT tile_rect{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + tile), static_cast<LONG>(y + tile)};
+                list->RSSetViewports(1, &tile_view );
+                list->RSSetScissorRects(1, &tile_rect);
+                list->SetGraphicsRoot32BitConstant(6, cascade, 0);
+                draw_character_instances(list, true, cascade);
+                if (auto drawn = impl_->DrawClusterGeometry(list, back_buffer_index, cascade + 1); !drawn)
+                    return drawn;
+                if (auto drawn = impl_->DrawHlodGeometry(list, back_buffer_index, cascade + 1); !drawn) return drawn;
+                handle.ptr += impl_->dsv_stride;
+            }
+            list->RSSetViewports(1, &viewport);
+            list->RSSetScissorRects(1, &scissor);
+            return Result::Success();
+        });
+    };
+    if (!overlap_ao_csm) register_cascaded_shadow();
 
     if (use_visibility)
     {
@@ -5470,7 +5597,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             34, impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress());
         for (std::size_t asset = 0; asset < static_environment_ranges.size(); ++asset)
         {
-            if (static_environment_ranges[asset].second == 0) continue;
+            if (static_environment_ranges[asset].second == 0 ||
+                retest_visibility_ranges[asset].count == 0) continue;
             list->SetGraphicsRoot32BitConstant(
                 6, (impl_->material_parameter_bases[asset / 3] << 1) | 1u, 1);
             list->SetGraphicsRootShaderResourceView(
@@ -5484,6 +5612,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         return Result::Success();
     });
 
+    // Retest19/53 only changed main-view records/counts.
+    if (overlap_ao_csm) register_cascaded_shadow();
     auto final_depth_pyramid_pass =
         impl_->graph.AddPass(21, kRenderPassNames[21], QueueHint::Compute);
     final_depth_pyramid_pass.Read(depth_version, Access::ComputeRead);
@@ -5561,6 +5691,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->ReadHlodFrame(resolve, hlod_graph, false);
         resolve.Read(visibility_ids_version, Access::ComputeRead);
         resolve.Read(visibility_face_version, Access::ComputeRead);
+        resolve.Read(depth_version, Access::ComputeRead);
         resolve.Read(raster_records_version, Access::ComputeRead);
         resolve.Read(geometry_records_version, Access::ComputeRead);
         resolve.Read(material_parameter_version, Access::ComputeRead);
@@ -5592,6 +5723,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         resolve.SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_surface_compute(list);
+            list->SetComputeRootShaderResourceView(34, dynamic_instance_base);
             for (std::uint32_t variant = 0; variant < kVisibilityVariantCount; ++variant)
             {
                 list->SetComputeRoot32BitConstant(6, variant, 0);
@@ -5797,8 +5929,24 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     }
     decltype(impl_->previous_shadow_casters) current_shadow_casters;
+    Impl::ShadowCasterNodes current_shadow_caster_nodes, prepared_previous_shadow_caster_nodes;
+    bool previous_shadow_caster_nodes_warm{};
     if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
     {
+        auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
+        // Each attempt owns scratch nodes; a failed attempt leaves submitted history intact.
+        const auto caster_preparation_epoch = BeginShadowCasterPreparation(
+            shadow_owner.scratch_shadow_casters, shadow_owner.shadow_caster_preparation_epoch,
+            shadow_owner.scratch_shadow_caster_nodes, current_shadow_caster_nodes);
+        current_shadow_casters = std::move(shadow_owner.scratch_shadow_casters);
+        const auto static_caster_refs = std::span{static_draw_refs.data(), static_leaf_ref_count};
+        const auto static_caster_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0u;
+        previous_shadow_caster_nodes_warm = impl_->previous_shadow_caster_nodes.Matches(
+            static_scene, static_caster_generation, static_caster_refs);
+        if (!previous_shadow_caster_nodes_warm)
+            prepared_previous_shadow_caster_nodes.Prepare(static_scene, static_caster_generation, static_caster_refs);
+        if (!current_shadow_caster_nodes.Matches(static_scene, static_caster_generation, static_caster_refs))
+            current_shadow_caster_nodes.Prepare(static_scene, static_caster_generation, static_caster_refs);
         struct ShadowBinding
         {
             const GeometryPageGpu *page{};
@@ -5808,7 +5956,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         };
         std::vector<ShadowBinding> bindings;
         std::vector<VirtualShadowDrawGroup> groups;
+        // Binding inputs are fixed for this preparation; never retain across frames.
+        std::array<std::array<UINT, kGpuVisibilityBucketCount + 2>, 2> shadow_group_indices;
+        for (auto &indices : shadow_group_indices) indices.fill(UINT32_MAX);
         std::vector<VirtualShadowCaster> casters;
+        std::size_t matched_previous_casters{};
+        std::size_t prepared_casters{};
+#ifndef NDEBUG
+        std::unordered_set<Impl::ShadowCasterMap::key_type, Impl::ShadowCasterKeyHash> caster_key_oracle;
+#endif
         current_shadow_casters.reserve(dynamic_draw_refs.size() + static_leaf_ref_count);
         casters.reserve(dynamic_draw_refs.size() + static_leaf_ref_count);
         std::vector<VirtualShadowReceiver> receivers;
@@ -5877,24 +6033,49 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const UINT material = ordinal < kAuthoredMaterialNames.size()
                 ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
             const auto binding_key = (std::uint64_t(material) << 32) | (immutable ? 0x80000000u : 0u) | page->page_slot;
-            auto group = std::ranges::find(groups, binding_key, &VirtualShadowDrawGroup::binding_key);
-            if (group == groups.end())
-            {
-                groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
-                    ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
-                bindings.push_back({page, pipeline, material, immutable});
-                group = groups.end() - 1;
-            }
+            const auto binding_slot = bucket != UINT32_MAX ? static_cast<std::size_t>(bucket)
+                : kGpuVisibilityBucketCount + (terrain ? 0u : 1u);
+            const auto draw_group = ResolveShadowCasterGroup(
+                shadow_group_indices[immutable ? 1u : 0u][binding_slot], groups, binding_key, [&] {
+                    groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
+                        ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
+                    bindings.push_back({page, pipeline, material, immutable});
+                });
             VirtualShadowCaster caster;
+            const auto key = std::tuple{immutable, source.stable_id,
+                source.stable_id == 0 ? reference.instance_index + 1u : 0u};
+            auto *previous_nodes = immutable
+                ? (previous_shadow_caster_nodes_warm ? &impl_->previous_shadow_caster_nodes
+                    : &prepared_previous_shadow_caster_nodes) : nullptr;
+            const auto *previous = FindPreviousShadowCasterNode(impl_->previous_shadow_casters,
+                key, previous_nodes, ref_index, previous_shadow_caster_nodes_warm);
+            const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
+            const auto instance_index = reference.instance_index | (immutable ? 0x80000000u : 0u);
             const auto &sphere = page->metadata.bounds.sphere;
-            const auto caster_yaw = instance ? instance->yaw : source.yaw;
-            const float sine = std::sin(caster_yaw), cosine = std::cos(caster_yaw);
             const float sx = sphere[0] * source.scale.x, sy = sphere[1] * source.scale.y, sz = sphere[2] * source.scale.z;
             const auto center = instance ? instance->position : DirectX::XMFLOAT4{
                 source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0};
             const float maximum_scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)});
-            caster.current_bounds = {center.x + cosine * sx + sine * sz, center.y + sy,
-                center.z - sine * sx + cosine * sz, sphere[3] * maximum_scale};
+            // StaticGpuScene assigns a fresh, nonwrapping instance generation
+            // whenever its strong immutable scene lease changes. Together with
+            // the page revision, this proves the local sphere transform is unchanged.
+            const bool reuse_static_center = immutable && !new_session &&
+                previous && previous->caster.immutable_source &&
+                previous->caster.instance_index == instance_index &&
+                previous->caster.instance_generation == reference.instance_generation &&
+                previous->caster.current_cut_revision == cut_revision;
+            if (reuse_static_center)
+            {
+                const auto &old = previous->caster.current_bounds;
+                caster.current_bounds = {old.x, old.y, old.z, sphere[3] * maximum_scale};
+            }
+            else
+            {
+                const auto caster_yaw = instance ? instance->yaw : source.yaw;
+                const float sine = std::sin(caster_yaw), cosine = std::cos(caster_yaw);
+                caster.current_bounds = {center.x + cosine * sx + sine * sz, center.y + sy,
+                    center.z - sine * sx + cosine * sz, sphere[3] * maximum_scale};
+            }
             caster.skin = hero;
             caster.wind = source.mesh == RenderMesh::Grass;
             caster.animated_alpha = source.mesh == RenderMesh::Grass;
@@ -5908,23 +6089,27 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
             caster.current_revisions = source.revisions;
             caster.current_revisions.material ^= impl_->material_parameter_revision;
-            caster.current_cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
-            caster.instance_index = reference.instance_index | (immutable ? 0x80000000u : 0u);
+            caster.current_cut_revision = cut_revision;
+            caster.instance_index = instance_index;
             caster.instance_generation = reference.instance_generation;
             caster.source_ref = ref_index;
             caster.geometry_record = pass >> 2;
-            caster.draw_group = static_cast<UINT>(group - groups.begin());
+            caster.draw_group = draw_group;
             caster.index_count = page->index_count;
             caster.meshlet_count = page->meshlet_count;
             caster.immutable_source = immutable;
-            const auto key = std::tuple{immutable, source.stable_id,
-                source.stable_id == 0 ? reference.instance_index + 1u : 0u};
-            const auto [current, inserted] = current_shadow_casters.try_emplace(key);
+            auto *current_nodes = immutable ? &current_shadow_caster_nodes : nullptr;
+            auto *current = FindCurrentShadowCasterNode(current_shadow_casters, key, current_nodes, ref_index);
+            const bool inserted = MarkShadowCasterPrepared(current->prepared_epoch, caster_preparation_epoch);
+#ifndef NDEBUG
+            assert(inserted == caster_key_oracle.insert(key).second);
+#endif
             if (!inserted) return Result::Success();
-            const auto previous = impl_->previous_shadow_casters.find(key);
-            if (!new_session && previous != impl_->previous_shadow_casters.end())
+            ++prepared_casters;
+            if (!new_session && previous)
             {
-                const auto &old = previous->second;
+                ++matched_previous_casters;
+                const auto &old = previous->caster;
                 caster.previous_bounds = old.current_bounds;
                 caster.previous_revisions = old.current_revisions;
                 caster.previous_cut_revision = old.current_cut_revision;
@@ -5935,7 +6120,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 caster.previous_wind = old.wind;
                 caster.previous_animated_alpha = old.animated_alpha;
             }
-            current->second = caster;
+            current->caster = caster;
             casters.push_back(caster);
             if (is_monster(source.mesh) && static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee) < 3)
             {
@@ -5955,7 +6140,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (std::size_t index = 0; index < static_leaf_ref_count; ++index)
                 if (auto added = append_caster(static_scene->instances[static_draw_refs[index].instance_index],
                         static_draw_refs[index], static_cast<UINT>(index), true, nullptr); !added) return added;
-        if (!new_session)
+        PruneShadowCasterStorage(current_shadow_casters, caster_preparation_epoch, prepared_casters);
+        assert(current_shadow_casters.size() == prepared_casters);
+        // Every cached static node was stamped above; prune can only erase
+        // unrelated keys. Duplicate named sources intentionally alias nodes.
+        for ([[maybe_unused]] const auto &entry : current_shadow_caster_nodes.entries)
+            assert(entry.node && entry.node->prepared_epoch == caster_preparation_epoch);
+        current_shadow_caster_nodes.valid = true;
+        prepared_previous_shadow_caster_nodes.valid = !previous_shadow_caster_nodes_warm;
+        // Unique current keys matching every previous key prove that no caster was removed.
+        if (!new_session && matched_previous_casters != impl_->previous_shadow_casters.size())
         {
             std::vector<const Impl::ShadowCasterMap::value_type *> removed_casters;
             for (const auto &entry : impl_->previous_shadow_casters)
@@ -5964,7 +6158,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             std::ranges::sort(removed_casters, {}, [](const auto *entry) { return entry->first; });
             for (const auto *entry : removed_casters)
             {
-                const auto &old = entry->second;
+                const auto &old = entry->second.caster;
                 auto removed = old;
                 removed.present = false;
                 removed.previous_present = true;
@@ -6639,6 +6833,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         pending_effects.adaptive = true;
         if (auto registered = impl_->adaptive_shading.Register(impl_->graph, adaptive_inputs, adaptive_outputs);
                 !registered) return registered;
+        // A deferred CSM must have its actual density producer.
+        if (overlap_ao_csm)
+        {
+            if (!adaptive_outputs.compute_ready || !adaptive_outputs.density.version.resource)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "AO/CSM overlap requires the current adaptive density producer.");
+            impl_->graph.AddOrderingDependency(280, 2);
+        }
+        // Classify shared guides before independent AO/virtual-shadow readers.
+        if (impl_->enhanced &&
+            adaptive_outputs.density.version.resource && virtual_shadow_outputs.resources[0])
+            impl_->graph.AddOrderingDependency(280, 149);
     }
     AmbientOcclusionOutputs ambient_outputs;
     AmbientOcclusionInputs ambient_inputs{
@@ -6649,6 +6855,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {gbuffer_surface_history_version, impl_->gbuffer_surface_history.resource.Get()},
         impl_->view_state.render_active, back_buffer_index, impl_->frame_number,
         impl_->graph_queue_executor.Completed(), !previous_view_valid || new_session};
+    ambient_inputs.queue = overlap_ao_csm ? QueueHint::Compute : QueueHint::Direct;
     const auto depth_signal = feature_declaration(SignalSemantic::Depth, SignalEncoding::Depth);
     const auto normal_signal = feature_declaration(SignalSemantic::Normal, SignalEncoding::Normal);
     const auto metadata_signal = feature_declaration(SignalSemantic::SurfaceMetadata, SignalEncoding::Metadata);
@@ -6719,6 +6926,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             if (auto registered = impl_->ambient_occlusion.Register(impl_->graph, ambient_inputs,
                     ambient_constants, ambient_outputs); !registered) return registered;
             pending_effects.ambient = ambient_outputs.ao.resource || ambient_outputs.contact.resource;
+            if (overlap_ao_csm && !ambient_outputs.adaptive_density_used)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "AO/CSM overlap requires the actual adaptive GTAO consumer.");
             if (active_features.ao_mode == GraphicsAoMode::GTAO)
                 emit_feature_signal(outputs, FeatureId::AmbientOcclusion, ambient_signal, ambient_outputs.ao);
             if (impl_->config.contact_shadows)
@@ -6876,9 +7086,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
         lighting_pass.Read(material_sidecar_versions[plane], Access::ShaderRead);
     hdr_version = lighting_pass.Write(hdr_version, Access::RenderTarget);
-    subsurface_diffuse_version = lighting_pass.Write(subsurface_diffuse_version, Access::RenderTarget);
-    environment_specular_version = lighting_pass.Write(environment_specular_version, Access::RenderTarget);
-    indirect_diffuse_version = lighting_pass.Write(indirect_diffuse_version, Access::RenderTarget);
+    if (subsurface_diffuse_version.resource)
+        subsurface_diffuse_version = lighting_pass.Write(subsurface_diffuse_version, Access::RenderTarget);
+    if (environment_specular_version.resource)
+        environment_specular_version = lighting_pass.Write(environment_specular_version, Access::RenderTarget);
+    if (indirect_diffuse_version.resource)
+        indirect_diffuse_version = lighting_pass.Write(indirect_diffuse_version, Access::RenderTarget);
     const auto raw_hdr_version = hdr_version;
     lighting_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -6886,9 +7099,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         constexpr float clear[] = {0, 0, 0, 0};
         const std::array targets{hdr_rtv, rtv_at(kLightingAuxRtvOffset), rtv_at(kLightingAuxRtvOffset + 1),
             rtv_at(kLightingAuxRtvOffset + 2)};
-        for (const auto target : targets) list->ClearRenderTargetView(target, clear, 0, nullptr);
+        list->ClearRenderTargetView(hdr_rtv, clear, 0, nullptr);
+        const std::array auxiliary_resources{impl_->subsurface_diffuse.resource.Get(),
+            impl_->environment_specular.resource.Get(), impl_->indirect_diffuse.resource.Get()};
+        for (std::size_t index = 0; index < auxiliary_resources.size(); ++index)
+            if (auxiliary_resources[index]) list->ClearRenderTargetView(targets[index + 1], clear, 0, nullptr);
         list->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, nullptr);
-        list->SetPipelineState(impl_->deferred_pipeline.Get());
+        const auto auxiliary_mask = static_cast<unsigned>(auxiliary_resources[0] != nullptr) |
+            (static_cast<unsigned>(auxiliary_resources[1] != nullptr) << 1) |
+            (static_cast<unsigned>(auxiliary_resources[2] != nullptr) << 2);
+        list->SetPipelineState(impl_->deferred_pipeline[auxiliary_mask].Get());
         list->SetGraphicsRootDescriptorTable(5, texture_table);
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         AdaptiveShadingRasterScope rate_scope;
@@ -8498,9 +8718,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->graph.SetFinalAccess(material_sidecar_versions[plane], Access::ShaderRead);
     impl_->graph.SetFinalAccess(hdr_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(raw_hdr_version, Access::ShaderRead);
-    impl_->graph.SetFinalAccess(subsurface_diffuse_version, Access::ShaderRead);
-    impl_->graph.SetFinalAccess(environment_specular_version, Access::ShaderRead);
-    impl_->graph.SetFinalAccess(indirect_diffuse_version, Access::ShaderRead);
+    for (const auto version : {subsurface_diffuse_version, environment_specular_version, indirect_diffuse_version})
+        if (version.resource) impl_->graph.SetFinalAccess(version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_accumulation_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(oit_revealage_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(post_a_version, Access::ShaderRead);
@@ -8743,7 +8962,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         pending_effects.local_shadows = false;
     }
     if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
-        impl_->previous_shadow_casters = std::move(current_shadow_casters);
+    {
+        auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
+        CommitShadowCasterStorage(impl_->previous_shadow_casters,
+            shadow_owner.scratch_shadow_casters, current_shadow_casters,
+            impl_->previous_shadow_caster_nodes, shadow_owner.scratch_shadow_caster_nodes,
+            current_shadow_caster_nodes, prepared_previous_shadow_caster_nodes,
+            previous_shadow_caster_nodes_warm);
+    }
     if (pending_effects.ray_shadows)
     {
         if (auto completed = impl_->ray_shadows.CompleteSubmission(impl_->graph, submitted_completion, true); !completed) return completed;
@@ -8973,6 +9199,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->previous_view_origin = current_view_origin;
     impl_->previous_origins_valid = true;
     impl_->previous_skin_deformation = current_skin_deformation;
+    std::copy_n(constants->grass_benders, 32, impl_->previous_grass_benders.begin());
+    impl_->previous_grass_state = {constants->camera_time.w,
+        static_cast<float>(constants->grass_bender_count.x), 1.0f, 0.0f};
     if (!impl_->canonical_instance_current || impl_->canonical_instance_current->package_id != impl_->active_render_package_id)
     {
         auto submitted = std::make_shared<Impl::SubmittedInstanceFrame>();
@@ -9027,6 +9256,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                     current_temporal_eye.z};
     impl_->temporal_previous_fov = snapshot.camera.vertical_fov_degrees;
     ++impl_->frame_number;
+    grass_history_attempt.succeeded = true;
     frame_result = {impl_->frame_number, snapshot.header.tick,
 #if defined(HS_DEVELOPMENT_TOOLS)
                     impl_->config.devtools_visible && ImGui::GetIO().WantCaptureMouse,

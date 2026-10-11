@@ -58,6 +58,7 @@ struct AmbientOcclusionInputs
     CompletionSet completed;
     bool reset_history{};
     AmbientOcclusionGuide adaptive_density; // Actual R8 tile8 density, only for the selected adaptive GTAO consumer.
+    QueueHint queue{QueueHint::Direct}; // Only the qualified Main caller selects Compute.
 };
 
 struct AmbientOcclusionOutputs

@@ -56,7 +56,9 @@ events.ndjson
 
 # Local planning documents
 /Docs/*
+!/Docs/VFX_Visual_UX_Audit_Resolution.md
 !/Docs/Consolidated_Review_Resolution.md
+!/Docs/Grass_History_Correction.md
 !/Docs/Plans/
 /Docs/Plans/*
 !/Docs/Plans/ENGINE_RENDERER_V7.md

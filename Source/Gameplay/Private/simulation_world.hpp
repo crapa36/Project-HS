@@ -69,6 +69,7 @@ struct PlayerState
 {
     Float2 position{};
     Float2 previous_position{};
+    DiscMotion2D tick_motion; // Derived collision cache, rebuilt before every CollisionHit phase.
     Float2 aim{0.0f, 1.0f};
     Float2 facing{0.0f, 1.0f};
     Float2 move_target{};
@@ -101,8 +102,6 @@ struct PlayerState
     std::uint64_t basic_arrow_sequence{};
     Tick active_basic_empower_until{};
     float movement_since_echo{};
-    Float2 one_second_ago{};
-    Tick last_position_sample{};
     SkillKind last_active{SkillKind::Count};
     Tick last_active_tick{};
     Tick alternating_refund_until{};
@@ -157,6 +156,7 @@ struct EnemyActor
     std::optional<BossKind> boss;
     Float2 position{};
     Float2 previous_position{};
+    DiscMotion2D tick_motion;
     Float2 velocity{};
     Float2 displacement_per_tick{};
     Tick displacement_ticks{};
@@ -592,6 +592,7 @@ struct GameSimulation::SimulationWorld
     BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
     const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
     void InitializePlayerState();
+    void RebuildNavigation();
     std::span<const ArenaObstacle2D> ArenaObstacles() const noexcept
     {
         return {rules.arena_obstacles.data(), rules.arena_obstacle_count};

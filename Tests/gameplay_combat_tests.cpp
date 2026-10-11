@@ -527,6 +527,141 @@ void TestRedirectedArrowUsesRemainingTick()
     }
 }
 
+void TestProjectilesHitMovingTargets()
+{
+    struct Case { float projectile_speed, enemy_speed; bool hit; };
+    for (const auto fixture : {Case{0, 0, false}, Case{0, 720, true},
+                                Case{600, 720, true}, Case{600, 0, true}})
+    {
+        hs::GameplayChecksum first{};
+        for (int repeat = 0; repeat < 2; ++repeat)
+        {
+            auto data = QuietGameData();
+            data.arena_obstacle_count = 0;
+            data.enemies[0].health = 1000;
+            data.enemies[0].move_speed = fixture.enemy_speed;
+            data.enemies[0].damage = 0;
+            data.enemies[0].attack_range = 0;
+            data.skills[0].projectile_speed = fixture.projectile_speed;
+            data.skills[5].projectile_speed = fixture.projectile_speed;
+            data.skills[5].range = 100;
+            hs::GameSimulation simulation;
+            Check(simulation.Initialize({0xC010u}, data).Succeeded(), "moving target initialize");
+            Debug(simulation, hs::DebugCommandKind::GrantSkill,
+                  static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+            hs::HeldInputState held; held.aim_world = {40, 0, 0};
+            hs::Sequence sequence{};
+            (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+            hs::GameReadModelStorage model;
+            hs::ProjectileView before;
+            for (int i = 0; i < 30 && before.id.value == 0; ++i)
+            {
+                simulation.WriteReadModel(model);
+                if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
+                else (void)Tick(simulation, held);
+            }
+            Check(before.id.value != 0, "moving target fixture launches an original arrow");
+            Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0,
+                  {before.position.x + 6, fixture.projectile_speed > 0 ? .6f : 0});
+            const auto result = Tick(simulation, held);
+            simulation.WriteReadModel(model);
+            const auto enemies = model.View().enemies;
+            Check(enemies.size() == 1 && (enemies[0].health < 1000) == fixture.hit,
+                  "moving target sweep catches intermediate contacts and preserves static controls");
+            if (fixture.enemy_speed > 0)
+                Check(enemies[0].position.x < before.position.x - 4,
+                      "crossing fixture ends outside the projectile's final-center broadphase cells");
+            if (repeat) Check(first == result.checksum, "moving target collision replay is deterministic");
+            else first = result.checksum;
+            Check(simulation.Shutdown().Succeeded(), "moving target shutdown");
+        }
+    }
+}
+
+void TestMovingPlayerHitsStationaryEnemyProjectile()
+{
+    auto data = QuietGameData();
+    data.arena_obstacle_count = 0;
+    data.stats.base_movement_speed_mps = 720;
+    data.enemies[1].move_speed = 0;
+    data.enemies[1].projectile_speed = 0;
+    data.enemies[1].attack_range = 10;
+    data.enemies[1].damage = 5;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0xC011u}, data).Succeeded(), "moving player collision initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+          static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {6, 0});
+    hs::GameReadModelStorage model;
+    hs::ProjectileView incoming;
+    for (int i = 0; i < 120 && incoming.id.value == 0; ++i)
+    {
+        (void)Tick(simulation);
+        simulation.WriteReadModel(model);
+        const auto found = std::ranges::find_if(model.View().projectiles,
+            [](const auto &projectile) { return !projectile.player_owned; });
+        if (found != model.View().projectiles.end()) incoming = *found;
+    }
+    Check(incoming.id.value != 0 && std::abs(incoming.position.x - 6) < .001f,
+          "moving player fixture creates a real stationary ranged projectile");
+    const auto health = simulation.GetObservation().health;
+    hs::HeldInputState held; held.move_held = true; held.move_target_world = {20, 0, 0};
+    (void)Tick(simulation, held);
+    Check(simulation.GetObservation().player_position.x > incoming.position.x + 2 &&
+              simulation.GetObservation().health < health,
+          "enemy projectile hits a player crossing during the tick rather than only its endpoint");
+    Check(simulation.Shutdown().Succeeded(), "moving player collision shutdown");
+}
+
+void TestRicochetClipsMovingTargetTime()
+{
+    auto data = QuietGameData();
+    data.arena_obstacle_count = 0;
+    for (const auto kind : {hs::EnemyKind::Melee, hs::EnemyKind::Ranged})
+    {
+        auto &enemy = data.enemies[static_cast<std::size_t>(kind)];
+        enemy.health = 1000;
+        enemy.move_speed = 0;
+        enemy.damage = 0;
+        enemy.attack_range = 0;
+        enemy.collision_radius = .1f;
+    }
+    data.enemies[1].move_speed = 120;
+    auto &skill = data.skills[5];
+    skill.projectile_speed = 600;
+    skill.collision_radius = .1f;
+    skill.range = 100;
+    skill.pierce_count = 1;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({0xC012u}, data).Succeeded(), "moving ricochet initialize");
+    Debug(simulation, hs::DebugCommandKind::GrantSkill,
+          static_cast<std::uint64_t>(hs::SkillKind::RicochetArrow));
+    hs::HeldInputState held; held.aim_world = {40, 0, 0};
+    hs::Sequence sequence{};
+    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
+    hs::GameReadModelStorage model;
+    hs::ProjectileView before;
+    for (int i = 0; i < 30 && before.id.value == 0; ++i)
+    {
+        simulation.WriteReadModel(model);
+        if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
+        else (void)Tick(simulation, held);
+    }
+    Check(before.id.value != 0 && std::abs(before.position.x - 10) < .001f,
+          "moving ricochet fixture launches one ten-metre step");
+    // The first hit is at 0.38 ticks; replaying the second target's whole path misses it.
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {14, 0});
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 1, 0, {11, 1.5f});
+    const auto result = Tick(simulation, held);
+    simulation.WriteReadModel(model);
+    Check(model.View().enemies.size() == 2 &&
+              std::ranges::all_of(model.View().enemies, [](const auto &enemy) { return enemy.health < 1000; }),
+          "ricochet tests the moving target only during the remaining global tick interval");
+    Check(std::ranges::count_if(simulation.PendingDomainSignals(), [&](const auto &signal) {
+              return signal.tick == result.tick && signal.kind == hs::DomainSignalKind::RicochetArrowHit;
+          }) == 2, "moving ricochet hits each target once in the same tick");
+    Check(simulation.Shutdown().Succeeded(), "moving ricochet shutdown");
+}
+
 void TestPiercingAndWallContactOrder()
 {
     const auto run = [](bool tie, bool wall) {
@@ -984,6 +1119,9 @@ void RunGameplayCombatTests()
     TestSuccessfulInputReplacesOldBuffer();
     TestAttacksRespectTerrain();
     TestRedirectedArrowUsesRemainingTick();
+    TestProjectilesHitMovingTargets();
+    TestMovingPlayerHitsStationaryEnemyProjectile();
+    TestRicochetClipsMovingTargetTime();
     TestPiercingAndWallContactOrder();
     TestZeroTimeRicochetsAreBounded();
     TestSoftSeparationRecoversCoincidentCenters();

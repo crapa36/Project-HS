@@ -4,17 +4,19 @@
 #include <Windows.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
+#include <d3dcompiler.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstring>
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
-#include <array>
 #include <memory>
 
 extern "C"
@@ -148,6 +150,49 @@ template <class T> std::shared_ptr<void> NativeOwner(T *native)
 {
     native->AddRef();
     return std::shared_ptr<void>(native, [](void *value) { static_cast<T *>(value)->Release(); });
+}
+
+void RunDeviceIdentity(Fixture &fixture, bool hardware)
+{
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "identity pool initialize");
+    hs::RenderGraphBuilder graph;
+    const auto heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    const auto description = BufferDescription(256);
+    const auto prepare = [&](ID3D12Resource *resource) {
+        graph.Reset();
+        const auto imported = graph.ImportBuffer({resource}, hs::Access::Common, "device identity import");
+        auto pass = graph.AddPass(1, "identity read", hs::QueueHint::Direct);
+        pass.Read(graph.Version(imported), hs::Access::CopySource);
+        pass.SetExecute([](hs::RenderPassContext &) {});
+        return graph.Prepare(pool);
+    };
+    ComPtr<ID3D12Resource> resource, resource_alias;
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)), "identity resource");
+    ComPtr<ID3D12Pageable> pageable;
+    Hr(resource.As(&pageable), "identity resource pageable interface");
+    Hr(pageable.As(&resource_alias), "identity resource interface roundtrip");
+    Check(prepare(resource_alias.Get()).Succeeded(), "same COM device identity accepts an interface roundtrip");
+
+    if (!hardware) return; // A hardware fixture and WARP provide genuinely distinct device identities.
+    ComPtr<IDXGIAdapter> warp;
+    ComPtr<ID3D12Device> foreign_device;
+    Hr(fixture.factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "identity WARP adapter");
+    Hr(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&foreign_device)),
+        "identity foreign WARP device");
+    ComPtr<IUnknown> expected_identity, foreign_identity;
+    Hr(fixture.device.As(&expected_identity), "identity fixture IUnknown");
+    Hr(foreign_device.As(&foreign_identity), "identity foreign IUnknown");
+    Check(expected_identity.Get() != foreign_identity.Get(), "foreign-device fixture must have distinct COM identities");
+    ComPtr<ID3D12Resource> foreign_resource;
+    Hr(foreign_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&foreign_resource)), "foreign identity resource");
+    const auto rejected = prepare(foreign_resource.Get());
+    Check(!rejected.Succeeded() &&
+        rejected.Message() == "RenderGraph imported resource belongs to a different device.",
+        "canonical identity comparison must still reject a genuinely foreign device");
+    fixture.CheckValidation();
 }
 
 struct ExternalWork
@@ -337,6 +382,13 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     Check(!graph.Prepare(pool).Succeeded(), "invalid version candidate is not cached");
     (void)declare(6, layout, false, false, true);
     Check(!graph.Prepare(pool).Succeeded(), "cache cannot mask a missing current callback");
+    for (const auto [producer, consumer] : std::array{std::pair{10u, 15u}, std::pair{15u, 20u}})
+    {
+        (void)declare(6, layout);
+        graph.AddOrderingDependency(producer, consumer);
+        Check(!graph.Prepare(pool).Succeeded(),
+            "sparse unknown ordering endpoint is rejected without replacing the cached plan");
+    }
     execute(6, layout);
     Check(hs::RenderGraphTestAccess::Compilations(graph) == 5 &&
         hs::RenderGraphTestAccess::Reuses(graph) == 2,
@@ -357,6 +409,24 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     texture_frame({16, 16, DXGI_FORMAT_R16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
     Check(hs::RenderGraphTestAccess::Compilations(graph) == 7,
         "format changes invalidate a plan despite matching allocation classes");
+
+    D3D12_RESOURCE_DESC texture_desc{};
+    texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture_desc.Width = texture_desc.Height = 16;
+    texture_desc.DepthOrArraySize = texture_desc.MipLevels = 1;
+    texture_desc.Format = DXGI_FORMAT_R8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    const auto heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+    ComPtr<ID3D12Resource> native_texture;
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture_desc,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&native_texture)), "wrong-kind plan texture");
+    graph.Reset();
+    pool.ResetCompletedClaims(fixture.executor.Completed());
+    (void)graph.ImportBuffer({native_texture.Get()}, hs::Access::Common, "texture imported as buffer");
+    const auto wrong_kind = graph.Prepare(pool);
+    Check(!wrong_kind.Succeeded() &&
+        wrong_kind.Message() == "RenderGraph imported resource kind disagrees with its native descriptor.",
+        "native descriptor snapshot rejects a texture imported as a buffer");
     fixture.CheckValidation();
 }
 
@@ -510,6 +580,363 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         Check(!graph.Prepare(pool) && !invoked, "invalid external boundary fails before callback/allocation");
     }
     fixture.CheckValidation();
+}
+
+void RunUavClear(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    struct Compiler
+    {
+        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ~Compiler() { if (module) FreeLibrary(module); }
+    } compiler;
+    if (!compiler.module)
+        throw std::runtime_error("Load System32 d3dcompiler_47.dll failed: " + std::to_string(GetLastError()));
+    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
+    Check(compile != nullptr, "System32 d3dcompiler_47.dll lacks D3DCompile");
+    constexpr std::string_view shader = R"(
+RWByteAddressBuffer UavSource : register(u0);
+ByteAddressBuffer SrvSource : register(t0);
+RWByteAddressBuffer Output : register(u1);
+[numthreads(64,1,1)] void ReadUav(uint3 p : SV_DispatchThreadID)
+{ Output.Store(p.x * 4, UavSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x)); }
+[numthreads(64,1,1)] void ReadSrv(uint3 p : SV_DispatchThreadID)
+{ Output.Store(p.x * 4, SrvSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x)); }
+)";
+    std::array<D3D12_ROOT_PARAMETER1, 3> parameters{};
+    for (auto &parameter : parameters)
+    {
+        parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+        parameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+        parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    }
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[2].Descriptor.ShaderRegister = 1;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    root_desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+    root_desc.Desc_1_1.pParameters = parameters.data();
+    ComPtr<ID3DBlob> serialized, errors;
+    Hr(D3D12SerializeVersionedRootSignature(&root_desc, &serialized, &errors), "serialize clear oracle root");
+    ComPtr<ID3D12RootSignature> root;
+    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+        IID_PPV_ARGS(&root)), "create clear oracle root");
+    std::array<ComPtr<ID3D12PipelineState>, 2> pipelines;
+    for (std::size_t entry = 0; entry < pipelines.size(); ++entry)
+    {
+        ComPtr<ID3DBlob> code, diagnostics;
+        const auto result = compile(shader.data(), shader.size(), "UavClearOracle", nullptr, nullptr,
+            entry ? "ReadSrv" : "ReadUav", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS |
+            D3DCOMPILE_WARNINGS_ARE_ERRORS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &diagnostics);
+        if (FAILED(result) && diagnostics)
+            std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
+                static_cast<const char *>(diagnostics->GetBufferPointer()));
+        Hr(result, "compile actual ClearUAV consumer shader");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC description{};
+        description.pRootSignature = root.Get();
+        description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+        Hr(fixture.device->CreateComputePipelineState(&description, IID_PPV_ARGS(&pipelines[entry])),
+            "create clear oracle pipeline");
+    }
+    constexpr UINT elements = 64, bytes = elements * sizeof(UINT), clear_value = 0x13579bdfu;
+    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    for (const bool interpass : {false, true})
+    {
+        const auto description = BufferDescription(bytes);
+        auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+        ComPtr<ID3D12Resource> upload, readback;
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create clear poison upload");
+        heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create clear oracle readback");
+        std::array<UINT, elements> poison;
+        poison.fill(0xdeadbeefu);
+        void *mapped{};
+        const D3D12_RANGE no_read{0, 0};
+        Hr(upload->Map(0, &no_read, &mapped), "map clear poison upload");
+        std::memcpy(mapped, poison.data(), bytes);
+        upload->Unmap(0, nullptr);
+        hs::TransientResourcePool pool;
+        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "clear oracle pool");
+        hs::RenderGraphBuilder graph;
+        const hs::BufferDesc uav_desc{bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
+        const auto source = graph.CreateBuffer(uav_desc, "clear oracle source");
+        const auto output = graph.CreateBuffer(uav_desc, "clear oracle output");
+        auto seed = graph.AddPass(300, "Clear oracle poison", hs::QueueHint::Copy);
+        const auto poisoned = seed.Write(graph.Version(source), hs::Access::CopyDest);
+        seed.SetExecute([&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(source)), 0, upload.Get(), 0, bytes);
+        });
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_desc.NumDescriptors = 1;
+        ComPtr<ID3D12DescriptorHeap> clear_cpu, clear_gpu;
+        Hr(fixture.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&clear_cpu)), "clear oracle CPU heap");
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        Hr(fixture.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&clear_gpu)), "clear oracle GPU heap");
+        const auto dispatch = [&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            list->SetComputeRootSignature(root.Get());
+            list->SetPipelineState(pipelines[interpass ? 1 : 0].Get());
+            auto *input = static_cast<ID3D12Resource *>(context.Resolve(source));
+            if (interpass) list->SetComputeRootShaderResourceView(1, input->GetGPUVirtualAddress());
+            else list->SetComputeRootUnorderedAccessView(0, input->GetGPUVirtualAddress());
+            list->SetComputeRootUnorderedAccessView(2,
+                static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+            list->Dispatch(1, 1, 1);
+        };
+        auto clear = graph.AddPass(301, "Clear oracle UAV clear", queue);
+        const auto cleared = clear.Write(poisoned, hs::Access::UnorderedWrite);
+        hs::ResourceVersion result;
+        if (!interpass) result = clear.Write(graph.Version(output), hs::Access::UnorderedWrite);
+        clear.SetExecute([&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            ID3D12DescriptorHeap *heaps[]{clear_gpu.Get()};
+            list->SetDescriptorHeaps(1, heaps);
+            const UINT values[]{clear_value, clear_value, clear_value, clear_value};
+            list->ClearUnorderedAccessViewUint(clear_gpu->GetGPUDescriptorHandleForHeapStart(),
+                clear_cpu->GetCPUDescriptorHandleForHeapStart(),
+                static_cast<ID3D12Resource *>(context.Resolve(source)), values, 0, nullptr);
+            if (!interpass) { context.UavBarrier(source); dispatch(context); }
+        });
+        if (interpass)
+        {
+            auto consumer = graph.AddPass(302, "Clear oracle SRV consumer", queue);
+            consumer.Read(cleared, hs::Access::ComputeRead);
+            result = consumer.Write(graph.Version(output), hs::Access::UnorderedWrite);
+            consumer.SetExecute(dispatch);
+        }
+        auto copy = graph.AddPass(303, "Clear oracle readback", hs::QueueHint::Copy);
+        copy.Read(result, hs::Access::CopySource);
+        copy.SetExecute([&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            list->CopyBufferRegion(readback.Get(), 0, static_cast<ID3D12Resource *>(context.Resolve(output)), 0, bytes);
+        });
+        Check(graph.Prepare(pool).Succeeded(), "prepare clear oracle graph");
+        D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R32_TYPELESS;
+        view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+        view.Buffer.NumElements = elements;
+        view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+        auto *input = static_cast<ID3D12Resource *>(graph.Resolve(source));
+        fixture.device->CreateUnorderedAccessView(input, nullptr, &view, clear_cpu->GetCPUDescriptorHandleForHeapStart());
+        fixture.device->CreateUnorderedAccessView(input, nullptr, &view, clear_gpu->GetCPUDescriptorHandleForHeapStart());
+        hs::CompletionSet completion;
+        fixture.Execute(graph, frame_slot, barriers, completion, "execute ClearUAV consumer oracle");
+        Check(fixture.executor.Wait(completion).Succeeded(), "wait clear oracle completion");
+        const D3D12_RANGE read{0, bytes};
+        Hr(readback->Map(0, &read, &mapped), "map clear oracle result");
+        const auto *actual = static_cast<const UINT *>(mapped);
+        for (UINT index = 0; index < elements; ++index)
+            Check(actual[index] == (clear_value ^ (0xa5a55a5au + index)), "ClearUAV actual shader result mismatch");
+        readback->Unmap(0, &no_read);
+        fixture.CheckValidation();
+        pool.ResetCompletedClaims(fixture.executor.Completed());
+        std::printf("ClearUAV %s/%s/%s passed (64 shader outputs).\n",
+            barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
+            queue == hs::QueueHint::Compute ? "Compute" : "Direct", interpass ? "SRV interpass" : "UAV callback");
+    }
+}
+
+void RunSharedTextureReaders(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    struct Compiler
+    {
+        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ~Compiler() { if (module) FreeLibrary(module); }
+    } compiler;
+    Check(compiler.module != nullptr, "load shared-reader shader compiler");
+    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
+    Check(compile != nullptr, "find shared-reader shader compiler");
+    constexpr std::string_view shader = R"(
+Texture2D<uint> Source : register(t0);
+RWByteAddressBuffer Output : register(u0);
+[numthreads(64,1,1)] void Main(uint3 p : SV_DispatchThreadID)
+{ Output.Store(p.x * 4, Source.Load(int3(p.x,0,0))); }
+)";
+    ComPtr<ID3DBlob> code, diagnostics, serialized;
+    const auto compiled = compile(shader.data(), shader.size(), "SharedTextureReaders", nullptr, nullptr,
+        "Main", "cs_5_0", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_WARNINGS_ARE_ERRORS, 0, &code, &diagnostics);
+    if (FAILED(compiled) && diagnostics)
+        std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
+            static_cast<const char *>(diagnostics->GetBufferPointer()));
+    Hr(compiled, "compile shared-reader shader");
+    D3D12_DESCRIPTOR_RANGE1 range{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0,
+        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0};
+    std::array<D3D12_ROOT_PARAMETER1, 2> parameters{};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[0].DescriptorTable = {1, &range};
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameters[1].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    root_desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+    root_desc.Desc_1_1.pParameters = parameters.data();
+    Hr(D3D12SerializeVersionedRootSignature(&root_desc, &serialized, &diagnostics), "serialize shared-reader root");
+    ComPtr<ID3D12RootSignature> root;
+    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+        IID_PPV_ARGS(&root)), "create shared-reader root");
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pso_desc{};
+    pso_desc.pRootSignature = root.Get();
+    pso_desc.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+    ComPtr<ID3D12PipelineState> pipeline;
+    Hr(fixture.device->CreateComputePipelineState(&pso_desc, IID_PPV_ARGS(&pipeline)), "create shared-reader pipeline");
+    constexpr UINT elements = 64, bytes = elements * sizeof(UINT), texture_offset = 1024;
+    constexpr UINT original = 0x5a17a55au, replacement = 0x16c4e21bu;
+    for (const auto final_access : {hs::Access::ComputeRead, hs::Access::CopySource})
+    for (const auto writer_queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    for (const bool legacy_bridge : {false, true})
+    {
+        auto heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+        D3D12_RESOURCE_DESC texture_desc{};
+        texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texture_desc.Width = elements; texture_desc.Height = 1;
+        texture_desc.DepthOrArraySize = texture_desc.MipLevels = 1;
+        texture_desc.Format = DXGI_FORMAT_R32_UINT;
+        texture_desc.SampleDesc.Count = 1;
+        texture_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        ComPtr<ID3D12Resource> texture, readback;
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texture_desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&texture)), "create shared texture");
+        auto output_desc = BufferDescription(bytes);
+        output_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        std::array<ComPtr<ID3D12Resource>, 3> outputs;
+        for (auto &output : outputs)
+            Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &output_desc,
+                D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&output)), "create shared-reader output");
+        heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+        const auto readback_desc = BufferDescription(texture_offset + bytes);
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create shared-reader readback");
+        D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
+        heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap_desc.NumDescriptors = 2;
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        ComPtr<ID3D12DescriptorHeap> gpu_heap, cpu_heap;
+        Hr(fixture.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&gpu_heap)), "create shared-reader GPU heap");
+        heap_desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE; heap_desc.NumDescriptors = 1;
+        Hr(fixture.device->CreateDescriptorHeap(&heap_desc, IID_PPV_ARGS(&cpu_heap)), "create shared-reader CPU heap");
+        const auto stride = fixture.device->GetDescriptorHandleIncrementSize(heap_desc.Type);
+        auto srv_cpu = gpu_heap->GetCPUDescriptorHandleForHeapStart();
+        auto uav_cpu = srv_cpu; uav_cpu.ptr += stride;
+        auto srv_gpu = gpu_heap->GetGPUDescriptorHandleForHeapStart();
+        auto uav_gpu = srv_gpu; uav_gpu.ptr += stride;
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = DXGI_FORMAT_R32_UINT; srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; srv.Texture2D.MipLevels = 1;
+        fixture.device->CreateShaderResourceView(texture.Get(), &srv, srv_cpu);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_UINT; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        fixture.device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav, uav_cpu);
+        fixture.device->CreateUnorderedAccessView(texture.Get(), nullptr, &uav, cpu_heap->GetCPUDescriptorHandleForHeapStart());
+        const auto clear = [&](hs::RenderPassContext &context, UINT value) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            ID3D12DescriptorHeap *heaps[]{gpu_heap.Get()}; commands->SetDescriptorHeaps(1, heaps);
+            const UINT values[]{value, value, value, value};
+            commands->ClearUnorderedAccessViewUint(uav_gpu, cpu_heap->GetCPUDescriptorHandleForHeapStart(),
+                texture.Get(), values, 0, nullptr);
+        };
+        hs::TransientResourcePool pool;
+        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "initialize shared-reader pool");
+        hs::RenderGraphBuilder graph;
+        const auto add_reader = [&](UINT id, hs::QueueHint queue, hs::ResourceVersion source,
+                                    hs::ResourceHandle output) {
+            auto pass = graph.AddPass(id, "Shared texture reader", queue);
+            pass.Read(source, hs::Access::ComputeRead);
+            const auto written = pass.Write(graph.Version(output), hs::Access::UnorderedWrite);
+            pass.SetExecute([&, output](hs::RenderPassContext &context) {
+                auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+                ID3D12DescriptorHeap *heaps[]{gpu_heap.Get()}; commands->SetDescriptorHeaps(1, heaps);
+                commands->SetComputeRootSignature(root.Get()); commands->SetPipelineState(pipeline.Get());
+                commands->SetComputeRootDescriptorTable(0, srv_gpu);
+                commands->SetComputeRootUnorderedAccessView(1,
+                    static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+                commands->Dispatch(1, 1, 1);
+            });
+            return written;
+        };
+        auto source = graph.ImportTexture({texture.Get()}, hs::Access::Common, "shared texture");
+        std::array<hs::ResourceHandle, 3> destination;
+        for (UINT i = 0; i < 2; ++i)
+            destination[i] = graph.ImportBuffer({outputs[i].Get()}, hs::Access::Common, "reader output");
+        auto seed = graph.AddPass(10, "Shared texture producer", hs::QueueHint::Direct);
+        const auto seeded = seed.Write(graph.Version(source), hs::Access::UnorderedWrite);
+        seed.SetExecute([&](auto &context) { clear(context, original); });
+        auto entry = graph.AddPass(20, "Shared read layout transition", hs::QueueHint::Direct);
+        entry.Read(seeded, hs::Access::ComputeRead);
+        if (legacy_bridge)
+            entry.SetExecuteOnOwner([source](hs::RenderPassContext &context) {
+                const hs::ExternalResourceAccess access{source, hs::Access::ComputeRead, hs::Access::ComputeRead};
+                return context.RecordLegacyResourceCommands({&access, 1}, [] { return hs::Result::Success(); });
+            });
+        else entry.SetExecute([](auto &) {});
+        add_reader(30, hs::QueueHint::Direct, seeded, destination[0]);
+        add_reader(40, hs::QueueHint::Compute, seeded, destination[1]);
+        graph.SetFinalAccess(seeded, final_access);
+        Check(graph.Prepare(pool).Succeeded(), "prepare shared-reader fanout");
+        hs::CompletionSet first;
+        fixture.Execute(graph, frame_slot, barriers, first, "execute shared-reader fanout");
+        const auto source_completion = graph.ResourceCompletion(source);
+        Check(source_completion.direct && source_completion.compute,
+            "shared texture retains both reader queue fences even without a final layout change");
+        auto partial = source_completion; --partial.compute;
+        Check(!source_completion.IsSatisfiedBy(partial), "one completed reader cannot retire the shared texture");
+        std::array<hs::CompletionSet, 2> output_completion;
+        std::array<hs::Access, 2> output_access;
+        std::array<hs::QueueHint, 2> output_queue;
+        for (UINT i = 0; i < 2; ++i)
+        {
+            output_completion[i] = graph.ResourceCompletion(destination[i]);
+            output_access[i] = graph.FinalAccess(destination[i]); output_queue[i] = graph.FinalQueue(destination[i]);
+        }
+        const auto source_queue = graph.FinalQueue(source);
+        graph.Reset();
+        // No CPU wait: the next import must join both previous-frame readers.
+        source = graph.ImportTexture({texture.Get(), source_completion, source_queue}, final_access, "shared reimport");
+        for (UINT i = 0; i < 2; ++i)
+            destination[i] = graph.ImportBuffer({outputs[i].Get(), output_completion[i], output_queue[i]},
+                output_access[i], "reimported reader output");
+        destination[2] = graph.ImportBuffer({outputs[2].Get()}, hs::Access::Common, "replacement reader output");
+        std::array<hs::ResourceVersion, 3> written_outputs;
+        written_outputs[0] = add_reader(10, hs::QueueHint::Direct, graph.Version(source), destination[0]);
+        written_outputs[1] = add_reader(20, hs::QueueHint::Compute, graph.Version(source), destination[1]);
+        auto overwrite = graph.AddPass(30, "Overwrite after all texture readers", writer_queue);
+        const auto changed = overwrite.Write(graph.Version(source), hs::Access::UnorderedWrite);
+        overwrite.SetExecute([&](auto &context) { clear(context, replacement); });
+        written_outputs[2] = add_reader(40, writer_queue == hs::QueueHint::Direct ? hs::QueueHint::Compute : hs::QueueHint::Direct,
+            changed, destination[2]);
+        const auto readback_handle = graph.ImportBuffer({readback.Get()}, hs::Access::CopyDest, "shared-reader readback");
+        auto copy = graph.AddPass(50, "Readback after shared-reader overwrite", hs::QueueHint::Direct);
+        copy.Read(changed, hs::Access::CopySource);
+        for (const auto output : written_outputs) copy.Read(output, hs::Access::CopySource);
+        (void)copy.Write(graph.Version(readback_handle), hs::Access::CopyDest);
+        copy.SetExecute([&](hs::RenderPassContext &context) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            for (UINT i = 0; i < outputs.size(); ++i)
+                commands->CopyBufferRegion(readback.Get(), UINT64(i) * bytes, outputs[i].Get(), 0, bytes);
+            D3D12_TEXTURE_COPY_LOCATION target{}; target.pResource = readback.Get();
+            target.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            target.PlacedFootprint = {texture_offset, {DXGI_FORMAT_R32_UINT, elements, 1, 1, bytes}};
+            D3D12_TEXTURE_COPY_LOCATION input{}; input.pResource = texture.Get();
+            input.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            commands->CopyTextureRegion(&target, 0, 0, 0, &input, nullptr);
+        });
+        Check(graph.Prepare(pool).Succeeded(), "prepare reimport/reader fanout/overwrite");
+        hs::CompletionSet second;
+        fixture.Execute(graph, 1u - frame_slot, barriers, second, "execute reimport/reader fanout/overwrite");
+        second.Merge(first);
+        Check(fixture.executor.Wait(second).Succeeded(), "wait every shared-reader frame");
+        void *mapped{}; const D3D12_RANGE read{0, texture_offset + bytes}, no_read{0, 0};
+        Hr(readback->Map(0, &read, &mapped), "map shared-reader results");
+        const auto *actual = static_cast<const UINT *>(mapped);
+        for (UINT i = 0; i < elements; ++i)
+            Check(actual[i] == original && actual[elements + i] == original &&
+                actual[2 * elements + i] == replacement && actual[texture_offset / sizeof(UINT) + i] == replacement,
+                "both readers precede overwrite and next frame observes the same imported texture");
+        readback->Unmap(0, &no_read);
+        fixture.CheckValidation();
+    }
 }
 
 void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
@@ -787,10 +1214,13 @@ int main(int argc, char **argv)
         const bool hardware =
             argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware);
+        RunDeviceIdentity(fixture, hardware);
         RunRemovedFenceSentinel(fixture);
         Run(fixture, hs::BarrierMode::Legacy, 0);
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);
         RunPlanReuse(fixture, hs::BarrierMode::Legacy, 0);
+        RunUavClear(fixture, hs::BarrierMode::Legacy, 0);
+        RunSharedTextureReaders(fixture, hs::BarrierMode::Legacy, 0);
         std::puts("Legacy Copy -> Compute -> Direct queue chain passed.");
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
@@ -801,6 +1231,8 @@ int main(int argc, char **argv)
             Run(fixture, hs::BarrierMode::Enhanced, 1);
             RunExternal(fixture, hs::BarrierMode::Enhanced, 1);
             RunPlanReuse(fixture, hs::BarrierMode::Enhanced, 1);
+            RunUavClear(fixture, hs::BarrierMode::Enhanced, 1);
+            RunSharedTextureReaders(fixture, hs::BarrierMode::Enhanced, 1);
             std::puts("Enhanced Copy -> Compute -> Direct queue chain passed.");
         }
         else if (hardware)

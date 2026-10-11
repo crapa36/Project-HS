@@ -345,6 +345,14 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
     return ResolveRendererFeatures({request.ray_tracing_enabled, request.ao_mode,
         request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
 }
+std::array<bool, 3> D3D12Renderer::Impl::RequiredLightingAuxiliaries(const RendererConfig &request) const noexcept
+{
+    const bool have_subsurface = std::ranges::any_of(material_surface_layouts, [](const auto &layout) {
+        return (layout.capability_mask & static_cast<std::uint32_t>(
+            render_data::MaterialClosureCapability::Subsurface)) != 0;
+    });
+    return LightingAuxiliaryTargets(ResolveFeatures(request), have_subsurface);
+}
 Result D3D12Renderer::Impl::PrepareLightList(const RendererConfig &candidate_config,
     ViewExtent capacity, LightListCandidate &candidate) const
 {

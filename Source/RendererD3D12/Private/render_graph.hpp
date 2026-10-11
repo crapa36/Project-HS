@@ -17,6 +17,7 @@ struct ID3D12Fence;
 namespace hs
 {
 
+
 enum class QueueHint : std::uint8_t
 {
     Direct,

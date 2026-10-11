@@ -664,6 +664,19 @@ if(HS_ENABLE_GPU_VALIDATION)
     target_compile_definitions(ProjectHS PRIVATE HS_ENABLE_GPU_VALIDATION=1)
 endif()
 hs_configure_target(ProjectHS)
+if(MSVC)
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest" CONTENT [=[
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
+]=])
+    target_sources(ProjectHS PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+endif()
 add_dependencies(ProjectHS hs_runtime_assets)
 
 add_executable(hs_experiment Source/Apps/Experiment/main.cpp)
@@ -1956,6 +1969,10 @@ if(HS_BUILD_TESTS)
         target_include_directories(hs_render_instance_order_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_render_instance_order_tests)
         add_test(NAME rendering.instance-order COMMAND hs_render_instance_order_tests)
+        add_executable(hs_renderer_caster_storage_tests Tests/renderer_caster_storage_tests.cpp)
+        target_include_directories(hs_renderer_caster_storage_tests PRIVATE Source/RendererD3D12/Private)
+        hs_configure_target(hs_renderer_caster_storage_tests)
+        add_test(NAME rendering.caster-storage COMMAND hs_renderer_caster_storage_tests)
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
             add_test(NAME rendering.shader-reconstruction-contracts
@@ -2176,6 +2193,22 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation
     )
     set_tests_properties(rendering.render-only PROPERTIES TIMEOUT 120)
+    add_test(NAME rendering.cluster-retest
+        COMMAND hs_render_test_runner
+            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/cluster-retest
+            --frames=14 --surface=visibility --geometry=indexed
+            --barriers=enhanced --validation --persistent-scene-probe
+        BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+    set_tests_properties(rendering.cluster-retest PROPERTIES TIMEOUT 120)
+    add_test(NAME rendering.grass-history
+        COMMAND hs_render_test_runner
+            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/grass-history
+            --frames=16 --grass-history-probe=D --grass-cadence=144
+            --surface=visibility --geometry=indexed --barriers=enhanced --validation
+        BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+    set_tests_properties(rendering.grass-history PROPERTIES TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
     add_test(NAME rendering.local-probe-revisions
         COMMAND hs_render_test_runner
             --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json
@@ -2218,6 +2251,21 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
     set_tests_properties(rendering.residency-streaming-gpu PROPERTIES TIMEOUT 600)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME rendering.light-list
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_light_list.py"
+                "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/light-list"
+                "--runner=$<TARGET_FILE:hs_render_test_runner>"
+                "--generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json"
+            BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+        add_test(NAME rendering.lighting-auxiliaries
+            COMMAND hs_render_test_runner
+                --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
+                --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/lighting-auxiliaries
+                --validation --barriers=enhanced --lighting-auxiliary-probe
+            BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+        set_tests_properties(rendering.light-list rendering.lighting-auxiliaries PROPERTIES
+            TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
         add_test(NAME rendering.oit-overdraw
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py"
@@ -2264,7 +2312,7 @@ if(HS_BUILD_TESTS)
     # These tests create D3D12 devices. Keep GPU captures serialized while
     # independent CPU validation runs alongside them under parallel CTest.
     set_tests_properties(
-        integration.render-smoke vfx.showcase rendering.barriers rendering.render-only rendering.local-probe-revisions
+        integration.render-smoke vfx.showcase rendering.barriers rendering.render-only rendering.cluster-retest rendering.local-probe-revisions
         rendering.skin-cache-gpu
         rendering.dynamic-lod-skin-growth
         rendering.residency-streaming-gpu
@@ -2527,6 +2575,8 @@ if(HS_BUILD_TESTS)
     add_test(NAME runtime.vfx-ribbon-state COMMAND hs_vfx_ribbon_state_tests)
     add_executable(hs_runtime_tests Tests/runtime_tests.cpp)
     target_link_libraries(hs_runtime_tests PRIVATE hs_runtime hs_asset_manifest hs_presentation)
+    target_compile_definitions(hs_runtime_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    add_dependencies(hs_runtime_tests hs_runtime_assets)
     target_include_directories(hs_runtime_tests PRIVATE
         Source/Runtime/Private
         Source/RendererD3D12/Public
@@ -2536,6 +2586,17 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_RUNTIME_TEST_GENERATION_TARGET})
     set_tests_properties(runtime.integration PROPERTIES TIMEOUT 30 ENVIRONMENT
         "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_RUNTIME_TEST_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_RUNTIME_TEST_GENERATION_SCOPE}")
+    if(HS_BUILD_CONTENT_TOOLS)
+        set(HS_UI_TEXT_GENERATION_TARGET hs_test_gameplay_generation)
+        set(HS_UI_TEXT_GENERATION_SCOPE test-gameplay)
+    else()
+        set(HS_UI_TEXT_GENERATION_TARGET ${HS_RUNTIME_TEST_GENERATION_TARGET})
+        set(HS_UI_TEXT_GENERATION_SCOPE ${HS_RUNTIME_TEST_GENERATION_SCOPE})
+    endif()
+    add_test(NAME runtime.ui-text-fit COMMAND hs_runtime_tests ui-text-fit
+        BUILD_DEPENDS ${HS_UI_TEXT_GENERATION_TARGET})
+    set_tests_properties(runtime.ui-text-fit PROPERTIES TIMEOUT 30 ENVIRONMENT
+        "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_UI_TEXT_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_UI_TEXT_GENERATION_SCOPE}")
     add_executable(hs_project_hs_arguments_tests
         Tests/project_hs_arguments_tests.cpp
         Source/Apps/ProjectHS/command_line.cpp)

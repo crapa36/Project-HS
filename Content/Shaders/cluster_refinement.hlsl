@@ -108,8 +108,8 @@ void Fault(uint flags)
     uint ignored;
     CutStatus.InterlockedOr(16u, flags, ignored);
     CutStatus.Store(20u, 0u);
-    // No later stage writes nonzero counts after Emit begins. Even an invariant
-    // failure discovered during Emit therefore disables the entire transaction.
+    // Emit never republishes live counts. Cull may trim cascade counts only
+    // after every Emit completes and the transaction is known to be fault-free.
     CommandCounts.Store4(0u, uint4(0u, 0u, 0u, 0u));
     CommandCounts.Store(16u, 0u);
 }
@@ -274,16 +274,20 @@ bool CompleteRepresentation(uint group_id, ClusterGroup group)
     }
     return complete;
 }
-void DemandRepresentation(uint group_id, ClusterGroup group, float priority)
+bool DemandRepresentation(uint group_id, ClusterGroup group, float priority, bool check_residency)
 {
     const uint encoded = asuint(max(priority, 1.0));
+    bool complete = true;
     for (uint offset = 0u; offset < group.ClusterCount; ++offset)
     {
         ClusterRecord cluster;
-        if (!ClusterValid(group.FirstCluster + offset, group_id, group, cluster)) return;
+        if (!ClusterValid(group.FirstCluster + offset, group_id, group, cluster)) return false;
         uint ignored;
         InterlockedMax(PageDemand[cluster.PageSlot], encoded, ignored);
+        // Missing pages still need demand; inspect the complete representation.
+        if (check_residency) complete = Resident(cluster.PageSlot) && complete;
     }
+    return complete;
 }
 float4 WorldSphere(ClusterGroup group, ClusterCandidate candidate, InstanceData instance)
 {
@@ -390,11 +394,10 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
             {
                 const uint child_id = Children[group.FirstChild + child];
                 ClusterGroup child_group;
-                if (GroupValid(child_id, candidate, child_group)) DemandRepresentation(child_id, child_group, priority);
+                if (GroupValid(child_id, candidate, child_group)) DemandRepresentation(child_id, child_group, priority, false);
             }
         if (refined) continue;
-        DemandRepresentation(id, group, priority);
-        if (!CompleteRepresentation(id, group)) { Fault(FailureMissingPage); continue; }
+        if (!DemandRepresentation(id, group, priority, true)) { Fault(FailureMissingPage); continue; }
         if ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u)
         {
             Fault(FailureErrorDomain); continue;
@@ -450,7 +453,9 @@ void PrefixCuts(uint3 dispatch : SV_DispatchThreadID, uint3 group_id : SV_GroupI
         if (total.y != 0u || total.x > OutputCapacity) Fault(FailureCapacity);
         const uint committed = CutStatus.Load(16u) == 0u ? total.x : 0u;
         CutStatus.Store(20u, committed);
-        CommandCounts.Store4(0u, uint4(committed, committed, committed, committed));
+        // Main is published by fault-immutable Cull from its final live commands.
+        // Keep the full selected transaction for Emit/history/current-depth Retest.
+        CommandCounts.Store4(0u, uint4(0u, committed, committed, committed));
         return;
     }
     if (PrefixStage == 2u)
@@ -551,6 +556,7 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
     uint count = 0u;
+    uint3 cascade_suffix = uint3(0u, 0u, 0u);
     uint node = candidate.FirstRoot;
     for (uint visited = 0u; node != Invalid && visited < candidate.GroupCount; ++visited)
     {
@@ -573,9 +579,24 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
             EmitCluster(base.x + count, cluster_id, id, group, cluster, candidate, instance, mask);
             ++count;
         }
+        const uint end = base.x + count;
+        if ((mask & 2u) != 0u) cascade_suffix.x = max(cascade_suffix.x, end);
+        if ((mask & 4u) != 0u) cascade_suffix.y = max(cascade_suffix.y, end);
+        if ((mask & 8u) != 0u) cascade_suffix.z = max(cascade_suffix.z, end);
     }
     if (node != Invalid) { Fault(FailureAncestorRange); return; }
-    if (CutCounts[candidate_index].y != 0u || count != CutCounts[candidate_index].x) Fault(FailureCatalog);
+    if (CutCounts[candidate_index].y != 0u || count != CutCounts[candidate_index].x)
+    {
+        Fault(FailureCatalog); return;
+    }
+    // Scratch only: a concurrent Emit fault may still invalidate all commands.
+    // Publish indirect counts later, after the complete transaction is immutable.
+    [unroll] for (uint cascade = 0u; cascade < 3u; ++cascade)
+    {
+        if (cascade_suffix[cascade] == 0u) continue;
+        uint ignored;
+        CommandCounts.InterlockedMax(20u + cascade * 4u, cascade_suffix[cascade], ignored);
+    }
 }
 
 bool SphereOccluded(float4 sphere, float4x4 view_projection)
@@ -653,6 +674,19 @@ bool SphereOccluded(float4 sphere, float4x4 view_projection)
 void CullClusters(uint3 dispatch : SV_DispatchThreadID)
 {
     const uint selection = LinearThread(dispatch);
+    if (selection == 0u)
+    {
+        const uint failure = CutStatus.Load(16u);
+        const uint committed = CutStatus.Load(20u);
+        const uint3 cascade_suffix = CommandCounts.Load3(20u);
+        // This pass follows every Emit. Keep holes and command order, trimming
+        // only empty cascade suffixes even when camera HZB/history is disabled.
+        if (failure != 0u)
+            CommandCounts.Store3(4u, uint3(0u, 0u, 0u));
+        else if (committed <= OutputCapacity && all(cascade_suffix <= committed))
+            CommandCounts.Store3(4u, cascade_suffix);
+        // An unexpected scratch bound leaves the original full prefix intact.
+    }
     if (selection >= OutputCapacity || selection >= CutStatus.Load(20u) || CutStatus.Load(16u) != 0u) return;
     PreviousRejected[selection] = 0u;
     const uint address = selection * 24u; // Only main-camera commands.
@@ -660,11 +694,19 @@ void CullClusters(uint3 dispatch : SV_DispatchThreadID)
     const ClusterInstanceRef reference = CutRefs[ClusterRefBase + selection];
     // Newly selected clusters, reused instance slots and new page versions
     // carry history-reset membership and cannot trust previous depth.
-    if (draw.x == 0u || draw.y == 0u || (reference.MeshFlags & 0x100000u) != 0u ||
-        OcclusionPhase != 0u || !SphereOccluded(SelectedBounds[selection], OcclusionPreviousViewProjection)) return;
-    PreviousRejected[selection] = 1u;
-    IndexedCommands.Store2(address + 4u, uint2(0u, 0u));
-    MeshCommands.Store3(selection * 16u + 4u, uint3(0u, 1u, 1u));
+    if (draw.x == 0u || draw.y == 0u) return;
+    if ((reference.MeshFlags & 0x100000u) == 0u && OcclusionPhase == 0u &&
+        SphereOccluded(SelectedBounds[selection], OcclusionPreviousViewProjection))
+    {
+        PreviousRejected[selection] = 1u;
+        IndexedCommands.Store2(address + 4u, uint2(0u, 0u));
+        MeshCommands.Store3(selection * 16u + 4u, uint3(0u, 1u, 1u));
+        return;
+    }
+    // Prefix1 cleared this count before Emit/Cull. No Fault writer remains;
+    // preserve every surviving command, including history-disabled/new cuts.
+    uint ignored;
+    CommandCounts.InterlockedMax(0u, selection + 1u, ignored);
 }
 
 [numthreads(64, 1, 1)]
@@ -672,7 +714,6 @@ void RetestClusters(uint3 dispatch : SV_DispatchThreadID)
 {
     const uint selection = LinearThread(dispatch);
     const uint committed = CutStatus.Load(16u) == 0u ? min(CutStatus.Load(20u), OutputCapacity) : 0u;
-    if (selection == 0u) CommandCounts.Store(16u, committed);
     if (selection >= committed) return;
     const uint record_id = GeometryDrawBase + selection;
     const uint address = record_id * 64u;
@@ -685,4 +726,10 @@ void RetestClusters(uint3 dispatch : SV_DispatchThreadID)
     const uint x = min(meshlet_count, 65535u);
     const uint y = visible ? meshlet_count / 65535u + (meshlet_count % 65535u != 0u ? 1u : 0u) : 1u;
     RetestMeshCommands.Store4(selection * 16u, uint4(record_id << 2u, x, y, 1u));
+    // Count cleared this word; preserve every live draw and omit only an empty suffix.
+    if (visible)
+    {
+        uint ignored;
+        CommandCounts.InterlockedMax(16u, selection + 1u, ignored);
+    }
 }

@@ -48,6 +48,7 @@ void BuildLightLists(uint3 dispatch : SV_DispatchThreadID)
     float3 lower, upper;
     HsClusterBounds(cell, lower, upper);
     uint inline_count = 0u, spill_count = 0u, total_count = 0u;
+    uint4 membership = 0u;
     bool world_query = !all(isfinite(lower)) || !all(isfinite(upper));
     [loop] for (uint index = Grid.w; index < Limits.x; ++index)
     {
@@ -58,11 +59,15 @@ void BuildLightLists(uint3 dispatch : SV_DispatchThreadID)
         // angular rejection happens at shading, so this broad phase cannot lose it.
         const float bound=light.position_range.w+(light.identity.w>=3u?light.shape_cone.y:0.0);
         if (dot(separation, separation) > bound * bound) continue;
-        if (inline_count < Limits.y) LightInline[cell_index * Limits.y + inline_count++] = index;
-        else if (spill_count < Limits.z) LightSpill[cell_index * Limits.z + spill_count++] = index;
+        if (inline_count < Limits.y) ++inline_count;
+        else if (spill_count < Limits.z) ++spill_count;
         else world_query = true;
+        if (total_count < Limits.y + Limits.z) membership[index / 32u] |= 1u << (index % 32u);
         ++total_count;
     }
+    [unroll] for (uint word = 0u; word < HsLightMaskWords; ++word)
+        LightInline[cell_index * HsLightMaskWords + word] = membership[word];
+    if (cell_index == 0u) LightSpill[0] = 0u; // Retain the existing four-resource binding contract.
     LightRanges.Store4(HsLightHeaderBytes + cell_index * 16u,
         uint4(inline_count, spill_count, world_query ? HsLightWorldQueryFlag : 0u, total_count));
 }

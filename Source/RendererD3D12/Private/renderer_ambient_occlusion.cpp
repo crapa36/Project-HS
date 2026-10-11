@@ -417,19 +417,19 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         auto metadata = import(storage->metadata_history[writeIndex], "AO.CurrentMetadata");
         auto resolved = import(storage->resolved, "AO.Resolved");
         auto sparse=storage->adaptive_compute?import(storage->adaptive_sparse,"AO.AdaptiveSparse"):ResourceVersion{};
-        auto horizon = graph.AddPass(45, storage->adaptive_compute?"AdaptiveGTAOHorizon":"GTAOHorizon", QueueHint::Direct);
+        auto horizon = graph.AddPass(45, storage->adaptive_compute?"AdaptiveGTAOHorizon":"GTAOHorizon", inputs.queue);
         readGuides(horizon);
         if(storage->adaptive_compute)
         {
             horizon.Read(inputs.adaptive_density.version,Access::ComputeRead);sparse=horizon.Write(sparse,Access::UnorderedWrite);
             horizon.SetExecute(execute(4,aoActive));
-            auto reconstruct=graph.AddPass(282,"AdaptiveGTAOCurrentGuideResolve",QueueHint::Direct);
+            auto reconstruct=graph.AddPass(282,"AdaptiveGTAOCurrentGuideResolve",inputs.queue);
             readGuides(reconstruct);reconstruct.Read(inputs.adaptive_density.version,Access::ComputeRead);
             reconstruct.Read(sparse,Access::ComputeRead);raw=reconstruct.Write(raw,Access::UnorderedWrite);
             reconstruct.SetExecute(execute(5,aoActive,1));outputs.adaptive_density_used=true;
         }
         else{raw=horizon.Write(raw,Access::UnorderedWrite);horizon.SetExecute(execute(0,aoActive));}
-        auto temporal = graph.AddPass(46, "GTAOTemporal", QueueHint::Direct);
+        auto temporal = graph.AddPass(46, "GTAOTemporal", inputs.queue);
         readGuides(temporal); temporal.Read(raw, Access::ComputeRead);
         temporal.Read(inputs.motion.version, Access::ComputeRead);
         temporal.Read(inputs.surface_history.version, Access::ComputeRead);
@@ -441,7 +441,7 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         history = temporal.Write(history, Access::UnorderedWrite);
         metadata = temporal.Write(metadata, Access::UnorderedWrite);
         temporal.SetExecute(execute(1, aoActive));
-        auto bilateral = graph.AddPass(47, "GTAOBilateral", QueueHint::Direct);
+        auto bilateral = graph.AddPass(47, "GTAOBilateral", inputs.queue);
         readGuides(bilateral); bilateral.Read(history, Access::ComputeRead);
         resolved = bilateral.Write(resolved, Access::UnorderedWrite);
         bilateral.SetExecute(execute(2, active));

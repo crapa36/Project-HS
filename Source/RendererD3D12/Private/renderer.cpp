@@ -463,7 +463,8 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
                                                    impl_->config.shadow_resolution,
                                                    impl_->config.bloom, width, height,
                                                    UsesInternalResolveTargets(reconstruction),
-                                                   impl_->config.outline); !result)
+                                                   impl_->config.outline,
+                                                   impl_->RequiredLightingAuxiliaries(impl_->config)); !result)
     {
         const auto device_reason = impl_->device->GetDeviceRemovedReason();
         if (FAILED(device_reason))
@@ -700,7 +701,8 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     const auto recreate_surfaces = capacity != impl_->view_state.render_capacity ||
         shadow_resolution != impl_->config.shadow_resolution ||
         UsesInternalResolveTargets(reconstruction) != UsesInternalResolveTargets(impl_->reconstruction_plan) ||
-        (options.bloom || options.outline) != (impl_->config.bloom || impl_->config.outline);
+        (options.bloom || options.outline) != (impl_->config.bloom || impl_->config.outline) ||
+        impl_->RequiredLightingAuxiliaries(feature_config) != impl_->RequiredLightingAuxiliaries(impl_->config);
     const auto recreate_pools = recreate_surfaces || options.bloom != impl_->config.bloom;
     const auto adaptive_status = impl_->adaptive_shading.Status();
     const bool recreate_adaptive = capacity != impl_->view_state.render_capacity ||
@@ -760,7 +762,8 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     {
         if (auto prepared = impl_->PrepareOptionTargets(targets, target_width, target_height,
             shadow_resolution, options.bloom, impl_->width, impl_->height,
-            UsesInternalResolveTargets(reconstruction), options.outline); !prepared) return prepared;
+            UsesInternalResolveTargets(reconstruction), options.outline,
+            impl_->RequiredLightingAuxiliaries(feature_config)); !prepared) return prepared;
     }
     else if (recreate_pools)
     {
@@ -1599,6 +1602,7 @@ Result D3D12Renderer::Shutdown()
     impl_->mesh_pipeline_pairs.clear();
     impl_->virtual_shadow_indexed_pipelines.clear();
     impl_->virtual_shadow_mesh_pipelines.clear();
+    impl_->previous_shadow_caster_nodes.Invalidate();
     impl_->previous_shadow_casters.clear();
     impl_->indexed_geometry_signature.Reset();
     impl_->mesh_geometry_signature.Reset();

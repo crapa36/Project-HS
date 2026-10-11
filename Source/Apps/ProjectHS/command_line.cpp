@@ -67,14 +67,17 @@ ApplicationConfig ParseProjectHsArguments(
         }
         else if (argument == "--no-vsync")
         {
+            config.vsync_explicit = true;
             config.vsync = false;
         }
         else if (argument == "--vsync")
         {
+            config.vsync_explicit = true;
             config.vsync = true;
         }
         else if (argument == "--borderless")
         {
+            config.borderless_explicit = true;
             config.borderless = true;
         }
         else if (argument == "--environment-preview")
@@ -291,7 +294,13 @@ ApplicationConfig ParseProjectHsArguments(
         else if (argument.starts_with("--frame-cap="))
         {
             const auto value = argument.substr(12);
-            std::from_chars(value.data(), value.data() + value.size(), config.frame_cap);
+            std::uint32_t frame_cap{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), frame_cap);
+            if (parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size() && frame_cap <= 1000)
+            {
+                config.frame_cap = frame_cap;
+                config.frame_cap_explicit = true;
+            }
         }
         else if (argument.starts_with("--render-scale="))
         {
@@ -327,11 +336,17 @@ ApplicationConfig ParseProjectHsArguments(
             const auto value = argument.substr(13);
             if (const auto separator = value.find('x'); separator != std::string_view::npos)
             {
-                std::from_chars(value.data(), value.data() + separator, config.width);
-                std::from_chars(value.data() + separator + 1, value.data() + value.size(),
-                                config.height);
-                config.width = std::max(config.width, 640u);
-                config.height = std::max(config.height, 360u);
+                std::uint32_t width{}, height{};
+                const auto parsed_width = std::from_chars(value.data(), value.data() + separator, width);
+                const auto parsed_height = std::from_chars(value.data() + separator + 1,
+                                                          value.data() + value.size(), height);
+                if (parsed_width.ec == std::errc{} && parsed_width.ptr == value.data() + separator &&
+                    parsed_height.ec == std::errc{} && parsed_height.ptr == value.data() + value.size())
+                {
+                    config.width = std::max(width, 640u);
+                    config.height = std::max(height, 360u);
+                    config.resolution_explicit = true;
+                }
             }
         }
     }

@@ -884,7 +884,13 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     for (std::size_t i = 0; i < kAuthoredMaterialNames.size(); ++i)
     {
         const std::string_view name = kAuthoredMaterialNames[i];
-        if (!(name.starts_with("leaf_") || name.starts_with("grass_"))) continue;
+        if (!(name.starts_with("leaf_") || name.starts_with("grass_")))
+        {
+            // Cluster/HLOD mesh draws select by material; opaque materials
+            // share the existing depth-only PSO and its mesh frontend pair.
+            environment_material_shadow_pipelines[i] = environment_opaque_shadow_pipeline;
+            continue;
+        }
         auto material_shadow = environment_shadow;
         material_shadow.PS = {material_shadow_pixels[i].data(),
                               material_shadow_pixels[i].size()};
@@ -1266,9 +1272,14 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                                         : HResultFailure("Create post-process PSO", create_result);
     };
     post.NumRenderTargets = 4;
-    post.RTVFormats[1] = post.RTVFormats[2] = post.RTVFormats[3] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    if (auto created = create_post_pipeline(deferred_pixel, deferred_pipeline.ReleaseAndGetAddressOf()); !created)
-        return created;
+    for (const UINT mask : {0u, 1u, 2u, 3u, 7u})
+    {
+        for (UINT slot = 0; slot < 3; ++slot)
+            post.RTVFormats[slot + 1] = mask & (1u << slot)
+                ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_UNKNOWN;
+        if (auto created = create_post_pipeline(deferred_pixel,
+                deferred_pipeline[mask].ReleaseAndGetAddressOf()); !created) return created;
+    }
     post.NumRenderTargets = 1;
     std::fill(std::begin(post.RTVFormats) + 1, std::end(post.RTVFormats), DXGI_FORMAT_UNKNOWN);
     for (auto [shader, pipeline] :

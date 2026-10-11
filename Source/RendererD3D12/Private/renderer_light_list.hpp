@@ -80,6 +80,14 @@ struct LightListOutputs
 };
 
 struct LightListTargets;
+struct AllocationResource;
+struct LightListDiagnostics
+{
+    std::array<const AllocationResource *, 4> resources{};
+    ViewExtent capacity{};
+    std::uint32_t frame_slot_count{}, frame_slot{};
+    std::uint64_t allocated_bytes{}, upload_allocated_bytes{};
+};
 class LightListCandidate
 {
   public:
@@ -89,9 +97,9 @@ class LightListCandidate
     friend class LightListSystem;
 };
 
-// Directional, Point/Spot and oriented Rectangle/elliptical Disk. Each cell stores at most
-// 8 inline + 8 spill indices; an exceeded cell selects the authoritative world
-// table instead of consuming its partial lists. No input or light truncation.
+// At most128 authoritative lights. Each cell stores ordered membership in four
+// uint mask words; exceeding quality's inline/spill counts keeps the exact world
+// query instead of consuming partial membership. No input or light truncation.
 class LightListSystem
 {
   public:
@@ -111,6 +119,8 @@ class LightListSystem
         const CompletionSet &completion, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
+    // Borrowed last successfully submitted slot; capture waits for GPU completion.
+    [[nodiscard]] LightListDiagnostics DiagnosticResources() const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(LightListSystem &other) noexcept { impl_.swap(other.impl_); }
   private:

@@ -213,7 +213,8 @@ void FillFaceConstants(FrameConstants &c,const LocalProbeCaptureView &view,std::
     c.screen_size={float(view.edge),float(view.edge),1.0f/view.edge,1.0f/view.edge}; c.output_size=c.screen_size;
     c.surface_view_origin={0,0,0,0}; c.surface_jitter_uv={0,0,0,0};
     c.temporal_options={0,0,view.far_distance,view.near_distance};
-    c.grass_bender_count={0,0,0,0}; c.vfx_light_count={0,0,0,0}; c.vfx_decal_count={0,0,0,0};
+    c.grass_bender_count={0,0,0,0}; c.previous_grass_state={};
+    c.vfx_light_count={0,0,0,0}; c.vfx_decal_count={0,0,0,0};
     c.particle_options={0,0,0,0}; c.authored_particle_clock={0,0,0,0}; c.lod_clock={0,0,0,0};
     c.skin_cache_options={0,0,0,generation}; c.lighting_options={0,0,1,1};
     // Captured transport is independent of exposure, screen AO/contact, camera

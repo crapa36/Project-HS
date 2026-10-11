@@ -4,6 +4,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include "vfx_typed_entity_surface_commands.hpp"
+#include "vfx_typed_screen_commands.hpp"
 #include <hs/renderer/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_spawn_command.hpp>
 
@@ -35,6 +36,7 @@ struct VfxSessionState
         }
     };
     std::uint64_t session_id{};
+    VfxLowHealthPulseState low_health_pulse;
     std::optional<Tick> terminal_clock_source_tick;
     std::optional<SessionPhase> terminal_clock_phase;
     std::optional<FixedStepClock::Clock::time_point> terminal_clock_started_at;
@@ -130,6 +132,7 @@ struct VfxSessionState
     {
         if (session_id == current_session) return false;
         session_id = current_session;
+        low_health_pulse.Clear();
         terminal_clock_source_tick.reset();
         terminal_clock_phase.reset();
         terminal_clock_started_at.reset();

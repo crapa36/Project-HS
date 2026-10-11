@@ -287,7 +287,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         auto fitted_size = font_size;
         while (SUCCEEDED(layout->GetMetrics(&metrics)) && fitted_size > 8.0f &&
                (metrics.height > text_height ||
-                metrics.widthIncludingTrailingWhitespace > text_width))
+                metrics.width > text_width))
         {
             fitted_size -= 1.0f;
             layout->SetFontSize(fitted_size, {0, static_cast<UINT32>(text.size())});
@@ -295,7 +295,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
         layout->GetMetrics(&metrics);
         layout->SetMaxHeight(text_height);
         if (metrics.height > text_height ||
-            metrics.widthIncludingTrailingWhitespace > text_width)
+            metrics.width > text_width)
         {
             ComPtr<IDWriteInlineObject> ellipsis;
             if (SUCCEEDED(ui_dwrite_factory->CreateEllipsisTrimmingSign(format.Get(),

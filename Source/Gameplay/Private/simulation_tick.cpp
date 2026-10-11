@@ -37,6 +37,9 @@ GameSimulation::SimulationWorld::SimulationWorld()
 void GameSimulation::SimulationWorld::InitializePlayerState()
 {
     actors->player = {};
+    actors->player_position_history.assign(
+        static_cast<std::size_t>(rules.relics.movement_echo.position_history_age_ticks) + 1,
+        actors->player.position);
     const auto &stats = rules.stats;
     actors->player.max_health = RoundDamage(stats.base_maximum_hp);
     actors->player.health = std::min(actors->player.max_health, RoundDamage(stats.base_current_hp));
@@ -650,8 +653,9 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(actors->player.basic_arrow_sequence);
     value(actors->player.active_basic_empower_until);
     value(actors->player.movement_since_echo);
-    vector2(actors->player.one_second_ago);
-    value(actors->player.last_position_sample);
+    // History can affect a later relic acquisition, so hash it even without the relic.
+    count(actors->player_position_history.size());
+    for (const auto position : actors->player_position_history) vector2(position);
     value(actors->player.last_active);
     value(actors->player.last_active_tick);
     value(actors->player.alternating_refund_until);

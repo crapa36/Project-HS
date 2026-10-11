@@ -1515,6 +1515,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
 void GameSimulation::SimulationWorld::MovementPhase()
 {
     actors->player.previous_position = actors->player.position;
+    actors->player.tick_motion.Reset(actors->player.position);
     const auto stationary_attack = current_input.held.basic_attack_held ||
                                    tick < actors->player.active_cast_tick;
     if (actors->player.retreat_landing_pending && tick >= actors->player.retreat_until)
@@ -1588,7 +1589,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                                 .delayed_second_retreat_and_arrow
                                                 .additional_move_distance),
                                   rules.stats.player_collision_radius,
-                                  rules.arena_boundary, ArenaObstacles());
+                                  rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
             actors->player.position = ClampToArena(rules.arena_boundary, actors->player.position,
                                                    rules.stats.player_collision_radius);
         }
@@ -1634,7 +1635,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
         actors->player.position = MoveDisc2D(actors->player.position,
                                      Multiply(actors->player.retreat_velocity, kTickSeconds),
                                      rules.stats.player_collision_radius,
-                                     rules.arena_boundary, ArenaObstacles());
+                                     rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
     }
     else if (!second_retreat && actors->player.has_move_target && !stationary_attack)
     {
@@ -1663,14 +1664,14 @@ void GameSimulation::SimulationWorld::MovementPhase()
             actors->player.position = MoveDisc2D(actors->player.position,
                                          Multiply(Normalize(delta), step),
                                          rules.stats.player_collision_radius,
-                                         rules.arena_boundary, ArenaObstacles());
+                                         rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
             actors->player.facing = Normalize(delta, actors->player.facing);
         }
         else
         {
             actors->player.position = MoveDisc2D(actors->player.position, delta,
                                          rules.stats.player_collision_radius,
-                                         rules.arena_boundary, ArenaObstacles());
+                                         rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
             if (LengthSquared(Subtract(actors->player.move_target, actors->player.position)) <= step * step)
                 actors->player.has_move_target = false;
         }
@@ -1681,6 +1682,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
     }
     actors->player.position = ClampToArena(rules.arena_boundary, actors->player.position,
                                    rules.stats.player_collision_radius);
+    actors->player.tick_motion.final_position = actors->player.position;
     actors->player.movement_since_echo += Length(Subtract(actors->player.position,
                                                    actors->player.previous_position));
     const auto moved = Length(Subtract(actors->player.position, actors->player.previous_position));
@@ -1708,12 +1710,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
     const auto locomotion_step = 1.0f / (Seconds(0.12f));
     actors->player.locomotion_blend += std::clamp(locomotion_target - actors->player.locomotion_blend,
                                            -locomotion_step, locomotion_step);
-    if (tick - actors->player.last_position_sample >=
-        rules.relics.movement_echo.position_history_age_ticks)
-    {
-        actors->player.one_second_ago = actors->player.previous_position;
-        actors->player.last_position_sample = tick;
-    }
+    actors->player_position_history[tick % actors->player_position_history.size()] =
+        actors->player.position;
 
     for (auto &enemy : actors->enemies)
     {
@@ -1737,7 +1735,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
             const auto radius = enemy.boss ? rules.boss_common.collision_radius
                                            : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
             enemy.position = MoveDisc2D(enemy.position, enemy.displacement_per_tick,
-                                        radius, rules.arena_boundary, ArenaObstacles());
+                                        radius, rules.arena_boundary, ArenaObstacles(), &enemy.tick_motion);
             if (--enemy.displacement_ticks == 0) enemy.displacement_per_tick = {};
         }
         else
@@ -1746,11 +1744,12 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                            : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
             enemy.position = MoveDisc2D(enemy.position,
                                         Multiply(enemy.velocity, kTickSeconds), radius,
-                                        rules.arena_boundary, ArenaObstacles());
+                                        rules.arena_boundary, ArenaObstacles(), &enemy.tick_motion);
         }
         const auto enemy_radius = enemy.boss ? rules.boss_common.collision_radius
                                              : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
         enemy.position = ClampToArena(rules.arena_boundary, enemy.position, enemy_radius);
+        enemy.tick_motion.final_position = enemy.position;
         if (enemy.boss && tick < enemy.dash_until && !enemy.dash_hit &&
             SegmentCircle(enemy.previous_position, enemy.position,
                           actors->player.position,
@@ -1806,16 +1805,28 @@ void GameSimulation::SimulationWorld::MovementPhase()
 
 void GameSimulation::SimulationWorld::SpatialGridPhase()
 {
-    const auto rebuild = [&]() {
+    const auto rebuild = [&](bool swept) {
         for (auto &cell : combat_state->enemy_grid) cell.clear();
         for (std::size_t index = 0; index < actors->enemies.size(); ++index)
         {
             if (actors->enemies[index].dead) continue;
-            const auto x = SpatialGridCoordinate(actors->enemies[index].position.x,
-                                                 rules.arena_half_extent);
-            const auto y = SpatialGridCoordinate(actors->enemies[index].position.y,
-                                                 rules.arena_half_extent);
-            combat_state->enemy_grid[static_cast<std::size_t>(y * kGridDimension + x)].push_back(index);
+            const auto &enemy = actors->enemies[index];
+            auto minimum = enemy.position, maximum = enemy.position;
+            if (swept)
+                for (std::uint8_t segment = 0; segment < enemy.tick_motion.count; ++segment)
+                    for (const auto point : {enemy.tick_motion.segments[segment].from,
+                                             enemy.tick_motion.segments[segment].to})
+                    {
+                        minimum.x = std::min(minimum.x, point.x); minimum.y = std::min(minimum.y, point.y);
+                        maximum.x = std::max(maximum.x, point.x); maximum.y = std::max(maximum.y, point.y);
+                    }
+            const auto minimum_x = SpatialGridCoordinate(minimum.x, rules.arena_half_extent);
+            const auto minimum_y = SpatialGridCoordinate(minimum.y, rules.arena_half_extent);
+            const auto maximum_x = SpatialGridCoordinate(maximum.x, rules.arena_half_extent);
+            const auto maximum_y = SpatialGridCoordinate(maximum.y, rules.arena_half_extent);
+            for (auto y = minimum_y; y <= maximum_y; ++y)
+                for (auto x = minimum_x; x <= maximum_x; ++x)
+                    combat_state->enemy_grid[static_cast<std::size_t>(y * kGridDimension + x)].push_back(index);
         }
     };
     const auto separate = [this](std::size_t left, std::size_t right) {
@@ -1836,7 +1847,7 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
         actors->enemies[right].position = Subtract(actors->enemies[right].position, push);
     };
 
-    rebuild();
+    rebuild(false);
     constexpr std::array<std::pair<int, int>, 4> kForwardNeighbors{{
         {1, 0}, {-1, 1}, {0, 1}, {1, 1},
     }};
@@ -1877,8 +1888,10 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
         enemy.position = ProjectOutsideObstacles(
             ClampToArena(rules.arena_boundary, enemy.position, radius),
             radius, ArenaObstacles());
+        enemy.tick_motion.final_position = enemy.position;
     }
-    rebuild();
+    // Separation uses final centers once; only projectile collision needs swept bounds.
+    rebuild(true);
 }
 
 bool GameSimulation::SimulationWorld::AlreadyHit(const ProjectileActor &projectile, std::uint64_t target) const noexcept
@@ -2766,6 +2779,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
         auto segment_start = projectile.previous_position;
         auto segment_end = projectile.position;
         auto remaining_seconds = kTickSeconds;
+        auto elapsed_fraction = 0.0f;
         std::uint64_t redirect_target{};
         std::uint32_t redirects{};
         for (;;)
@@ -2797,13 +2811,17 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         const auto &enemy = actors->enemies[index];
                         const auto radius = enemy.boss ? rules.boss_common.collision_radius
                             : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
-                        return SegmentDiscHitTime(segment_start, segment_end,
-                                                  enemy.position, projectile.radius + radius);
+                        return MovingDiscHitTime(segment_start, segment_end,
+                                                  enemy.tick_motion, projectile.radius + radius,
+                                                  elapsed_fraction);
                     };
                     const auto left_time = hit_time(left), right_time = hit_time(right);
                     if (left_time != right_time) return left_time < right_time;
                     return actors->enemies[left].id.value < actors->enemies[right].id.value;
                 });
+                combat_state->collision_candidates.erase(std::unique(
+                    combat_state->collision_candidates.begin(), combat_state->collision_candidates.end()),
+                    combat_state->collision_candidates.end());
                 for (const auto enemy_index : combat_state->collision_candidates)
                 {
                     auto &enemy = actors->enemies[enemy_index];
@@ -2813,8 +2831,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                                                   : rules.enemies[static_cast<std::size_t>(enemy.kind)]
                                                         .collision_radius;
                     const auto combined = projectile.radius + enemy_radius;
-                    const auto actor_time = SegmentDiscHitTime(segment_start,
-                        segment_end, enemy.position, combined);
+                    const auto actor_time = MovingDiscHitTime(segment_start,
+                        segment_end, enemy.tick_motion, combined, elapsed_fraction);
                     // A return clears hit_ids, but its departure contact is not a new hit.
                     if (actor_time == 0.0f && enemy.id.value == redirect_target) continue;
                     if (actor_time <= 1.0f && actor_time < wall_time)
@@ -2826,6 +2844,7 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         projectile.position = contact_position;
                         if (OnProjectileHit(projectile, enemy, contact_position))
                         {
+                            elapsed_fraction += (1.0f - elapsed_fraction) * actor_time;
                             remaining_seconds *= 1.0f - actor_time;
                             redirect_target = enemy.id.value;
                             redirected = true;
@@ -2839,8 +2858,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     }
                 }
             }
-            else if (const auto actor_time = SegmentDiscHitTime(segment_start,
-                     segment_end, actors->player.position,
+            else if (const auto actor_time = MovingDiscHitTime(segment_start,
+                     segment_end, actors->player.tick_motion,
                      projectile.radius + rules.stats.player_collision_radius);
                  actor_time <= 1.0f && actor_time < wall_time)
             {
@@ -4290,15 +4309,23 @@ void GameSimulation::SimulationWorld::HandleMovementEcho(Tick release_ticks, std
 {
     const auto &relic = rules.relics.movement_echo;
     if (actors->player.movement_since_echo < relic.required_distance) return;
+    // CastAttack precedes Movement: tick-age is a completed movement sample
+    // for positive ages. Age zero uses the current pre-movement position.
+    const auto history_tick = tick > relic.position_history_age_ticks
+                                  ? tick - relic.position_history_age_ticks : 0;
+    const auto echo_position = relic.position_history_age_ticks == 0
+                                  ? actors->player.position
+                                  : actors->player_position_history[
+                                        history_tick % actors->player_position_history.size()];
     RecordRelicEffect(RelicKind::MovementEcho, UpgradeEffectMetric::Activations);
     RecordRelicEffect(RelicKind::MovementEcho,
                       UpgradeEffectMetric::ProjectilesCreated);
     ScheduleAction({tick + release_ticks, ScheduledKind::Projectile,
-              SkillKind::BasicAttack, actors->player.one_second_ago, actors->player.aim,
+              SkillKind::BasicAttack, echo_position, actors->player.aim,
               relic.damage_multiplier, 0.0f, 0.0f, 1, 0,
               EffectOrigin::Derived, cast_id, kNoTelemetrySource,
               static_cast<std::uint8_t>(RelicKind::MovementEcho)});
-    EmitVfx(DomainSignalKind::AfterimageArrowFired, actors->player.one_second_ago,
+    EmitVfx(DomainSignalKind::AfterimageArrowFired, echo_position,
             actors->player.aim, 1.0f, 0.3f,
             static_cast<std::uint8_t>(RelicKind::MovementEcho));
     actors->player.movement_since_echo = 0.0f;

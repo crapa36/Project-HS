@@ -143,6 +143,7 @@ Window::~Window()
 
 Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, bool borderless)
 {
+    dpi_error_ = ERROR_SUCCESS;
     instance_ = GetModuleHandleW(nullptr);
 
     WNDCLASSEXW window_class{};
@@ -182,7 +183,9 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
     }
     else
     {
-        AdjustWindowRect(&rectangle, style, FALSE);
+        if (!AdjustWindowRectExForDpi(&rectangle, style, FALSE, 0, GetDpiForSystem()))
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                std::format("Cannot calculate the initial DPI window frame: {}", GetLastError()));
     }
     window_ = CreateWindowExW(0, kWindowClass, L"Project HS",
                               style, x, y,
@@ -197,8 +200,8 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
         has_windowed_rect_ = true;
 
     RAWINPUTDEVICE devices[] = {
-        {HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD, RIDEV_INPUTSINK, window_},
-        {HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE, RIDEV_INPUTSINK, window_},
+        {HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_KEYBOARD, 0, window_},
+        {HID_USAGE_PAGE_GENERIC, HID_USAGE_GENERIC_MOUSE, 0, window_},
     };
     if (!RegisterRawInputDevices(devices, static_cast<UINT>(std::size(devices)),
                                  sizeof(RAWINPUTDEVICE)))
@@ -207,26 +210,41 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
                                std::format("RegisterRawInputDevices failed: {}", GetLastError()));
     }
 
-    client_width_ = width;
-    client_height_ = height;
+    RECT client{};
+    if (!GetClientRect(window_, &client) || client.right <= 0 || client.bottom <= 0)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime", "Cannot query the initial window client extent.");
+    client_width_ = static_cast<std::uint32_t>(client.right);
+    client_height_ = static_cast<std::uint32_t>(client.bottom);
     if (visible)
     {
         ShowWindow(window_, SW_SHOW);
     }
+    if (dpi_error_)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+            std::format("Initial DPI window placement failed: {}", dpi_error_));
     return Result::Success();
 }
 
-bool Window::PumpMessages()
+bool Window::PumpMessages(Result *failure)
 {
+    if (failure) *failure = Result::Success();
     MSG message{};
-    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+    while (!dpi_error_ && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
     {
         if (message.message == WM_QUIT)
         {
+            // PeekMessage can dispatch a synchronous DPI message before returning WM_QUIT.
+            if (dpi_error_) break;
             return false;
         }
         TranslateMessage(&message);
         DispatchMessageW(&message);
+    }
+    if (dpi_error_)
+    {
+        if (failure) *failure = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+            std::format("DPI window placement failed: {}", dpi_error_));
+        return false;
     }
 
     if (accepting_input_ && window_)
@@ -359,7 +377,9 @@ Result Window::SetBorderless(bool borderless)
         {
             target = {0, 0, static_cast<LONG>(windowed_client_width_),
                       static_cast<LONG>(windowed_client_height_)};
-            AdjustWindowRect(&target, style, FALSE);
+            if (!AdjustWindowRectExForDpi(&target, style, FALSE, 0, GetDpiForWindow(window_)))
+                return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    std::format("Cannot calculate the restored DPI window frame: {}", GetLastError()));
         }
     }
 
@@ -482,6 +502,7 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
     if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
             target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
         return rollback(GetLastError());
+    if (dpi_error_) return rollback(dpi_error_);
     // Moving across monitors can change the HWND DPI. Recalculate the frame at
     // that DPI so the requested client pixel extent survives the display move.
     const auto target_dpi = GetDpiForWindow(window_);
@@ -491,6 +512,7 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
         if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
                 target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
             return rollback(GetLastError());
+        if (dpi_error_) return rollback(dpi_error_);
     }
     if (borderless && !borderless_)
     {
@@ -546,6 +568,44 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
 #endif
     switch (message)
     {
+    case WM_DPICHANGED:
+    {
+        if (!lparam || !LOWORD(wparam) || !HIWORD(wparam))
+        {
+            dpi_error_ = ERROR_INVALID_PARAMETER;
+            return 0;
+        }
+        auto target = *reinterpret_cast<const RECT *>(lparam);
+        const bool popup = (GetWindowLongPtrW(window, GWL_STYLE) & WS_POPUP) != 0;
+        if (popup)
+        {
+            MONITORINFO monitor{sizeof(monitor)};
+            if (!GetMonitorInfoW(MonitorFromRect(&target, MONITOR_DEFAULTTONEAREST), &monitor))
+            {
+                dpi_error_ = GetLastError();
+                if (!dpi_error_) dpi_error_ = ERROR_GEN_FAILURE;
+                return 0;
+            }
+            target = monitor.rcMonitor;
+        }
+        const auto width = static_cast<std::int64_t>(target.right) - target.left;
+        const auto height = static_cast<std::int64_t>(target.bottom) - target.top;
+        if (width <= 0 || height <= 0 || width > std::numeric_limits<int>::max() ||
+            height > std::numeric_limits<int>::max())
+        {
+            dpi_error_ = ERROR_INVALID_PARAMETER;
+            return 0;
+        }
+        if (!SetWindowPos(window, nullptr, target.left, target.top, static_cast<int>(width),
+                static_cast<int>(height), SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED))
+        {
+            dpi_error_ = GetLastError();
+            if (!dpi_error_) dpi_error_ = ERROR_GEN_FAILURE;
+            return 0;
+        }
+        if (!popup) { windowed_rect_ = target; has_windowed_rect_ = true; }
+        return 0;
+    }
     case WM_DISPLAYCHANGE:
         (void)channels_->window_messages.TryPush(
             {message, static_cast<std::uintptr_t>(wparam),
@@ -569,11 +629,14 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         }
         return 0;
     case WM_INPUT:
-        if (accepting_input_)
+        if (accepting_input_ && GET_RAWINPUT_CODE_WPARAM(wparam) == RIM_INPUT &&
+            GetForegroundWindow() == window_)
         {
             HandleRawInput(reinterpret_cast<HRAWINPUT>(lparam));
         }
-        return 0;
+        // DefWindowProc must clean up foreground raw input even when discarded.
+        return GET_RAWINPUT_CODE_WPARAM(wparam) == RIM_INPUT
+                   ? DefWindowProcW(window, message, wparam, lparam) : 0;
     case WM_KILLFOCUS:
         held_ = {};
         channels_->held_input.store(held_, std::memory_order_release);

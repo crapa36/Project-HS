@@ -14,6 +14,7 @@
 #include <hs/renderer/render_frame_input.hpp>
 
 #include "renderer_options.hpp"
+#include "renderer_caster_storage.hpp"
 #include "render_graph.hpp"
 
 #include "d3d12_resources.hpp"
@@ -225,7 +226,7 @@ constexpr std::uint32_t kViewRtvOffset = kMaterialSidecarRtvOffset + 2;
 constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
 constexpr std::uint32_t kLightingAuxRtvCount = 3;
-constexpr std::uint32_t kInstanceDataOffset = 12 * 1024;
+constexpr std::uint32_t kInstanceDataOffset = 13 * 1024;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Scene Buffer Upload", "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
     "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
@@ -425,14 +426,22 @@ struct FrameConstants
     std::array<DirectX::XMUINT4, 2> hero_material_varying_masks;
     std::array<DirectX::XMUINT4, 7> hero_binding_ranges;
     DirectX::XMFLOAT4 probe_options;
+    std::array<DirectX::XMFLOAT4, 32> previous_grass_benders;
+    DirectX::XMFLOAT4 previous_grass_state;
+    DirectX::XMFLOAT4 previous_grass_origin_delta;
+    DirectX::XMUINT4 scene_table_bounds;
 };
 
 constexpr std::uint32_t kExposureConstantsOffset = kInstanceDataOffset - 256;
-static_assert(sizeof(FrameConstants) == 11728);
+static_assert(sizeof(FrameConstants) == 12288);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
 static_assert(offsetof(FrameConstants, lod_clock) == 11200);
 static_assert(offsetof(FrameConstants, output_size) == 11392);
 static_assert(offsetof(FrameConstants, probe_options) == 11712);
+static_assert(offsetof(FrameConstants, previous_grass_benders) == 11728);
+static_assert(offsetof(FrameConstants, previous_grass_state) == 12240);
+static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 12256);
+static_assert(offsetof(FrameConstants, scene_table_bounds) == 12272);
 static_assert(sizeof(FrameConstants) <= kExposureConstantsOffset);
 
 struct ExposureConstants
@@ -584,8 +593,14 @@ struct D3D12Renderer::Impl
             return hash ^ (std::get<0>(key) + 0x9e3779b9u + (hash << 6) + (hash >> 2));
         }
     };
+    struct ShadowCasterRecord
+    {
+        VirtualShadowCaster caster;
+        std::uint64_t prepared_epoch{};
+    };
     using ShadowCasterMap = std::unordered_map<std::tuple<bool, std::uint64_t, std::uint32_t>,
-        VirtualShadowCaster, ShadowCasterKeyHash>;
+        ShadowCasterRecord, ShadowCasterKeyHash>;
+    using ShadowCasterNodes = ShadowCasterNodeCache<ShadowCasterMap, std::shared_ptr<const StaticRenderScene>>;
     struct UiResources
     {
         ~UiResources();
@@ -691,6 +706,8 @@ struct D3D12Renderer::Impl
         ClusterViewRuntime cluster_view;
         std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation;
         std::shared_ptr<const SubmittedInstanceFrame> previous_instances;
+        std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
+        DirectX::XMFLOAT4 previous_grass_state{};
         std::shared_ptr<const StaticRenderScene> scene_lease;
         std::uint64_t view_session_id{};
         GpuLodStateBuffer dynamic_lod_states;
@@ -698,6 +715,9 @@ struct D3D12Renderer::Impl
         std::uint32_t lod_session_epoch{};
         VolumetricCamera previous_volumetric_camera;
         ShadowCasterMap previous_shadow_casters;
+        ShadowCasterMap scratch_shadow_casters;
+        ShadowCasterNodes previous_shadow_caster_nodes, scratch_shadow_caster_nodes;
+        std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
         std::uint32_t exposure_read_index{}, temporal_read_index{}, hzb_read_index{};
@@ -888,13 +908,17 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CreateSwapChainAndTargets();
     [[nodiscard]] Result CreateDepthAndShadow();
     [[nodiscard]] Result CreatePostProcessTargets();
+    [[nodiscard]] std::array<bool, 3> RequiredLightingAuxiliaries(const RendererConfig &) const noexcept;
+    [[nodiscard]] Result PrepareLightingAuxiliaries(std::array<AllocationResource *, 3>,
+        ViewExtent, std::array<bool, 3>);
     [[nodiscard]] Result PrepareOptionTargets(OptionTargets &targets,
                                               std::uint32_t target_width,
                                               std::uint32_t target_height,
                                               std::uint32_t shadow_resolution,
                                               bool bloom, std::uint32_t output_width,
                                               std::uint32_t output_height,
-                                              bool native_resolve, bool outline);
+                                              bool native_resolve, bool outline,
+                                              std::array<bool, 3> lighting_auxiliaries);
     [[nodiscard]] Result PrepareOptionPools(
         std::array<TransientResourcePool, kFrameCount> &pools,
         std::uint32_t target_width, std::uint32_t target_height, bool bloom,
@@ -1250,7 +1274,6 @@ struct D3D12Renderer::Impl
     AllocationResource family_normal;
     AllocationResource vfx_masks;
     std::uint32_t vfx_sprite_count{};
-    Tick last_status_visual_tick{std::numeric_limits<Tick>::max()};
     AllocationResource vfx_mesh_atlas;
     std::array<std::uint32_t, 7> vfx_mesh_vertex_counts{};
     std::array<float, 7> vfx_mesh_transverse_radii{};
@@ -1383,6 +1406,7 @@ struct D3D12Renderer::Impl
     std::uint64_t volumetric_revision{};
     VolumetricCamera previous_volumetric_camera;
     ShadowCasterMap previous_shadow_casters;
+    ShadowCasterNodes previous_shadow_caster_nodes;
     LightListSystem light_list;
     DecalSurfaceSystem decal_surface;
     ScreenReflectionsSystem screen_reflections;
@@ -1441,6 +1465,8 @@ struct D3D12Renderer::Impl
     std::chrono::steady_clock::time_point render_package_time;
     std::shared_ptr<CanonicalSkinFrame> previous_skin_deformation, canonical_skin_current;
     std::shared_ptr<const SubmittedInstanceFrame> previous_instances, canonical_instance_current;
+    std::array<DirectX::XMFLOAT4, 32> previous_grass_benders{};
+    DirectX::XMFLOAT4 previous_grass_state{};
     std::vector<std::shared_ptr<CanonicalSkinFrame>> canonical_skin_frames;
     GraphicsSettings applied_graphics;
     std::shared_ptr<const render_data::QualityProfiles> quality_profiles;
@@ -1523,7 +1549,8 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> ribbon_args_pipeline;
     ComPtr<ID3D12PipelineState> ribbon_add_pipeline;
     ComPtr<ID3D12PipelineState> ribbon_oit_pipeline;
-    ComPtr<ID3D12PipelineState> deferred_pipeline;
+    // Auxiliary bits: SSS=1, environment specular=2, indirect diffuse=4; valid masks 0,1,2,3,7.
+    std::array<ComPtr<ID3D12PipelineState>, 8> deferred_pipeline;
     ComPtr<ID3D12PipelineState> composite_pipeline;
     ComPtr<ID3D12PipelineState> temporal_pipeline;
     ComPtr<ID3D12PipelineState> pre_exposure_pipeline;

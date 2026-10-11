@@ -46,6 +46,7 @@ struct PresentationUiState
     std::uint8_t loadout_source_slot{0xFF};
     std::uint8_t settings_group{}; // Seven definition groups, then Audio/Input.
     std::uint8_t settings_page{};
+    std::uint8_t character_details_page{};
 };
 
 // Runtime publishes immutable requested intent and actual renderer receipts.
@@ -74,6 +75,8 @@ inline constexpr std::size_t kGraphicsUiRowsPerPage = 10;
 // Main-menu title + panel + tabs + rows + telemetry + footer + display modal.
 inline constexpr std::size_t kGraphicsUiSnapshotReserve = 2 + 8 + 5 * kGraphicsUiRowsPerPage + 3 + 5 + 4;
 inline constexpr float kGraphicsUiRowY = 250, kGraphicsUiRowStride = 56;
+inline constexpr std::size_t kCharacterUpgradesPerPage = 4, kCharacterRelicsPerPage = 4;
+[[nodiscard]] std::size_t CharacterDetailsPageCount(const SessionProbe &, const PresentationUiState &) noexcept;
 [[nodiscard]] std::vector<const GraphicsSettingDescriptor *> GraphicsSettingsVisibleRows(
     const PresentationUiState &);
 [[nodiscard]] std::size_t GraphicsSettingsPageCount(std::uint8_t group);

@@ -15,7 +15,7 @@ SceneOutput LocalProbeCaptureVS(SceneInput input,uint instance_id : SV_InstanceI
     context.instance=HsLoadGpuSceneInstance(instance_id);
     context.draw.InstanceIndex=instance_id; context.draw.InstanceGeneration=generation;
     context.instance.Scale.w=1.0;
-    SceneOutput output=EvaluateSceneVertex(input,context,vertex_id);
+    SceneOutput output=EvaluateSceneVertex(input,context,vertex_id,false);
     output.MaterialId=0x10000000u+PassValue;
     output.EnvironmentFade=1.0; output.EnvironmentFlags&=~0x20000u;
     output.HistoryConfidence=0.0; output.ShadowClipDistance=1.0;

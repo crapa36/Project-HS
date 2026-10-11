@@ -729,8 +729,12 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
             ? path->current_position
             : Float3{input.current_transform[12], input.current_transform[13],
                      input.current_transform[14]};
+        const Float3 previous_position = retarget
+            ? path->previous_position
+            : Float3{input.previous_transform[12], input.previous_transform[13],
+                     input.previous_transform[14]};
         const float footprint = retarget ? path->projectile_radius : entity->footprint_radius;
-        if (!Finite(position)) continue;
+        if (!Finite(position) || !Finite(previous_position)) continue;
         for (std::size_t source_index = effect.sources.first;
              source_index < static_cast<std::size_t>(effect.sources.first) + effect.sources.count;
              ++source_index)
@@ -758,6 +762,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
                 output.rgba[3] > 1.0f) continue;
             VfxFlashSpawnInput flash;
             flash.position = position;
+            flash.previous_position = previous_position;
+            flash.interpolate_owner_position = true;
             flash.shape = VfxImpactShape::StatusStamp;
             flash.size = footprint;
             flash.curve_row = 4;

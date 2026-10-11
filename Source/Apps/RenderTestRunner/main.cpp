@@ -4,6 +4,7 @@
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/renderer/render_frame_input.hpp>
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "view_fixture.hpp"
 #include <hs/jobs/task_system.hpp>
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -973,12 +975,18 @@ int main(int argc, char **argv)
         bool gpu_lod_probe{};
         bool residency_streaming_probe{};
         bool surface_motion_resize_probe{};
+        std::string grass_history_probe;
+        std::uint32_t grass_cadence = 60;
         bool lighting_transport_probe{};
         bool world_transport_probe{};
         bool gameplay_scene{};
         bool local_probe_revision_probe{};
         bool oit_overdraw_probe{};
+        std::string vfx_composition_probe;
+        bool entity_surface_probe{};
         bool camera_basis_probe{};
+        bool light_list_probe{};
+        bool lighting_auxiliary_probe{};
         bool software_gi_probe{};
         std::string ray_reconstruction_probe;
         bool require_multi_queue{};
@@ -1032,12 +1040,20 @@ int main(int argc, char **argv)
             else if (arg == "--gpu-lod-probe") gpu_lod_probe = true;
             else if (arg == "--residency-streaming-probe") residency_streaming_probe = true;
             else if (arg == "--surface-motion-resize-probe") surface_motion_resize_probe = true;
+            else if (arg.starts_with("--grass-history-probe="))
+                grass_history_probe = arg.substr(22);
+            else if (arg.starts_with("--grass-cadence="))
+                grass_cadence = Number(arg.substr(16), 30, 240);
             else if (arg == "--lighting-transport-probe") lighting_transport_probe = true;
             else if (arg == "--world-transport-probe") world_transport_probe = true;
             else if (arg == "--gameplay-scene") gameplay_scene = true;
             else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
             else if (arg == "--oit-overdraw-probe") oit_overdraw_probe = true;
+            else if (arg.starts_with("--vfx-composition-probe=")) vfx_composition_probe = arg.substr(24);
+            else if (arg == "--entity-surface-probe") entity_surface_probe = true;
             else if (arg == "--camera-basis-probe") camera_basis_probe = true;
+            else if (arg == "--light-list-probe") light_list_probe = true;
+            else if (arg == "--lighting-auxiliary-probe") lighting_auxiliary_probe = true;
             else if (arg == "--software-gi-probe") software_gi_probe = world_transport_probe = true;
             else if (arg.starts_with("--ray-reconstruction="))
             {
@@ -1098,6 +1114,107 @@ int main(int argc, char **argv)
                                            !material_reload_invalid_pointer.empty();
         const bool surface_motion_resize_fixture =
             surface_motion_resize_probe || (lighting_transport_probe && ray_reconstruction_probe.empty());
+        if (entity_surface_probe)
+        {
+            if ((frames_explicit && frames != 8) || !vfx_composition_probe.empty() || !grass_history_probe.empty())
+                throw std::runtime_error("Entity surface probe requires eight isolated ordinary frames");
+            frames = 8;
+            config.interpolate = config.dynamic_resolution = config.temporal_reconstruction = false;
+            config.grid_floor_probe = config.grid_floor_disable_aa = true;
+            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.ao_mode = hs::GraphicsAoMode::Off;
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.reflection_mode = hs::GraphicsReflectionMode::Off;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+            receipt["entity_surface"] = {{"frames", Json::array()}, {"diagnostic_options", true},
+                {"aa", "off"}, {"exposure_delta_seconds", 0}, {"simulation_time_ns", 0},
+                {"negative_generation_scope", "source guard only; no GPU fault injection"}};
+        }
+        if (!grass_history_probe.empty())
+        {
+            if (grass_history_probe.size() != 1 || grass_history_probe[0] < 'A' ||
+                grass_history_probe[0] > 'E' || frames < 16 || gameplay_scene || owned_view_probe ||
+                surface_motion_resize_fixture || persistent_scene_probe || gpu_lod_probe)
+                throw std::runtime_error("grass history probe requires A..E and at least 16 ordinary frames");
+            config.dynamic_resolution = false;
+            config.temporal_reconstruction = true;
+            config.sharpening = 0;
+            config.bloom = config.outline = false;
+            config.ray_tracing_enabled = false;
+            config.ao_mode = hs::GraphicsAoMode::Off;
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.reflection_mode = hs::GraphicsReflectionMode::Off;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+            receipt["grass_history"] = {{"case", grass_history_probe},
+                {"logical_render_hz", grass_cadence}, {"diagnostic_options", true},
+                {"frames", Json::array()}};
+        }
+        if (light_list_probe || lighting_auxiliary_probe)
+        {
+            const auto required_frames = light_list_probe ? 6u : 5u;
+            if (!frames_explicit) frames = required_frames;
+            if (frames != required_frames) throw std::runtime_error("lighting probe frame count is fixed");
+            config.lighting_quality = hs::GraphicsQuality::Ultra;
+            config.dynamic_resolution = config.temporal_reconstruction = false;
+            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.ao_mode = hs::GraphicsAoMode::Off;
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.reflection_mode = hs::GraphicsReflectionMode::Off;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+            if (light_list_probe)
+                receipt["light_list"] = {{"local_counts", {4, 64, 65, 128, 127, 0}},
+                    {"directional_counts", {0, 0, 0, 0, 1, 1}}, {"frames", Json::array()}};
+            else receipt["lighting_auxiliaries"]["frames"] = Json::array();
+        }
+        if (!vfx_composition_probe.empty())
+        {
+            if ((vfx_composition_probe != "fixed" && vfx_composition_probe != "auto" &&
+                 vfx_composition_probe != "control" && vfx_composition_probe != "switch") ||
+                (frames_explicit && frames != 32) || oit_overdraw_probe || camera_basis_probe ||
+                gameplay_scene || owned_view_probe || surface_motion_resize_fixture ||
+                persistent_scene_probe || grid_floor_probe || world_transport_probe ||
+                provider_switch_probe || material_reload_probe || !grass_history_probe.empty() ||
+                light_list_probe || lighting_auxiliary_probe || skin_cache_monster_probe ||
+                dynamic_lod_skin_growth_probe || gpu_lod_probe || residency_streaming_probe ||
+                all_providers_probe)
+                throw std::runtime_error("VFX composition probe requires fixed/auto/control/switch and 32 isolated frames");
+            frames = 32;
+            config.dynamic_resolution = false;
+            config.temporal_reconstruction = true;
+            config.sharpening = 0;
+            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.ao_mode = hs::GraphicsAoMode::Off;
+            config.gi_mode = hs::GraphicsGiMode::Off;
+            config.reflection_mode = hs::GraphicsReflectionMode::Off;
+            config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
+            receipt["vfx_composition"] = {{"exposure", vfx_composition_probe},
+                {"logical_hz", 60}, {"diagnostic_options", true}, {"frames", Json::array()}};
+            if (vfx_composition_probe == "switch")
+            {
+                // Unlike native-options fixtures, a settings transition needs
+                // an acknowledged startup request. Preserve this fixture's
+                // native extent, TAA and disabled effects in that projection.
+                hs::GraphicsSettings initial;
+                initial.vsync = config.vsync;
+                initial.resolution_mode = hs::GraphicsResolutionMode::Manual;
+                initial.manual_scale_percent = static_cast<float>(config.render_scale_percent);
+                initial.dynamic_resolution = config.dynamic_resolution;
+                initial.reconstruction_provider.value = "internal_taau";
+                initial.reconstruction_quality.value = "native";
+                initial.sharpening = config.sharpening;
+                initial.bloom = config.bloom;
+                initial.outline = config.outline;
+                initial.ao_mode = config.ao_mode;
+                initial.gi_mode = config.gi_mode;
+                initial.reflection_mode = config.reflection_mode;
+                initial.ray_tracing_enabled = config.ray_tracing_enabled;
+                initial.volumetric_quality = config.volumetric_quality;
+                initial.particle_quality = config.vfx_quality == hs::VfxQuality::Low
+                    ? hs::GraphicsQuality::Low : config.vfx_quality == hs::VfxQuality::Medium
+                        ? hs::GraphicsQuality::Medium : hs::GraphicsQuality::High;
+                config.requested_graphics = std::move(initial);
+            }
+        }
         if (oit_overdraw_probe || camera_basis_probe)
         {
             const auto required_frames = camera_basis_probe ? 6u : 4u;
@@ -1186,6 +1303,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("--owned-view-probe requires exactly 3 frame packages");
         if (persistent_scene_probe && frames < 9)
             throw std::runtime_error("--persistent-scene-probe requires at least 9 frames");
+        if (persistent_scene_probe && config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer && frames < 11)
+            throw std::runtime_error("Visibility --persistent-scene-probe requires at least 11 frames for live Cluster Retest");
         if (skin_cache_monster_probe && frames < 2)
             throw std::runtime_error("--skin-cache-monster-probe requires at least 2 frames");
         if (local_probe_revision_probe && frames < 96)
@@ -1210,6 +1329,9 @@ int main(int argc, char **argv)
                 static_cast<unsigned>(provider_switch_probe) +
                 static_cast<unsigned>(oit_overdraw_probe) +
                 static_cast<unsigned>(camera_basis_probe) +
+                static_cast<unsigned>(light_list_probe) +
+                static_cast<unsigned>(lighting_auxiliary_probe) +
+                static_cast<unsigned>(entity_surface_probe) +
                 static_cast<unsigned>(grid_floor_probe) > 1)
             throw std::runtime_error("render-only probes are mutually exclusive");
         if (grid_floor_probe)
@@ -1263,6 +1385,10 @@ int main(int argc, char **argv)
               : surface_motion_resize_probe ? "surface-motion-resize-v1"
              : grid_floor_probe ? "grid-floor-probe-v1"
              : material_reload_probe ? "material-parameter-reload-v1"
+             : light_list_probe ? "light-list-capacity-v1"
+             : lighting_auxiliary_probe ? "lighting-auxiliary-liveness-v1"
+             : !vfx_composition_probe.empty() ? "vfx-composition-v1"
+             : entity_surface_probe ? "entity-surface-identity-v1"
                                         : "static-environment-moving-player-v1";
         if (grid_floor_probe)
         {
@@ -1296,6 +1422,69 @@ int main(int argc, char **argv)
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
         receipt["generation_id"] = generation.id;
         receipt["generation_scope"] = generation.scope;
+        hs::VfxEntitySurfaceCommand entity_surface_template;
+        if (entity_surface_probe)
+        {
+            std::filesystem::path path;
+            Require(generation.Require("vfx/vfx_program.hsbin", path));
+            std::ifstream input(path, std::ios::binary | std::ios::ate);
+            if (!input || input.tellg() <= 0) throw std::runtime_error("Entity surface fixture requires its cooked VFX program");
+            std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+            input.seekg(0);
+            if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+                throw std::runtime_error("Could not read entity surface fixture VFX program");
+            hs::VfxProgramData program;
+            std::string error;
+            if (!hs::LoadVfxProgram(bytes, program, error)) throw std::runtime_error(error);
+            const auto hash64 = [](std::string_view value) {
+                std::uint64_t hash = 14695981039346656037ull;
+                for (const unsigned char c : value) hash = (hash ^ c) * 1099511628211ull;
+                return hash;
+            };
+            const auto hash32 = [](std::string_view value) {
+                std::uint32_t hash = 2166136261u;
+                for (const unsigned char c : value) hash = (hash ^ c) * 16777619u;
+                return hash;
+            };
+            const auto effect = std::ranges::find(program.effect_lookup,
+                hash64("particle.boss.phase_change"), &hs::VfxEffectLookupRecord::effect_id);
+            if (effect == program.effect_lookup.end()) throw std::runtime_error("Cooked boss phase effect is missing");
+            if (program.effects.at(effect->handle - 1).seconds != 1.5f)
+                throw std::runtime_error("Cooked boss phase fixture requires the actual 90-tick interval");
+            unsigned matched{};
+            for (std::size_t i = 0; i < program.outputs.size(); ++i)
+            {
+                const auto &output = program.outputs[i];
+                const auto &source = program.sources.at(output.source);
+                if (source.effect != effect->handle || output.profile != hs::VfxOutputProfile::EntitySurface) continue;
+                if (source.stable_id != hash32("entity_surface_transition") || source.type != hs::VfxSourceType::Direct ||
+                    source.knot_count != 2 || source.knots[0] != .08f || source.knots[1] != .88f ||
+                    output.motion != hs::VfxMotionKind::SurfaceNoiseThroughBoss || output.hdr != 4.8f || output.rgba[3] != .72f)
+                    throw std::runtime_error("Cooked entity surface fixture interval/output contract changed");
+                entity_surface_template.output_index = static_cast<std::uint32_t>(i);
+                entity_surface_template.gradient_row = output.gradient_row;
+                entity_surface_template.color = {output.rgba[0], output.rgba[1], output.rgba[2], output.rgba[3]};
+                entity_surface_template.hdr = output.hdr; entity_surface_template.alpha = output.rgba[3];
+                unsigned parameters{};
+                for (const auto &parameter : std::span(program.parameters).subspan(output.parameters.first, output.parameters.count))
+                {
+                    if (parameter.key == hash32("noise_scale") && parameter.type == hs::VfxParameterType::Float)
+                    { entity_surface_template.noise_scale = std::bit_cast<float>(parameter.bits); parameters |= 1; }
+                    else if (parameter.key == hash32("edge_width") && parameter.type == hs::VfxParameterType::Float)
+                    { entity_surface_template.edge_width = std::bit_cast<float>(parameter.bits); parameters |= 2; }
+                    else if (parameter.key == hash32("direction") && parameter.type == hs::VfxParameterType::Enum && parameter.bits == hash32("up_and_out"))
+                    { entity_surface_template.direction = hs::VfxEntitySurfaceDirection::UpAndOut; parameters |= 4; }
+                }
+                if (output.parameters.count != 3 || parameters != 7 || entity_surface_template.noise_scale != 2.4f || entity_surface_template.edge_width != .07f)
+                    throw std::runtime_error("Cooked entity surface fixture parameter contract changed");
+                ++matched;
+            }
+            if (matched != 1) throw std::runtime_error("Entity surface fixture requires one actual phase output");
+            receipt["entity_surface"]["cooked_output"] = {{"index", entity_surface_template.output_index},
+                {"gradient_row", entity_surface_template.gradient_row}, {"hdr", entity_surface_template.hdr},
+                {"alpha", entity_surface_template.alpha}, {"noise_scale", entity_surface_template.noise_scale},
+                {"edge_width", entity_surface_template.edge_width}};
+        }
         const auto owned_view_archer_asset = owned_view_probe ? SelectedArcherAsset(generation) : hs::AssetId{};
         config.content_generation_id = generation.id;
         config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
@@ -1424,6 +1613,11 @@ int main(int argc, char **argv)
         first.mesh = hs::RenderMesh::Archer;
         first.scale = {.97174913f, .97174913f, .97174913f};
         first.stable_id = 1;
+        if (entity_surface_probe)
+        {
+            first.mesh = hs::RenderMesh::BossFiveMinute;
+            first.scale = {2, 2, 2};
+        }
         if (grid_floor_probe)
         {
             first.position = {0, 0, 3};
@@ -1450,9 +1644,11 @@ int main(int argc, char **argv)
         replacement.position.x = -2.0f;
         hs::RenderInstance occluder;
         occluder.stable_id = 99;
-        occluder.mesh = hs::RenderMesh::Area;
-        occluder.position = {0.0f, -0.25f, -9.25f};
-        occluder.scale = {10.0f, 10.0f, 3.0f};
+        // Area flattens cube height by 0.1 and sits below the target's sightline.
+        // Use the opaque builtin box across the orbit camera's target projection.
+        occluder.mesh = hs::RenderMesh::Enemy;
+        occluder.position = {0.0f, 5.0f, -9.25f};
+        occluder.scale = {12.0f, 16.0f, 3.0f};
         occluder.color_rgba = 0xff303030u;
         std::vector<hs::RenderInstance> previous;
         std::vector<hs::RenderInstance> current =
@@ -1474,6 +1670,25 @@ int main(int argc, char **argv)
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
         // fixture terrain/rocks otherwise occlude different pixels after roll.
         if (camera_basis_probe) pair.current.static_scene.reset();
+        if (entity_surface_probe) pair.current.static_scene.reset();
+        if (!grass_history_probe.empty())
+        {
+            auto grass_scene = std::make_shared<hs::StaticRenderScene>(*scene);
+            std::erase_if(grass_scene->instances, [](const auto &instance) {
+                return instance.mesh != hs::RenderMesh::Ground && instance.mesh != hs::RenderMesh::Grass;
+            });
+            for (auto &instance : grass_scene->instances)
+                if (instance.mesh == hs::RenderMesh::Grass)
+                {
+                    instance.position.x *= 0.35f;
+                    instance.scale = {2, 2, 2};
+                }
+            pair.current.static_scene = std::move(grass_scene);
+            auto dynamic_grass = pair.current.static_scene->instances.back();
+            dynamic_grass.stable_id = 0x4752415353ull;
+            dynamic_grass.position = {0, 0, -5};
+            current.push_back(dynamic_grass);
+        }
         pair.current.header.session_id = 1;
         constexpr std::uint64_t kShadowHistoryCasterId = 0x5348434153540001ull;
         hs::RenderInstance shadow_history_caster;
@@ -1520,6 +1735,7 @@ int main(int argc, char **argv)
         pair.current.camera.pitch_degrees = 22;
         pair.current.camera.distance = dynamic_lod_skin_growth_probe ? 28.0f : 22.0f;
         std::array<hs::LightView, 3> world_lights{};
+        std::vector<hs::LightView> light_list_lights;
         if (world_transport_probe || lighting_transport_probe || local_probe_revision_probe)
         {
             auto &sun = world_lights[0];
@@ -1610,6 +1826,29 @@ int main(int argc, char **argv)
             }
             for (std::uint32_t frame = 1; frame <= frames; ++frame)
             {
+                if (vfx_composition_probe == "switch" && (frame == 13 || frame == 21))
+                {
+                    auto status = renderer.GetGraphicsSettingsStatus();
+                    status.requested.volumetric_quality = frame == 13
+                        ? hs::GraphicsOptionalQuality::Medium : hs::GraphicsOptionalQuality::Off;
+                    Require(renderer.RequestGraphicsSettings({status.generation + 1,
+                        hs::GraphicsSettingsRequestCause::User, status.requested}));
+                }
+                if (lighting_auxiliary_probe && frame > 1)
+                {
+                    auto status = renderer.GetGraphicsSettingsStatus();
+                    status.requested.reflection_mode = frame % 2 == 0
+                        ? hs::GraphicsReflectionMode::ScreenSpace : hs::GraphicsReflectionMode::Off;
+                    measure(std::format("auxiliary_settings_{}", frame).c_str(), [&] {
+                        Require(renderer.RequestGraphicsSettings({status.generation + 1,
+                            hs::GraphicsSettingsRequestCause::User, status.requested}));
+                    });
+                    if (frame == 3 || frame == 4)
+                        measure(std::format("auxiliary_resize_{}", frame).c_str(), [&] {
+                            Require(renderer.Resize(frame == 3 ? 1279 : config.width,
+                                frame == 3 ? 719 : config.height));
+                        });
+                }
                 const bool provider_switch_frame = provider_switch_probe && (all_providers_probe
                     ? (frame == 2 || frame == 4 || frame == 6 || frame == 19 ||
                        frame == 21 || frame == 23 || frame == 25 || frame == 27 ||
@@ -1728,6 +1967,12 @@ int main(int argc, char **argv)
                         pair.current.static_scene = hzb_scene;
                     }
                     else if (frame == 8) current[0].position.x = 30.0f;
+                    // Scene publication at frame7 resets Cluster membership. Let
+                    // selection/page history settle before a second HZB reveal.
+                    else if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer && frame == 10)
+                        current[0].position = occluder.position;
+                    else if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer && frame == 11)
+                        current[0].position.x = 30.0f;
                 }
                 else if (dynamic_lod_skin_growth_probe)
                 {
@@ -1862,11 +2107,22 @@ int main(int argc, char **argv)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
                 }
+                if (!vfx_composition_probe.empty()) current[0].position.x = 0;
                 pair.current.header.tick = material_reload_probe || grid_floor_probe ? 1 : frame;
                 pair.current.header.simulation_time = material_reload_probe || grid_floor_probe || persistent_scene_probe
                     ? std::chrono::nanoseconds::zero()
                     : std::chrono::nanoseconds(
                         static_cast<std::int64_t>(frame) * 1000000000ll / 60);
+                if (!grass_history_probe.empty())
+                {
+                    const bool wind = grass_history_probe != "A" && grass_history_probe != "C";
+                    pair.current.header.simulation_time = std::chrono::nanoseconds(
+                        1000000000ll + (wind ? static_cast<std::int64_t>(frame) * 1000000000ll / grass_cadence : 0));
+                    current[0].position = grass_history_probe == "D"
+                        ? hs::Float3{-2.0f + frame * 0.12f, 0, -6.0f} : hs::Float3{20, 0, 0};
+                    current.back().position.x = grass_history_probe == "D" ? frame * 0.015f : 0;
+                    pair.current.instances = current;
+                }
                 observe_world_timings();
                 observe_provider_timings();
                 if (local_probe_revision_probe && frame == 33) world_lights[0].direction.x += 0.2f;
@@ -1886,7 +2142,70 @@ int main(int argc, char **argv)
                 if (local_probe_revision_probe && frame == 81)
                     std::erase_if(current, [](const auto &instance) { return instance.stable_id == kShadowHistoryCasterId; });
                 pair.current.instances = current;
+                if (!grass_history_probe.empty() && (frame == 13 || frame == 14))
+                    Require(renderer.Resize(config.width + (frame == 13 ? 64 : 0),
+                                            config.height + (frame == 13 ? 32 : 0)));
                 auto main_view = renderer.MainViewInput(pair.current.camera);
+                std::vector<hs::VfxEntitySurfaceCommand> entity_surfaces;
+                if (entity_surface_probe)
+                {
+                    current[0].position = {};
+                    if (frame >= 7) current[0].stable_id = 2;
+                    pair.current.instances = frame == 6 ? std::span<const hs::RenderInstance>{}
+                        : std::span<const hs::RenderInstance>{current};
+                    pair.current.header.simulation_time = std::chrono::nanoseconds::zero();
+                    main_view.camera.position = {0, 2, -8};
+                    main_view.camera.target = {0, 1, 0};
+                    main_view.camera.up = {0, 1, 0};
+                    main_view.view_origin = main_view.camera.position;
+                    main_view.camera_cut = frame == 1 || frame == 6 || frame == 7;
+                    if (frame == 2 || frame == 3 || frame == 8)
+                    {
+                        auto command = entity_surface_template;
+                        command.render_instance_id = command.owner_id = command.event_sequence = 1;
+                        command.owner_started_tick = 0; command.current_tick = frame == 2 ? 8 : 43; command.owner_until_tick = 90;
+                        command.normalized_phase = static_cast<float>((static_cast<double>(command.current_tick) / 90.0 - .08f) /
+                            (static_cast<double>(.88f) - .08f));
+                        command.gradient_age = command.normalized_phase;
+                        entity_surfaces.push_back(command);
+                    }
+                }
+                if (!grass_history_probe.empty())
+                {
+                    const double pan = grass_history_probe == "C" || grass_history_probe == "D"
+                        ? frame * 0.012 : 0;
+                    const double distance = grass_history_probe == "E"
+                        ? 3.0 + 0.5 * (frame <= frames / 2 ? frame : frames - frame) : 3.0;
+                    main_view.camera.position = {pan, 1.6, -6.0 - distance};
+                    main_view.camera.target = {pan, 0.45, -6};
+                    main_view.view_origin = main_view.camera.position;
+                    main_view.camera_cut = frame == 5;
+                }
+                if (light_list_probe)
+                {
+                    constexpr std::array counts{4u, 64u, 65u, 128u, 127u, 0u};
+                    const auto local_count = counts[frame - 1];
+                    const auto directional_count = frame >= 5 ? 1u : 0u;
+                    light_list_lights.assign(local_count + directional_count, {});
+                    for (std::uint32_t index = 0; index < light_list_lights.size(); ++index)
+                    {
+                        auto &light = light_list_lights[index];
+                        light.stable_id = 0x4c4c000000000000ull + light_list_lights.size() - index;
+                        light.type = index < directional_count ? hs::LightType::Directional
+                            : static_cast<hs::LightType>(1u + index % 4u);
+                        light.unit = light.type == hs::LightType::Directional ? hs::LightUnit::Lux
+                            : index % 4u >= 2u ? hs::LightUnit::Luminance : hs::LightUnit::Lumen;
+                        light.position = {0, 3, 0}; light.direction = {0, -1, 0};
+                        light.color = {.7f, .8f, 1};
+                        light.quantity = local_count ? 100.0f / local_count : 0.0f;
+                        light.range = 10000; light.emitter_radius = .15f;
+                        light.inner_cone_radians = .2f; light.outer_cone_radians = .6f;
+                        light.shape = {2, 2}; light.area_tangent = {1, 0, 0};
+                    }
+                    // An explicit zero-intensity sun avoids Runtime's empty-table default sun.
+                    pair.current.lights = light_list_lights;
+                    main_view.camera_cut = true;
+                }
                 if (camera_basis_probe)
                 {
                     pair.current.instances = {};
@@ -1934,11 +2253,37 @@ int main(int argc, char **argv)
                     }
                     oit_flashes.assign(oit_overdraw_probe ? layers[frame - 1] : 1u, flash);
                 }
+                if (!vfx_composition_probe.empty() && vfx_composition_probe != "control" && frame >= 9 && frame <= 24)
+                {
+                    hs::VfxFlashSpawnInput flash;
+                    const auto &camera = main_view.camera;
+                    const double dx = camera.target.x - camera.position.x;
+                    const double dy = camera.target.y - camera.position.y;
+                    const double dz = camera.target.z - camera.position.z;
+                    const double distance = std::hypot(dx, dy, dz);
+                    flash.position = {static_cast<float>(camera.position.x + 3.0 * dx / distance),
+                        static_cast<float>(camera.position.y + 3.0 * dy / distance),
+                        static_cast<float>(camera.position.z + 3.0 * dz / distance)};
+                    if (frame >= 13 && frame <= 16) flash.position.x += .35f;
+                    flash.color = {1, .7f, .3f, 1};
+                    flash.size = frame >= 17 ? 3.0f : .6f;
+                    flash.hdr = frame >= 17 ? 8.0f : .1f;
+                    flash.opacity_scale = frame >= 17 ? 1.0f : .25f;
+                    flash.lifetime = 1; flash.normalized_age = .2f;
+                    flash.event_tick = pair.current.header.tick; flash.stable_seed = 17;
+                    flash.shape = hs::VfxImpactShape::RadialEnergy; flash.oit = true;
+                    oit_flashes.push_back(flash);
+                }
                 const hs::RenderFrameInput render_input{
                     .views = std::span(&main_view, 1), .snapshots = pair,
-                    .vfx = {.flashes = oit_flashes},
-                    .delta_seconds = persistent_scene_probe || material_reload_probe
-                        ? std::optional<float>{0.0f} : std::nullopt};
+                    .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces},
+                    .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
+                        : !vfx_composition_probe.empty()
+                        ? std::optional<float>{vfx_composition_probe == "auto" || vfx_composition_probe == "switch"
+                            ? 1.0f / 60.0f : 0.0f}
+                        : persistent_scene_probe || material_reload_probe
+                        ? std::optional<float>{0.0f} : std::nullopt,
+                    .wait_for_streaming = entity_surface_probe || !vfx_composition_probe.empty()};
                 if (provider_switch_probe)
                 {
                     std::uint64_t input_token{};
@@ -1949,7 +2294,64 @@ int main(int argc, char **argv)
                         Require(renderer.SimulationCompleted(input_token));
                     }
                 }
-                Require(renderer.Render(render_input, frame_result));
+                if (lighting_auxiliary_probe)
+                    measure(std::format("auxiliary_render_{}", frame).c_str(), [&] {
+                        Require(renderer.Render(render_input, frame_result));
+                    });
+                else Require(renderer.Render(render_input, frame_result));
+                if (vfx_composition_probe == "switch")
+                {
+                    const auto status = renderer.GetGraphicsSettingsStatus();
+                    const auto expected = frame >= 13 && frame < 21
+                        ? hs::GraphicsOptionalQuality::Medium : hs::GraphicsOptionalQuality::Off;
+                    const auto actual = status.actual_applied_available
+                        ? hs::GraphicsEnumToken(status.actual_applied.volumetric_quality)
+                        : std::string_view{"unavailable"};
+                    if (frame == 1 || frame == 13 || frame == 21)
+                        receipt["vfx_composition"]["settings"].push_back({{"frame", frame},
+                            {"generation", status.generation}, {"state", static_cast<unsigned>(status.state)},
+                            {"actual_applied_available", status.actual_applied_available},
+                            {"requested_volumetric_quality", std::string(hs::GraphicsEnumToken(status.requested.volumetric_quality))},
+                            {"active_volumetric_quality", std::string(actual)}});
+                    if (!status.actual_applied_available ||
+                        status.actual_applied.volumetric_quality != expected ||
+                        status.requested.volumetric_quality != expected)
+                        throw std::runtime_error(std::format(
+                            "Volumetric switch mismatch at frame {}: generation={} state={} actual_available={} requested={} actual={} expected={}",
+                            frame, status.generation, static_cast<unsigned>(status.state),
+                            status.actual_applied_available,
+                            hs::GraphicsEnumToken(status.requested.volumetric_quality), actual,
+                            hs::GraphicsEnumToken(expected)));
+                }
+                if (lighting_auxiliary_probe)
+                {
+                    const auto capture = std::format("lighting-auxiliary-{}.json", frame);
+                    measure(std::format("auxiliary_capture_{}", frame).c_str(), [&] {
+                        Require(renderer.CaptureSurfaceDiagnostics(artifacts / capture));
+                    });
+                    std::ifstream input(artifacts / capture);
+                    const auto diagnostic = Json::parse(input);
+                    const auto &targets = diagnostic.at("auxiliary_targets");
+                    if (targets.at(1).at("present").get<bool>() != (frame % 2 == 0) ||
+                        targets.at(2).at("present").get<bool>() ||
+                        (frame > 1 && targets.at(0).at("present") != receipt["lighting_auxiliaries"]
+                            ["frames"].front().at("targets").at(0).at("present")) ||
+                        (frame > 1 && renderer.GetGraphicsSettingsStatus().state != hs::SettingsApplyState::Applied &&
+                         renderer.GetGraphicsSettingsStatus().state != hs::SettingsApplyState::Confirmed))
+                        throw std::runtime_error("Auxiliary liveness did not follow applied reflection settings");
+                    for (const auto &target : targets)
+                        if (target.at("present").get<bool>() !=
+                            (target.at("allocation_bytes").get<std::uint64_t>() != 0))
+                            throw std::runtime_error("Auxiliary allocation disagrees with resource liveness");
+                    receipt["lighting_auxiliaries"]["frames"].push_back({{"frame", frame},
+                        {"targets", targets}, {"extent", diagnostic.at("extent")}});
+                }
+                if (light_list_probe)
+                {
+                    const auto capture = std::format("light-list-{}.json", frame);
+                    Require(renderer.CaptureSurfaceDiagnostics(artifacts / capture));
+                    receipt["light_list"]["frames"].push_back({{"frame", frame}, {"surface", capture}});
+                }
                 if (oit_overdraw_probe || camera_basis_probe)
                 {
                     if (frame_result.typed_vfx_flash_count != oit_flashes.size())
@@ -1961,6 +2363,29 @@ int main(int argc, char **argv)
                         {"flashes", frame_result.typed_vfx_flash_count}, {"surface", capture}});
                 }
                 observe_probe_revisions();
+                if (entity_surface_probe)
+                {
+                    const auto capture = std::format("entity-surface-{}.json", frame);
+                    Require(renderer.CaptureSurfaceDiagnostics(artifacts / capture));
+                    const auto geometry = std::format("entity-surface-geometry-{}.json", frame);
+                    if (frame != 6) Require(renderer.CaptureGeometryDiagnostics(artifacts / geometry));
+                    receipt["entity_surface"]["frames"].push_back({{"frame", frame}, {"surface", capture},
+                        {"geometry", frame == 6 ? Json(nullptr) : Json(geometry)},
+                        {"owner", frame >= 7 ? 2 : 1}, {"submitted_commands", entity_surfaces.size()},
+                        {"source_tick", frame == 4 ? Json(80) : entity_surfaces.empty() ? Json(nullptr) : Json(entity_surfaces[0].current_tick)},
+                        {"phase", entity_surfaces.empty() ? Json(nullptr) : Json(entity_surfaces[0].normalized_phase)}});
+                }
+                if (!vfx_composition_probe.empty() && (vfx_composition_probe != "control" || frame == 9) &&
+                    (frame == 8 || frame == 9 || frame == 12 ||
+                    frame == 13 || frame == 16 || frame == 17 || frame == 24 || frame == 25 || frame == 32))
+                {
+                    if (frame_result.typed_vfx_flash_count != oit_flashes.size())
+                        throw std::runtime_error("VFX composition probe did not admit its actual writer");
+                    const auto capture = std::format("vfx-composition-{:02}.json", frame);
+                    Require(renderer.CaptureSurfaceDiagnostics(artifacts / capture));
+                    receipt["vfx_composition"]["frames"].push_back({{"frame", frame},
+                        {"flashes", frame_result.typed_vfx_flash_count}, {"surface", capture}});
+                }
                 observe_provider_timings();
                 if (provider_switch_probe)
                 {
@@ -2121,12 +2546,112 @@ int main(int argc, char **argv)
                     Require(renderer.CapturePng(artifacts / "hzb_retest.png"));
                 if (persistent_scene_probe && frame == 9)
                     Require(renderer.CapturePng(artifacts / "hzb_reference.png"));
+                if (persistent_scene_probe && frame == 11 &&
+                    config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
+                {
+                    failure_code = "HS_RENDER_HZB_CLUSTER_RETEST_FAILED";
+                    Require(renderer.CapturePng(artifacts / "hzb-cluster-retest.png"));
+                    const auto path = artifacts / "hzb-retest-commands.json";
+                    Require(renderer.CaptureVisibilityDiagnostics(path));
+                    const auto diagnostic = Json::parse(std::ifstream(path));
+                    if (!diagnostic.at("execution_valid").get<bool>())
+                        throw std::runtime_error("HZB Cluster Retest diagnostic is invalid");
+                    std::uint64_t committed{}, published{}, live{}, vertices{};
+                    for (const auto &catalog : diagnostic.at("cluster_commands"))
+                    {
+                        if (catalog.at("frame").get<std::uint64_t>() != frame ||
+                            catalog.at("failure_flags").get<std::uint32_t>() != 0)
+                            throw std::runtime_error("HZB Cluster Retest has stale or failed status");
+                        committed += catalog.at("committed_records").get<std::uint64_t>();
+                        for (const auto &view : catalog.at("views"))
+                        {
+                            if (view.at("nonzero_outside_published_prefix").get<std::uint64_t>() != 0)
+                                throw std::runtime_error("HZB Cluster draw prefix omits live commands");
+                            if (view.at("view").get<std::uint32_t>() != 4) continue;
+                            const auto count = view.at("published_count").get<std::uint64_t>();
+                            if (count < view.at("last_nonzero_exclusive").get<std::uint64_t>())
+                                throw std::runtime_error("HZB Cluster Retest suffix excludes a live command");
+                            published += count;
+                            live += view.at("nonzero_count").get<std::uint64_t>();
+                            vertices += view.at("draw_vertex_count_sum").get<std::uint64_t>();
+                        }
+                    }
+                    if (!committed || !live || !vertices)
+                        throw std::runtime_error("HZB reveal did not exercise live Cluster Retest draws");
+                    receipt["hzb_cluster_retest"] = {
+                        {"frame", frame}, {"diagnostic", path.filename().string()},
+                        {"committed", committed}, {"published", published},
+                        {"nonzero", live}, {"draw_vertex_count_sum", vertices},
+                        {"nonzero_outside_published_prefix", 0},
+                    };
+                }
                 if (surface_motion_resize_fixture && frame == 3)
                 {
                     failure_code = "HS_RENDER_SURFACE_DIAGNOSTIC_FAILED";
                     Require(renderer.CaptureSurfaceDiagnostics(artifacts / "surface-motion.json"));
                     ValidateSurfaceDiagnostic(artifacts / "surface-motion.json", config.width,
                                               config.height, true, "motion", receipt);
+                }
+                if (!grass_history_probe.empty() && (frame == 1 || frame == 5 || frame == 6 || frame > frames - 6))
+                {
+                    const auto name = std::format("grass-{:03}.json", frame);
+                    Require(renderer.CaptureSurfaceDiagnostics(artifacts / name));
+                    const auto diagnostic = Json::parse(std::ifstream(artifacts / name));
+                    const auto grass = diagnostic.at("grass");
+                    const auto pixels = grass.at("pixels").get<std::uint64_t>();
+                    const auto historical = grass.at("historical_pixels").get<std::uint64_t>();
+                    if (pixels < 100 || ((frame == 1 || frame == 5 || frame == 13 || frame == 14) && historical != 0) ||
+                        (frame == frames && grass_history_probe != "E" && historical < pixels / 2))
+                        throw std::runtime_error("grass history reset/recovery regression");
+                    if (frame == frames && grass_history_probe != "A" && grass_history_probe != "E" &&
+                        grass.at("moving_pixels").get<std::uint64_t>() == 0)
+                        throw std::runtime_error("moving grass has no motion vectors");
+                    const auto previous_time = diagnostic.at("temporal_inputs").at("previous_grass_state").at(0).get<double>();
+                    const double expected_time = grass_history_probe == "A" || grass_history_probe == "C"
+                        ? 1.0 : 1.0 + double(frame - 1) / grass_cadence;
+                    if (frame > 1 && std::abs(previous_time - expected_time) > 0.0001)
+                        throw std::runtime_error("grass history used another view or a simulation tick instead of its previous render");
+                    const auto &gpu = renderer.LastGpuPassTimings();
+                    Json passes = Json::array();
+                    for (const auto &pass : gpu.passes)
+                        if (gpu.valid && pass.measured)
+                            passes.push_back({{"name", pass.name}, {"nanoseconds", pass.nanoseconds}});
+                    receipt["grass_history"]["frames"].push_back({{"frame", frame},
+                        {"capture", name}, {"grass", grass},
+                        {"gpu_frame", gpu.completed_frame_id}, {"gpu_passes", passes}});
+                }
+                if (!grass_history_probe.empty() && (frame == 3 || frame == 9))
+                {
+                    auto preview = main_view;
+                    preview.id = hs::ViewId{0x47524153u};
+                    preview.role = hs::RenderViewRole::Preview;
+                    preview.output_extent = preview.render_capacity = preview.render_active = {640, 360};
+                    preview.camera_cut = false;
+                    preview.scene_origin.x = frame == 9 ? 0.25 : 0.0;
+                    preview.camera.position.x = preview.camera.target.x = preview.scene_origin.x;
+                    preview.view_origin = preview.camera.position;
+                    auto preview_instances = current;
+                    preview_instances.front().position = {20, 0, 0};
+                    preview_instances.back().position = {0, 0, -5};
+                    auto preview_pair = pair;
+                    preview_pair.has_previous = false;
+                    preview_pair.current.instances = preview_instances;
+                    const hs::RenderFrameInput preview_input{
+                        .views = std::span(&preview, 1), .snapshots = preview_pair,
+                        .simulation_time = std::chrono::nanoseconds(10000000000ll + frame * 1000000000ll / 30)};
+                    hs::RendererFrameResult preview_result;
+                    Require(renderer.Render(preview_input, preview_result));
+                    const auto path = artifacts / std::format("grass-preview-{:03}.json", frame);
+                    Require(renderer.Capture({preview.id, path, hs::CaptureKind::SurfaceDiagnostics}));
+                    const auto captured = Json::parse(std::ifstream(path));
+                    const auto &state = captured.at("temporal_inputs").at("previous_grass_state");
+                    if ((frame == 3 && state.at(2).get<double>() != 0.0) ||
+                        (frame == 9 && (std::abs(state.at(0).get<double>() - 10.1) > 0.0001 ||
+                                       state.at(2).get<double>() != 1.0)))
+                        throw std::runtime_error("preview grass history lost its last successful render state");
+                    if (frame == 9 && captured.at("grass").at("max_motion_pixels").get<double>() > 10.0)
+                        throw std::runtime_error("grass origin shift produced false motion");
+                    receipt["grass_history"]["preview"][std::to_string(frame)] = state;
                 }
                 if (gpu_lod_probe && (frame == 1 || frame == 3 || frame == 4 ||
                                       frame == 5 || frame == 10))
@@ -2235,6 +2760,18 @@ int main(int argc, char **argv)
                 Require(renderer.CaptureVisibilityDiagnostics(artifacts / "visibility.json"));
             });
             receipt["visibility"] = Json::parse(std::ifstream(artifacts / "visibility.json"));
+            if (persistent_scene_probe && frames >= 14)
+            {
+                failure_code = "HS_RENDER_HZB_CLUSTER_RETEST_FAILED";
+                for (const auto &catalog : receipt["visibility"].at("cluster_commands"))
+                    for (const auto &view : catalog.at("views"))
+                        if (view.at("view").get<std::uint32_t>() == 4 &&
+                            (view.at("published_count").get<std::uint64_t>() != 0 ||
+                             view.at("nonzero_count").get<std::uint64_t>() != 0 ||
+                             view.at("nonzero_outside_published_prefix").get<std::uint64_t>() != 0))
+                            throw std::runtime_error("Cluster Retest count survived the live frame's slot reuse");
+                receipt["hzb_cluster_retest"]["empty_after_slot_reuse"] = true;
+            }
         }
         measure("capture", [&] { Require(renderer.Capture({.path = artifacts / "capture.png"})); });
         observe_world_timings();
@@ -2526,6 +3063,14 @@ int main(int argc, char **argv)
             if (!matching_hzb)
                 throw std::runtime_error(
                     "current-depth visibility retest does not match the next stable frame");
+            if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
+            {
+                const bool matching_cluster = FilesEqual(artifacts / "hzb-cluster-retest.png",
+                                                         artifacts / "hzb_reference.png");
+                receipt["hzb_cluster_retest"]["matching_reference_capture"] = matching_cluster;
+                if (!matching_cluster)
+                    throw std::runtime_error("live Cluster Retest does not match the stable HZB reference");
+            }
         }
         if (config.validation && skin_cache_monster_probe)
             ValidateMonsterSkinCacheProbe(

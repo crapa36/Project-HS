@@ -483,7 +483,7 @@ Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operati
     }
     CountValidationErrors();
     const auto reason = device ? device->GetDeviceRemovedReason() : result;
-    if (reason == DXGI_ERROR_DEVICE_REMOVED || reason == DXGI_ERROR_DEVICE_RESET ||
+    if (FAILED(reason) ||
         result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
     {
         WriteDred(reason);

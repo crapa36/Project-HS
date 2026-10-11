@@ -4,6 +4,7 @@
 
 #include "../Source/Runtime/Private/graphics_settings_commit.hpp"
 #include "../Source/Runtime/Private/renderer_settings_projection.hpp"
+#include "../Source/Runtime/Private/startup_graphics_settings.hpp"
 
 #include <Windows.h>
 
@@ -124,6 +125,42 @@ void TestRequestedEditPreservesUnimplementedFields()
     Check(hs::ProjectSettingsDocument(document).frame_cap == 240 &&
               document.graphics.frame_limit_fps == 240,
           "effective frame cap matches render pacing without changing the request");
+}
+
+void TestStartupGraphicsRendererProjection()
+{
+    auto requested = hs::LegacyDefaultSettingsDocument();
+    requested.graphics.vsync = true;
+    requested.graphics.frame_limit_fps = 47;
+    requested.graphics.output_extent = hs::GraphicsExtent{3440, 1440};
+    hs::ApplicationConfig config;
+    config.width = 1920;
+    config.height = 1080;
+    config.resolution_explicit = config.vsync_explicit = config.frame_cap_explicit = true;
+    config.vsync = false;
+    config.frame_cap = 0;
+    const auto effective = hs::PrepareStartupGraphicsSettings(requested, config);
+    const auto renderer = hs::ProjectRendererConfig(effective, requested.graphics);
+    Check(renderer.width == 1920 && renderer.height == 1080 && !renderer.vsync &&
+              renderer.presentation_request.frame_limit_fps == 0 &&
+              renderer.requested_graphics &&
+              renderer.requested_graphics->output_extent == requested.graphics.output_extent &&
+              renderer.requested_graphics->display_mode == hs::GraphicsDisplayMode::Windowed,
+          "startup CLI intent reaches renderer and window display snapshot");
+
+    hs::GraphicsSettingsCommit controller(requested, effective, false);
+    Check(controller.EditGraphics({hs::UiCommandKind::SetBloom, 0}), "later startup settings edit");
+    const auto packet = controller.NextRequest();
+    Check(packet.has_value(), "later startup settings packet");
+    Check(controller.Acknowledge({packet->generation, hs::ErrorCode::None}) ==
+              hs::GraphicsSettingsCommit::AckOutcome::Applied,
+          "later startup settings acknowledgment");
+    const auto after = hs::ProjectRendererConfig(controller.Effective(), controller.Committed().graphics);
+    Check(after.width == 1920 && after.height == 1080 && !after.vsync && !after.bloom &&
+              after.presentation_request.frame_limit_fps == 0 &&
+              after.requested_graphics &&
+              after.requested_graphics->output_extent == requested.graphics.output_extent,
+          "unrelated settings commit does not restore saved display overrides");
 }
 
 void TestGraphicsApplyAcknowledgments()
@@ -698,6 +735,7 @@ int main()
     {
         TestLoadSourceAndProjection();
         TestRequestedEditPreservesUnimplementedFields();
+        TestStartupGraphicsRendererProjection();
         TestGraphicsApplyAcknowledgments();
         TestFailedApplyReplaysOnlyLaterEdits();
         TestClickPreviewWithinOnePump();

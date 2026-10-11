@@ -21,6 +21,8 @@ public:
     [[nodiscard]] std::span<const GpuRibbonOutput> Outputs() const noexcept { return outputs_; }
     [[nodiscard]] std::uint32_t DroppedSources() const noexcept { return dropped_sources_; }
     [[nodiscard]] std::uint32_t Capacity() const noexcept { return capacity_; }
+    [[nodiscard]] bool OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
+                                        std::size_t output_capacity) const;
 
 private:
     struct Slot

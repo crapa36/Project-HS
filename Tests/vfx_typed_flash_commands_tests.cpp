@@ -322,6 +322,8 @@ void AuthoredSdfShapesAndContext()
         auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(c, std::span(&input, 1)); };
         auto decoded = run();
         Require(decoded.size() == 1 && decoded[0].shape == test.kind && Near(decoded[0].size, test.size * 2), "SDF shape or metre scale missing");
+        Require(!decoded[0].interpolate_owner_position,
+                "world impact unexpectedly followed an owner pose");
         Require(Near(decoded[0].direction.x, .6f) && Near(decoded[0].direction.z, .8f), "incoming direction was lost");
         if (test.curve >= 0) Require(decoded[0].curve_row == static_cast<std::uint32_t>(test.curve), "curve row changed");
         c.effects[0].payload_kind = Hash32("PresentationContextPayload");
@@ -1058,6 +1060,26 @@ void UpgradeStatusStampsUseAuthoredGeometry()
                 Near(command.lifetime, test.seconds * .55f) &&
                 (test.path || (command.mask_slice == 5 && Near(command.mask_strength, .38f))),
                 "upgrade status stamp did not use its authored geometry and fixed timing");
+        Require(command.interpolate_owner_position &&
+                Near(command.previous_position.x, test.path ? 7.5f : owner.previous_transform[12]) &&
+                Near(command.previous_position.z, test.path ? 8.5f : owner.previous_transform[14]),
+                "attached stamp did not carry its owner's interpolation endpoints");
+        // Authoritative equal endpoints already encode a spawn/discontinuity;
+        // never substitute a previously rendered stamp or extrapolate velocity.
+        if (test.path)
+            std::get<hs::VfxProjectilePathPayload>(owner.payload).previous_position = command.position;
+        else owner.previous_transform = owner.current_transform;
+        const auto discontinuous = run();
+        Require(discontinuous.size() == 1 &&
+                Near(discontinuous[0].previous_position.x, discontinuous[0].position.x) &&
+                Near(discontinuous[0].previous_position.z, discontinuous[0].position.z),
+                "equal owner endpoints invented a discontinuity interpolation");
+        if (test.path)
+            std::get<hs::VfxProjectilePathPayload>(owner.payload).previous_position.x =
+                std::numeric_limits<float>::quiet_NaN();
+        else owner.previous_transform[12] = std::numeric_limits<float>::quiet_NaN();
+        Require(run().empty(), "stamp accepted an invalid previous owner position");
+        owner = PersistentStampOwner(test.kind);
         owner.quality = hs::VfxQuality::Low;
         Require(run().size() == 1, "low quality lost upgrade status stamp");
 

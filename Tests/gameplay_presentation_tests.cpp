@@ -92,6 +92,24 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
               hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "internal_taau" &&
               !hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::FrameGenerationMode, 1, &receipt),
           "settings skip unsupported choices and disable controls with no available alternative");
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto disabled_ui = test_ui;
+            disabled_ui.settings_group = group;
+            disabled_ui.settings_page = page;
+            const auto rows = hs::GraphicsSettingsVisibleRows(disabled_ui);
+            for (std::size_t row = 0; row < rows.size(); ++row)
+                if (rows[row]->id == hs::SettingId::FrameGenerationMode)
+                    for (const float x : {1000.0f, 1470.0f, 1570.0f})
+                    {
+                        const auto click = hs::ResolveUiInteraction({}, disabled_ui, {},
+                            hs::ReferenceUiCursor({x, hs::kGraphicsUiRowY + row * hs::kGraphicsUiRowStride + 20},
+                                                  {1920, 1080}), &receipt);
+                        Check(!click.invalid && !click.runtime_command && !click.gameplay_action,
+                              "disabled setting labels and arrows ignore clicks without a rejection cue");
+                    }
+        }
     receipt.requested.hdr_mode = hs::GraphicsHdrMode::On;
     Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "off",
           "an unavailable saved setting can still be turned off");
@@ -152,6 +170,30 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
                    entry.anchor_pixels.y == hs::kGraphicsUiRowY &&
                    entry.size_pixels.x == 64.0f && entry.size_pixels.y == 48.0f;
         }), "settings edit row keeps its original drawing and hit-test bounds");
+    for (const float boundary : {0.0f, 1.0f})
+    {
+        hs::SettingsData bounded;
+        bounded.master_volume = bounded.bgm_volume = bounded.sfx_volume = bounded.ui_volume =
+            bounded.screen_overlay_intensity = boundary;
+        auto bounded_ui = test_ui;
+        bounded_ui.settings_group = 7;
+        snapshot.Clear();
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, bounded_ui,
+                  bounded, snapshot), "bounded audio and overlay settings snapshot");
+        const float arrow_x = boundary == 0 ? 1450.0f : 1550.0f;
+        for (std::size_t row = 0; row < 5; ++row)
+        {
+            const auto y = hs::kGraphicsUiRowY + row * hs::kGraphicsUiRowStride;
+            Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+                return entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x == arrow_x &&
+                       entry.anchor_pixels.y == y;
+            }), "clamped audio and overlay arrows are visibly disabled");
+            const auto click = hs::ResolveUiInteraction({}, bounded_ui, bounded,
+                hs::ReferenceUiCursor({arrow_x + 20, y + 20}, {1920, 1080}));
+            Check(!click.invalid && !click.runtime_command && !click.gameplay_action,
+                  "clamped audio and overlay arrows emit no redundant apply or cue");
+        }
+    }
 }
 } // namespace
 
@@ -394,10 +436,43 @@ void TestCharacterInformationPage()
                 return true;
             return model.anchor_pixels.x >= 780.0f &&
                    model.anchor_pixels.x + model.size_pixels.x <= 1'560.0f &&
-                   model.anchor_pixels.y + model.size_pixels.y <= 920.0f;
+                   model.anchor_pixels.y + model.size_pixels.y <= 940.0f;
         });
-    Check(upgrade_cards == hs::kUpgradeCount && upgrades_fit,
-          "all upgrade cards fit the character panel");
+    Check(upgrade_cards == hs::kCharacterUpgradesPerPage && upgrades_fit,
+          "readable upgrade cards fit the character panel without moving slot controls");
+    SetCursor(held, 1530, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    snapshot.Clear();
+    Check(test_ui.character_details_page == 1 && WriteSnapshot(simulation, snapshot) &&
+              contains_text(snapshot.View(), "강화 5 ·") && contains_text(snapshot.View(), "강화 8 ·") &&
+              !contains_text(snapshot.View(), "강화 1 ·"),
+          "next page exposes the remaining four upgrades");
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 1, "last upgrade page cannot advance");
+    SetCursor(held, 700, 165);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "switching a character tab resets its detail page");
+    const auto hidden = hs::ResolveUiInteraction(simulation.GetObservation(), test_ui, {},
+        hs::ReferenceUiCursor({400, 494}, {1920, 1080}));
+    Check(!hidden.invalid && !hidden.gameplay_action && !hidden.runtime_command,
+          "unlearned skill rows have no invisible interactive target");
+    const auto check_remapped_bindings = [&](bool hud, const std::array<std::string_view, 4> &labels) {
+        hs::SettingsData remapped;
+        remapped.skill_virtual_keys = {'Z', 'X', 0x71, '4'};
+        hs::GameReadModelStorage model;
+        simulation.WriteReadModel(model);
+        snapshot.Clear();
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
+                  remapped, snapshot), "remapped skill labels snapshot");
+        for (std::size_t slot = 0; slot < labels.size(); ++slot)
+            Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+                return entry.kind == hs::UiModel::Kind::Button &&
+                       entry.anchor_pixels.x == (hud ? 730.0f + slot * 190.0f : 780.0f + slot * 195.0f) &&
+                       entry.anchor_pixels.y == (hud ? 948.0f : 225.0f) &&
+                       std::string_view(entry.utf8_text.data()).starts_with(labels[slot]);
+            }), "HUD and character slots use the current physical binding, including empty slots and function keys");
+    };
+    check_remapped_bindings(false, {"Z  관통 사격", "X  다중 사격", "F2  비어 있음", "4  비어 있음"});
 
     SetCursor(held, 850, 240);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -420,6 +495,7 @@ void TestCharacterInformationPage()
     Check(reordered.skill_loadout[1] == hs::SkillKind::PiercingShot &&
               reordered.skill_loadout[2] == hs::SkillKind::MultiShot,
           "clicking two occupied slots swaps their QWER bindings");
+    check_remapped_bindings(false, {"Z  비어 있음", "X  관통 사격", "F2  다중 사격", "4  비어 있음"});
 
     SetCursor(held, 1'000, 165);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -440,8 +516,8 @@ void TestCharacterInformationPage()
         });
     };
     Check(has_relic_text(0xFFFFD06Au, 247.0f) &&
-              has_relic_text(0xFF9CC8FFu, 277.0f) &&
-              has_relic_text(0xFFB8C2D0u, 305.0f),
+              has_relic_text(0xFF9CC8FFu, 280.0f) &&
+              has_relic_text(0xFFB8C2D0u, 404.0f),
           "relic cards separate name, contribution, and rule hierarchy");
     const auto relic_cards = std::ranges::count_if(
         snapshot.View().ui, [](const hs::UiModel &model) {
@@ -457,13 +533,31 @@ void TestCharacterInformationPage()
                    model.anchor_pixels.x + model.size_pixels.x <= 1'620.0f &&
                    model.anchor_pixels.y + model.size_pixels.y <= 935.0f;
         });
-    Check(relic_cards == hs::kRelicCount && relics_fit,
-          "all relic cards fit the character panel");
+    Check(relic_cards == hs::kCharacterRelicsPerPage && relics_fit,
+          "readable relic cards fit the character panel");
+    for (std::size_t page = 0; page < hs::CharacterDetailsPageCount(simulation.GetObservation(), test_ui); ++page)
+    {
+        snapshot.Clear();
+        Check(WriteSnapshot(simulation, snapshot), "paged relic snapshot");
+        for (std::size_t relic = page * hs::kCharacterRelicsPerPage;
+             relic < std::min(hs::kRelicCount, (page + 1) * hs::kCharacterRelicsPerPage); ++relic)
+            Check(contains_text(snapshot.View(), DefaultContent().presentation.relic_rules[relic].data()),
+                  "every acquired relic retains its complete authored rule on a reachable page");
+        SetCursor(held, 1530, 968);
+        (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    }
+    Check(test_ui.character_details_page == 4, "last relic page cannot advance");
+    auto empty = simulation.GetObservation();
+    empty.relic_mask = 0;
+    (void)hs::ResolveUiInteraction(empty, test_ui, {}, hs::ReferenceUiCursor({300, 950}, {1920, 1080}));
+    Check(test_ui.character_details_page == 0 && hs::CharacterDetailsPageCount(empty, test_ui) == 1,
+          "empty or reduced detail content clamps a stale page safely");
 
     const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
     Check(closed.phase == hs::SessionPhase::Playing && test_ui.page == hs::UiPage::Root,
           "Tab closes the character page");
+    check_remapped_bindings(true, {"Z\n-", "X\n관통 사격", "F2\n다중 사격", "4\n-"});
     held.aim_world = {20.0f, 0.0f, 0.0f};
     (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
                    sequence, held);
@@ -541,8 +635,37 @@ void TestSkillUpgradeCardsHaveDescriptions()
     const auto probe = simulation.GetObservation();
     Check(probe.phase == hs::SessionPhase::CardSelection,
           "upgrade description card selection");
+    for (const auto phase : {hs::SessionPhase::CardSelection, hs::SessionPhase::RelicSelection})
+    {
+        auto bounded = probe;
+        bounded.phase = phase;
+        bounded.card_count = 1;
+        bounded.level_rerolls_remaining = bounded.relic_rerolls_remaining = 0;
+        hs::PresentationUiState ui;
+        const auto reroll = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 826}, {1920, 1080}));
+        Check(!reroll.invalid && !reroll.gameplay_action, "exhausted reroll emits no accepted-action cue");
+        const auto empty_card = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 510}, {1920, 1080}));
+        Check(!empty_card.invalid && !empty_card.gameplay_action, "empty card positions are not interactive");
+        bounded.level_rerolls_remaining = bounded.relic_rerolls_remaining = 1;
+        const auto available = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 826}, {1920, 1080}));
+        Check(available.gameplay_action && available.gameplay_action->kind == hs::UiActionKind::Reroll,
+              "available reroll keeps its existing action and hit rectangle");
+    }
 
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
+    hs::GameReadModelStorage exhausted;
+    simulation.WriteReadModel(exhausted);
+    exhausted.session.level_rerolls_remaining = 0;
+    Check(hs::ProjectRenderSnapshot(exhausted.View(), DefaultContent().presentation, {}, {}, snapshot),
+          "exhausted reroll snapshot");
+    Check(std::ranges::any_of(snapshot.View().ui, [](const hs::UiModel &entry) {
+        return entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x == 760 &&
+               entry.anchor_pixels.y == 790 && std::string_view(entry.utf8_text.data()) == "재추첨 0";
+    }), "exhausted reroll is visibly disabled at its existing position");
+    snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "upgrade description snapshot");
     bool checked_upgrade{};
     for (std::size_t card_index = 0; card_index < probe.card_count; ++card_index)

@@ -18,6 +18,7 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kTilePixels = 16, kSlices = 24;
+constexpr std::uint32_t kMaxLights = 128, kMaskWords = kMaxLights / 32;
 constexpr std::uint32_t kDescriptorCount = 4, kHeaderBytes = sizeof(LightListConstants);
 constexpr std::uint64_t kMaxBufferBytes = UINT64(UINT32_MAX) & ~UINT64(3);
 
@@ -219,6 +220,8 @@ struct LightListTargets
     std::uint64_t upload_stride{}, bytes{};
     CompletionSet completion;
     bool usable{true};
+    bool diagnostic_frame_valid{};
+    std::uint32_t diagnostic_frame_slot{};
     ~LightListTargets() { if (mapped && upload.resource) upload.resource->Unmap(0, nullptr); }
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(std::uint32_t slot, std::uint32_t index, bool exported = false) const
     {
@@ -249,12 +252,27 @@ LightListSystem::LightListSystem() : impl_(std::make_unique<Impl>()) {}
 LightListSystem::~LightListSystem() = default;
 std::uint64_t LightListCandidate::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 std::uint64_t LightListSystem::AllocatedBytes() const noexcept { return impl_->targets ? impl_->targets->bytes : 0; }
+LightListDiagnostics LightListSystem::DiagnosticResources() const noexcept
+{
+    const auto &storage = impl_->targets;
+    if (!storage || !storage->usable || !storage->diagnostic_frame_valid || impl_->pending.graph)
+        return {};
+    LightListDiagnostics output;
+    output.capacity = storage->capacity;
+    output.frame_slot_count = static_cast<std::uint32_t>(storage->frames.size());
+    output.frame_slot = storage->diagnostic_frame_slot;
+    output.allocated_bytes = storage->bytes;
+    output.upload_allocated_bytes = storage->upload.allocation->GetSize();
+    for (std::size_t index = 0; index < output.resources.size(); ++index)
+        output.resources[index] = &storage->frames[output.frame_slot].buffers[index];
+    return output;
+}
 
 Result LightListSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     ViewExtent capacity, std::uint32_t maxLights, std::uint32_t slots,
     const ShaderReader &readShader, LightListCandidate &candidate, std::uint32_t clusterCapacity) const
 {
-    if (!device || !allocator || !ValidExtent(capacity) || !maxLights || !slots || !readShader ||
+    if (!device || !allocator || !ValidExtent(capacity) || !maxLights || maxLights > kMaxLights || !slots || !readShader ||
         !clusterCapacity || clusterCapacity > 128 ||
         slots > D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 / kDescriptorCount)
         return LightFailure(ErrorCode::InvalidArgument, "Invalid light-list device, capacity, light count, frame slots or shader reader.");
@@ -265,8 +283,7 @@ Result LightListSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *alloca
     const auto inlineCapacity = std::min(clusterCapacity, maxLights);
     const auto spillCapacity = std::min(clusterCapacity, maxLights - inlineCapacity);
     const std::array<std::uint64_t, 4> widths{UINT64(maxLights) * sizeof(GpuLightRecord),
-        kHeaderBytes + cells * 16, std::max(UINT64(4), cells * inlineCapacity * 4),
-        std::max(UINT64(4), cells * spillCapacity * 4)};
+        kHeaderBytes + cells * 16, cells * kMaskWords * sizeof(std::uint32_t), 4};
     const std::uint64_t uploadStride = (kHeaderBytes + widths[0] + 255) & ~UINT64(255);
     if (std::ranges::any_of(widths, [](std::uint64_t size) { return size > kMaxBufferBytes; }) ||
         uploadStride > std::numeric_limits<SIZE_T>::max() / slots)
@@ -513,7 +530,12 @@ Result LightListSystem::CompleteSubmission(const RenderGraphBuilder &graph, cons
             imported.allocation->graph_queue = graph.FinalQueue(imported.handle);
         }
     }
-    if (!success) storage->usable = false;
+    if (success)
+    {
+        storage->diagnostic_frame_slot = pending.slot;
+        storage->diagnostic_frame_valid = true;
+    }
+    else storage->usable = false;
     pending = {};
     return Result::Success();
 }

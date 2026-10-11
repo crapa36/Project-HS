@@ -351,6 +351,7 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
 
 void GameSimulation::SimulationWorld::XpCardPhase()
 {
+    if (session_phase != SessionPhase::Playing) return;
     for (auto &pickup : actors->pickups)
     {
         if (pickup.dead) continue;
@@ -393,6 +394,7 @@ void GameSimulation::SimulationWorld::XpCardPhase()
                 rules.growth.experience_pickup_radius)
         {
             CollectPickup(pickup);
+            if (session_phase != SessionPhase::Playing) break;
         }
     }
     while (config.scenario.progression_enabled &&

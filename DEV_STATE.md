@@ -305,6 +305,13 @@ remain unstaged above the migration; do not commit or rewrite either branch.
   the last verified contact next tick. Original casts retain their actual saved
   cooldown budget while live projectiles can still spend it. Exact enemy overlap
   uses stable opposite separation directions without imposing hard collision.
+- Projectile/actor collision uses relative motion over the actual MoveDisc2D
+  contact/slide pieces, including forced displacement. Initial projection and
+  final separation/projection are instantaneous corrections, not swept chords;
+  the corrected endpoint remains collidable at t=1. Separation keeps the point
+  grid and only the later projectile grid uses swept AABBs. Redirects clip the
+  target path to the same remaining global tick. Static no-motion math, wall
+  ties, piercing, redirect bound, phase order and checksum oracle are retained.
 - DRS preparation and control share inclusive integer extent bounds. Feasible
   unaligned extents outrank 8-pixel alignment; invalid provider/capacity domains
   are rejected. Per-view history and capacity ownership are unchanged.
@@ -317,6 +324,27 @@ remain unstaged above the migration; do not commit or rewrite either branch.
   The extra accumulation payload is 15.82MiB per FHD view; bandwidth cost is not
   inferred from format size. Stable instance buckets replace repeated scans while
   preserving canonical indices, foliage retention and per-view preparation.
+- Light-grid retained candidates use four uint membership words per cell;
+  ascending word/bit enumeration preserves stable authoritative record order.
+  Header/ranges, quality counts and exact overflow/off-frustum fallback remain;
+  max 128, four SRVs, 128-byte records, 256-byte header and three-slot retirement
+  are unchanged. The unused spill SRV has a minimal backed placeholder.
+- Enhanced UAV barriers include API ClearUnorderedAccessView synchronization,
+  separately from shader synchronization. Cluster Count clears all catalogs and
+  shared refs before existing barriers and dispatches; per-resource declarations,
+  counts, overflow faults and retirement remain unchanged.
+- Deferred auxiliary allocation follows authored SSS and resolved SSR/native/
+  software transport consumers. The same mask reaches startup, apply, resize,
+  owned views and resident adoption. Four MRT positions use PSO variants for
+  masks 0/1/2/3/7; absent slots require UNKNOWN PSO formats with null RTVs. Newly
+  allocated auxiliaries carry their own Common/ShaderRead graph access, including
+  partial target replacement during full resident reload.
+- Reassessment of V04/A01/A06 preserves their implementations with narrower
+  claims: Archer-only outlines bypass FXAA under TAA/provider paths; HDR-on
+  capability queries still copy the owning config on event paths, not every
+  gameplay frame; six post feature registrations are the current caller size,
+  not an API limit or pass signal count. Their remaining costs/stability are
+  unmeasured, so no general cache, scheduler or outline redesign was added.
 - Development reload tracks observed and applied pointers separately. One CPU
   preparation future validates immutable captured inputs; stale/ABA results are
   discarded and failures retry with 250ms–30s capped backoff. GPU/VFX commit stays
@@ -330,17 +358,112 @@ remain unstaged above the migration; do not commit or rewrite either branch.
 
 #### Current evidence and next checkpoint
 
-- Work remains on `main` at `5ee6bf8d41c1ea8114ee12c0583d671fd25b8ff2`: staged migration equals source commit `fecc13c0f0922c2b70b88a251f50ceea5d93a6a5`, index tree `f545c39df35df3562abcb06f261ff821be794731`. The backup branch `codex/engine-v7-backup-20261009` records review checkpoints on top of that unchanged source commit. Main's index and working files remain in place, with fixes unstaged above the migration.
-- The b0 table lookup failure was isolated by same-draw raw-SRV/direct-CBV probes. FrameConstants now uses root15 direct CBV, including private probe banks; immutable t18 occupies the former b0 slot without changing HLSL registers, heap stride or the 64-DWORD budget. All 2,077 sampled ROI frames were finite/nonblack (`Build/tooling/flicker-binding-fix.json`). Fence UINT64_MAX is rejected by Completed/Wait/Drain, preserving DeviceRemoved HRESULT instead of consuming unfinished readbacks. The original DeviceHung cause remains unconfirmed; these fixes do not establish all-scene stability.
-- Settings use message-time click coordinates and the reference letterbox transform, Korean labels/values, shared UI/Runtime capability guards, working 144/165/custom caps and current-file extension preservation. Unsupported HDR/DLSS/FG cannot be enabled. Presentation/settings-store checks pass in the current full execution; title and float display fixes are included.
-- Unhandled WaveTimer/pickup-idle owners no longer fall through to white legacy ground commands. Typed pickup bursts replace legacy collection layers only after successful conversion; malformed/unsupported fallback and ballistic debris remain. `Build/tooling/vfx-final-comparison.json` records white pixels 117756→1986, zero in scene rows 200–899, with unchanged depth/GBuffer/LightingHDR. The eight-frame Enhanced pickup fixture confirms 4 events/4 flashes/4 ribbons and zero drops/unsupported/validation errors (`Build/verification/vfx-pickup-enhanced-8.log`). Package-wide VFX qualification remains incomplete; keep `runtime_ready=false` and admission flags truthful.
-- Review decisions cover 28 IDs: 18 corrections/verification improvements and 10 conditional/retained decisions (`Docs/Consolidated_Review_Resolution.md`). Existing core 10/10 and portable 23/23 pass (`Build/verification/review-portable-final.log`). Full execution `verify-20261010T094257223Z-4768` passed 76/77; only camera fixture occlusion/clipping failed. Isolating those inputs retained the original aspect/extent criteria, and camera/analyzer passed 2/2 in `verify-20261010T101003093Z-34424`. These are combined valid receipts, not one 78/78 full-gate run.
-- Actual FP32 OIT surfaces have 43,431 nonempty pixels, 22-layer alpha 66000 and 64-layer alpha 192000; accumulation/revealage/composite nonfinite and out-of-tolerance linearity mismatches are 0 (`Build/reviews/consolidated-20261010/oit-after-analysis.json`). This resolves observed FP16 saturation, not reproduced Inf/NaN. Added storage/bandwidth cost remains unmeasured.
-- Development reload separates selected shader and resident scene generations. CTest registers the single-config shader reload; hidden-window shutdown targets only the child PID's `ProjectHS.Window`. `verify-20261010T102630399Z-33072` passed shader/material/local-probe 3/3. Full-resident Runtime scene binding and closure admission passed expanded shader reload/watch/architecture 3/3 in `verify-20261010T104523795Z-9732`: narrow frame59 keeps the original resident ID, incompatible layout is rejected before commit, full VFX frame156 uses the new ID. Native exit0/validation0/static scene uploads2; original pointer preserved. Prepare/commit, immutable snapshot leases and strict scene/page checks remain; no generic transaction framework.
-- Latest recorded Release runtime-full generation is `86c6bb06570d2b8c6b4199eb0418247b776b482b0dd1aaafd9cd6498a70381f1` with 3,680 products. Two FHD Ultra 240-tick runs, excluding 60 warmup frames, have render-scope p50 60.5075/60.7185ms and p95 68.699/68.683ms (`Build/reviews/consolidated-20261010/performance-after.json`). Lockstep drains all GPU queues each frame inside this scope; final readback is outside it. Release optimization/RTX4080/validation and GBV OFF are confirmed. These are not display FPS or a controlled source-equivalent A/B; 144FPS is not established. Native reconstruction/GI SDKs remain disabled; software-hybrid GI uses its probe fallback.
-- Final Release ProjectHS/render runner rebuild and 3,680-product verification passed (`Build/verification/review-release-completed.log`). Normal Runtime's existing 60-second input ran FHD Ultra without lockstep, VSync or frame cap: exit0, 1,021frames, checksum15682705976600721736, validation/dropped inputs/dropped presentation/unsupported VFX0 (`Build/verification/review-final-normal.log`). The 456 Render scopes with300<=tick<1818 have p50 55.37ms/p95 60.41ms, excluding CPU preparation before Render; no actual present-interval or144FPS claim (`Build/reviews/consolidated-20261010/normal-play-after.json`).
-- A02's 1,200 randomized order/range cases and CPU microbenchmark cover dynamic classification only. A04's approximately 0.082ms sums two separate function p50s; it does not justify a broader dirty-bank cache or prove an FPS gain. A08's 2.513–2.674s measures whole CLI Verify for3,680 products; render-thread VFX/commit cost and shutdown join remain unmeasured. Exact boss RT secondary-hit and dedicated TAA/FXAA edge GPU oracles are unexecuted; conditional decisions remain in the 28-ID document.
-- Next: investigate normal-play throughput separately from lockstep drains and obtain paired pass-level measurements for remaining CSM/GBuffer/GTAO cost. Full VFX changes combined with scene shader/geometry/layout changes require new scene projection and are currently rejected before adoption. Retain strict prepare/commit/abort, GPU waits and ownership checks. Use `Build/tooling/performance-investigation-current.md` and the consolidated review reports for unresolved technical work.
+- Work remains on `main` at `5ee6bf8d41c1ea8114ee12c0583d671fd25b8ff2`: staged migration equals source commit `fecc13c0f0922c2b70b88a251f50ceea5d93a6a5`, index tree `f545c39df35df3562abcb06f261ff821be794731`. Backup `codex/engine-v7-backup-20261009` checkpoint `b8e9dbb878c8bf1cb0ae609b6143b3ef8dc0ec2a` is committed/pushed; later corrections remain uncommitted. Preserve source commit, HEAD, refs, index and user changes.
+- Same-draw raw-SRV/direct-CBV probes isolated b0 table lookup failure. FrameConstants uses root15 direct CBV, including private probe banks; immutable t18 uses the former b0 slot with shader registers, heap stride and 64-DWORD budget unchanged. All 2,077 sampled ROI frames were finite/nonblack (`Build/tooling/flicker-binding-fix.json`). Fence UINT64_MAX is a removed-device sentinel: Completed/Wait/Drain reject it without releasing unproven work or losing DeviceRemoved HRESULT. The original DeviceHung cause remains unconfirmed; all-scene stability is not proved.
+- Settings retain message-time click/letterbox coordinates, Korean labels/values, capability guards, 144/165/custom caps, current-file extensions and title/float fixes. Unsupported HDR/DLSS/FG stay disabled. PMv2, exact GDI-device identity, DPI-aware window frames and WM_DPICHANGED→WM_SIZE unify physical pixels; placement failures reach record_thread_failure. Manifest/hidden-HWND, architecture and shader contracts pass 3/3 (`verify-20261010T170945562Z-7492`), without new Public API or OFF/OFF prerequisite.
+- WaveTimer/pickup-idle owners no longer fall through to white legacy ground commands. Successful typed pickup bursts supersede only their legacy collection layer; malformed/unsupported fallback and debris remain. White pixels 117756→1986 with unchanged depth/GBuffer/LightingHDR (`Build/tooling/vfx-final-comparison.json`); Enhanced pickup8 records events/flashes/ribbons 4/4/4, drops/unsupported/validation 0 (`Build/verification/vfx-pickup-enhanced-8.log`). Package-wide qualification remains incomplete: keep runtime_ready=false and truthful admission flags.
+- Review IDs remain 21 corrections/verification improvements and 7 conditional decisions. Retain core10/10 (`verify-core-20261010T113305865Z-23044`), portable23/23 (`review-portable-final.log`), related CPU8 and light/aux native2/2 (`verify-20261010T113428406Z-35064`). Full76/77 plus corrected camera/analyzer2/2 are separate receipts (`verify-20261010T094257223Z-4768`, `verify-20261010T101003093Z-34424`), not one latest full gate. FP32 OIT records 43431 nonempty pixels, alpha66000/192000 and nonfinite/linearity mismatch0 (`oit-after-analysis.json`). Final caster-storage/range/transient/multi-queue selected gate passes4/4(1.45s), including wrong-kind rejection (`Build/verification/perf144-retained-final-tests.log`); earlier clean native6/6 and live14 Retest GBV216.167444s passed their retained fixtures (`verify-20261010T132142987Z-32580`, Build/msvc-validation/Artifacts/remaining-retest-gbv/bounded-run.json).
+- Reload shader/material/probe3/3 and full VFX/watch/architecture3/3 pass (`verify-20261010T102630399Z-33072`, `verify-20261010T104523795Z-9732`): narrow retains resident ID; full VFX validates closure and renders with the new ID. Auxiliary full reload passes 3680 HybridRT→3679 SSR→original, PSO1→2→3, Render/exit0/validation0/original pointer preserved (`Build/msvc-validation/Artifacts/auxiliary-resident-reload/auxiliary_reload_result.json`); masks7→2/3→7 are policy-derived. A03 FHD/4K raw membership/order/overflow/zero-light reset/LightingHDR SHA match, validation0; allocation bytes160101888→18937728 and634719744→74749824 (`remaining-light-after-{fhd,4k}/analysis.json`). A05 cold GBV5/5 passes433.410902s under the unchanged600s bound with SSS/present/allocation checks (`Build/msvc-validation/Artifacts/reassess-auxiliary-gbv/bounded-run.json`); earlier interrupted/3-of-5 timeout attempts remain non-passes. No memory-only FPS gain, every native RT/softwareGI branch or generic transaction framework is claimed.
+- Retained defaults enable static node-address cache and Enhanced SharedReaders, with VSM early rejection and frame-local GetDesc6→1. Their isolated grouping/GetDesc gain is unmeasured. Existing work preserves quality/LOD/light order/grass density: two-map caster reuse, epoch pruning/success-only swap, frame-local grouping (isolated gain unmeasured), fused Count and Main suffix90022→36630 (-53392); existing native caster4 and arena10catalog/5view invariants remain valid. Static node-address cache same-FD309/d5 OFF/ON gives CPU17.229100→16.004250ms (~7.1%) and nested caster3.71065→2.441ms, while GPU28.310528→28.381696/Present28.7328→28.7570ms shows no frame-rate gain. Persistent OFF/ON, revisions and owned-view4 native cases pass; OFF/OFF portable caster-storage1/1 passes (`node-cache-comparison.json`, `Artifacts/perf144-node-cache-native/execution.json`, `Build/verification/perf144-node-portable-escalated-{build,test}.log`). Coarse ON874 rows reanalyze PASS using exact MSVC/QPC/binary32 serialization, preserving original FAIL/CSV/SHA; do not add nested/separate p50s (`cpu-coarse-recovery/reanalysis-receipt.json`).
+- Previous retained bundle uses same frozen7F7AE68E/settings/replay/checksum15682705976600721736, FHD Ultra/nativeTAA/indexedCompact/Enhanced: d5/Node0/Shared0/Mesh0→d8/Node1/Shared1/Mesh0, tick[300,1818),871→897 frames,28/28 JSON contracts PASS. GPU critical p50/p9528.400640/30.677504→27.700224/29.788365ms (-2.47%p50); CPU17.377701/21.057150→15.834100/19.187720ms (-8.88%); Present-start28.826300→28.069550ms and34.448081→35.440620 calls/s. This is combined node/shared/VSM, not summed individual gains or GetDesc attribution. Overlap0→3.5216ms is not an equal critical saving. Selected misses0; three tails each are tick1818 outside; clock/tick distributions differ. Critical contains wait/idle; recorder includes preparation/graph/Execute/commits after initial waits; union is not hardware busy. ActualNoneBrixel differs from requestedSoftwareHybrid. Calls/s is not physical display FPS and6.944ms/144FPS remains unmet (`retained-bundle-comparison.json`, `retained-result.md`).
+- New Compact Mesh native8FHD strict PNG/raw passes but same7F7A/d5 critical28.400640→30.031360ms (+5.74%): rejected, temporary4-line override removed, Indexed policy retained (`compact-mesh-performance.json`). Rejected Visibility/AO/Page48NativeIndexed remain rejected: Visibility critical28.37→36.67ms; AO hoist Horizon3.228672→3.303424ms with original ambient source byte-exact restored and raw oracle unexecuted. The stale-mtime hoist products were repaired; v2 AO3 equals d5. NativeIndexed had no GPU/Present benefit and all13 files were byte-exact restored to Page32/draw24 (`native-indexed-profile-findings.md`, `native-indexed-rollback.json`). Strict1280x720 Retest GBV old/candidate both fail pixel(631,332),two channels1LSB; three PNGs are byte-identical. Empty logs/null final counters are not validation0; a common cause with FHD(965,491) is unproved (`retest-gbv-investigation.md`). Pipeline-query CSM VS/PS24.15M/46.79M versus GBuffer0.672M/5.85M is observational, not baseline timing (`pipeline-stats-findings.md`).
+- Follow-up production cleanup retains the original timing/diagnostics/HLOD and removes temporary Runtime collector, Runner AO capture and experimental queue selector. Canonical Validation/Release builds, source14 and export/independent Verify of all3680 products pass; frozen game E55D4395/runner C258DC79 use generation b66d07c53afd4a7787bb5aeab2d4ba468c358bd1813b106bb988ac622550643b. Build/source hashes: `Build/reviews/perf144-followup-20261011/measurement/canonical-build-provenance.json`. Related selected graph/ribbon gate5/5 passes1.55s (`verify-20261011T014621757Z-33876`); canonical primary-depth changes have separate source14 receipt, not a new full gate. Normal final FHD Ultra replay exit0/assertions/checksum15682705976600721736 passes (`Artifacts/perf144-followup-canonical-clean-a/execution.json`); a stale parent LASTEXITCODE post-check failure is recorded separately. Final clean executable GPU timing is unmeasured.
+- Visibility carries integer instance identity/generation, dynamic-instance base, STBN and existing material bindings into surface resolve. Shared root-SRV bounds use validated SceneTableBounds rather than root-SRV GetDimensions; FrameConstants remains12288 aligned bytes. Primary entity effects reconstruct world position from actual raster depth in both frontends; resolve declares the latest depth read. World-anchored noise and ray-hit world position remain intact. Unchanged entity-surface native oracle passes both8-frame640x360 Compact/Visibility runs, exit0/GBV0, positive emission/history and slot reuse; compared emission error0 (`visibility-canonical-resume/{execution,parity-result}.json`). Failed and interrupted attempts are preserved. This does not exercise all RT/SDK paths or shader-side forged-generation injection.
+- Ribbon growth prepares all three replacement buffers before commit and checkpoints CPU history/reset state when growth or repair can fail. Allocation/Wait/Update failures restore that state; null/mismatched resources can be retried. Failure injection covers three allocations, retry/cleanup, generation reset, retained-tail upper bounds and no-allocation steady state. The private state helper preserves history64/ABI20; transient old+new allocation cost and bound-query set cost are unmeasured. RenderGraph device validation compares canonical IUnknown identity; same-device/foreign-WARP hardware checks pass, without weakening boundary rejection.
+- Retained AO/CSM scheduling is limited to actual eligible single-main Indexed Compact/Enhanced/GTAO/adaptive-density/ProbeGI+SSR raster execution. CSM follows Retest/Classify using latest geometry/count versions; AO Horizon/GuideResolve/Temporal/Bilateral use Compute, Contact remains Direct. Other modes retain their original ordering/queue. Same frozen642930C7/gen914c429d UltraFHD replay OFF/ON gives critical GPU p50/p95/p99 29.237248/32.186880/33.357312→27.197952/30.121779/31.387996ms (-6.98%/-6.42%/-5.90%), actual CSM/Horizon overlap0→3.1867ms, selected misses0 (`measurement/overlap-ab.json`). CSM pass4.006→8.368ms grows under concurrency; do not report reduced shadow work or add pass medians/overlap as net savings. One serial pair, not a variance study or physical-display FPS. Native raw37/geometry/decodedRGBA are exact; the original GBV interval-overlap oracle fails because no overlap was observed and remains a failure. Release A/B supplies the overlap evidence. 6.944ms/144FPS is unmet.
+- Nsight counter access was authorized; administrative sessions required no global policy change. Before/after policy snapshots match, registry unchanged. Both administrator traces terminate on imported-device identity rejection, including the final throughput attempt; canonical COM identity correction does not resolve that capture failure. No hardware counter/SM/TEX/bandwidth attribution is available (`measurement/counter-policy/policy-comparison-final.json`). GBuffer POM/stochastic samples are not proven duplicates; actual opaque/masked shadow PS already has alpha-only DCE. Shadow VS no-history was effect-tested and rejected: fixed642930C7/canonicalb66→candidate5a98885a GPU p50 30.921216→31.769600ms, CSM9.708544→9.714688ms; p95/p99 34.193766/35.307848→34.182144/35.146752ms. Source15/cook/3680 Verify and static history removal pass, but this serial800→781-frame pair establishes no gain/general regression. All3 source files and canonical pointers are byte-exact restored; candidate native pair was skipped after rejection. Original canonical build/native receipts remain applicable (`measurement/shadow-vertex-candidate/{performance-a,dxil-proof,rollback}.json`). Recorder wall time includes preparation/graph/Execute/waits and is not pure CPU execution (`measurement/cpu-recorder-scope.md`).
+- FullFHD ON GBV explicitly records id232/TDR/DeviceHung; matched C547/d5 OFF fails211.751772s/exit1/timeoutfalse/inputspreserved with provider-drain0x887A0006 DeviceHung and empty validation log, not an explicit OFF TDR report. NormalFHD strict PNG/raw, smallFHD both-GBV and hardware reader-lifecycle passes do not resolve either full failure. Cause and SharedReaders flawlessness remain unproved. Next investigate common fullGBV DeviceHung and remaining CSM/GBuffer cost; retain strong lease/radius/wind/prior/removal, demand14-float catalog0–9/not grass10–13, closure and seven conditional decisions. Exact bossRT,TAA/FXAA edges,volumetric fullscan/clustered and SDK/provider GPU oracles remain unexecuted. A02 is a microbenchmark; A04 0.082ms sums separate p50s; A08 2.513–2.674s is whole CLI Verify.
+
+### Repository audit corrections (2026-10-11)
+
+- Terminal phases skip XP/relic collection. Manual relic selection stops pickup
+  iteration at the first chest; later chests remain collectible after choosing.
+  Automatic choices still award multiple chests in one tick.
+- Movement Echo queries an authored tick-age position ring, recorded after all
+  player movement/clamping. Default age60 uses61 Float2 entries (488 bytes).
+  Warmup uses the session start position, age0 uses the current position, and
+  session start resets/resizes history. The complete ring is authoritative hash
+  state, including before acquiring the relic. Simulation/hash versions are5/7;
+  older recordings are rejected before replay. Hash-v7 240tick oracle is
+  15816561498904262959, with independent historical-position regressions.
+- Applying menu-time rules rebuilds player/enemy/boss navigation and invalidates
+  both cached flow targets. Reloaded paths match a fresh rules initialization.
+- Raw Input registration no longer requests background delivery; foreground
+  RIM_INPUT alone is consumed, and DefWindowProc performs foreground cleanup.
+  Replay accepts CharacterPage and rejects out-of-range/noninteger edge enums
+  before narrowing. Temporary phases/resume retain the current boss/session BGM.
+- Explicit resolution/VSync/frame-cap/borderless CLI intent merges into the same
+  requested graphics document used by window placement, renderer startup and
+  later settings commits. Unspecified saved profiles/automatic extent survive;
+  smoke process defaults remain isolated. Production private helpers are shared
+  with the startup projection and music policy regressions.
+- Core coverage:9 unchanged checks passed in
+  `Build/verification/verify-core-20261011T142942719Z-33788.json`; new progression,
+  history and reload regressions passed before the expected old-oracle mismatch.
+  Updated determinism check passes1/1 in `verify-core-20261011T143100466Z-32572.json`.
+  These are10 unique passing checks, not a new single full-gate receipt.
+  Runtime integration/arguments/settings and content combat/progression/determinism
+  pass6/6 in `verify-20261011T143211695Z-32916.json` (same verification directory).
+  Release ProjectHS builds and its3680-product runtime-full generation verifies;
+  build receipt: `Build/verification/audit-fixes-20261011-release-build.log`.
+- Sandbox C1902 attempts stopped before tests; the same MSVC toolset succeeds
+  outside the execution restriction. A new settings-test optional access compile
+  error was repaired before the successful6-test run. No new renderer change or
+  GPU timing is attributed to this batch. Prior performance/replay receipts use
+  their recorded older executable/hash versions; they do not validate this build.
+
+### VFX and character UI audit (2026-10-11)
+
+Current batch is documented in `Docs/VFX_Visual_UX_Audit_Resolution.md`.
+VF01 restores only live births in an observed status episode using the existing
+successful particle-submission checkpoint. VF02 owner stamps reuse mesh
+interpolation; world contact flashes stay anchored. VF04 integrates a private
+session tick phase with failure-atomic conversion. Character skill labels use
+actual bindings; upgrade/relic details use four cards per page.
+DirectWrite shrink/trim and the text-fit oracle now use visible `metrics.width`:
+11 authored wraps fit their original 354/588 widths but trailing spaces caused
+false overflow. The genuinely short damage line is 24 high (was 23, measured
+23.168). Font18, full descriptions, maximum counters and fit thresholds remain.
+CPU receipt `verify-20261010T180512949Z-25400` passes text-fit and Presentation;
+the other valid seven checks from `verify-20261010T174908530Z-21232` are retained
+(eight unique checks). Validation/Release ProjectHS and runner builds pass;
+configured runtime-full generations and validation test-render verify.
+`VfxSpriteOitPS -> HsFogEnabled` reads `VmCounts.y` even with volumetrics Off.
+The shared frame now initializes a real 0-filled 768B CBV in existing upload
+space 12288..13056 after WriteViewDescriptors and before descriptor clones.
+Active Volumetric.Register overrides it; every reused bank gets the Off default.
+No allocation, FrameConstants ABI change or validation suppression was added.
+Control/fixed/auto native composition runs complete 32 frames with validation 0;
+auto also uses GBV. The original null-CBV run's 16 errors, binary and receipt
+remain under `Build/reviews/vfx-visual-ux-20261011` and validation Artifacts.
+The switch fixture now supplies an acknowledged startup request preserving its
+native/TAA/disabled-effects options. Corrected 32-frame Off/Medium/Off GBV passes
+with validation 0: frame1 generation0 Off, frame13 generation1 Medium,
+frame21 generation2 Off, all actual-applied and requested values match.
+Post-Off captures24/25/32 cover bank reuse. Receipt: `native-switch-v2.json` in
+`Build/reviews/vfx-visual-ux-20261011`; the three original valid comparison runs
+retain their earlier binary/source provenance separately.
+Actual same-frame low-contrast onset samples (375) have p10/p50/p90 current
+signal fractions 0.1290/0.2736/1.0001. Auto exposure at effect removal is 21.5698%
+below its frame8 value; full-screen effect frames17/24 have no scene-only ROI.
+These observations do not qualify temporal quality or establish a metering policy.
+VF03 lacks an independent authored child TTL; no expired child culling is valid.
+VF07 geometry/lifetime and GR01 prior history contracts were rechecked without
+new defects. Profile-specific temporal guides and metering policy remain conditional.
+
+### Grass deformation history (2026-10-11)
+
+GSH-01/02 now reevaluate grass with per-view last-successful time and the complete previous bender list. Dynamic slots use the existing previous instance table with generation/mesh validation; static history retains scene-lease/page identity. New-cut/fade/HLOD and temporal depth/material/normal rejection remain active. Shadow/ray/probe paths evaluate only current deformation. Static lease coordinates and CPU-rebased dynamic transforms use different old-basis conversion before applying the current-basis previous projection.
+
+FrameConstants is 12272B with unchanged old prefix offsets: previous benders 11728, state 12240, origin delta 12256. Instance upload begins at 13KiB to keep Exposure CB separate. Added CPU history is 528B per view; no new GPU history allocation or wait was introduced.
+
+`rendering.grass-history` covers camera cut, resize recovery, independent Main/Preview success times and a 0.25m origin transition. The pre-origin-correction shader reproduces 52.85px false motion; the corrected shader records only 0.70px wind motion. Mesh+visibility D144 GPU validation passes, errors 0 (223.35s, `Build/msvc-validation/Artifacts/grass-history-final-gbv-mesh-D144`). D120 native validation and shader/source analysis checks also pass. These use logical input times, not measured display frequency.
+
+Latest clean Release and validation ProjectHS are built. Runtime-full `fd6ba971f8e22763348ffba73f88e97713ce699b1096f095b578a3cace3dbaea` is composed, exported to Release and verified with 3680 products. The preceding grass eaa38 and 9a138 snapshots remain immutable; the CSM successor preserves the grass deformation-history contracts. Validation configuration is RelWithDebInfo; no fresh Debug hot-reload result is claimed. Detailed contracts, native measurements and unresolved provider/atlas/performance limits are in `Docs/Grass_History_Correction.md`.
+
+Final selected integration gate passes 5/5 in 134.88s (`Build/verification/verify-20261010T161204504Z-19116.json`): grass-history, shader-reconstruction-contracts, barriers, local-probe-revisions, cluster-retest. This is a selected gate, not a fresh entire-suite result.
+
+Next: use residual evidence to decide compressed-atlas coverage/resident mip work; validate native SR inputs when an SDK-enabled build exists. Keep normal-gameplay 144FPS and worst-case 32-bender cost separate from the small diagnostic scene. A05 five-frame cold GBV passes; native RT/softwareGI auxiliary combinations and the other conditional review limits remain unverified.
 
 ### VFX v4 runtime execution (2026-09-27)
 

@@ -593,6 +593,8 @@ void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
     if (cluster_runtime) swap(static_cast<ClusterViewRuntime &>(*cluster_runtime), view.cluster_view);
     swap(previous_skin_deformation, view.previous_skin_deformation);
     swap(previous_instances, view.previous_instances);
+    swap(previous_grass_benders, view.previous_grass_benders);
+    swap(previous_grass_state, view.previous_grass_state);
     swap(view_session_id, view.view_session_id);
     swap(width, view.width);
     swap(height, view.height);
@@ -630,6 +632,7 @@ void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
     swap(lod_session_epoch, view.lod_session_epoch);
     swap(previous_volumetric_camera, view.previous_volumetric_camera);
     swap(previous_shadow_casters, view.previous_shadow_casters);
+    swap(previous_shadow_caster_nodes, view.previous_shadow_caster_nodes);
     swap(previous_geometry_page_versions, view.previous_geometry_page_versions);
     swap(reconstruction_provider, view.reconstruction_provider);
     swap(reconstruction_plan, view.reconstruction_plan);
@@ -794,7 +797,8 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
             v.reconstruction_plan, native_capacity, v.reconstruction_provider, &config); !r) return r;
     if (auto r = PrepareOptionTargets(v.targets, input.render_capacity.width, input.render_capacity.height,
             config.shadow_resolution, config.bloom, input.output_extent.width, input.output_extent.height,
-            UsesInternalResolveTargets(v.reconstruction_plan), config.outline); !r) return r;
+            UsesInternalResolveTargets(v.reconstruction_plan), config.outline,
+            RequiredLightingAuxiliaries(config)); !r) return r;
     candidate->transient_textures_common = enhanced;
     if (auto r = PrepareUiResources(v.ui, v.width, v.height); !r) return r;
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;

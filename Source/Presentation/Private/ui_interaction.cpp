@@ -8,9 +8,24 @@
 #include <charconv>
 #include <type_traits>
 #include <limits>
+#include <bit>
 
 namespace hs
 {
+std::size_t CharacterDetailsPageCount(const SessionProbe &probe, const PresentationUiState &ui) noexcept
+{
+    if (ui.page == UiPage::CharacterSkills)
+    {
+        auto selected = std::min<std::size_t>(ui.selected_character_skill, kCombatSkillCount - 1);
+        if (probe.skill_levels[selected] == 0) selected = 0;
+        return std::max<std::size_t>(1, (std::popcount(probe.upgrade_masks[selected]) +
+            kCharacterUpgradesPerPage - 1) / kCharacterUpgradesPerPage);
+    }
+    if (ui.page == UiPage::CharacterStats)
+        return std::max<std::size_t>(1, (std::popcount(probe.relic_mask & kAllRelicsMask) +
+            kCharacterRelicsPerPage - 1) / kCharacterRelicsPerPage);
+    return 1;
+}
 std::size_t GraphicsSettingsPageCount(std::uint8_t group)
 {
     if (group >= 7) return 1;
@@ -273,6 +288,9 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
         return UiInteraction{std::nullopt, UiCommand{kind, value}};
     };
     const auto &probe = session;
+    ui.character_details_page = probe.phase == SessionPhase::Paused
+        ? static_cast<std::uint8_t>(std::min<std::size_t>(ui.character_details_page,
+              CharacterDetailsPageCount(probe, ui) - 1)) : 0;
 
     if (ui.page == UiPage::MainMenuSettings || ui.page == UiPage::PauseSettings)
     {
@@ -297,7 +315,8 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
                     : (clicked(1550, y, 64, 48) || clicked(900, y, 530, 48)) ? 1 : 0;
                 if (!direction) continue;
                 const auto token = NextGraphicsSettingToken(requested, rows[index]->id, direction, graphics_ui);
-                if (!token || token->size() >= UiCommand{}.graphics_token.size()) return {std::nullopt, std::nullopt, true};
+                if (!token) return {};
+                if (token->size() >= UiCommand{}.graphics_token.size()) return {std::nullopt, std::nullopt, true};
                 UiCommand edit{UiCommandKind::SetGraphicsSetting};
                 edit.graphics_setting = rows[index]->id;
                 std::copy(token->begin(), token->end(), edit.graphics_token.begin());
@@ -318,6 +337,7 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
             const auto delta = clicked(1450, y, 64, 48) ? -0.1f : 0.1f;
             const auto value = std::round(std::clamp(volumes[index] + delta,
                                                      0.0f, 1.0f) * 10.0f) / 10.0f;
+            if (value == volumes[index]) return {};
             return command(volume_kinds[index],
                            static_cast<std::uint32_t>(std::lround(value * 100.0f)));
         }
@@ -326,8 +346,11 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
             clicked(900, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 530, 48))
         {
             const auto delta = clicked(1450, kGraphicsUiRowY + 4 * kGraphicsUiRowStride, 64, 48) ? -10 : 10;
+            const auto current = static_cast<int>(std::lround(settings.screen_overlay_intensity * 100));
+            const auto value = std::clamp(current + delta, 0, 100);
+            if (value == current) return {};
             return command(UiCommandKind::SetVfxScreenOverlayIntensityPercent,
-                static_cast<std::uint32_t>(std::clamp(static_cast<int>(std::lround(settings.screen_overlay_intensity * 100)) + delta, 0, 100)));
+                static_cast<std::uint32_t>(value));
         }
         for (std::uint8_t slot = 0; slot < 4; ++slot)
             if (clicked(950, kGraphicsUiRowY + (slot + 5) * kGraphicsUiRowStride, 664, 48))
@@ -358,8 +381,11 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
     if (probe.phase == SessionPhase::CardSelection ||
         probe.phase == SessionPhase::RelicSelection)
     {
-        if (clicked(760, 790, 400, 72)) return action(UiActionKind::Reroll);
-        for (std::uint8_t index = 0; index < 3; ++index)
+        const auto rerolls = probe.phase == SessionPhase::RelicSelection
+            ? probe.relic_rerolls_remaining : probe.level_rerolls_remaining;
+        if (clicked(760, 790, 400, 72))
+            return rerolls && probe.card_count ? action(UiActionKind::Reroll) : UiInteraction{};
+        for (std::uint8_t index = 0; index < probe.card_count; ++index)
             if (clicked(360.0f + index * 420.0f, 300, 360, 420))
                 return action(UiActionKind::SelectCard, index);
     }
@@ -375,9 +401,13 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
          ui.page == UiPage::CharacterSkills ||
          ui.page == UiPage::CharacterStats))
     {
-        if (clicked(350, 140, 280, 58)) { ui.page = UiPage::CharacterOverview; return {}; }
-        if (clicked(650, 140, 280, 58)) { ui.page = UiPage::CharacterSkills; return {}; }
-        if (clicked(950, 140, 280, 58)) { ui.page = UiPage::CharacterStats; return {}; }
+        if (clicked(350, 140, 280, 58)) { ui.page = UiPage::CharacterOverview; ui.character_details_page = 0; return {}; }
+        if (clicked(650, 140, 280, 58)) { ui.page = UiPage::CharacterSkills; ui.character_details_page = 0; return {}; }
+        if (clicked(950, 140, 280, 58)) { ui.page = UiPage::CharacterStats; ui.character_details_page = 0; return {}; }
+        if (clicked(1250, 950, 160, 36))
+        { if (ui.character_details_page) --ui.character_details_page; return {}; }
+        if (clicked(1450, 950, 160, 36))
+        { if (ui.character_details_page + 1 < CharacterDetailsPageCount(probe, ui)) ++ui.character_details_page; return {}; }
         if (clicked(1520, 140, 120, 58))
         {
             ui = {};
@@ -401,14 +431,15 @@ UiInteraction ResolveUiInteraction(const SessionProbe &session,
                     }
                     const auto source = std::exchange(ui.loadout_source_slot,
                                                       std::uint8_t{0xFF});
+                    ui.character_details_page = 0;
                     return action(UiActionKind::SwapLoadoutSlots, source, slot);
                 }
             for (std::uint8_t skill = 0; skill < kCombatSkillCount; ++skill)
                 if (clicked(350, 240.0f + skill * 78.0f, 360, 64))
                 {
-                    if (probe.skill_levels[skill] == 0)
-                        return {std::nullopt, std::nullopt, true};
+                    if (probe.skill_levels[skill] == 0) return {};
                     ui.selected_character_skill = skill;
+                    ui.character_details_page = 0;
                     return {};
                 }
         }

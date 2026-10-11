@@ -16,8 +16,8 @@ float4 HsEntitySurface(uint mesh, uint2 key, float3 world)
     const uint4 instance1 = HsGpuSceneTables.Load4(address + 16u);
     if (instance1.y != key.y || instance1.w == 0u ||
         HsGpuSceneTables.Load(h1.z + instance0.y * h3.x) != mesh) return 0.0;
-    uint scene_bytes;
-    HsGpuSceneTables.GetDimensions(scene_bytes);
+    // A root SRV supplies an address, not a descriptor byte range.
+    const uint scene_bytes = SceneTableBounds.x;
     const uint tail = h2.y + h0.z * h3.w;
     if (tail > scene_bytes || instance1.w - 1u > scene_bytes - tail) return 0.0;
     const uint group = tail + instance1.w - 1u;

@@ -47,7 +47,7 @@ HsSceneVertexContext HsRayVertexContext(RayHitGeometry g,uint geometry)
 }
 SceneOutput HsRayVertex(RayHitGeometry g,uint geometry,uint vertex)
 {
-    return EvaluateSceneVertex(HsRayCanonicalVertex(g,vertex),HsRayVertexContext(g,geometry),vertex);
+    return EvaluateSceneVertex(HsRayCanonicalVertex(g,vertex),HsRayVertexContext(g,geometry),vertex,false);
 }
 float3 HsRayWorldToLocal(InstanceData instance,float3 world)
 {

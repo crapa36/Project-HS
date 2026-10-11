@@ -252,6 +252,30 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets()
     return Result::Success();
 }
 
+Result D3D12Renderer::Impl::PrepareLightingAuxiliaries(std::array<AllocationResource *, 3> targets,
+    ViewExtent capacity, std::array<bool, 3> required)
+{
+    D3D12MA::ALLOCATION_DESC allocation{};
+    allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC texture{};
+    texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texture.Width = capacity.width; texture.Height = capacity.height;
+    texture.DepthOrArraySize = texture.MipLevels = 1;
+    texture.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    texture.SampleDesc.Count = 1;
+    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = texture.Format;
+    for (std::size_t index = 0; index < targets.size(); ++index)
+        if (required[index])
+        {
+            if (auto created = CreateAllocation(*targets[index], allocation, texture,
+                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear); !created) return created;
+            targets[index]->graph_access = enhanced ? Access::Common : Access::ShaderRead;
+        }
+    return Result::Success();
+}
+
 Result D3D12Renderer::Impl::CreatePostProcessTargets()
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
@@ -326,9 +350,6 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
              std::tuple{&gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
              std::tuple{&gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
              std::tuple{&hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&subsurface_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&environment_specular, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&indirect_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
              std::tuple{&gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
@@ -341,6 +362,8 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
             return created;
         }
     }
+    if (auto created = PrepareLightingAuxiliaries({&subsurface_diffuse, &environment_specular, &indirect_diffuse},
+            {render_width, render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
     if (auto created = create_target(post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                      black, width, height); !created) return created;
     if (config.bloom || config.outline)
@@ -403,7 +426,11 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets()
     rtv.ptr += static_cast<SIZE_T>(kLightingAuxRtvOffset) * rtv_stride;
     for (auto *resource : {subsurface_diffuse.resource.Get(), environment_specular.resource.Get(), indirect_diffuse.resource.Get()})
     {
-        device->CreateRenderTargetView(resource, nullptr, rtv);
+        D3D12_RENDER_TARGET_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        // An unused fixed MRT slot uses a null RTV, which discards shader writes.
+        device->CreateRenderTargetView(resource, &view, rtv);
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
@@ -599,7 +626,8 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
                                                  bool bloom,
                                                  std::uint32_t output_width,
                                                  std::uint32_t output_height,
-                                                 bool native_resolve, bool outline)
+                                                 bool native_resolve, bool outline,
+                                                 std::array<bool, 3> lighting_auxiliaries)
 {
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
     D3D12MA::ALLOCATION_DESC allocation{};
@@ -659,9 +687,6 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
              std::tuple{&targets.gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
              std::tuple{&targets.gbuffer_metadata, DXGI_FORMAT_R32G32_UINT, metadata_clear},
              std::tuple{&targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&targets.subsurface_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&targets.environment_specular, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&targets.indirect_diffuse, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
              std::tuple{&targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
              std::tuple{&targets.gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
@@ -670,6 +695,8 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
          })
          if (auto result = color_target(*resource, format, clear); !result) return result;
 
+    if (auto result = PrepareLightingAuxiliaries({&targets.subsurface_diffuse, &targets.environment_specular,
+            &targets.indirect_diffuse}, {target_width, target_height}, lighting_auxiliaries); !result) return result;
     if (auto result = color_target(targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
                                    black, output_width, output_height); !result) return result;
     if (bloom || outline)
@@ -842,7 +869,10 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
     rtv.ptr += static_cast<SIZE_T>(kLightingAuxRtvOffset) * rtv_stride;
     for (auto *resource : {subsurface_diffuse.resource.Get(), environment_specular.resource.Get(), indirect_diffuse.resource.Get()})
     {
-        device->CreateRenderTargetView(resource, nullptr, rtv);
+        D3D12_RENDER_TARGET_VIEW_DESC view{};
+        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        device->CreateRenderTargetView(resource, &view, rtv);
         rtv.ptr += rtv_stride;
     }
     rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();

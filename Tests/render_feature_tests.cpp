@@ -1,5 +1,6 @@
 #include "render_features.hpp"
 #include "renderer_post_subgraphs.hpp"
+#include "renderer_feature_resolve.hpp"
 
 #include <algorithm>
 #include <array>
@@ -301,6 +302,26 @@ int main()
 {
     try
     {
+        RendererFeaturePlan plan;
+        plan.reflection_mode = GraphicsReflectionMode::Off;
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, false, false},
+            "probe lighting without consumers has no auxiliary attachments");
+        Check(LightingAuxiliaryTargets(plan, true) == std::array{true, false, false},
+            "authored subsurface keeps its diffuse attachment");
+        plan.reflection_mode = GraphicsReflectionMode::ScreenSpace;
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{false, true, false},
+            "SSR retains only its environment fallback");
+        plan.reflection_mode = GraphicsReflectionMode::HybridRT;
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
+            "native reflections retain the complete transport guide contract");
+        plan.reflection_mode = GraphicsReflectionMode::Off;
+        plan.software_gi_enabled = true;
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
+            "software GI retains all backing signals");
+        plan.software_gi_enabled = false;
+        plan.gi_mode = GraphicsGiMode::RayTraced;
+        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
+            "native GI retains all backing signals");
         CompositionValidation();
         LargeSignalComposition();
         ConfiguredPostTopology();

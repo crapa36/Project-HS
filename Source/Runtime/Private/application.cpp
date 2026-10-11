@@ -3,6 +3,7 @@
 #include <hs/presentation/projector.hpp>
 
 #include "runtime_channels.hpp"
+#include "session_music.hpp"
 #include "vfx_catalog.hpp"
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_typed_ground_commands.hpp"
@@ -21,6 +22,7 @@
 #include "vfx_session_state.hpp"
 #include "vfx_generation_rebind.hpp"
 #include "renderer_settings_projection.hpp"
+#include "startup_graphics_settings.hpp"
 #include "window.hpp"
 #include "camera_pose.hpp"
 #include "generation_reload_watch.hpp"
@@ -212,14 +214,26 @@ Result ResolveGraphicsDisplayOutput(HWND window, const GraphicsDisplayId &reques
     if (!window)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
                                "Cannot resolve a display without a window.");
-    MONITORINFO monitor{sizeof(monitor)};
-    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+    MONITORINFOEXW monitor{};
+    monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST),
+                         reinterpret_cast<MONITORINFO *>(&monitor)))
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                "Cannot query the current display.");
+    std::array<char, CCHDEVICENAME * 4> device_name{};
+    const auto count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, monitor.szDevice, -1,
+        device_name.data(), static_cast<int>(device_name.size()), nullptr, nullptr);
+    if (count <= 1)
+        return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                               "Cannot encode the current display device name.");
+    const std::string_view device(device_name.data(), static_cast<std::size_t>(count - 1));
     const auto selected = std::ranges::find_if(displays, [&](const auto &display) {
-        return display.left == monitor.rcMonitor.left && display.top == monitor.rcMonitor.top &&
-            static_cast<std::int64_t>(display.left) + display.width == monitor.rcMonitor.right &&
-            static_cast<std::int64_t>(display.top) + display.height == monitor.rcMonitor.bottom;
+        // Public native ID: dxgi:<16 hex LUID digits>:<UTF-8 GDI DeviceName>.
+        // CCD rectangles are physical; GetMonitorInfo rectangles can be DPI-virtualized.
+        constexpr std::size_t name_offset = 5 + 16 + 1;
+        const std::string_view id(display.id);
+        return id.starts_with("dxgi:") && id.size() == name_offset + device.size() &&
+            id[name_offset - 1] == ':' && id.substr(name_offset) == device;
     });
     if (selected == displays.end())
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -661,25 +675,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     }
     if (!loaded_from_file)
         requested_settings = LegacyDefaultSettingsDocument();
-    if (config.render_scale_explicit)
-        (void)ApplySettingsEdit(requested_settings,
-                                {UiCommandKind::SetRenderScale, config.render_scale_percent});
-    if (config.shadow_resolution_explicit)
-        (void)ApplySettingsEdit(requested_settings,
-                                {UiCommandKind::SetShadowResolution, config.shadow_resolution});
-    if (config.particle_percentage_explicit)
-        (void)ApplySettingsEdit(requested_settings,
-                                {UiCommandKind::SetParticlePercentage, config.particle_percentage});
-    requested_settings.graphics.bloom = config.bloom;
-    requested_settings.graphics.outline = config.outline;
-    SettingsData initial_settings = ProjectSettingsDocument(requested_settings);
-    initial_settings.width = config.width;
-    initial_settings.height = config.height;
-    initial_settings.borderless = config.borderless;
-    initial_settings.vsync = config.vsync;
-    initial_settings.frame_cap = config.frame_cap;
-    if (config.mute_audio)
-        initial_settings.master_volume = 0.0f;
+    const auto initial_settings = PrepareStartupGraphicsSettings(requested_settings, config);
     GraphicsSettingsCommit settings_commit(std::move(requested_settings),
                                            initial_settings, config.mute_audio);
     SettingsData &settings = settings_commit.Effective();
@@ -748,7 +744,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.character_skill.load(std::memory_order_acquire),
                 channels.loadout_source.load(std::memory_order_acquire),
                 channels.settings_group.load(std::memory_order_acquire),
-                channels.settings_page.load(std::memory_order_acquire)};
+                channels.settings_page.load(std::memory_order_acquire),
+                channels.character_details_page.load(std::memory_order_acquire)};
             const auto interaction = ResolveUiInteraction(session, ui, ui_click_settings, cursor, &ui_click_model);
             channels.ui_page.store(static_cast<std::uint8_t>(ui.page),
                                    std::memory_order_release);
@@ -757,6 +754,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             channels.loadout_source.store(ui.loadout_source_slot, std::memory_order_release);
             channels.settings_group.store(ui.settings_group, std::memory_order_release);
             channels.settings_page.store(ui.settings_page, std::memory_order_release);
+            channels.character_details_page.store(ui.character_details_page, std::memory_order_release);
             if (interaction.gameplay_action) (void)channels.ui_actions.TryPush(*interaction.gameplay_action);
             if (interaction.runtime_command)
             {
@@ -1896,7 +1894,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 std::vector<VfxScreenInput> typed_screen;
                 if (auto converted = runtime_detail::BuildVfxTypedScreenCommands(vfx_catalog.Program(),
                         vfx_session.screen_events, typed_vfx.persistent, light_tick,
-                        active_vfx_quality, typed_screen); !converted)
+                        active_vfx_quality, vfx_session.low_health_pulse, typed_screen); !converted)
                 {
                     record_thread_failure(converted);
                     break;
@@ -2862,7 +2860,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                channels.character_skill.load(std::memory_order_acquire),
                                                channels.loadout_source.load(std::memory_order_acquire),
                                                channels.settings_group.load(std::memory_order_acquire),
-                                               channels.settings_page.load(std::memory_order_acquire)},
+                                               channels.settings_page.load(std::memory_order_acquire),
+                                               channels.character_details_page.load(std::memory_order_acquire)},
                                               projection_settings,
                                               *slot->storage,
                                                channels.pending_rebind_slot.load(
@@ -3091,8 +3090,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     {
         ui_click_settings = settings_commit.UiInput();
         std::uint64_t sampled_token{};
-        if (native_input_frame.ShouldPump(sampled_token) && !window.PumpMessages())
+        Result window_failure = Result::Success();
+        if (native_input_frame.ShouldPump(sampled_token) && !window.PumpMessages(&window_failure))
         {
+            if (!window_failure) record_thread_failure(std::move(window_failure));
             channels.stop_requested.store(true, std::memory_order_release);
             native_input_frame.Cancel();
             break;
@@ -3577,13 +3578,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (session_phase != previous_audio_phase)
         {
             const auto old_phase = previous_audio_phase;
-            const auto target = session_phase == SessionPhase::MainMenu
-                                    ? MakeAssetId("audio.bgm.main_menu")
-                                    : (session_phase == SessionPhase::Victory
-                                           ? MakeAssetId("audio.stinger.victory")
-                                           : (session_phase == SessionPhase::Defeat
-                                                  ? MakeAssetId("audio.stinger.defeat")
-                                                  : MakeAssetId("audio.bgm.session")));
+            const auto target = ResolveSessionMusic(session_phase, active_bgm);
             if (session_phase == SessionPhase::Victory || session_phase == SessionPhase::Defeat)
             {
                 if (active_bgm.value != 0) audio.Stop(active_bgm);

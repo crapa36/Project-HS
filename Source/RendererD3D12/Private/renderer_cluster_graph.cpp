@@ -211,23 +211,31 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 cpu.ptr += static_cast<SIZE_T>(offset) * srv_stride;
                 list->ClearUnorderedAccessViewUint(gpu, cpu, resource.resource.Get(), zero, 0, nullptr);
             };
+            ID3D12DescriptorHeap *heaps[]{cluster_runtime->descriptors.Get()};
+            list->SetDescriptorHeaps(1, heaps);
             bool refs_cleared{};
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
             {
                 if (!state.cuts[ordinal].active) continue;
-                bind(list, ordinal, 0);
                 auto &cut = cluster_runtime->frames[frame_slot].cuts[ordinal];
+                // Emit overwrites every published argument; its count excludes the unused tail.
                 const std::array resources{&cut.counts, &cut.offsets, &cut.block_sums, &cut.block_offsets,
-                    &cut.demand, &cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
+                    &cut.demand, &cut.status, &cut.command_counts,
                     &cut.history_bits, &cut.history_generations, &cut.selected_bounds, &cut.previous_rejected,
                     &cut.retest_draw_commands, &cut.retest_mesh_commands};
-                constexpr std::array<std::uint32_t, 15> slots{0, 1, 2, 3, 4, 5, 8, 9, 10, 12, 13, 14, 15, 16, 17};
+                constexpr std::array<std::uint32_t, 13> slots{0, 1, 2, 3, 4, 5, 10, 12, 13, 14, 15, 16, 17};
                 for (std::size_t i = 0; i < resources.size(); ++i) clear(ordinal, slots[i], *resources[i]);
                 if (!refs_cleared)
                 {
                     clear(ordinal, 7u, cluster_runtime->frames[frame_slot].refs);
                     refs_cleared = true;
                 }
+            }
+            // Complete all initialization before shader work so the next catalog's
+            // barriers cannot serialize an otherwise independent Count dispatch.
+            for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
+            {
+                if (!state.cuts[ordinal].active) continue;
                 for (const auto *buffer : {&state.cuts[ordinal].counts, &state.cuts[ordinal].offsets,
                     &state.cuts[ordinal].block_sums, &state.cuts[ordinal].block_offsets,
                     &state.cuts[ordinal].demand, &state.cuts[ordinal].status, &state.cuts[ordinal].draw_commands,
@@ -235,9 +243,14 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                     &state.cuts[ordinal].history_bits, &state.cuts[ordinal].history_generations,
                     &state.cuts[ordinal].selected_bounds, &state.cuts[ordinal].previous_rejected,
                     &state.cuts[ordinal].retest_draw_commands, &state.cuts[ordinal].retest_mesh_commands}) context.UavBarrier(buffer->handle);
-                context.UavBarrier(state.refs.handle);
-                list->SetPipelineState(cluster_count_pipeline.Get());
-                DispatchCluster(list, cut.candidate_count);
+            }
+            context.UavBarrier(state.refs.handle);
+            list->SetPipelineState(cluster_count_pipeline.Get());
+            for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
+            {
+                if (!state.cuts[ordinal].active) continue;
+                bind(list, ordinal, 0);
+                DispatchCluster(list, cluster_runtime->frames[frame_slot].cuts[ordinal].candidate_count);
             }
         });
         for (std::uint32_t stage = 0; stage < 3; ++stage)
@@ -277,6 +290,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                     bind(list, ordinal, stage);
                     const auto &cut = cluster_runtime->frames[frame_slot].cuts[ordinal];
                     if (stage == 1) list->Dispatch(1u, 1u, 1u);
+                    else if (stage == 0) DispatchCluster(list, cut.candidate_count);
                     else DispatchCluster(list, std::max(cut.candidate_count, cut.output_capacity));
                 }
             });
@@ -395,9 +409,11 @@ Result D3D12Renderer::Impl::AddClusterOcclusionPass(std::uint32_t frame_slot,
             cut.previous_rejected.version = pass.Write(cut.previous_rejected.version, Access::UnorderedWrite);
             cut.draw_commands.version = pass.ReadWrite(cut.draw_commands.version, Access::UnorderedWrite);
             cut.mesh_commands.version = pass.ReadWrite(cut.mesh_commands.version, Access::UnorderedWrite);
+            cut.command_counts.version = pass.ReadWrite(cut.command_counts.version, Access::UnorderedWrite);
             graph.SetFinalAccess(cut.previous_rejected.version, Access::UnorderedWrite);
             graph.SetFinalAccess(cut.draw_commands.version, Access::UnorderedWrite);
             graph.SetFinalAccess(cut.mesh_commands.version, Access::UnorderedWrite);
+            graph.SetFinalAccess(cut.command_counts.version, Access::UnorderedWrite);
         }
     }
     pass.SetExecute([this, frame_slot, &state, retest](RenderPassContext &context) {

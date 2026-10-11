@@ -297,6 +297,12 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         if (binding.sprite >= next->vfx_sprite_count || !binding.frame_columns || !binding.frame_rows)
             return reject(ResidentReloadFailure("Candidate status sprite bindings exceed the actual resident VFX atlas or have invalid frame dimensions."));
     const bool replace_sidecars = !SameSidecarLayout(material_sidecar_layout, next->material_sidecar_layout);
+    const auto next_auxiliaries = next->RequiredLightingAuxiliaries(next->config);
+    const bool replace_auxiliaries = next_auxiliaries != RequiredLightingAuxiliaries(config);
+    if (replace_auxiliaries)
+        if (auto prepared = next->PrepareLightingAuxiliaries({&next->subsurface_diffuse,
+                &next->environment_specular, &next->indirect_diffuse}, view_state.render_capacity,
+                next_auxiliaries); !prepared) return reject(prepared);
     if (replace_sidecars)
         if (auto prepared = next->PrepareMaterialSidecars(next->material_sidecars,
                 view_state.render_capacity.width, view_state.render_capacity.height); !prepared) return reject(prepared);
@@ -342,6 +348,13 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     SwapResidentAssetData(*next);
     SwapResidentPipelines(*next);
     SwapResidentServices(*next);
+    if (replace_auxiliaries)
+    {
+        std::swap(subsurface_diffuse, next->subsurface_diffuse);
+        std::swap(environment_specular, next->environment_specular);
+        std::swap(indirect_diffuse, next->indirect_diffuse);
+        WriteOptionTargetDescriptors();
+    }
     if (replace_sidecars)
     {
         material_sidecars.swap(next->material_sidecars);

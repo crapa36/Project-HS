@@ -53,8 +53,8 @@ bool Textures(const VfxProgramData &p,const VfxOutputRecord &o)
         i->asset_path_bytes.count)=="Content/Textures/VFX/vfx_gradient_lut.dds";
 }
 Result Append(const VfxProgramData &p,const VfxEffectRecord &effect,const VfxContextPayload &context,
-    float elapsed,float age,bool persistent,VfxQuality admission,std::uint64_t sequence,
-    std::uint64_t owner,std::vector<VfxScreenInput> &commands)
+    float phase,float age,bool persistent,VfxQuality admission,std::uint64_t sequence,
+    std::uint64_t owner,std::vector<VfxScreenInput> &commands,float entry_fade=1.0f)
 {
     if(!Range(effect.sources,p.sources))return Invalid("Screen overlay source range is invalid.");
     for(auto si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
@@ -85,11 +85,8 @@ Result Append(const VfxProgramData &p,const VfxEffectRecord &effect,const VfxCon
             v.gradient_age=std::clamp(source_age,0.0f,1.0f);
             if(persistent)
             {
-                // The owner's tick clock sets phase. Lower HP changes period only.
-                const float frequency=1.0f+(1.0f-context.ratio01/0.35f);
-                const float phase=elapsed*frequency;
-                v.gradient_age=phase-std::floor(phase);
-                v.envelope=0.75f+0.25f*std::cos(2.0f*std::numbers::pi_v<float>*phase);
+                v.gradient_age=phase;
+                v.envelope=entry_fade*(0.75f+0.25f*std::cos(2.0f*std::numbers::pi_v<float>*phase));
             }
             commands.push_back(v); // Authored alpha zero remains zero, including optional arcs.
         }
@@ -97,12 +94,30 @@ Result Append(const VfxProgramData &p,const VfxEffectRecord &effect,const VfxCon
     return Result::Success();
 }
 }
+void VfxLowHealthPulseState::Advance(std::uint64_t stable,std::uint64_t owner,Tick tick,float ratio) noexcept
+{
+    if(stable_id!=stable||owner_id!=owner||tick<last_tick)
+    {
+        Clear();stable_id=stable;owner_id=owner;last_tick=entered_tick=tick;
+    }
+    // A newly observed HP value changes future speed, never the accrued phase.
+    phase=std::fmod(phase+double(tick-last_tick)*double(frequency)/60.0,1.0);
+    last_tick=tick;
+    frequency=2.0f-ratio/0.35f;
+}
+float VfxLowHealthPulseState::EntryFade() const noexcept
+{
+    // Nine simulation ticks soften re-entry without delaying the HP snapshot.
+    return std::min(float(last_tick-entered_tick)/9.0f,1.0f);
+}
 bool IsVfxTypedScreenEffect(const VfxProgramData &p,VfxEffectHandle handle) noexcept
 { const auto id=EffectId(p,handle);return id==kHit||id==kHealth; }
 Result BuildVfxTypedScreenCommands(const VfxProgramData &p,std::span<const VfxEventInput> events,
-    std::span<const VfxPersistentInput> persistent,Tick tick,VfxQuality admission,std::vector<VfxScreenInput> &output)
+    std::span<const VfxPersistentInput> persistent,Tick tick,VfxQuality admission,
+    VfxLowHealthPulseState &pulse,std::vector<VfxScreenInput> &output)
 {
     output.clear();std::vector<VfxScreenInput> commands;
+    auto next_pulse=pulse;
     for(const auto &v:events)
     {
         if(EffectId(p,v.effect_handle)!=kHit)continue;
@@ -115,16 +130,21 @@ Result BuildVfxTypedScreenCommands(const VfxProgramData &p,std::span<const VfxEv
         const float elapsed=float(tick-v.event_tick)/60.0f;if(elapsed>=e.seconds)continue;
         if(auto r=Append(p,e,*c,elapsed,elapsed/e.seconds,false,admission,v.sequence,0,commands);!r)return r;
     }
+    bool health_present=false;
     for(const auto &v:persistent)
     {
         if(EffectId(p,v.effect_handle)!=kHealth)continue;
         if(!v.effect_handle||v.effect_handle>p.effects.size())return Invalid("Screen health effect handle is invalid.");
         const auto &e=p.effects[v.effect_handle-1];const auto *c=std::get_if<VfxContextPayload>(&v.payload);
-        if(!c||!v.stable_id||e.input_mode!=1||e.timing_kind!=1||e.payload_kind!=Hash32("PresentationContextPayload")||
+        if(!c||!v.stable_id||!c->owner_id||health_present||e.input_mode!=1||e.timing_kind!=1||e.payload_kind!=Hash32("PresentationContextPayload")||
            !std::isfinite(c->ratio01)||c->ratio01<0||c->ratio01>0.35f||
            !std::isfinite(v.elapsed_seconds)||v.elapsed_seconds<0)return Invalid("Screen health requires its live low-health owner and tick clock.");
-        if(auto r=Append(p,e,*c,v.elapsed_seconds,v.normalized_age,true,admission,0,v.stable_id,commands);!r)return r;
+        health_present=true;
+        next_pulse.Advance(v.stable_id,c->owner_id,tick,c->ratio01);
+        if(auto r=Append(p,e,*c,float(next_pulse.phase),v.normalized_age,true,admission,0,v.stable_id,commands,next_pulse.EntryFade());!r)return r;
     }
+    if(!health_present)next_pulse.Clear();
+    pulse=next_pulse;
     output=std::move(commands);return Result::Success();
 }
 }

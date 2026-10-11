@@ -33,6 +33,25 @@ std::uint32_t MotionCode(VfxMotionKind motion)
 }
 }
 
+bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
+                                     std::size_t output_capacity) const
+{
+    std::set<Key> source_keys;
+    for (const auto &source : sources)
+    {
+        if (source.outputs.size() > output_capacity) return true;
+        output_capacity -= source.outputs.size();
+        source_keys.insert(SourceKey(source));
+    }
+    for (const auto &slot : slots_)
+        if (slot.occupied && !source_keys.contains(Key{slot.owner_id, slot.effect_handle, slot.source_id}))
+        {
+            if (slot.outputs.size() > output_capacity) return true;
+            output_capacity -= slot.outputs.size();
+        }
+    return false;
+}
+
 bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
                             std::uint64_t catalog_generation,

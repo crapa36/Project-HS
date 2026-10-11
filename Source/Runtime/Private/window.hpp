@@ -37,7 +37,7 @@ class Window
 
     [[nodiscard]] Result Create(std::uint32_t width, std::uint32_t height, bool visible,
                                 bool borderless);
-    [[nodiscard]] bool PumpMessages();
+    [[nodiscard]] bool PumpMessages(Result *failure = nullptr);
     [[nodiscard]] HWND Handle() const noexcept;
     void StopInput() noexcept;
     void BeginSkillRebind(std::uint32_t slot) noexcept;
@@ -63,6 +63,7 @@ class Window
     RuntimeChannels *channels_{};
     HWND window_{};
     HINSTANCE instance_{};
+    DWORD dpi_error_{};
     HeldInputState held_{};
     std::array<std::uint16_t, 4> skill_virtual_keys_{};
     PresentationCamera camera_{};

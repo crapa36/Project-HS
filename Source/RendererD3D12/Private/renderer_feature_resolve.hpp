@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/core/graphics_settings.hpp>
+#include <array>
 #include <cstdint>
 
 struct ID3D12Device;
@@ -74,6 +75,16 @@ struct RendererFeaturePlan
     RendererFeatureFallbackReason reflection_reason{RendererFeatureFallbackReason::None};
     RendererFeatureFallbackReason shadow_reason{RendererFeatureFallbackReason::None};
 };
+
+// Preserve the complete native/software transport input contract, even without SSS materials.
+[[nodiscard]] constexpr std::array<bool, 3> LightingAuxiliaryTargets(
+    const RendererFeaturePlan &plan, bool have_subsurface) noexcept
+{
+    const bool transport = plan.software_gi_enabled || plan.gi_mode == GraphicsGiMode::RayTraced ||
+        plan.reflection_mode == GraphicsReflectionMode::HybridRT;
+    return {have_subsurface || transport,
+        plan.reflection_mode != GraphicsReflectionMode::Off || transport, transport};
+}
 
 // Pure resolution of validated public enum requests. The request remains the
 // persistence/apply authority; preparations and frame recording use this plan.

@@ -8,6 +8,8 @@ using namespace gameplay_detail;
 struct ActorState
 {
     PlayerState player{};
+    // Tick-indexed ring, including tick zero; bounded by the authored echo age.
+    std::vector<Float2> player_position_history;
     std::vector<EnemyActor> enemies;
     std::vector<ProjectileActor> projectiles;
     std::vector<AreaActor> areas;

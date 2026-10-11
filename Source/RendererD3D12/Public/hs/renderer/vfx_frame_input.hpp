@@ -99,6 +99,10 @@ struct VfxFlashSpawnInput
     std::uint32_t fbm_octaves{4}, smoke_first_frame{}, smoke_frame_count{};
     float domain_warp{}, smoke_fps{}, opacity_scale{1}, motion_strength{};
     float procedural_flow_speed{0.85f};
+    // Live attachments share the owner's snapshot interpolation. Burst/contact
+    // flashes stay world anchored by default; these are not motion-history data.
+    Float3 previous_position{};
+    bool interpolate_owner_position{};
 };
 struct VfxPersistentInput
 {

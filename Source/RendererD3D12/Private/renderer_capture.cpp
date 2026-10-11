@@ -730,6 +730,15 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             surfaces.push_back(SurfaceCapture{name, resource, resource->resource->GetDesc().Format,
                                                resource->graph_access});
     };
+    const auto history_current = impl_->temporal_read_index;
+    const auto history_previous = 1u - history_current;
+    append_diagnostic("temporal_current", &impl_->temporal_history[history_current]);
+    append_diagnostic("temporal_previous", &impl_->temporal_history[history_previous]);
+    append_diagnostic("temporal_normal_previous", &impl_->temporal_normal_history[history_previous]);
+    append_diagnostic("temporal_material_previous", &impl_->temporal_material_history[history_previous]);
+    append_diagnostic("exposure_current", &impl_->exposure_values[impl_->exposure_read_index]);
+    append_diagnostic("exposure_previous", &impl_->exposure_values[1u - impl_->exposure_read_index]);
+    append_diagnostic("exposure_histogram", &impl_->exposure_histogram);
     constexpr std::array ao_names{"ao_raw", "ao_resolved", "ao_contact", "ao_history", "ao_previous_history"};
     const auto ao_resources = impl_->ambient_occlusion.DiagnosticResources();
     for (std::size_t index = 0; index < ao_resources.size(); ++index)
@@ -742,6 +751,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto shadow_resources = impl_->virtual_shadows.DiagnosticResources();
     for (std::size_t index = 0; index < shadow_resources.size(); ++index)
         append_diagnostic(shadow_names[index], shadow_resources[index]);
+    constexpr std::array light_names{"light_records", "light_ranges", "light_inline", "light_spill"};
+    const auto light_resources = impl_->light_list.DiagnosticResources();
+    for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
+        append_diagnostic(light_names[index], light_resources.resources[index]);
     for (auto &surface : surfaces)
     {
         if (!surface.resource->resource || surface.resource->graph_access != surface.final_access)
@@ -890,6 +903,8 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     std::uint64_t background_invalid_metadata_pixels{};
     std::uint64_t historical_foreground_pixels{};
     std::uint64_t nonzero_motion_pixels{};
+    std::uint64_t grass_pixels{}, historical_grass_pixels{}, moving_grass_pixels{};
+    float grass_motion_max_pixels{};
     float depth_min = 1.0f;
     float depth_max = 0.0f;
     for (std::uint32_t y = 0; y < height; ++y)
@@ -923,6 +938,17 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                 if (!valid_metadata)
                     return unmap_failure("Foreground metadata is not marked valid.");
                 ++foreground_valid_metadata_pixels;
+                if ((metadata_flags & (3u << 8u)) == (2u << 8u))
+                {
+                    ++grass_pixels;
+                    if (history_confidence > 0.0f)
+                    {
+                        ++historical_grass_pixels;
+                        if (motion_x != 0.0f || motion_y != 0.0f) ++moving_grass_pixels;
+                        grass_motion_max_pixels = std::max(grass_motion_max_pixels,
+                            std::hypot(motion_x * width, motion_y * height));
+                    }
+                }
                 if (history_confidence > 0.0f)
                 {
                     ++historical_foreground_pixels;
@@ -977,13 +1003,64 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         const auto description = surface.resource->resource->GetDesc();
         metadata_output << std::format(
             "    {{\"name\": \"{}\", \"file\": \"{}\", \"width\": {}, "
-            "\"height\": {}, \"format\": \"{}\", \"row_size\": {}}}{}\n",
+            "\"height\": {}, \"format\": \"{}\", \"row_size\": {}, \"allocation_bytes\": {}}}{}\n",
             surface.name, surface.raw_path.filename().string(), description.Width, description.Height,
             FormatName(surface.format), surface.row_size,
+            surface.resource->allocation ? surface.resource->allocation->GetSize() : 0,
             index + 1 == surfaces.size() ? "" : ",");
     }
     metadata_output << std::format(
-        "  ],\n  \"foreground_depth_pixels\": {},\n  \"background_depth_pixels\": {},\n"
+        "  ],\n  \"light_list\": {{\"index_encoding\": \"bitset_u32x4\", "
+        "\"allocation_bytes\": {}, \"upload_allocation_bytes\": {}, "
+        "\"capacity\": {{\"width\": {}, \"height\": {}}}, "
+        "\"frame_slot_count\": {}, \"frame_slot\": {}}},\n",
+        light_resources.allocated_bytes, light_resources.upload_allocated_bytes,
+        light_resources.capacity.width, light_resources.capacity.height,
+        light_resources.frame_slot_count, light_resources.frame_slot);
+    constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular", "indirect_diffuse"};
+    const auto &captured_constants = *reinterpret_cast<const FrameConstants *>(
+        impl_->frames[impl_->last_presented_index].mapped);
+    metadata_output << std::format("  \"grass\": {{\"pixels\": {}, \"historical_pixels\": {}, \"moving_pixels\": {}, \"max_motion_pixels\": {}}},\n",
+        grass_pixels, historical_grass_pixels, moving_grass_pixels, grass_motion_max_pixels);
+    if (impl_->frames[impl_->last_presented_index].submitted_view_id == impl_->active_view_id.value)
+    {
+        metadata_output << "  \"temporal_inputs\": {\n";
+        metadata_output << std::format("    \"emission_word\": {},\n", captured_constants.material_sidecar_offsets[1].x);
+        const auto write_floats = [&](const char *name, const float *values, std::size_t count) {
+            metadata_output << "    \"" << name << "\": [";
+            for (std::size_t i = 0; i < count; ++i)
+                metadata_output << (i ? "," : "") << values[i];
+            metadata_output << "],\n";
+        };
+        write_floats("jitter_uv", &captured_constants.surface_jitter_uv.x, 4);
+        write_floats("options", &captured_constants.temporal_options.x, 4);
+        write_floats("camera_time", &captured_constants.camera_time.x, 4);
+        write_floats("previous_grass_state", &captured_constants.previous_grass_state.x, 4);
+        write_floats("previous_grass_origin_delta", &captured_constants.previous_grass_origin_delta.x, 4);
+        write_floats("grass_benders", &captured_constants.grass_benders[0].x,
+            std::min(captured_constants.grass_bender_count.x, 32u) * 4u);
+        write_floats("previous_grass_benders", &captured_constants.previous_grass_benders[0].x,
+            static_cast<std::uint32_t>(std::clamp(captured_constants.previous_grass_state.y, 0.0f, 32.0f)) * 4u);
+        write_floats("current_vp", &captured_constants.current_unjittered_view_projection._11, 16);
+        write_floats("previous_vp", &captured_constants.previous_unjittered_view_projection._11, 16);
+        metadata_output << std::format("    \"view_id\": {}, \"frame\": {}, \"history_current_index\": {}\n  }},\n",
+            impl_->active_view_id.value, impl_->frame_number, history_current);
+    }
+    else metadata_output << "  \"temporal_inputs\": null,\n";
+    const std::array auxiliary_resources{&impl_->subsurface_diffuse, &impl_->environment_specular, &impl_->indirect_diffuse};
+    metadata_output << "  \"auxiliary_targets\": [\n";
+    for (std::size_t index = 0; index < auxiliary_resources.size(); ++index)
+    {
+        const auto *resource = auxiliary_resources[index];
+        metadata_output << std::format(
+            "    {{\"name\": \"{}\", \"present\": {}, \"allocation_bytes\": {}}}{}\n",
+            auxiliary_names[index], resource->resource ? "true" : "false",
+            resource->allocation ? resource->allocation->GetSize() : 0,
+            index + 1 == auxiliary_resources.size() ? "" : ",");
+    }
+    metadata_output << "  ],\n";
+    metadata_output << std::format(
+        "  \"foreground_depth_pixels\": {},\n  \"background_depth_pixels\": {},\n"
         "  \"foreground_valid_metadata_pixels\": {},\n  \"background_invalid_metadata_pixels\": {},\n"
         "  \"historical_foreground_pixels\": {},\n  \"nonzero_motion_pixels\": {},\n"
         "  \"depth_min\": {},\n  \"depth_max\": {}\n}}\n",
@@ -1366,6 +1443,13 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     auto *cluster_frame = impl_->cluster_runtime
         ? &impl_->cluster_runtime->frames[impl_->last_presented_index] : nullptr;
 
+    struct CommandDiagnostic
+    {
+        std::uint32_t published{}, nonzero{}, last_nonzero_exclusive{}, outside_prefix_nonzero{};
+        std::uint64_t draw_vertices{};
+        std::uint64_t argument_offset{};
+    };
+    static_assert(kGeometryArgumentStride == 24); // Root constant + DRAW words and padding.
     struct CutCapture
     {
         std::uint32_t ordinal{};
@@ -1373,6 +1457,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         GpuClusterRefinementConstants constants{};
         GpuClusterCutStatus status{};
         std::size_t status_buffer_index{std::numeric_limits<std::size_t>::max()};
+        std::array<std::size_t, 6> command_buffer_indices{};
+        std::array<CommandDiagnostic, 5> commands{};
     };
     std::vector<CutCapture> cuts;
     if (cluster_frame)
@@ -1404,6 +1490,35 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                         sizeof(capture.constants));
             const D3D12_RANGE no_write{};
             cut.constants.resource->Unmap(0, &no_write);
+            // The normal graph already copied this frame's status after Emit.
+            // Reuse that completed readback to bound argument copies, with no
+            // additional submission/wait or dependence on an older last_status.
+            const auto status_offset = impl_->cluster_runtime->cpu.pages.size() *
+                sizeof(std::uint32_t);
+            if (!cut.readback.resource || cut.readback.resource->GetDesc().Width <
+                    status_offset + sizeof(capture.status))
+                return invalid("Cluster command diagnostic has no complete status readback.");
+            void *mapped_status{};
+            const D3D12_RANGE status_range{status_offset, status_offset + sizeof(capture.status)};
+            const auto status_hr = cut.readback.resource->Map(0, &status_range, &mapped_status);
+            if (FAILED(status_hr)) return HResultFailure("Map cluster command diagnostic status", status_hr);
+            std::memcpy(&capture.status, static_cast<const std::byte *>(mapped_status) +
+                status_offset, sizeof(capture.status));
+            cut.readback.resource->Unmap(0, &no_write);
+            const auto &status = capture.status;
+            const auto status_frame = (static_cast<std::uint64_t>(status.frame_id_high) << 32u) |
+                status.frame_id_low;
+            if (status.reserved || status_frame != cut.actual_frame_id ||
+                status.catalog_index != ordinal || status.content_generation != cut.generation ||
+                cut.generation != impl_->cluster_runtime->generation ||
+                status.candidate_count != cut.candidate_count ||
+                status.committed_records > cut.output_capacity ||
+                (status.failure_flags & ~kClusterCutFailureCapacity) ||
+                (status.failure_flags && status.committed_records) ||
+                status.required_records_high || status.required_commands_high ||
+                status.required_records_low > UINT32_MAX / 96u ||
+                status.required_commands_low > UINT32_MAX / 24u)
+                return invalid("Cluster command diagnostic status is stale or violates its transaction.");
             cuts.push_back(std::move(capture));
         }
     }
@@ -1437,9 +1552,10 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         UINT64 size{};
         CaptureNativeAccess native{};
         std::uint32_t cut_ordinal{UINT32_MAX};
+        UINT64 source_offset{};
     };
     std::vector<BufferCapture> buffers;
-    buffers.reserve(3 + 2 + cuts.size());
+    buffers.reserve(3 + 2 + 7 * cuts.size());
     buffers.push_back({"visibility_pixels", &impl_->visibility_pixels});
     buffers.push_back({"visibility_counts", &impl_->visibility_counts});
     buffers.push_back({"raster_records", &visibility_frame.raster_records});
@@ -1453,11 +1569,30 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         cluster_ref_buffer_index = buffers.size();
         buffers.push_back({"cluster_refs", &cluster_frame->refs});
     }
+    UINT64 command_readback_bytes{};
     for (auto &cut : cuts)
     {
         cut.status_buffer_index = buffers.size();
         buffers.push_back({std::format("cluster_status_{}", cut.ordinal),
                            &cut.cut->status, 0, 0, {}, cut.ordinal});
+        const auto argument_bytes = static_cast<UINT64>(cut.status.committed_records) *
+            kGeometryArgumentStride;
+        command_readback_bytes += 5 * argument_bytes + 5 * sizeof(std::uint32_t);
+        if (command_readback_bytes > 512ull * 1024 * 1024)
+            return invalid("Cluster command diagnostic prefixes exceed the 512 MiB capture budget.");
+        cut.command_buffer_indices[0] = buffers.size();
+        buffers.push_back({std::format("cluster_command_counts_{}", cut.ordinal),
+                           &cut.cut->command_counts, 0, 5 * sizeof(std::uint32_t), {}, cut.ordinal});
+        if (!argument_bytes) continue;
+        for (std::size_t view = 0; view < cut.commands.size(); ++view)
+        {
+            cut.command_buffer_indices[view + 1] = buffers.size();
+            const auto source_offset = view == 4 ? 0 : view *
+                static_cast<UINT64>(cut.cut->output_capacity) * kGeometryArgumentStride;
+            buffers.push_back({std::format("cluster_commands_{}_{}", cut.ordinal, view),
+                               view == 4 ? &cut.cut->retest_draw_commands : &cut.cut->draw_commands,
+                               0, argument_bytes, {}, cut.ordinal, source_offset});
+        }
     }
 
     UINT64 readback_size{};
@@ -1527,7 +1662,11 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 "Visibility diagnostic buffer {} has an invalid native description.",
                 buffer.name));
         buffer.offset = readback_size;
-        buffer.size = description.Width;
+        if (buffer.source_offset > description.Width ||
+            buffer.size > description.Width - buffer.source_offset)
+            return invalid(std::format("Visibility diagnostic buffer {} copy exceeds its allocation.",
+                                       buffer.name));
+        if (!buffer.size) buffer.size = description.Width - buffer.source_offset;
         if (buffer.size > std::numeric_limits<UINT64>::max() - readback_size)
             return invalid("Visibility diagnostic readback size overflowed.");
         readback_size += buffer.size;
@@ -1589,7 +1728,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         impl_->TransitionBuffer(buffer.resource->resource.Get(), buffer.native.state, copy_state,
                                 buffer.native.sync, copy_sync, buffer.native.access, copy_access);
         impl_->command_list->CopyBufferRegion(readback.resource.Get(), buffer.offset,
-                                               buffer.resource->resource.Get(), 0, buffer.size);
+                                               buffer.resource->resource.Get(), buffer.source_offset, buffer.size);
         impl_->TransitionBuffer(buffer.resource->resource.Get(), copy_state, buffer.native.state,
                                 copy_sync, buffer.native.sync, copy_access, buffer.native.access);
     }
@@ -1646,6 +1785,9 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         cluster_refs_raw.resize(static_cast<std::size_t>(
             buffers[cluster_ref_buffer_index].size));
     std::vector<std::byte> cluster_status_raw(cuts.size() * sizeof(GpuClusterCutStatus));
+    std::vector<std::byte> cluster_command_counts_raw(cuts.size() * 5 * sizeof(std::uint32_t));
+    std::vector<std::byte> cluster_commands_raw;
+    cluster_commands_raw.reserve(static_cast<std::size_t>(command_readback_bytes));
     std::memcpy(visibility_pixels_raw.data(), mapped + buffers[0].offset, pixel_bytes);
     std::memcpy(visibility_counts_raw.data(), mapped + buffers[1].offset, count_bytes);
     std::memcpy(raster_records_raw.data(), mapped + buffers[2].offset, record_bytes);
@@ -1656,11 +1798,50 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     cluster_refs_raw.size());
     for (std::size_t index = 0; index < cuts.size(); ++index)
     {
-        std::memcpy(&cuts[index].status,
+        GpuClusterCutStatus copied_status{};
+        std::memcpy(&copied_status,
                     mapped + buffers[cuts[index].status_buffer_index].offset,
-                    sizeof(cuts[index].status));
+                    sizeof(copied_status));
+        if (std::memcmp(&copied_status, &cuts[index].status, sizeof(copied_status)) != 0)
+            return fail_mapped("Cluster command diagnostic status changed after prefix sizing.");
         std::memcpy(cluster_status_raw.data() + index * sizeof(cuts[index].status),
                     &cuts[index].status, sizeof(cuts[index].status));
+        auto &cut = cuts[index];
+        if (cut.status.committed_records > cut.cut->output_capacity)
+            return fail_mapped("Cluster command diagnostic committed prefix exceeds capacity.");
+        const auto *command_counts = mapped + buffers[cut.command_buffer_indices[0]].offset;
+        std::memcpy(cluster_command_counts_raw.data() + index * 5 * sizeof(std::uint32_t),
+                    command_counts, 5 * sizeof(std::uint32_t));
+        for (std::size_t view = 0; view < cut.commands.size(); ++view)
+        {
+            auto &command = cut.commands[view];
+            command.argument_offset = cluster_commands_raw.size();
+            command.published = ReadU32(command_counts + view * sizeof(std::uint32_t));
+            if (command.published > cut.status.committed_records)
+                return fail_mapped("Cluster command diagnostic publishes outside its committed prefix.");
+            if (!cut.status.committed_records) continue;
+            const auto &arguments = buffers[cut.command_buffer_indices[view + 1]];
+            cluster_commands_raw.insert(cluster_commands_raw.end(), mapped + arguments.offset,
+                                        mapped + arguments.offset + arguments.size);
+            // Only same-frame committed prefixes were copied; unpublished
+            // allocation tails are neither copied nor interpreted as commands.
+            for (std::uint32_t selection = 0; selection < cut.status.committed_records; ++selection)
+            {
+                const auto *argument = mapped + arguments.offset +
+                    static_cast<UINT64>(selection) * kGeometryArgumentStride;
+                const auto vertices = ReadU32(argument + 4);
+                const auto instances = ReadU32(argument + 8);
+                if (!vertices || !instances) continue;
+                if (selection >= command.published)
+                {
+                    ++command.outside_prefix_nonzero;
+                    continue;
+                }
+                ++command.nonzero;
+                command.last_nonzero_exclusive = selection + 1;
+                command.draw_vertices += static_cast<std::uint64_t>(vertices) * instances;
+            }
+        }
     }
     std::array<std::uint32_t, kVisibilityVariantCount * 3> counts{};
     std::memcpy(counts.data(), visibility_counts_raw.data(), count_bytes);
@@ -1741,7 +1922,9 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         !write_raw("gbuffer_metadata", metadata_raw) ||
         !write_raw("geometry_draw_records", geometry_records_raw) ||
         (!cluster_refs_raw.empty() && !write_raw("cluster_refs", cluster_refs_raw)) ||
-        (!cluster_status_raw.empty() && !write_raw("cluster_status", cluster_status_raw)))
+        (!cluster_status_raw.empty() && !write_raw("cluster_status", cluster_status_raw)) ||
+        !write_raw("cluster_command_counts", cluster_command_counts_raw) ||
+        !write_raw("cluster_commands", cluster_commands_raw))
         return invalid("Could not write visibility diagnostic raw output.");
 
     std::vector<std::uint8_t> seen(pixel_count);
@@ -2081,12 +2264,59 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     output << "{\n  \"schema_version\": 1,\n  \"execution_valid\": true,\n"
               "  \"width\": "
            << impl_->render_width << ",\n  \"height\": " << impl_->render_height
+            << ",\n  \"frame_slot\": " << impl_->last_presented_index
            << ",\n  \"valid_pixel_count\": " << valid_pixel_count
            << ",\n  \"invalid_pixel_count\": " << invalid_pixel_count
            << ",\n  \"variant_counts\": [";
     for (std::size_t index = 0; index < variant_counts.size(); ++index)
         output << (index == 0 ? "" : ", ") << variant_counts[index];
-    output << "],\n  \"num_records\": " << used_record_count
+    output << "],\n  \"cluster_command_readback_bytes\": " << command_readback_bytes
+           << ",\n  \"cluster_command_layout\": {\"indexed\": {\"file\": \""
+           << json_escape(raw_path("cluster_commands").filename().string())
+           << "\", \"stride\": " << kGeometryArgumentStride << ", \"size\": " << cluster_commands_raw.size()
+           << "}, \"counts\": {\"file\": \""
+           << json_escape(raw_path("cluster_command_counts").filename().string())
+           << "\", \"stride\": 20, \"size\": " << cluster_command_counts_raw.size()
+           << "}, \"mesh_arguments_captured\": false}"
+           << ",\n  \"cluster_commands\": [";
+    for (std::size_t index = 0; index < cuts.size(); ++index)
+    {
+        const auto &cut = cuts[index];
+        const auto used_cluster_records = cut.constants.raster_record_base == UINT32_MAX ? 0 :
+            std::count(used_raster_records.begin() + cut.constants.raster_record_base,
+                       used_raster_records.begin() + cut.constants.raster_record_base +
+                           cut.status.committed_records, std::uint8_t{1});
+        output << (index ? "," : "") << "\n    {\"catalog\": " << cut.ordinal
+               << ", \"frame\": " << cut.cut->actual_frame_id
+               << ", \"candidate_count\": " << cut.cut->candidate_count
+               << ", \"output_capacity\": " << cut.cut->output_capacity
+               << ", \"committed_records\": " << cut.status.committed_records
+               << ", \"failure_flags\": " << cut.status.failure_flags
+               << ", \"pixel_contributing_raster_records\": " << used_cluster_records
+               << ", \"geometry_frontend_flags\": " << cut.cut->geometry_frontend_flags
+               << ", \"command_counts_offset\": " << index * 5 * sizeof(std::uint32_t)
+               << ", \"views\": [";
+        for (std::size_t view = 0; view < cut.commands.size(); ++view)
+        {
+            const auto &command = cut.commands[view];
+            output << (view ? ", " : "") << "{\"view\": " << view
+                   << ", \"argument_offset\": " << command.argument_offset
+                   << ", \"argument_size\": " << static_cast<std::uint64_t>(cut.status.committed_records) * kGeometryArgumentStride
+                   << ", \"published_count\": " << command.published
+                   << ", \"nonzero_count\": " << command.nonzero
+                   << ", \"zero_count\": " << command.published - command.nonzero
+                   << ", \"last_nonzero_exclusive\": " << command.last_nonzero_exclusive
+                   << ", \"trailing_zero_count\": " << command.published - command.last_nonzero_exclusive
+                   << ", \"committed_prefix_not_submitted\": " << cut.status.committed_records - command.published
+                   << ", \"nonzero_outside_published_prefix\": " << command.outside_prefix_nonzero
+                   << ", \"unused_capacity_records_not_inspected\": " << cut.cut->output_capacity - cut.status.committed_records
+                   << ", \"draw_vertex_count_sum\": " << command.draw_vertices << "}";
+        }
+        output << "]}";
+    }
+    output << "\n  ],\n  \"cluster_command_notes\": \"Views 0=main after previous-HZB cull, 1..3=CSM, 4=current-depth retest. "
+              "24-byte vertex-pull arguments are written for both geometry frontends; draw_vertex_count_sum is the vertex-pull argument workload, "
+              "not measured VS/MS invocations. Uncommitted allocation tails are neither copied nor inspected.\",\n  \"num_records\": " << used_record_count
            << ",\n  \"record_capacity\": " << raster_capacity
            << ",\n  \"declared_formats\": {\"visibility_ids\": \"DXGI_FORMAT_R32G32_UINT\", "
               "\"visibility_front_face\": \"DXGI_FORMAT_R8_UINT\", "

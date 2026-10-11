@@ -49,6 +49,10 @@ cbuffer FrameConstants : register(b0)
     uint4 HeroMaterialVaryingMasks[2];
     uint4 HeroBindingRanges[7];
     float4 ProbeOptions; // cosine/sine yaw, maximum prefiltered LOD, enabled.
+    float4 PreviousGrassBenders[32];
+    float4 PreviousGrassState; // time, bender count, valid, reserved.
+    float4 PreviousGrassOriginDelta; // current scene origin minus previous origin.
+    uint4 SceneTableBounds; // Serialized dynamic scene byte length in x; reserved yzw.
 };
 
 cbuffer PassConstants : register(b1)
@@ -514,19 +518,20 @@ float3 ShapePlaceholder(float3 position, uint mesh)
     return position;
 }
 
-float3 BendGrass(float3 world, float3 local_position)
+float3 BendGrass(float3 world, float3 local_position, float time,
+                 float4 benders[32], uint bender_count)
 {
     if (local_position.y <= -0.45) return world;
     float3 bend = 0.0;
-    const uint count = min(GrassBenderCount.x, 32u);
+    const uint count = min(bender_count, 32u);
     for (uint index = 0; index < count; ++index)
     {
-        const float2 delta = world.xz - GrassBenders[index].xz;
-        const float radius = max(GrassBenders[index].w, 0.1);
+        const float2 delta = world.xz - benders[index].xz;
+        const float radius = max(benders[index].w, 0.1);
         const float weight = saturate(1.0 - length(delta) / radius);
         bend += float3(delta.x, 0.0, delta.y) * weight * 0.42 * saturate(local_position.y + 0.5);
     }
-    const float wind = sin(CameraTime.w * 1.7 + world.x * 0.11 + world.z * 0.07) * 0.035;
+    const float wind = sin(time * 1.7 + world.x * 0.11 + world.z * 0.07) * 0.035;
     return world + bend + float3(wind, 0.0, wind * 0.7) * saturate(local_position.y + 0.5);
 }
 
@@ -561,7 +566,7 @@ struct HsSceneVertexContext
 };
 
 SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
-                                uint vertex_id)
+                                uint vertex_id, bool evaluate_history = true)
 {
     const InstanceData instance = context.instance;
     const StaticDrawRef draw = context.draw;
@@ -602,9 +607,28 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     float cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
     const float3 stable_world = InstanceWorldPosition(instance, local_position);
-    float3 world = mesh == 19 ? BendGrass(stable_world, local_position -
-        float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0)) : stable_world;
+    const float3 grass_local = local_position -
+        float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0);
+    float3 world = mesh == 19 ? BendGrass(stable_world, grass_local,
+        CameraTime.w, GrassBenders, GrassBenderCount.x) : stable_world;
     float3 previous_world = world;
+    const bool previous_static_grass = context.geometryValid &&
+        (context.geometry.Flags & 12u) == 12u;
+    const bool previous_dynamic_grass = context.gpuSceneRefs && context.geometryValid &&
+        (context.geometry.Flags & 8u) != 0u && (draw.MeshFlags & 0x200000u) != 0u;
+    const bool grass_history = evaluate_history && mesh == 19 &&
+        PreviousGrassState.z > 0.5 && SurfaceViewOrigin.w > 0.5 &&
+        (previous_static_grass || previous_dynamic_grass);
+    if (grass_history)
+    {
+        const float3 previous_stable = previous_dynamic_grass
+            ? InstanceWorldPosition(SkinPreviousInstances[draw.InstanceIndex], local_position) + PreviousGrassOriginDelta.xyz
+            : stable_world;
+        // The immutable static lease retains old scene coordinates; dynamic transforms were rebased on the CPU.
+        previous_world = BendGrass(previous_stable,
+            grass_local, PreviousGrassState.x, PreviousGrassBenders,
+            (uint)PreviousGrassState.y) - PreviousGrassOriginDelta.xyz;
+    }
     if (cached_skin_history)
     {
         const uint previous_vertex = skin_slot * SkinCacheOptions.x + vertex_id;
@@ -641,7 +665,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         (mesh == 19 ? HsSurfaceFoliageGrass : 0u);
     output.SurfaceFlags = HsPackSurfaceFlags(model, foliage, mesh == 0 ? 1u : 0u);
     output.MaterialId = (mesh == 9 || mesh == 20) ? 0x1000000eu : 0x30000000u + mesh;
-    output.HistoryConfidence = cached_skin_history ? 1.0 : 0.0;
+    output.HistoryConfidence = cached_skin_history || grass_history ? 1.0 : 0.0;
     if (context.geometryValid)
     {
         // Material binding identity is separate from a foliage atlas entry or
@@ -726,7 +750,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
         context.rasterRecordId = context.geometry.Reserved2 + instance_id -
             context.geometry.VisibleBase;
     }
-    return EvaluateSceneVertex(input, context, vertex_id);
+    return EvaluateSceneVertex(input, context, vertex_id, !HsShadowIsDraw(PassValue));
 }
 
 SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
@@ -1197,7 +1221,10 @@ GBufferOutput HsHeroEvaluateSceneSurface(SceneOutput input, HsMaterialContext ct
     uint ordinal)
 {
     HsSurfaceClosure surface = HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx, ordinal), ctx);
-    const float4 entity_surface = HsEntitySurface(input.Mesh, input.InstanceKey, input.WorldPosition);
+    // Use the actual primary surface in both raster and Visibility evaluation.
+    const float3 entity_world = HsReconstructSurfaceRelative(
+        HsSurfaceRasterUv(int2(input.Position.xy)), input.Position.z) + SurfaceViewOrigin.xyz;
+    const float4 entity_surface = HsEntitySurface(input.Mesh, input.InstanceKey, entity_world);
     surface.emission += entity_surface.rgb;
     const float3 normal = surface.normal;
     GBufferOutput output = (GBufferOutput)0;

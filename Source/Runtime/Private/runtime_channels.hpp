@@ -84,6 +84,7 @@ struct SimulationPorts
     std::atomic<std::uint64_t> &dropped_presentation_events;
     std::atomic<std::uint8_t> &settings_group;
     std::atomic<std::uint8_t> &settings_page;
+    std::atomic<std::uint8_t> &character_details_page;
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &presentation_graphics_ui;
 
     void PublishSessionProbe(const SessionProbe &probe)
@@ -144,6 +145,7 @@ struct RuntimeChannels
     std::atomic<bool> devtools_capture_keyboard{};
     std::atomic<std::uint8_t> settings_group{};
     std::atomic<std::uint8_t> settings_page{};
+    std::atomic<std::uint8_t> character_details_page{};
     // A renderer receipt is published at initialization/apply/reload boundaries
     // and for completed native telemetry while a settings page is open.
     // Main combines it with validated requested intent; simulation only reads it.
@@ -182,7 +184,7 @@ struct RuntimeChannels
                 collection_skill, character_skill, loadout_source,
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
-                settings_group, settings_page, presentation_graphics_ui};
+                settings_group, settings_page, character_details_page, presentation_graphics_ui};
     }
 };
 

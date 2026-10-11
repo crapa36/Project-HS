@@ -2,6 +2,9 @@
 #include <hs/gameplay/game_simulation.hpp>
 
 #include <array>
+#include <algorithm>
+#include <bit>
+#include <cmath>
 #include <format>
 #include <iostream>
 #include <stdexcept>
@@ -36,8 +39,8 @@ hs::GameplayChecksum RunDeterministicSimulation()
 
 void TestDeterminism()
 {
-    // Includes pending basic cast/release and buffered input slot state.
-    constexpr hs::GameplayChecksum kGameplayOracle = 10598978034812353093ull;
+    // Hash v7 includes the complete movement-echo position history.
+    constexpr hs::GameplayChecksum kGameplayOracle = 15816561498904262959ull;
     const auto first = RunDeterministicSimulation();
     Check(first == RunDeterministicSimulation(), "repeated gameplay checksum");
     Check(first == kGameplayOracle,
@@ -138,16 +141,299 @@ void TestSameTickFinalBossVictory()
           "same-tick final boss and player death resolves victory");
 }
 
+hs::SimulationRules QuietRules()
+{
+    auto rules = hs::SimulationRules::Defaults();
+    for (auto &stage : rules.spawn_stages) stage.per_second = 0;
+    for (auto &wave : rules.waves) wave.count = 0;
+    rules.arena_obstacle_count = 0;
+    rules.growth.utility_pickup_base_chance = 0;
+    rules.growth.utility_pickup_miss_increment = 0;
+    rules.relic_drop.healing_pickup_probability = 0;
+    rules.relic_drop.normal_enemy_base_probability = 0;
+    rules.relic_drop.normal_enemy_probability_increment_per_kill = 0;
+    return rules;
+}
+
+hs::TickResult Advance(hs::GameSimulation &simulation,
+                       const hs::HeldInputState &held = {},
+                       std::span<const hs::ActionEdge> edges = {})
+{
+    hs::InputFrame input{};
+    input.target_tick = simulation.GetSessionProbe().tick + 1;
+    input.held = held;
+    input.ordered_edges = edges;
+    return simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
+}
+
+void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,
+           std::uint64_t value = 0, hs::Float2 position = {})
+{
+    Check(simulation.ApplyDebugCommand({kind, value, 0, position}).Succeeded(),
+          "regression debug command");
+}
+
+hs::SimulationRules ChestRules()
+{
+    auto rules = QuietRules();
+    rules.enemies[0].health = 1;
+    rules.enemies[0].move_speed = 0;
+    rules.relic_drop.normal_enemy_base_probability = 1;
+    rules.relic_drop.normal_enemy_probability_cap = 1;
+    rules.progression.required_xp_base = 100'000;
+    rules.character_initial.starting_active_skill_count = 1;
+    rules.character_initial.starting_active_skill_ids[0] = hs::SkillKind::ArrowRain;
+    rules.skills[static_cast<std::size_t>(hs::SkillKind::ArrowRain)].activation_delay_ticks = 0;
+    return rules;
+}
+
+void SpawnChestEnemies(hs::GameSimulation &simulation)
+{
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, {1, 0});
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, {1, 1});
+}
+
+void CastChestRain(hs::GameSimulation &simulation)
+{
+    hs::HeldInputState held{};
+    held.aim_world = {1, 0, 0};
+    const std::array edges{hs::ActionEdge{1, hs::GameAction::SkillQ, hs::EdgeKind::Pressed}};
+    (void)Advance(simulation, held, edges);
+}
+
+void TestTerminalPhaseKeepsPickups()
+{
+    for (const auto terminal : {hs::SessionPhase::Victory, hs::SessionPhase::Defeat})
+    {
+        hs::SimulationConfig config{141};
+        config.scenario.auto_collect_progression = true;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize(config, ChestRules()).Succeeded(), "terminal pickups initialize");
+        SpawnChestEnemies(simulation);
+        if (terminal == hs::SessionPhase::Victory)
+        {
+            Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+                  static_cast<std::uint64_t>(hs::BossKind::Final));
+            Debug(simulation, hs::DebugCommandKind::DamageFinalBoss, 1'000'000);
+        }
+        else Debug(simulation, hs::DebugCommandKind::DamagePlayer, 1'000'000);
+        CastChestRain(simulation);
+        const auto observation = simulation.GetObservation();
+        const auto chest = static_cast<std::size_t>(hs::PickupKind::RelicChest);
+        Check(observation.balance.pickup_drops[chest] == 2,
+              "terminal tick produces two collectable chests");
+        Check(observation.phase == terminal && observation.card_count == 0 &&
+                  observation.experience == 0 && observation.balance.pickup_collected[chest] == 0,
+              "terminal phase blocks XP and relic collection");
+        Check(Advance(simulation).phase == terminal,
+              "pending rewards cannot reopen a terminal session");
+    }
+}
+
+void TestMultipleChestRewards()
+{
+    for (const bool automatic : {false, true})
+    {
+        hs::SimulationConfig config{142, automatic};
+        config.scenario.auto_collect_progression = true;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize(config, ChestRules()).Succeeded(), "multiple chest initialize");
+        SpawnChestEnemies(simulation);
+        CastChestRain(simulation);
+        const auto chest = static_cast<std::size_t>(hs::PickupKind::RelicChest);
+        if (!automatic)
+        {
+            Check(simulation.GetObservation().phase == hs::SessionPhase::RelicSelection &&
+                      simulation.GetObservation().balance.pickup_collected[chest] == 1,
+                  "manual selection consumes one chest and preserves the next");
+            Debug(simulation, hs::DebugCommandKind::SelectCard);
+            (void)Advance(simulation);
+            Check(simulation.GetObservation().phase == hs::SessionPhase::RelicSelection,
+                  "remaining chest opens its own selection after the first choice");
+            Debug(simulation, hs::DebugCommandKind::SelectCard);
+        }
+        const auto observation = simulation.GetObservation();
+        Check(observation.phase == hs::SessionPhase::Playing &&
+                  observation.balance.pickup_collected[chest] == 2 &&
+                  std::popcount(observation.relic_mask) == 2,
+              "both manual and automatic collection award two distinct relics");
+    }
+}
+
+void CheckPosition(hs::Float2 actual, hs::Float2 expected, std::string_view message)
+{
+    Check(std::abs(actual.x - expected.x) < 0.00001f &&
+              std::abs(actual.y - expected.y) < 0.00001f, message);
+}
+
+hs::GameplayChecksum RunMovementEchoHistory(hs::Tick age, bool forced_move)
+{
+    auto rules = QuietRules();
+    rules.relics.movement_echo.position_history_age_ticks = age;
+    rules.relics.movement_echo.required_distance = 0;
+    rules.character_initial.starting_active_skill_count = 1;
+    rules.character_initial.starting_active_skill_ids[0] = hs::SkillKind::RetreatShot;
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({143}, rules).Succeeded(), "echo history initialize");
+    std::array<hs::Float2, 73> positions{};
+    hs::HeldInputState held{};
+    held.move_held = true;
+    held.move_target_world = {30, 0, 0};
+    held.aim_world = {30, 0, 0};
+    const std::array retreat{hs::ActionEdge{1, hs::GameAction::SkillQ, hs::EdgeKind::Pressed}};
+    for (hs::Tick tick = 1; tick <= 72; ++tick)
+    {
+        (void)Advance(simulation, held, forced_move && tick == 5
+                          ? std::span<const hs::ActionEdge>(retreat) : std::span<const hs::ActionEdge>{});
+        positions[tick] = simulation.GetSessionProbe().player_position;
+    }
+    // Acquiring the relic after movement must retain that movement's history.
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::MovementEcho));
+    held.move_held = false;
+    held.basic_attack_held = true;
+    simulation.ClearDomainSignals();
+    (void)Advance(simulation, held); // Cast tick 73, before its Movement phase.
+    const auto sample_tick = age == 0 ? 72 : age < 73 ? 73 - age : 0;
+    const auto expected = positions[sample_tick];
+    const auto signals = simulation.PendingDomainSignals();
+    const auto echo = std::ranges::find(signals, hs::DomainSignalKind::AfterimageArrowFired,
+                                       &hs::DomainSignal::kind);
+    Check(echo != signals.end(), "echo activation emits its source position");
+    CheckPosition({echo->position.x, echo->position.z}, expected,
+                  "echo source uses attack tick minus authored age, including forced movement");
+    bool released{};
+    for (int step = 0; step < 30 && !released; ++step)
+    {
+        (void)Advance(simulation);
+        hs::GameReadModelStorage model;
+        simulation.WriteReadModel(model);
+        for (const auto &projectile : model.View().projectiles)
+            if (projectile.source_relic == static_cast<std::uint8_t>(hs::RelicKind::MovementEcho))
+            {
+                CheckPosition(projectile.previous_position, expected,
+                              "delayed echo projectile retains the historical source");
+                released = true;
+            }
+    }
+    Check(released, "historical echo projectile releases");
+    const auto checksum = simulation.ComputeChecksum();
+    Debug(simulation, hs::DebugCommandKind::StartSession);
+    Debug(simulation, hs::DebugCommandKind::GrantRelic,
+          static_cast<std::uint64_t>(hs::RelicKind::MovementEcho));
+    simulation.ClearDomainSignals();
+    (void)Advance(simulation, held);
+    bool restarted_echo{};
+    for (const auto &signal : simulation.PendingDomainSignals())
+        if (signal.kind == hs::DomainSignalKind::AfterimageArrowFired)
+        {
+            CheckPosition({signal.position.x, signal.position.z}, {},
+                          "new session warmup uses its own start position");
+            restarted_echo = true;
+        }
+    Check(restarted_echo, "new session emits a warmup echo");
+    if (age == 0)
+    {
+        simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
+        rules.relics.movement_echo.position_history_age_ticks = 5;
+        Check(simulation.ApplySimulationRules(rules).Succeeded(), "echo history age reload");
+        simulation.ApplyUiAction({hs::UiActionKind::StartSession});
+        Debug(simulation, hs::DebugCommandKind::GrantRelic,
+              static_cast<std::uint64_t>(hs::RelicKind::MovementEcho));
+        held.basic_attack_held = false;
+        held.move_held = true;
+        for (std::size_t tick = 1; tick <= 10; ++tick)
+        {
+            (void)Advance(simulation, held);
+            positions[tick] = simulation.GetSessionProbe().player_position;
+        }
+        held.move_held = false;
+        held.basic_attack_held = true;
+        simulation.ClearDomainSignals();
+        (void)Advance(simulation, held);
+        const auto reloaded_signals = simulation.PendingDomainSignals();
+        const auto reloaded_echo = std::ranges::find(
+            reloaded_signals, hs::DomainSignalKind::AfterimageArrowFired, &hs::DomainSignal::kind);
+        Check(reloaded_echo != reloaded_signals.end(), "reloaded history emits an echo");
+        CheckPosition({reloaded_echo->position.x, reloaded_echo->position.z}, positions[6],
+                      "reloaded age resizes and resets the new session history");
+    }
+    return checksum;
+}
+
+void TestMovementEchoHistory()
+{
+    for (const hs::Tick age : {hs::Tick{0}, hs::Tick{5}, hs::Tick{60}, hs::Tick{120}})
+        Check(RunMovementEchoHistory(age, false) == RunMovementEchoHistory(age, false),
+              "historical echo remains deterministic");
+    (void)RunMovementEchoHistory(60, true);
+}
+
+void TestNavigationRulesReload()
+{
+    auto old_rules = QuietRules();
+    old_rules.arena_obstacle_count = 2;
+    old_rules.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {7, 0}, 2};
+    const auto edge = old_rules.arena_half_extent - 1;
+    old_rules.arena_obstacles[1] = {hs::ArenaObstacleKind::Rock, {-edge / 2, -edge / 2}, 1};
+    old_rules.boss_common.initial_pattern_delay_ticks = 0;
+    old_rules.bosses[static_cast<std::size_t>(hs::BossKind::TenMinute)].preferred_distance_far = 0;
+    hs::GameSimulation reloaded;
+    Check(reloaded.Initialize({144}, old_rules).Succeeded(), "navigation reload initialize");
+    const auto spawn = [](hs::GameSimulation &simulation) {
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, {15, 0});
+        Debug(simulation, hs::DebugCommandKind::SpawnBoss,
+              static_cast<std::uint64_t>(hs::BossKind::TenMinute));
+    };
+    hs::HeldInputState held{};
+    held.move_held = true;
+    held.move_target_world = {15, 0, 0};
+    spawn(reloaded);
+    (void)Advance(reloaded, held); // Prime both cached target cells with the old grids.
+    reloaded.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
+    auto new_rules = old_rules;
+    new_rules.arena_obstacles[0].radius = 3;
+    new_rules.arena_obstacles[1].radius = 4;
+    new_rules.stats.player_collision_radius += 0.25f;
+    new_rules.enemies[0].collision_radius += 0.25f;
+    new_rules.boss_common.collision_radius += 0.25f;
+    Check(reloaded.ApplySimulationRules(new_rules).Succeeded(), "navigation rules reload");
+    reloaded.ApplyUiAction({hs::UiActionKind::StartSession});
+    hs::GameSimulation fresh;
+    Check(fresh.Initialize({144}, new_rules).Succeeded(), "fresh navigation initialize");
+    spawn(reloaded);
+    spawn(fresh);
+    for (int step = 0; step < 120; ++step)
+    {
+        (void)Advance(reloaded, held);
+        (void)Advance(fresh, held);
+        CheckPosition(reloaded.GetSessionProbe().player_position, fresh.GetSessionProbe().player_position,
+                      "reloaded player navigation matches a fresh rules initialization");
+        hs::GameReadModelStorage actual, expected;
+        reloaded.WriteReadModel(actual);
+        fresh.WriteReadModel(expected);
+        Check(actual.View().enemies.size() == 2 && expected.View().enemies.size() == 2,
+              "navigation reload keeps both normal enemy and boss alive");
+        for (std::size_t index = 0; index < 2; ++index)
+            CheckPosition(actual.View().enemies[index].position, expected.View().enemies[index].position,
+                          "reloaded normal and boss navigation match fresh grids");
+    }
+}
+
 } // namespace
 
 int main()
 {
     try
     {
-        TestDeterminism();
         TestPauseDoesNotAdvance();
         TestRulesHashAndAbilityMapping();
         TestSameTickFinalBossVictory();
+        TestTerminalPhaseKeepsPickups();
+        TestMultipleChestRewards();
+        TestMovementEchoHistory();
+        TestNavigationRulesReload();
+        TestDeterminism();
         std::cout << "simulation_tests passed\n";
         return 0;
     }

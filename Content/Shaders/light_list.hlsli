@@ -20,6 +20,7 @@ static const uint HsLightLocalMask = 30u;
 static const uint HsLightAllMask = 31u;
 static const uint HsLightWorldQueryFlag = 1u;
 static const uint HsLightHeaderBytes = 256u;
+static const uint HsLightMaskWords = 4u; // The CPU rejects more than128 authoritative lights.
 
 #ifndef HS_LIGHT_LIST_BUILD
 #include "ltc_area.hlsli"
@@ -83,10 +84,7 @@ struct HsLightQuery
     uint directional_count;
     uint light_count;
     uint local_cursor;
-    uint inline_count;
-    uint spill_count;
-    uint inline_base;
-    uint spill_base;
+    uint4 local_mask;
     bool world_query;
 };
 HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_query)
@@ -113,10 +111,12 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
         const uint cell = (slice * grid.grid.y + tile.y) * grid.grid.x + tile.x;
         const uint4 range = HsLightRanges.Load4(HsLightHeaderBytes + cell * 16u);
         query.world_query = (range.z & HsLightWorldQueryFlag) != 0u;
-        query.inline_count = range.x;
-        query.spill_count = range.y;
-        query.inline_base = cell * grid.limits.y;
-        query.spill_base = cell * grid.limits.z;
+        if (!query.world_query)
+        {
+            const uint base = cell * HsLightMaskWords;
+            query.local_mask = uint4(HsLightInline[base], HsLightInline[base + 1u],
+                HsLightInline[base + 2u], HsLightInline[base + 3u]);
+        }
     }
     // An overflow cell ignores its partial inline/spill lists and scans every
     // authoritative local record exactly once. Off-frustum queries do the same.
@@ -136,13 +136,18 @@ bool HsNextLight(inout HsLightQuery query, out uint light_index)
     }
     if ((query.mask & HsLightLocalMask) == 0u) return false;
     [loop] while (query.world_query ? query.local_cursor < query.light_count :
-        query.local_cursor < query.inline_count + query.spill_count)
+        query.local_cursor < HsLightMaskWords)
     {
         uint index;
-        if (query.world_query) index = query.local_cursor;
-        else if (query.local_cursor < query.inline_count) index = HsLightInline[query.inline_base + query.local_cursor];
-        else index = HsLightSpill[query.spill_base + query.local_cursor - query.inline_count];
-        ++query.local_cursor;
+        if (query.world_query) index = query.local_cursor++;
+        else
+        {
+            const uint word = query.local_mask[query.local_cursor];
+            if (word == 0u) { ++query.local_cursor; continue; }
+            // Lowest word/bit first preserves the original stable record order.
+            index = query.local_cursor * 32u + uint(firstbitlow(word));
+            query.local_mask[query.local_cursor] = word & (word - 1u);
+        }
 #ifdef HS_LOCAL_PROBE_CAPTURE
         if ((HsLightRecords[index].metadata.w & 8u) != 0u) continue;
 #endif

@@ -664,10 +664,14 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             frame.held.basic_attack_held = json.at("basic_attack_held").get<bool>();
             for (const auto &edge : json.at("edges"))
             {
-                const auto action = edge.at("action").get<std::uint8_t>();
-                const auto kind = edge.at("kind").get<std::uint8_t>();
-                if (action > static_cast<std::uint8_t>(GameAction::Pause) ||
-                    kind > static_cast<std::uint8_t>(EdgeKind::Released))
+                const auto &action_json = edge.at("action");
+                const auto &kind_json = edge.at("kind");
+                if (!action_json.is_number_unsigned() || !kind_json.is_number_unsigned())
+                    return Invalid("Playtest input contains an invalid action edge.");
+                const auto action = action_json.get<std::uint64_t>();
+                const auto kind = kind_json.get<std::uint64_t>();
+                if (action > static_cast<std::uint64_t>(GameAction::CharacterPage) ||
+                    kind > static_cast<std::uint64_t>(EdgeKind::Released))
                     return Invalid("Playtest input contains an invalid action edge.");
                 frame.ordered_edges.push_back(
                     {edge.at("sequence").get<Sequence>(),

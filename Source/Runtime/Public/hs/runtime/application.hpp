@@ -58,6 +58,10 @@ struct ApplicationConfig
     std::uint32_t camera_zoom_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
+    bool resolution_explicit{};
+    bool vsync_explicit{};
+    bool frame_cap_explicit{};
+    bool borderless_explicit{};
     bool render_scale_explicit{};
     bool shadow_resolution_explicit{};
     bool particle_percentage_explicit{};
