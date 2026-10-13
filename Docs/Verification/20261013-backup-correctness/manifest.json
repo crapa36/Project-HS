@@ -18,7 +18,7 @@
   },
   "source_sha256": {
     ".gitattributes": "1c5e3306c0814f98b1b6f545b606cf7760da269cb0d5472e31b198ec3893418f",
-    ".github/workflows/foundation.yml": "62f96d20581521e34a6d94954c95006d8ffb5ea352d0e7375acd40815d45c7c6",
+    ".github/workflows/foundation.yml": "69266a61923bf6f537db89b865480f3f4f3ddafcb920851aa3511a96d168700d",
     "CMakeLists.txt": "1d4baa9f6b869926dc9c32b92ff6141d73d6d155f5f7507e88290a2c97290376",
     "CMakePresets.json": "eb0322a4b9c3cf43d322a69d22c92e1d71657e2dd7d994fab003b8a935d40eb6",
     "Content/Shaders/cluster_refinement.hlsl": "7365ac407170131916c4407cba00527519d359dbc2ab15c796604ecd23eee767",
@@ -36,7 +36,7 @@
     "Tests/hzb_region_tests.cpp": "0b1feec329db375f5bcbcfd979b6f050b69cc64b4038226326193fc0b737d7db",
     "Tests/project_hs_arguments_tests.cpp": "e590571aa8c7902fe44caf10e3c4674c16521fdeef956a1087a8cd91f72f94a3",
     "Tests/runtime_diagnostics_tests.cpp": "0a301b265efdc64a64dc781a2ad38fe16489f1fd387d42c101067df935a57e08",
-    "Tests/task_system_failure_tests.cpp": "cb7771a243d7075d2b83ea321d5886e3218a52005f67ce546e7276427a0c5923",
+    "Tests/task_system_failure_tests.cpp": "cd47920c8a7756578e477e80813c84afa57daeae21e89aae7e1d4cd6fe705298",
     "Tests/ui_command_admission_tests.cpp": "ccba119f588d4a4f3bd702fbdd87105d913d09cba4c78dac1f2d869ba91f7083",
     "cmake/patches/taskflow-async-admission.cmake": "198e8ab5efe0832cc737145e16531e679577cfbed3b957217e1ae1c17b2db369",
     "cmake/patches/taskflow-async-admission.patch": "c317d8b7f52fd60fffdf6c2db0605a6a39711b848c748c26eb1f650f75f549e1"

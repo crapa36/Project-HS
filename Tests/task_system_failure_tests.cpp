@@ -28,7 +28,7 @@ void operator delete[](void* p, std::size_t) noexcept { std::free(p); }
 
 void Check(bool condition, const char* message)
 {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition) { std::fprintf(stderr, "CHECK FAILED: %s\n", message); throw std::runtime_error(message); }
 }
 
 struct ThrowingCopy
@@ -80,9 +80,14 @@ void Backend()
     std::fprintf(stderr, "backend: worker blocked capacity=%zu\n", capacity);
     std::atomic<std::size_t> completed{};
     for (std::size_t i = 0; i < capacity; ++i)
+    {
+        if (i % 256 == 0) std::fprintf(stderr, "backend: filling spill %zu\n", i);
         executor.silent_async([&] { ++completed; });
+    }
+    std::fprintf(stderr, "backend: spill full\n");
     for (int budget : {1, 2})
     {
+        std::fprintf(stderr, "backend: spill budget=%d submit\n", budget);
         bool rejected = false;
         allocation_budget = budget;
         try { executor.silent_async([&] { ++completed; }); }

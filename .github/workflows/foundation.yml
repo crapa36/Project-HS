@@ -13,6 +13,10 @@ jobs:
       - name: Verify core
         shell: pwsh
         run: ./Tools/verify.ps1 -Workflow verify-core
+      - name: Retain full core failure details
+        if: failure()
+        shell: pwsh
+        run: Get-Content Build/msvc-core/Testing/Temporary/LastTest.log -ErrorAction SilentlyContinue
       - name: Verify portable render data and asset pipeline
         shell: pwsh
         run: ./Tools/cmake.ps1 --workflow --preset verify-portable
