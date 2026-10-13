@@ -53,4 +53,23 @@ function(hs_patch_taskflow source)
     if(NOT digest STREQUAL "da8b2c80580996b2c480726b319873437a826c11c5abba5fda3995fdef6f657c")
         message(FATAL_ERROR "Taskflow patch verification failed: taskflow/core/wsq.hpp")
     endif()
+
+    # Applied separately so an existing authenticated admission patch upgrades
+    # without rewriting or discarding the populated dependency source tree.
+    hs_taskflow_normalize_known("${source}/taskflow/core/graph.hpp"
+        "ea88f3e1ceec6eeb1e66c39688fb352e5f79fa5f07779d8d090cae3fb3ac90c1"
+        "e561ac8c101a79dd734d1102d1064924c202b3ded37e2165bdc9d1aa573d66e0")
+    file(SHA256 "${source}/taskflow/core/graph.hpp" digest)
+    if(digest STREQUAL "ea88f3e1ceec6eeb1e66c39688fb352e5f79fa5f07779d8d090cae3fb3ac90c1")
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf apply --check
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/taskflow-default-name.patch"
+            WORKING_DIRECTORY "${source}" COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" -c core.autocrlf=false -c core.eol=lf apply
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/taskflow-default-name.patch"
+            WORKING_DIRECTORY "${source}" COMMAND_ERROR_IS_FATAL ANY)
+    endif()
+    file(SHA256 "${source}/taskflow/core/graph.hpp" digest)
+    if(NOT digest STREQUAL "e561ac8c101a79dd734d1102d1064924c202b3ded37e2165bdc9d1aa573d66e0")
+        message(FATAL_ERROR "Taskflow patch verification failed: taskflow/core/graph.hpp")
+    endif()
 endfunction()

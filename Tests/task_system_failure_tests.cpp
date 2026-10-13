@@ -23,8 +23,10 @@
 
 // Fail only allocations made by the submitting thread, never worker internals.
 thread_local int allocation_budget = -1;
+thread_local int allocation_count = 0;
 void* operator new(std::size_t size)
 {
+    ++allocation_count;
     if (allocation_budget == 0) throw std::bad_alloc{};
     if (allocation_budget > 0) --allocation_budget;
     if (void* p = std::malloc(size == 0 ? 1 : size)) return p;
@@ -61,14 +63,18 @@ void Backend()
     Check(caught, "callable construction must throw");
     Check(executor.num_topologies() == 0, "failed callable leaked topology");
     executor.wait_for_all();
+    for (bool named : {false, true})
     for (int budget = 0; budget < 10; ++budget)
     {
         std::atomic<int> ran{};
         bool rejected = false;
         const std::string name(120, 'n');
-        std::fprintf(stderr, "backend: budget=%d submit\n", budget);
+        std::fprintf(stderr, "backend: named=%d budget=%d submit\n", named, budget);
         allocation_budget = budget;
-        try { executor.silent_async(name, [&] { ++ran; }); }
+        try {
+            if (named) executor.silent_async(name, [&] { ++ran; });
+            else executor.silent_async([&] { ++ran; });
+        }
         catch (const std::bad_alloc&) { rejected = true; }
         allocation_budget = -1;
         std::fprintf(stderr, "backend: budget=%d wait topology=%zu\n", budget, executor.num_topologies());
@@ -81,21 +87,36 @@ void Backend()
     std::fprintf(stderr, "backend: spill growth\n");
     tf::UnboundedWSQ<void*> sizing;
     const auto capacity = sizing.capacity();
+    std::atomic<std::size_t> completed{};
+    // MSVC Debug also allocates a string iterator proxy. Measure ordinary
+    // node preparation, then fail each of the two *queue growth* allocations.
+    allocation_count = 0;
+    executor.silent_async([&] { ++completed; });
+    const int node_allocations = allocation_count;
+    executor.wait_for_all();
+    completed = 0;
     std::atomic<bool> entered{}, release{};
     executor.silent_async([&] {
         entered.store(true); entered.notify_one();
         release.wait(false);
     });
     entered.wait(false);
+    struct ReleaseWorker
+    {
+        std::atomic<bool>& release;
+        tf::Executor& executor;
+        ~ReleaseWorker() {
+            release.store(true); release.notify_one(); executor.wait_for_all();
+        }
+    } release_worker{release, executor};
     std::fprintf(stderr, "backend: worker blocked capacity=%zu\n", capacity);
-    std::atomic<std::size_t> completed{};
     for (std::size_t i = 0; i < capacity; ++i)
     {
         if (i % 256 == 0) std::fprintf(stderr, "backend: filling spill %zu\n", i);
         executor.silent_async([&] { ++completed; });
     }
     std::fprintf(stderr, "backend: spill full\n");
-    for (int budget : {1, 2})
+    for (int budget : {node_allocations, node_allocations + 1})
     {
         std::fprintf(stderr, "backend: spill budget=%d submit\n", budget);
         bool rejected = false;

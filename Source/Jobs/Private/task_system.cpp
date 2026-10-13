@@ -150,8 +150,10 @@ TaskHandle TaskSystem::Submit(TaskGroup &group, TaskDesc description,
 
     const auto state = group.state_;
     const auto handle = TaskHandle{impl_->next_task_id.fetch_add(1, std::memory_order_relaxed)};
-    const std::string task_name =
-        description.name.empty() ? "unnamed" : std::string(description.name);
+    // Construct directly: an MSVC Debug string move allocates an iterator
+    // proxy inside noexcept and cannot propagate allocation failure.
+    const std::string task_name(
+        description.name.empty() ? std::string_view("unnamed") : description.name);
     auto shared_task =
         std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
 
