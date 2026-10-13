@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstddef>
 #include <fstream>
+#include <string>
 #include <string_view>
 
 extern "C"
