@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <cstdio>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -39,11 +40,14 @@ struct ThrowingCopy
 
 void Backend()
 {
+    std::fprintf(stderr, "backend: construct\n");
     tf::Executor executor(1);
+    std::fprintf(stderr, "backend: throwing copy\n");
     ThrowingCopy callable;
     bool caught = false;
     try { executor.silent_async(callable); }
     catch (const std::bad_alloc&) { caught = true; }
+    std::fprintf(stderr, "backend: copy caught topology=%zu\n", executor.num_topologies());
     Check(caught, "callable construction must throw");
     Check(executor.num_topologies() == 0, "failed callable leaked topology");
     executor.wait_for_all();
@@ -52,16 +56,19 @@ void Backend()
         std::atomic<int> ran{};
         bool rejected = false;
         const std::string name(120, 'n');
+        std::fprintf(stderr, "backend: budget=%d submit\n", budget);
         allocation_budget = budget;
         try { executor.silent_async(name, [&] { ++ran; }); }
         catch (const std::bad_alloc&) { rejected = true; }
         allocation_budget = -1;
+        std::fprintf(stderr, "backend: budget=%d wait topology=%zu\n", budget, executor.num_topologies());
         executor.wait_for_all();
         Check(ran == (rejected ? 0 : 1), "backend acceptance must be atomic");
         Check(executor.num_topologies() == 0, "backend leaked topology");
     }
     // Actual Executor spill growth: stop its only consumer, fill its sole
     // external buffer, then fail each allocation before queue publication.
+    std::fprintf(stderr, "backend: spill growth\n");
     tf::UnboundedWSQ<void*> sizing;
     const auto capacity = sizing.capacity();
     std::atomic<bool> entered{}, release{};
@@ -70,6 +77,7 @@ void Backend()
         release.wait(false);
     });
     entered.wait(false);
+    std::fprintf(stderr, "backend: worker blocked capacity=%zu\n", capacity);
     std::atomic<std::size_t> completed{};
     for (std::size_t i = 0; i < capacity; ++i)
         executor.silent_async([&] { ++completed; });
@@ -80,15 +88,18 @@ void Backend()
         try { executor.silent_async([&] { ++completed; }); }
         catch (const std::bad_alloc&) { rejected = true; }
         allocation_budget = -1;
+        std::fprintf(stderr, "backend: spill budget=%d rejected=%d topology=%zu\n", budget, rejected, executor.num_topologies());
         Check(rejected, "expected spill growth allocation failure");
         Check(executor.num_topologies() == capacity + 1, "spill failure leaked topology");
     }
+    std::fprintf(stderr, "backend: release\n");
     release.store(true); release.notify_one();
     executor.wait_for_all();
     Check(completed == capacity, "rejected spill work ran");
     // Exercise both allocation sites in the actual spill-queue resize path.
     for (int budget = 0; budget < 4; ++budget)
     {
+        std::fprintf(stderr, "backend: queue budget=%d\n", budget);
         tf::UnboundedWSQ<int*> queue(1);
         int values[3]{};
         queue.push(&values[0]); queue.push(&values[1]);
@@ -107,6 +118,7 @@ void Engine()
 {
     for (std::size_t workers : {0u, 1u, 4u})
     {
+        std::fprintf(stderr, "engine: workers=%zu construct\n", workers);
         hs::TaskSystem tasks(workers);
         for (int budget = 0; budget < 14; ++budget)
         {
@@ -115,16 +127,19 @@ void Engine()
             const std::string name(120, 'n');
             hs::TaskHandle handle;
             bool threw = false;
+            std::fprintf(stderr, "engine: workers=%zu budget=%d submit\n", workers, budget);
             allocation_budget = budget;
             try { handle = tasks.Submit(group, {name}, [&](std::stop_token) { ++ran; }); }
             catch (const std::bad_alloc&) { threw = true; }
             allocation_budget = -1;
+            std::fprintf(stderr, "engine: workers=%zu budget=%d wait handle=%d threw=%d\n", workers, budget, static_cast<bool>(handle), threw);
             const auto result = tasks.Wait(group);
             Check(ran == (handle ? 1 : 0), "engine acceptance/completion mismatch");
             Check(!threw || ran == 0, "preparation failure published work");
             Check(result.Succeeded() || result.Code() == hs::ErrorCode::TaskFailed,
                   "unexpected submission result");
         }
+        std::fprintf(stderr, "engine: workers=%zu persistent OOM\n", workers);
         hs::TaskGroup failing;
         (void)tasks.Submit(failing, {"failure while allocator unavailable"}, [](std::stop_token) {
             allocation_budget = 0;
@@ -132,10 +147,12 @@ void Engine()
         });
         // Restore the submitter (worker zero runs inline); other workers reset below.
         allocation_budget = -1;
+        std::fprintf(stderr, "engine: workers=%zu persistent OOM wait\n", workers);
         Check(tasks.Wait(failing).Code() == hs::ErrorCode::TaskFailed,
               "non-allocating failure recording");
     }
     hs::TaskSystem tasks(0);
+    std::fprintf(stderr, "engine: overflow\n");
     hs::TaskGroup large;
     std::size_t chunks = 0;
     const auto maximum = std::numeric_limits<std::size_t>::max();

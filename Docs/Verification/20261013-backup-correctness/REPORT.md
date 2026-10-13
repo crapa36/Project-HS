@@ -58,3 +58,5 @@ Rollback: 이 변경 commit을 revert하면 기준선으로 돌아간다. 원본
 임의 편집 파일은 여전히 거절한다. 원본 LF·원본 CRLF·수정본 CRLF 복구와 변조 거절을 검증했다.
 근거: `ci-initial.json`, `patch-eol-repro.json`, `patch-eol-verification.json`.
 후속 Windows CI 결과는 별도 실행을 확인해야 하며, 첫 실패를 PASS로 대체하지 않는다.
+
+후속 `e099ef9` CI(run `38358018633`)는 Linux 성공, Windows configure/build 성공과 15/17 테스트 성공. Jobs allocation sweep 및 실제 backend 실패 주입 두 테스트는 30초 timeout이다. portable 단계는 아직 미실행이다. 이 Windows 결함은 미해결로 다시 열었으며 stderr 단계 추적으로 원인을 조사한다. Linux PASS로 Windows 결과를 대체하지 않는다.
