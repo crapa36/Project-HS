@@ -327,6 +327,10 @@ ApplicationConfig ParseProjectHsArguments(
                             config.particle_percentage);
             config.particle_percentage = config.particle_percentage <= 50 ? 50u : 100u;
         }
+        else if (argument == "--capture-diagnostics")
+        {
+            config.capture_diagnostics = true;
+        }
         else if (argument.starts_with("--artifacts="))
         {
             config.artifact_directory = argument.substr(12);

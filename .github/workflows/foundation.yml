@@ -16,3 +16,15 @@ jobs:
       - name: Verify portable render data and asset pipeline
         shell: pwsh
         run: ./Tools/cmake.ps1 --workflow --preset verify-portable
+
+  linux-core:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install isolated verification tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hs-build-tools"
+          "$RUNNER_TEMP/hs-build-tools/bin/pip" install cmake==4.4.4 ninja==1.13.2
+          echo "$RUNNER_TEMP/hs-build-tools/bin" >> "$GITHUB_PATH"
+      - name: Verify core and portable correctness helpers
+        run: cmake --workflow --preset verify-core-linux

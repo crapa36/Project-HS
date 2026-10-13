@@ -178,6 +178,8 @@ int main()
 {
     try
     {
+        Check(!Parse({}).capture_diagnostics, "bounded diagnostics default");
+        Check(Parse({"--capture-diagnostics"}).capture_diagnostics, "explicit capture diagnostics");
         TestSmokeUsesProcessDefaults();
         TestInteractiveSettingsAndCliPrecedence();
         TestCaptureModeValidation();

@@ -1,3 +1,4 @@
+#include "hzb_region.hlsli"
 // Runtime hierarchy cut transaction. ABI: renderer_cluster_catalog.hpp.
 // Inputs and page residency stay immutable across Count/Prefix/Emit. One cut is
 // shared by camera and three cascades, using the largest output-pixel error.
@@ -629,35 +630,22 @@ bool SphereOccluded(float4 sphere, float4x4 view_projection)
     if (!all(isfinite(uv_min)) || !all(isfinite(uv_max)) ||
         any(uv_min <= 0.0) || any(uv_max >= 1.0)) return false;
 
-    uint2 extent = (uint2)OcclusionExtentNearFar.xy;
-    uint2 minimum_coordinate = (uint2)(uv_min * OcclusionExtentNearFar.xy);
-    uint2 maximum_coordinate = (uint2)(uv_max * OcclusionExtentNearFar.xy);
-    uint level = 0u, offset = 0u;
-    // The actual hierarchy uses ceil-halved dimensions, including odd extents.
-    // Divide base pixel coordinates by two rather than remapping UV to each
-    // level: the latter changes which reduction region owns edge pixels.
-    while (any(maximum_coordinate - minimum_coordinate > 1u) && level + 1u < OcclusionLevelCount)
-    {
-        if (extent.x > OcclusionElementCount / extent.y) return false;
-        const uint elements = extent.x * extent.y;
-        if (offset > OcclusionElementCount - elements) return false;
-        offset += elements;
-        extent = max((extent + 1u) / 2u, uint2(1u, 1u));
-        minimum_coordinate /= 2u;
-        maximum_coordinate /= 2u;
-        ++level;
-    }
-    if (any(maximum_coordinate - minimum_coordinate > 1u) ||
-        any(maximum_coordinate >= extent) || extent.x > OcclusionElementCount / extent.y) return false;
-    const uint elements = extent.x * extent.y;
-    if (offset > OcclusionElementCount - elements) return false;
+    const uint2 extent = (uint2)OcclusionExtentNearFar.xy;
+    const uint2 base_min = (uint2)(uv_min * OcclusionExtentNearFar.xy);
+    const uint2 base_max = (uint2)(uv_max * OcclusionExtentNearFar.xy);
+    HsHzbRegion region;
+    if (!HsFindHzbRegion(extent.x, extent.y, OcclusionLevelCount, OcclusionElementCount,
+        base_min.x, base_min.y, base_max.x, base_max.y, region)) return false;
+    const uint2 minimum_coordinate = uint2(region.min_x, region.min_y);
+    const uint2 maximum_coordinate = uint2(region.max_x, region.max_y);
+    const uint offset = region.offset;
     const uint2 coordinates[4] = {minimum_coordinate,
         uint2(maximum_coordinate.x, minimum_coordinate.y),
         uint2(minimum_coordinate.x, maximum_coordinate.y), maximum_coordinate};
     float region_farthest = 1.0;
     [unroll] for (uint sample = 0u; sample < 4u; ++sample)
     {
-        const float depth = OcclusionHzb[offset + coordinates[sample].y * extent.x + coordinates[sample].x];
+        const float depth = OcclusionHzb[offset + coordinates[sample].y * region.width + coordinates[sample].x];
         if (!isfinite(depth) || depth <= 0.0 || depth > 1.0) return false;
         region_farthest = min(region_farthest, depth);
     }

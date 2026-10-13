@@ -65,12 +65,17 @@ class TaskSystem
     TaskSystem(const TaskSystem &) = delete;
     TaskSystem &operator=(const TaskSystem &) = delete;
 
+    // Preparation may throw before admission. A rejected backend submission
+    // returns an empty handle and records failure; accepted work completes once.
     [[nodiscard]] TaskHandle Submit(TaskGroup &group, TaskDesc description,
                                     std::move_only_function<void(std::stop_token)> task);
 
     void ParallelFor(TaskGroup &group, TaskDesc description, std::size_t count, std::size_t grain,
                      std::move_only_function<void(std::size_t begin, std::size_t end)> task);
 
+    // Seals admission and joins work. Do not wait on the current task's group
+    // (including from its synchronous stop callback). Result allocation may
+    // throw only after joining; cancellation callbacks may submit without waiting.
     [[nodiscard]] Result Wait(TaskGroup &group);
     [[nodiscard]] std::size_t WorkerCount() const noexcept;
 

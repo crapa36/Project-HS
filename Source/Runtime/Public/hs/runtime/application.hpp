@@ -49,6 +49,7 @@ struct ApplicationConfig
     std::uint32_t skill_vfx_capture{0xFFFFFFFFu};
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};
     Float2 skill_vfx_aim{0.0f, 9.0f};
+    bool capture_diagnostics{}; // Full streamed CSV/NDJSON; default retains bounded recent rows.
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};

@@ -1,0 +1,66 @@
+--- a/taskflow/core/async.hpp
++++ b/taskflow/core/async.hpp
+@@ -12,16 +12,16 @@
+ // Procedure: _schedule_async_task
+ template <typename... ArgsT>
+ void Executor::_schedule_async_task(ArgsT&&... args) {  
+-  // caller is a worker of the executor
+-  if(auto w = this_worker(); w) {
+-    // We don't do per-worker cache as it can cause bugs in corun that are very difficult to 
+-    // track. For example, when a worker invokes an async task and then immediately enter corun,
+-    // it becomes very difficult to get the task out of its cache correctly.
+-    _schedule(*w, animate(std::forward<ArgsT>(args)...));
+-  }
+-  // caller is a freelance thread
+-  else{
+-    _schedule(animate(std::forward<ArgsT>(args)...));
++  Node* node = animate(std::forward<ArgsT>(args)...);
++  try {
++    // No worker cache: nested corun must be able to discover this work.
++    if(auto w = this_worker(); w) _schedule(*w, node);
++    else _schedule(node);
++  }
++  catch(...) {
++    // Single-node schedule throws only before queue publication.
++    recycle(node);
++    throw;
+   }
+ }
+ 
+@@ -172,7 +172,13 @@
+ template <typename P, typename F>
+ void Executor::silent_async(P&& params, F&& f) {
+   _increment_topology();
+-  _silent_async(std::forward<P>(params), std::forward<F>(f), nullptr, nullptr);
++  try {
++    _silent_async(std::forward<P>(params), std::forward<F>(f), nullptr, nullptr);
++  }
++  catch(...) {
++    _decrement_topology();
++    throw;
++  }
+ }
+ 
+ // Function: _silent_async
+--- a/taskflow/core/wsq.hpp
++++ b/taskflow/core/wsq.hpp
+@@ -510,7 +510,8 @@
+ typename UnboundedWSQ<T>::Array*
+ UnboundedWSQ<T>::_resize_array(Array* a, int64_t b, int64_t t) {
+   Array* tmp = a->resize(b, t);
+-  _garbage.push_back(a);
++  try { _garbage.push_back(a); }
++  catch(...) { delete tmp; throw; }
+   // Note: the original paper using relaxed causes t-san to complain
+   _array.store(tmp, std::memory_order_release);
+   return tmp;
+@@ -520,7 +521,8 @@
+ typename UnboundedWSQ<T>::Array*
+ UnboundedWSQ<T>::_resize_array(Array* a, int64_t b, int64_t t, size_t N) {
+   Array* tmp = a->resize(b, t, N);
+-  _garbage.push_back(a);
++  try { _garbage.push_back(a); }
++  catch(...) { delete tmp; throw; }
+   // Note: the original paper using relaxed causes t-san to complain
+   _array.store(tmp, std::memory_order_release);
+   return tmp;

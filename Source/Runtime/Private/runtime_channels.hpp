@@ -122,6 +122,8 @@ struct RuntimeChannels
     BoundedSpscQueue<SettingsData, 8> presentation_settings;
     BoundedSpscQueue<UiAction, 64> ui_actions;
     BoundedSpscQueue<UiCommand, 64> ui_commands;
+    std::uint64_t rejected_ui_commands{}; // Main-thread admission counter.
+    std::atomic<bool> ui_input_rejected{};
     BoundedSpscQueue<NativeWindowMessage, 256> window_messages;
     BoundedSpscQueue<DebugCommand, 64> debug_commands;
     std::atomic<Tick> completed_tick{};

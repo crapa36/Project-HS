@@ -167,6 +167,22 @@ review, independently review the separate hair study, then continue layered part
 Do not import a hair candidate without inspecting front/side/back/three-quarter
 renders. Engine/runtime files were not changed by this part-modeling work.
 
+### Backup correctness implementation (2026-10-13)
+
+Current authorized engine work is on `codex/engine-v7-backup-20261009`, based on
+`a0d98d477099509fe7eb0db379de537d2cbf8ac9`, in an isolated clean Linux checkout.
+This supersedes the historical main/staged-tree instructions below for this task;
+no user-PC worktree was accessed. The current plan is the 2026-10-13 section of
+`Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. First C01/C02A/C02B/C03/C04 source
+batch is implemented. Original jobs failure timeouts reproduced; candidate core
+16/16 and strengthened HZB/UI targeted checks passed. Seven actual production
+HLSL entries compile to DXIL with Linux DXC. Windows/D3D12/GBV and HZB GPU
+readback remain unexecuted; no native completion/performance claim. LSan cannot
+read /proc in this environment, so the sanitizer attempt failed, not passed.
+Next: native first-batch gates and GPU helper readback before structural work.
+Exact contracts, limits, source hashes and retained logs:
+`Docs/Verification/20261013-backup-correctness/REPORT.md`.
+
 ### Engine and content migration (2026-10-10)
 
 Requirements: `Docs/Plans/ENGINE_RENDERER_V7.md` and
@@ -174,8 +190,9 @@ Requirements: `Docs/Plans/ENGINE_RENDERER_V7.md` and
 `Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. Whole-plan completion remains
 unclaimed. The migration from `fecc13c0f0922c2b70b88a251f50ceea5d93a6a5`
 is staged on `main`; its HEAD remains `5ee6bf8d41c1ea8114ee12c0583d671fd25b8ff2`.
-Preserve the source commit and `codex/engine-v7-backup-20261009`. Current fixes
-remain unstaged above the migration; do not commit or rewrite either branch.
+That prior session preserved the source commit and backup branch with unstaged
+fixes above the migration. It does not describe the current isolated backup-branch
+checkout; follow the 2026-10-13 correctness section for current engine work.
 
 #### Current source contracts
 

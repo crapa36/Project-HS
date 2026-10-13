@@ -3,6 +3,8 @@
 #include <hs/presentation/projector.hpp>
 
 #include "runtime_channels.hpp"
+#include "ui_command_admission.hpp"
+#include "runtime_diagnostics.hpp"
 #include "session_music.hpp"
 #include "vfx_catalog.hpp"
 #include "vfx_typed_frame_adapter.hpp"
@@ -746,7 +748,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 channels.settings_group.load(std::memory_order_acquire),
                 channels.settings_page.load(std::memory_order_acquire),
                 channels.character_details_page.load(std::memory_order_acquire)};
-            const auto interaction = ResolveUiInteraction(session, ui, ui_click_settings, cursor, &ui_click_model);
+            const auto previous_ui = ui;
+            auto interaction = ResolveUiInteraction(session, ui, ui_click_settings, cursor, &ui_click_model);
+            const bool admitted = runtime_detail::AdmitUiInteraction(interaction, ui, previous_ui,
+                channels.ui_actions, channels.ui_commands, channels.rejected_ui_commands);
+            channels.ui_input_rejected.store(!admitted, std::memory_order_release);
+            if (!admitted) ui_command_queue_full = true;
             channels.ui_page.store(static_cast<std::uint8_t>(ui.page),
                                    std::memory_order_release);
             channels.collection_skill.store(ui.selected_collection_skill, std::memory_order_release);
@@ -755,20 +762,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             channels.settings_group.store(ui.settings_group, std::memory_order_release);
             channels.settings_page.store(ui.settings_page, std::memory_order_release);
             channels.character_details_page.store(ui.character_details_page, std::memory_order_release);
-            if (interaction.gameplay_action) (void)channels.ui_actions.TryPush(*interaction.gameplay_action);
-            if (interaction.runtime_command)
+            if (interaction.runtime_command &&
+                ApplySettingsEdit(ui_click_document, *interaction.runtime_command))
             {
-                if (channels.ui_commands.TryPush(*interaction.runtime_command))
-                {
-                    if (ApplySettingsEdit(ui_click_document, *interaction.runtime_command))
-                    {
-                        ui_click_settings = ProjectSettingsDocument(ui_click_document);
-                        if (config.mute_audio) ui_click_settings.master_volume = 0;
-                        ui_click_model.requested = ui_click_document.graphics;
-                    }
-                }
-                else
-                    ui_command_queue_full = true;
+                ui_click_settings = ProjectSettingsDocument(ui_click_document);
+                if (config.mute_audio) ui_click_settings.master_volume = 0;
+                ui_click_model.requested = ui_click_document.graphics;
             }
             std::string_view cue;
             if (interaction.invalid)
@@ -1086,15 +1085,32 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto &active_vfx_flashes = vfx_session.flashes;
         auto &active_vfx_ground_events = vfx_session.ground_events;
         auto &active_vfx_ribbon_events = vfx_session.ribbon_events;
-        std::vector<std::string> event_lines;
-        std::vector<std::string> timeline_lines;
-        std::vector<std::string> gpu_lines;
+        // Smoke/recording runs retain the existing full-log analyzer contract.
+        const bool capture_diagnostics = config.capture_diagnostics || config.smoke ||
+            config.record_playtest || config.replay_compare || !config.replay_directory.empty();
+        const auto write_diagnostics_status = [&](std::string_view text) {
+            std::ofstream status(config.artifact_directory / "diagnostics.json", std::ios::binary);
+            status.write(text.data(), static_cast<std::streamsize>(text.size()));
+            status.close();
+            return !status.fail();
+        };
+        const bool status_started = write_diagnostics_status(
+            "{\"complete\":false,\"reason\":\"running\"}\n");
+        if (!status_started)
+            record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                "Could not initialize diagnostic status."));
+        std::ofstream event_file(config.artifact_directory / "events.ndjson", std::ios::binary);
+        std::ofstream timeline_file(config.artifact_directory / "timeline.csv", std::ios::binary);
+        std::ofstream gpu_file(config.artifact_directory / "gpu_passes.csv", std::ios::binary);
+        runtime_detail::DiagnosticLog event_lines(event_file, capture_diagnostics);
+        runtime_detail::DiagnosticLog timeline_lines(timeline_file, capture_diagnostics,
+            "frame,tick,cpu_us,memory_bytes,ecs_count,queue_depth\n");
+        runtime_detail::DiagnosticLog gpu_lines(gpu_file, capture_diagnostics,
+            "frame,tick,pass,gpu_ns,queue,measured\n");
         float previous_foot_phase = -1.0f;
         Tick previous_foot_tick{};
-        event_lines.reserve(32);
         pending_particle_spawns.reserve(256);
         pending_effect_lines.reserve(64);
-        timeline_lines.reserve(static_cast<std::size_t>(config.maximum_ticks) + 16);
 
         Tick last_tick{};
         std::uint64_t typed_vfx_events_received{};
@@ -1558,7 +1574,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     channels.dropped_presentation_events.fetch_add(1,
                                                                    std::memory_order_relaxed);
                 }
-                event_lines.push_back(
+                event_lines.Append(
                     std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{},"
                                 "\"asset\":{},\"position\":[{},{},{}]}}\n",
                                 event.sequence, event.tick, static_cast<unsigned>(event.kind),
@@ -2308,7 +2324,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                          frame.debug_value, frame.debug_secondary, {}});
                 }
                 last_tick = frame.rendered_tick;
-                timeline_lines.push_back(
+                timeline_lines.Append(
                     std::format("{},{},{},{},{},{}\n", frame.frame, last_tick,
                                 frame_microseconds, CurrentProcessWorkingSetBytes(),
                                 snapshots.current.instances.size() +
@@ -2374,7 +2390,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 {
                     for (const auto &pass : gpu_timings.passes)
                     {
-                        gpu_lines.push_back(std::format(
+                        gpu_lines.Append(std::format(
                             "{},{},{},{},{},{}\n",
                             channels.rendered_frames.load(std::memory_order_acquire),
                             last_tick, pass.name, pass.nanoseconds,
@@ -2420,25 +2436,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         std::format("{} validation errors.", validation_errors)));
         }
 
-        std::string timeline = "frame,tick,cpu_us,memory_bytes,ecs_count,queue_depth\n";
-        for (const auto &line : timeline_lines)
-        {
-            timeline += line;
-        }
-        WriteText(config.artifact_directory / "timeline.csv", timeline);
-        std::string gpu_timeline = "frame,tick,pass,gpu_ns,queue,measured\n";
-        for (const auto &line : gpu_lines)
-        {
-            gpu_timeline += line;
-        }
-        WriteText(config.artifact_directory / "gpu_passes.csv", gpu_timeline);
-
-        std::string events;
-        for (const auto &line : event_lines)
-        {
-            events += line;
-        }
-        WriteText(config.artifact_directory / "events.ndjson", events);
+        const bool events_written = event_lines.Finish();
+        const bool timeline_written = timeline_lines.Finish();
+        const bool gpu_written = gpu_lines.Finish();
+        event_file.close(); timeline_file.close(); gpu_file.close();
+        const bool io_ok = events_written && timeline_written && gpu_written &&
+            !event_file.fail() && !timeline_file.fail() && !gpu_file.fail();
+        const bool complete = io_ok && event_lines.Complete() &&
+            timeline_lines.Complete() && gpu_lines.Complete();
+        const bool status_written = write_diagnostics_status(std::format(
+            "{{\"schema\":1,\"mode\":\"{}\",\"complete\":{},\"io_failed\":{},"
+            "\"event_records\":{},\"event_dropped\":{},\"timeline_records\":{},"
+            "\"timeline_dropped\":{},\"gpu_records\":{},\"gpu_dropped\":{}}}\n",
+            capture_diagnostics ? "capture" : "recent", complete ? "true" : "false",
+            io_ok ? "false" : "true", event_lines.Records(), event_lines.Dropped(),
+            timeline_lines.Records(), timeline_lines.Dropped(), gpu_lines.Records(), gpu_lines.Dropped()));
+        if (!status_started || !status_written || !io_ok || (capture_diagnostics && !complete))
+            record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                "Diagnostic output incomplete: write, flush or close failed."));
         WriteText(config.artifact_directory / "render.json",
                   std::format("{{\"enhanced_barriers\":{},\"validation_errors\":{},"
                               "\"last_tick\":{},\"typed_vfx_events_received\":{},"
@@ -2907,6 +2922,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 }
                             }
                         }
+                        if (channels.ui_input_rejected.load(std::memory_order_acquire))
+                            (void)slot->storage->AddUi(SettingsStatusText(
+                                "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
+                                {500, 1000}, 0xFF80C0FFu));
                         slot->storage->camera.target.y = pose.target_height_m;
                         channels.snapshots.Publish(*slot, ++publish_sequence);
                         scene_projection.Commit();
@@ -3101,9 +3120,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (sampled_token) native_input_frame.Sampled(sampled_token);
         if (ui_command_queue_full)
         {
-            record_thread_failure(Result::Failure(
-                ErrorCode::InvalidState, "hs_runtime",
-                "UI settings command queue capacity exceeded."));
+            OutputDebugStringA("UI command rejected: queue full. Retry with a new input.\n");
             ui_command_queue_full = false;
         }
         audio.SetBackgroundMuted(GetForegroundWindow() != window.Handle());

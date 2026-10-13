@@ -57,6 +57,10 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(taskflow)
+# Reproducible correction of the pinned backend, including existing source overrides.
+# Hash verification rejects unsupported or locally modified Taskflow sources.
+include(cmake/patches/taskflow-async-admission.cmake)
+hs_patch_taskflow("${taskflow_SOURCE_DIR}")
 
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS OR HS_BUILD_ASSET_PIPELINE_TESTS)
     FetchContent_Declare(
@@ -529,6 +533,7 @@ endforeach()
 set(HS_SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/project_hs.hlsl")
 set(HS_GPU_SCENE_TABLES_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/gpu_scene_tables.hlsli")
+set(HS_HZB_REGION_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/hzb_region.hlsli")
 set(HS_GEOMETRY_SHADER_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/geometry.hlsli"
     "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/geometry_records.hlsli"
@@ -1188,13 +1193,17 @@ foreach(family IN ITEMS project geometry visibility static-visibility depth-pyra
         string(REPLACE "-" "_" family_source "${family}")
         string(APPEND family_source ".hlsl")
     endif()
+    set(family_hzb_inputs)
+    if(family STREQUAL "static-visibility" OR family STREQUAL "cluster-refinement")
+        list(APPEND family_hzb_inputs "${HS_HZB_REGION_SOURCE}")
+    endif()
     set(family_result "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/${family}/result.json")
     hs_add_asset_action(
         NAME "hs_render_runtime_shader_${family}"
         BUILDER hs_render_runtime_shader
         RESULT "${family_result}"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/runtime/${family}/result.d"
-        STATIC_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/${family_source}"
+        STATIC_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/${family_source}" ${family_hzb_inputs}
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/entity_surface.hlsli"
             ${HS_DXC_TOOL_INPUTS}
         ARGS "--family=${family}" "--source=${CMAKE_CURRENT_SOURCE_DIR}"
@@ -1943,6 +1952,24 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_tests)
 
     add_test(NAME foundation.core COMMAND hs_tests foundation)
+    add_executable(hs_hzb_region_tests Tests/hzb_region_tests.cpp)
+    hs_configure_target(hs_hzb_region_tests)
+    add_test(NAME rendering.hzb-region-cpu COMMAND hs_hzb_region_tests)
+    add_executable(hs_ui_command_admission_tests Tests/ui_command_admission_tests.cpp)
+    target_link_libraries(hs_ui_command_admission_tests PRIVATE hs_presentation)
+    hs_configure_target(hs_ui_command_admission_tests)
+    add_test(NAME runtime.ui-command-admission COMMAND hs_ui_command_admission_tests)
+    add_executable(hs_runtime_diagnostics_tests Tests/runtime_diagnostics_tests.cpp)
+    hs_configure_target(hs_runtime_diagnostics_tests)
+    add_test(NAME runtime.diagnostics-bounds COMMAND hs_runtime_diagnostics_tests)
+    add_executable(hs_project_hs_arguments_tests
+        Tests/project_hs_arguments_tests.cpp
+        Source/Apps/ProjectHS/command_line.cpp)
+    target_link_libraries(hs_project_hs_arguments_tests PRIVATE hs_core)
+    target_include_directories(hs_project_hs_arguments_tests PRIVATE Source/Runtime/Public)
+    hs_configure_target(hs_project_hs_arguments_tests)
+    add_test(NAME runtime.arguments COMMAND hs_project_hs_arguments_tests)
+
     add_executable(hs_sha256_tests Tests/sha256_tests.cpp)
     target_link_libraries(hs_sha256_tests PRIVATE hs_core)
     hs_configure_target(hs_sha256_tests)
@@ -2018,6 +2045,14 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_graphics_settings_tests)
     add_test(NAME foundation.graphics-settings COMMAND hs_graphics_settings_tests)
     add_test(NAME foundation.task-system COMMAND hs_tests jobs)
+    add_executable(hs_task_system_failure_tests Tests/task_system_failure_tests.cpp)
+    target_link_libraries(hs_task_system_failure_tests PRIVATE hs_jobs Taskflow::Taskflow)
+    hs_configure_target(hs_task_system_failure_tests)
+    add_test(NAME foundation.task-system-failure-injection COMMAND hs_task_system_failure_tests engine)
+    add_test(NAME foundation.task-system-stop-reentry COMMAND hs_task_system_failure_tests reentry)
+    add_test(NAME foundation.taskflow-admission-failure COMMAND hs_task_system_failure_tests backend)
+    set_tests_properties(foundation.task-system-failure-injection foundation.task-system-stop-reentry
+        foundation.taskflow-admission-failure PROPERTIES TIMEOUT 30)
     add_test(
         NAME architecture.layers
         COMMAND ${CMAKE_COMMAND}
@@ -2597,13 +2632,6 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_UI_TEXT_GENERATION_TARGET})
     set_tests_properties(runtime.ui-text-fit PROPERTIES TIMEOUT 30 ENVIRONMENT
         "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_UI_TEXT_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_UI_TEXT_GENERATION_SCOPE}")
-    add_executable(hs_project_hs_arguments_tests
-        Tests/project_hs_arguments_tests.cpp
-        Source/Apps/ProjectHS/command_line.cpp)
-    target_link_libraries(hs_project_hs_arguments_tests PRIVATE hs_core)
-    target_include_directories(hs_project_hs_arguments_tests PRIVATE Source/Runtime/Public)
-    hs_configure_target(hs_project_hs_arguments_tests)
-    add_test(NAME runtime.arguments COMMAND hs_project_hs_arguments_tests)
     add_executable(hs_graphics_settings_store_tests
         Tests/graphics_settings_store_tests.cpp)
     target_link_libraries(hs_graphics_settings_store_tests PRIVATE hs_runtime)

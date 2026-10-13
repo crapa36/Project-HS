@@ -809,7 +809,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (static_draw_refs.size() > std::numeric_limits<std::uint32_t>::max())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Static draw reference index overflow.");
-    std::array<GpuStaticVisibilityRange, kGpuVisibilityBucketCount> visibility_ranges{};
+    std::array<GpuStaticVisibilityRange, kGpuVisibilityBucketCount + 1> visibility_ranges{};
     for (auto &range : visibility_ranges)
         range.argument_stride = static_cast<std::uint32_t>(kGpuVisibilityBucketCount);
     for (std::size_t asset = 0; asset < static_environment_ranges.size(); ++asset)
@@ -836,7 +836,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             environment_ranges[asset + lod] =
                 instance_ranges[kInstanceEnvironmentBucketBegin + asset / 3];
     }
-    std::array<GpuStaticVisibilityRange, kGpuVisibilityBucketCount>
+    std::array<GpuStaticVisibilityRange, kGpuVisibilityBucketCount + 1>
         dynamic_visibility_ranges{};
     for (auto &range : dynamic_visibility_ranges)
         range.argument_stride = static_cast<std::uint32_t>(kGpuVisibilityBucketCount);
@@ -1786,6 +1786,17 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (!static_draw_refs.empty())
         std::memcpy(frame.mapped + static_ref_data_offset, static_draw_refs.data(),
                     sizeof(GpuStaticDrawRef) * static_draw_refs.size());
+    // Trailing metadata record consumed only by HZB lookup. The preceding
+    // bucket records and their 32-byte stride remain unchanged. Target/DRS
+    // changes invalidate previous HZB before this producer layout is reused.
+    const GpuStaticVisibilityRange hzb_metadata{
+        impl_->hzb_layout.levels[0].width, impl_->hzb_layout.levels[0].height,
+        impl_->hzb_layout.count,
+        impl_->hzb_layout.elements <= UINT32_MAX
+            ? static_cast<std::uint32_t>(impl_->hzb_layout.elements) : 0u};
+    visibility_ranges.back() = hzb_metadata;
+    dynamic_visibility_ranges.back() = hzb_metadata;
+    retest_visibility_ranges.back() = hzb_metadata;
     std::memcpy(frame.mapped + visibility_range_offset, visibility_ranges.data(),
                 sizeof(visibility_ranges));
     std::memcpy(frame.mapped + dynamic_visibility_range_offset,

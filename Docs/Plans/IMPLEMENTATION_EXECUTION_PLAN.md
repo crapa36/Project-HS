@@ -342,3 +342,34 @@ Retained verification also includes composed source-scoped D/E/G receipts (12 ch
 | Package / performance | Current finish state | Ordinary `msvc-debug` passes; package-smoke/perf3case and fresh package/performance runs are not claimed. |
 
 Next checkpoint: retain the completed CLI source fix, corrected incremental Debug build and display-output source repair; latest PID59344 HWND/log validation remains pending and final-options GPU CTest was not rerun. The 592-path backup dry-run passes, but the remote name is absent. Then perform one whole-592-path backup commit on branch `codex/engine-v7-backup-20261008`, push it, and restore `main` to its original HEAD, index and working-tree bytes. Use pending `Build/tooling/backup-and-restore-main.receipt.json` as outcome authority; original main ref prefix is `5ee6bf8`, and commit/push/restoration are unclaimed until that receipt exists. Package/performance runs are not claimed. HLOD equivalence is closed with 0 changed digest/size across1245 products and a measured2.71x action speedup; no engine-wide old/new speedup percentage is available. Whole-plan completion remains pending.
+
+## Backup-branch correctness follow-up (2026-10-13)
+
+Current user direction: work on `codex/engine-v7-backup-20261009`, including
+Linux setup when needed. This supersedes the historical main/staged-tree
+workflow for this isolated checkout. Base: `a0d98d477099509fe7eb0db379de537d2cbf8ac9`;
+initial index/worktree clean. User PC tunnel is disconnected; no local PC
+worktree was inspected or changed.
+
+Execution owner: main agent. This section tracks the attached
+`Project_HS_종합조사_정밀수정계획.md` first implementation batch;
+`DEV_STATE.md` remains the technical resume record.
+
+- B00/G01: original CPU baseline and candidate 16-test Linux integration passed;
+  affected HZB/UI follow-ups passed. Linux CI and MSVC core registration added.
+- C01: source correction and production shader compilation complete; GPU
+  readback/native scene gate still open (harness not yet implemented).
+- C02A/C02B: production failure reproductions and corrected jobs/backend
+  regressions passed, including actual executor spill growth rejection.
+- C03: enqueue-gated state/feedback and portable production-resolver tests passed;
+  Windows runtime integration remains open.
+- C04: bounded diagnostics and explicit streamed capture implemented/tested;
+  native disk/close integration remains open.
+- Later C05/S/P/D work remains pending. Existing full-FHD DeviceHung unresolved.
+- Retained evidence and next steps: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
+  ASan/UBSan+LSan attempt failed on inaccessible /proc; no sanitizer PASS claim.
+
+Evidence directory (ignored build output):
+`Build/verification/backup-fixes-20261013`. Linux configure uses the existing
+`linux-core` preset, CMake 4.4.4, Ninja 1.13.2, GCC 13.3.0. No changes to
+production dependency pins, compiler warning policy, or validation strength.

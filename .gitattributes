@@ -6,3 +6,6 @@
 *.json text eol=lf
 *.hlsl text eol=lf
 *.hlsli text eol=lf
+
+# Reproducible upstream patch preimages use LF on Windows and Linux.
+*.patch text eol=lf

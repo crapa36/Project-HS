@@ -1,3 +1,4 @@
+#include "hzb_region.hlsli"
 #include "scene_hlod_sampling.hlsli"
 cbuffer FrameConstants : register(b0)
 {
@@ -342,26 +343,14 @@ void ResolveVisibilitySphere(InstanceData instance, StaticDrawRef draw,
         radius += abs(GrassDeformationRadius);
 }
 
-uint HzbLevelOffset(uint level, out uint width, out uint height)
-{
-    width = max((uint)ScreenSize.x, 1u);
-    height = max((uint)ScreenSize.y, 1u);
-    uint offset = 0;
-    for (uint index = 0; index < level; ++index)
-    {
-        offset += width * height;
-        width = max((width + 1u) / 2u, 1u);
-        height = max((height + 1u) / 2u, 1u);
-    }
-    return offset;
-}
-
 bool SphereOccludedByHzb(float3 center, float radius, float4x4 view_projection)
 {
     // A negative deformation radius is the explicit conservative-disable mode
     // used when previous HZB history is invalid or for paths that do not yet
     // participate in occlusion history.
-    if (GrassDeformationRadius < 0.0) return false;
+    if (!isfinite(GrassDeformationRadius) || GrassDeformationRadius < 0.0 ||
+        !all(isfinite(center)) || !isfinite(radius) || radius < 0.0 ||
+        !all(isfinite(TemporalOptions.zw))) return false;
     const float4 clip = mul(float4(center, 1.0), view_projection);
     const float3 clip_x_axis = float3(view_projection._11,
         view_projection._21, view_projection._31);
@@ -371,7 +360,8 @@ bool SphereOccludedByHzb(float3 center, float radius, float4x4 view_projection)
         view_projection._24, view_projection._34);
     const float w_radius = radius * length(clip_w_axis);
     const float minimum_w = clip.w - w_radius;
-    if (minimum_w <= 0.0) return false;
+    if (!all(isfinite(clip)) || !isfinite(minimum_w) ||
+        minimum_w <= max(TemporalOptions.w, 0.0001)) return false;
     const float2 uv = float2(clip.x / clip.w * 0.5 + 0.5,
                              0.5 - clip.y / clip.w * 0.5);
     // Bound (X+dX)/(W+dW)-X/W over the entire world-space sphere.
@@ -383,27 +373,21 @@ bool SphereOccludedByHzb(float3 center, float radius, float4x4 view_projection)
     const float2 uv_min = uv - uv_radius;
     const float2 uv_max = uv + uv_radius;
     // Near-screen-edge bounds are uncertain and must stay visible.
-    if (any(uv_min <= 0.0) || any(uv_max >= 1.0)) return false;
+    if (!all(isfinite(uv_min)) || !all(isfinite(uv_max)) ||
+        any(uv_min <= 0.0) || any(uv_max >= 1.0)) return false;
 
-    const float2 pixel_radius = uv_radius * ScreenSize.xy;
-    const float diameter_pixels =
-        max(pixel_radius.x * 2.0, pixel_radius.y * 2.0);
-    const uint maximum_level = min(
-        (uint)floor(log2(max(max(ScreenSize.x, ScreenSize.y), 1.0))), 15u);
-    // ceil() makes one mip texel at least as wide as the projected diameter.
-    // The projected rectangle can therefore overlap at most two texels per
-    // axis; sampling all four corners covers every touched HZB region.
-    const uint level = min(
-        (uint)max(ceil(log2(max(diameter_pixels, 1.0))), 0.0),
-        maximum_level);
-    uint width, height;
-    const uint offset = HzbLevelOffset(level, width, height);
-    const uint2 minimum_coordinate =
-        min((uint2)(uv_min * float2(width, height)),
-            uint2(width - 1u, height - 1u));
-    const uint2 maximum_coordinate =
-        min((uint2)(uv_max * float2(width, height)),
-            uint2(width - 1u, height - 1u));
+    // The trailing range-sized record carries producer layout metadata without
+    // increasing the already-full 64-DWORD root signature or changing record stride.
+    const VisibilityRange layout = Ranges[Ranges[0].ArgumentStride];
+    const uint2 extent = uint2(layout.Begin, layout.Count);
+    const uint2 base_min = (uint2)floor(uv_min * float2(extent));
+    const uint2 base_max = (uint2)floor(uv_max * float2(extent));
+    HsHzbRegion region;
+    if (!HsFindHzbRegion(extent.x, extent.y, layout.IndexCount, layout.ArgumentStride,
+        base_min.x, base_min.y, base_max.x, base_max.y, region)) return false;
+    const uint width = region.width, offset = region.offset;
+    const uint2 minimum_coordinate = uint2(region.min_x, region.min_y);
+    const uint2 maximum_coordinate = uint2(region.max_x, region.max_y);
     float region_farthest = 1.0;
     const uint2 coordinates[4] = {
         minimum_coordinate,
@@ -413,9 +397,9 @@ bool SphereOccludedByHzb(float3 center, float radius, float4x4 view_projection)
     [unroll] for (uint sample_index = 0; sample_index < 4; ++sample_index)
     {
         const uint2 coordinate = coordinates[sample_index];
-        region_farthest = min(
-            region_farthest,
-            PreviousHzb[offset + coordinate.y * width + coordinate.x]);
+        const float depth = PreviousHzb[offset + coordinate.y * width + coordinate.x];
+        if (!isfinite(depth) || depth <= 0.0 || depth > 1.0) return false;
+        region_farthest = min(region_farthest, depth);
     }
     // Reversed-Z clear is zero. A region touching background cannot be a
     // conservative full occluder.
@@ -432,7 +416,7 @@ bool SphereOccludedByHzb(float3 center, float radius, float4x4 view_projection)
     const float nearest_view_z = max(minimum_w, far_z);
     const float conservative_nearest =
         saturate(projection_a + projection_b / nearest_view_z);
-    return conservative_nearest + 0.0005 < region_farthest;
+    return isfinite(conservative_nearest) && conservative_nearest + 0.0005 < region_farthest;
 }
 
 void StaticLodFamilyVisibility(uint owner_bucket, uint view, uint thread_id)
