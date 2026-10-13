@@ -49,3 +49,12 @@ DXC 1.9.2609.5 Linux release를 별도 도구 경로에 두고 SHA256 검증 후
 5. 전체계획 C05와 S/P/D 구조·성능 작업은 아직 미착수. 첫 묶음 native 검증 전에 대형 렌더 구조 변경을 섞지 않는다.
 
 Rollback: 이 변경 commit을 revert하면 기준선으로 돌아간다. 원본 기준 commit은 ancestry로 보존한다.
+
+## 첫 원격 CI 후 수정
+
+커밋 `3bd953d`의 [Foundation 실행](https://github.com/crapa36/Project-HS/actions/runs/38357551495): Linux 성공, Windows는 Taskflow patch postimage SHA256 불일치로 configure 실패, portable 단계 미실행.
+`core.autocrlf=true`가 `git apply` 결과를 CRLF로 바꾸는 것을 Linux 임시 repo에서도 재현했다.
+후속 수정은 patch 명령의 LF 출력을 고정하고, 이미 CRLF로 바뀐 정확한 원본/수정본만 LF로 복구한다.
+임의 편집 파일은 여전히 거절한다. 원본 LF·원본 CRLF·수정본 CRLF 복구와 변조 거절을 검증했다.
+근거: `ci-initial.json`, `patch-eol-repro.json`, `patch-eol-verification.json`.
+후속 Windows CI 결과는 별도 실행을 확인해야 하며, 첫 실패를 PASS로 대체하지 않는다.
