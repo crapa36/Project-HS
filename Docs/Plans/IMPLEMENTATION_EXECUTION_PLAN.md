@@ -356,13 +356,18 @@ Execution owner: main agent. This section tracks the attached
 `DEV_STATE.md` remains the technical resume record.
 
 - B00/G01: original CPU baseline and candidate 16-test Linux integration passed;
-  affected HZB/UI follow-ups passed. Linux CI and MSVC core registration added.
-- C01: source correction and production shader compilation complete; GPU
-  readback/native scene gate still open (harness not yet implemented).
-- C02A/C02B: production failure reproductions and corrected jobs/backend
-  regressions passed, including actual executor spill growth rejection.
-- C03: enqueue-gated state/feedback and portable production-resolver tests passed;
-  Windows runtime integration remains open.
+  affected HZB/UI follow-ups passed. Windows core17 and portable31 also passed.
+  Production runtime/renderer compile and explicit HZB WARP gates are added.
+- C01: source correction and production shader compilation complete. The compiled
+  helper readback harness now replays the independent CPU oracle cases; explicit
+  WARP CI passed with Debug layer and GBV. Target-GPU scene/DRS/cluster gates remain open.
+- C02A/C02B: Linux and MSVC Debug core regressions passed, including actual
+  executor spill growth rejection. Corrected MSVC Debug noexcept string-proxy
+  allocation paths; no timeout or assertion was relaxed.
+- C03: enqueue-gated state/feedback and portable production-resolver tests passed.
+  Native compilation found a missing SimulationPorts read reference, now wired;
+  production runtime and renderer compilation passed. Windows runtime interaction
+  remains open.
 - C04: bounded diagnostics and explicit streamed capture implemented/tested;
   native disk/close integration remains open.
 - Later C05/S/P/D work remains pending. Existing full-FHD DeviceHung unresolved.

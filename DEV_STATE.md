@@ -174,12 +174,18 @@ Current authorized engine work is on `codex/engine-v7-backup-20261009`, based on
 This supersedes the historical main/staged-tree instructions below for this task;
 no user-PC worktree was accessed. The current plan is the 2026-10-13 section of
 `Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. First C01/C02A/C02B/C03/C04 source
-batch is implemented. Original jobs failure timeouts reproduced; candidate core
-16/16 and strengthened HZB/UI targeted checks passed. Seven actual production
-HLSL entries compile to DXIL with Linux DXC. Windows/D3D12/GBV and HZB GPU
-readback remain unexecuted; no native completion/performance claim. LSan cannot
-read /proc in this environment, so the sanitizer attempt failed, not passed.
-Next: native first-batch gates and GPU helper readback before structural work.
+batch is implemented. Original jobs failure timeouts reproduced; Linux core16,
+Windows core17 and portable31 passed. MSVC Debug string-proxy OOM termination
+was diagnosed with stacks and corrected without disabling injection. The native
+compile gate built the renderer and found a missing SimulationPorts UI rejection
+reference; that reference is now wired. Production runtime and renderer
+libraries compile successfully with MSVC RelWithDebInfo and validation enabled.
+Seven production HLSL entries plus the new HZB probe compile with Linux DXC.
+The compiled helper readback harness replays CPU oracle inputs and has separate
+hardware and explicit WARP tests, both requiring debug layer and GBV. CI WARP
+passed with Debug layer and GBV; hardware scenes/DRS/cluster and full native verify remain open.
+LSan cannot read /proc here; the sanitizer attempt failed, not passed.
+Next: hardware/native first-batch gates before structural work. No performance or whole-plan claim.
 Exact contracts, limits, source hashes and retained logs:
 `Docs/Verification/20261013-backup-correctness/REPORT.md`.
 
