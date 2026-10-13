@@ -86,6 +86,7 @@ struct SimulationPorts
     std::atomic<std::uint8_t> &settings_page;
     std::atomic<std::uint8_t> &character_details_page;
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &presentation_graphics_ui;
+    const std::atomic<bool> &ui_input_rejected;
 
     void PublishSessionProbe(const SessionProbe &probe)
     {
@@ -186,7 +187,8 @@ struct RuntimeChannels
                 collection_skill, character_skill, loadout_source,
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
-                settings_group, settings_page, character_details_page, presentation_graphics_ui};
+                settings_group, settings_page, character_details_page, presentation_graphics_ui,
+                ui_input_rejected};
     }
 };
 
