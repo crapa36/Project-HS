@@ -21,6 +21,20 @@ jobs:
         shell: pwsh
         run: ./Tools/cmake.ps1 --workflow --preset verify-portable
 
+  runtime-compile:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+      # Compile the production libraries without requiring the proprietary FBX
+      # cooker or a GPU. This supplements, and does not replace, native verify.
+      - name: Configure runtime compilation
+        shell: pwsh
+        run: ./Tools/cmake.ps1 --preset msvc-validation -DHS_BUILD_CONTENT_TOOLS=OFF
+      - name: Compile runtime and renderer
+        shell: pwsh
+        run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_runtime hs_renderer_d3d12 --parallel 2
+
   linux-core:
     runs-on: ubuntu-24.04
     steps:
