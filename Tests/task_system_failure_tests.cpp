@@ -11,6 +11,13 @@
 #include <string>
 #include <string_view>
 
+#if defined(_WIN32)
+#include <Windows.h>
+#include <DbgHelp.h>
+#include <crtdbg.h>
+#pragma comment(lib, "Dbghelp.lib")
+#endif
+
 // Fail only allocations made by the submitting thread, never worker internals.
 thread_local int allocation_budget = -1;
 void* operator new(std::size_t size)
@@ -187,6 +194,30 @@ void Reentry()
 
 int main(int argc, char** argv)
 {
+#if defined(_WIN32)
+    // CI must report a fatal CRT/noexcept failure instead of waiting for a dialog.
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    std::set_terminate([] {
+        allocation_budget = -1; // Diagnostic symbol lookup only; the test fails.
+        std::fputs("TERMINATE during failure injection\n", stderr);
+        auto process = GetCurrentProcess();
+        SymInitialize(process, nullptr, TRUE);
+        void* frames[32]{};
+        const auto count = CaptureStackBackTrace(0, 32, frames, nullptr);
+        alignas(SYMBOL_INFO) char storage[sizeof(SYMBOL_INFO) + MAX_SYM_NAME]{};
+        auto* symbol = reinterpret_cast<SYMBOL_INFO*>(storage);
+        symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+        symbol->MaxNameLen = MAX_SYM_NAME;
+        for (USHORT i = 0; i < count; ++i)
+            if (SymFromAddr(process, reinterpret_cast<DWORD64>(frames[i]), nullptr, symbol))
+                std::fprintf(stderr, "  %s\n", symbol->Name);
+        std::fflush(stderr);
+        std::_Exit(3);
+    });
+#endif
     try
     {
         const std::string_view mode = argc > 1 ? argv[1] : "engine";
