@@ -31,6 +31,15 @@ jobs:
       - name: Configure runtime compilation
         shell: pwsh
         run: ./Tools/cmake.ps1 --preset msvc-validation -DHS_BUILD_CONTENT_TOOLS=OFF
+      - name: Compile HZB readback probe
+        shell: pwsh
+        run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_hzb_region_gpu_tests --parallel 2
+      - name: Verify compiled HZB helper on explicit WARP
+        shell: pwsh
+        run: |
+          $cmake = (& ./tools/bootstrap_cmake.ps1 -PrintPath | Select-Object -Last 1)
+          & (Join-Path (Split-Path $cmake) ctest.exe) --test-dir Build/msvc-validation -R '^rendering\.hzb-region-warp$' --output-on-failure
+          exit $LASTEXITCODE
       - name: Compile runtime and renderer
         shell: pwsh
         run: ./Tools/cmake.ps1 --build Build/msvc-validation --target hs_runtime hs_renderer_d3d12 --parallel 2

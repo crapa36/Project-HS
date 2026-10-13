@@ -10,6 +10,23 @@ using uint = std::uint32_t;
 #include <vector>
 #include <cmath>
 
+#ifdef HS_HZB_GPU_PROBE
+#include "hzb_region_gpu.hpp"
+std::vector<HzbProbeInput> gpu_inputs;
+std::vector<HzbProbeOutput> gpu_expected;
+#endif
+
+bool FindRegion(uint w, uint h, uint levels, uint capacity,
+    uint x0, uint y0, uint x1, uint y1, HsHzbRegion& region)
+{
+    const bool valid = HsFindHzbRegion(w,h,levels,capacity,x0,y0,x1,y1,region);
+#ifdef HS_HZB_GPU_PROBE
+    gpu_inputs.push_back({w,h,levels,capacity,x0,y0,x1,y1});
+    gpu_expected.push_back({valid ? 1u : 0u, valid ? region : HsHzbRegion{}});
+#endif
+    return valid;
+}
+
 void Check(bool ok) { if (!ok) throw std::runtime_error("HZB region contract"); }
 void Case(uint w, uint h, uint x0, uint y0, uint x1, uint y1)
 {
@@ -22,7 +39,7 @@ void Case(uint w, uint h, uint x0, uint y0, uint x1, uint y1)
         if (x==1 && y==1) break;
     }
     HsHzbRegion r{};
-    Check(HsFindHzbRegion(w,h,levels,capacity,x0,y0,x1,y1,r));
+    Check(FindRegion(w,h,levels,capacity,x0,y0,x1,y1,r));
     Check(r.width==widths[r.level] && r.height==heights[r.level] && r.offset==offsets[r.level]);
     // Independent oracle: each selected cell owns a power-of-two base-pixel
     // interval clipped at the image border, including every odd trailing pixel.
@@ -34,7 +51,7 @@ void Case(uint w, uint h, uint x0, uint y0, uint x1, uint y1)
     Check(r.min_x==x0/span && r.max_x==x1/span && r.min_y==y0/span && r.max_y==y1/span);
     if (r.level) Check((x1/(span/2)-x0/(span/2)>1) || (y1/(span/2)-y0/(span/2)>1));
     // One fewer available level must conservatively refuse a still-wide region.
-    if (r.level) Check(!HsFindHzbRegion(w,h,r.level,capacity,x0,y0,x1,y1,r));
+    if (r.level) Check(!FindRegion(w,h,r.level,capacity,x0,y0,x1,y1,r));
 }
 void SphereCounterexample()
 {
@@ -57,7 +74,7 @@ void SphereCounterexample()
         ++levels;
     }
     HsHzbRegion region{};
-    Check(HsFindHzbRegion(w,h,levels,static_cast<uint>(pyramid.size()),409,1016,418,1024,region));
+    Check(FindRegion(w,h,levels,static_cast<uint>(pyramid.size()),409,1016,418,1024,region));
     float actual=1;
     for(uint y=region.min_y;y<=region.max_y;++y)
         for(uint x=region.min_x;x<=region.max_x;++x)
@@ -70,7 +87,7 @@ void SphereCounterexample()
     Check(actual==0.0f); // Reversed-Z background forces visible, bias unchanged.
 }
 
-int main()
+int main(int argc, char** argv)
 {
     try
     {
@@ -87,15 +104,21 @@ int main()
             }
         SphereCounterexample();
         HsHzbRegion r{};
-        Check(!HsFindHzbRegion(0,17,5,500,0,0,0,0,r));
-        Check(!HsFindHzbRegion(17,0,5,500,0,0,0,0,r));
-        Check(!HsFindHzbRegion(17,17,0,500,0,0,1,1,r));
-        Check(!HsFindHzbRegion(17,17,17,500,0,0,1,1,r));
-        Check(!HsFindHzbRegion(17,17,5,288,0,0,1,1,r));
-        Check(!HsFindHzbRegion(17,17,5,500,2,0,1,1,r));
-        Check(!HsFindHzbRegion(17,17,5,500,0,0,17,1,r));
-        Check(!HsFindHzbRegion(UINT32_MAX,2,16,UINT32_MAX,0,0,1,1,r));
-        Check(!HsFindHzbRegion(UINT32_MAX,1,16,UINT32_MAX,0,0,UINT32_MAX-1,0,r));
+        Check(!FindRegion(0,17,5,500,0,0,0,0,r));
+        Check(!FindRegion(17,0,5,500,0,0,0,0,r));
+        Check(!FindRegion(17,17,0,500,0,0,1,1,r));
+        Check(!FindRegion(17,17,17,500,0,0,1,1,r));
+        Check(!FindRegion(17,17,5,288,0,0,1,1,r));
+        Check(!FindRegion(17,17,5,500,2,0,1,1,r));
+        Check(!FindRegion(17,17,5,500,0,0,17,1,r));
+        Check(!FindRegion(UINT32_MAX,2,16,UINT32_MAX,0,0,1,1,r));
+        Check(!FindRegion(UINT32_MAX,1,16,UINT32_MAX,0,0,UINT32_MAX-1,0,r));
+#ifdef HS_HZB_GPU_PROBE
+        Check(argc==2 || (argc==3 && std::string_view(argv[2])=="--warp"));
+        VerifyHzbReadback(argv[1], argc==3, gpu_inputs, gpu_expected);
+#else
+        (void)argc; (void)argv;
+#endif
         std::cout << "PASS production HZB address helper and independent ownership oracle\n";
     }
     catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }

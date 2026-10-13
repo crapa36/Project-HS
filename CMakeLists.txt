@@ -1955,6 +1955,31 @@ if(HS_BUILD_TESTS)
     add_executable(hs_hzb_region_tests Tests/hzb_region_tests.cpp)
     hs_configure_target(hs_hzb_region_tests)
     add_test(NAME rendering.hzb-region-cpu COMMAND hs_hzb_region_tests)
+    if(HS_BUILD_RUNTIME)
+        set(HS_HZB_PROBE_SHADER "${CMAKE_CURRENT_BINARY_DIR}/Generated/TestShaders/hzb_region.dxil")
+        add_custom_command(OUTPUT "${HS_HZB_PROBE_SHADER}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Generated/TestShaders"
+            COMMAND "${HS_DXC}" -nologo -WX -O3 -Ges -E main -T cs_6_0
+                -I "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders"
+                -Fo "${HS_HZB_PROBE_SHADER}" "${CMAKE_CURRENT_SOURCE_DIR}/Tests/hzb_region_probe.hlsl"
+            DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/hzb_region_probe.hlsl"
+                "${HS_HZB_REGION_SOURCE}" ${HS_DXC_TOOL_INPUTS}
+            VERBATIM)
+        add_executable(hs_hzb_region_gpu_tests Tests/hzb_region_tests.cpp "${HS_HZB_PROBE_SHADER}")
+        target_link_libraries(hs_hzb_region_gpu_tests PRIVATE d3d12 dxgi)
+        target_include_directories(hs_hzb_region_gpu_tests BEFORE PRIVATE "${agility_SOURCE_DIR}/build/native/include")
+        target_compile_definitions(hs_hzb_region_gpu_tests PRIVATE HS_HZB_GPU_PROBE=1 WIN32_LEAN_AND_MEAN NOMINMAX)
+        hs_configure_target(hs_hzb_region_gpu_tests)
+        add_dependencies(hs_hzb_region_gpu_tests hs_runtime_native_assets)
+        add_test(NAME rendering.hzb-region-gpu
+            COMMAND hs_hzb_region_gpu_tests "${HS_HZB_PROBE_SHADER}"
+            BUILD_DEPENDS hs_hzb_region_gpu_tests)
+        add_test(NAME rendering.hzb-region-warp
+            COMMAND hs_hzb_region_gpu_tests "${HS_HZB_PROBE_SHADER}" --warp
+            BUILD_DEPENDS hs_hzb_region_gpu_tests)
+        set_tests_properties(rendering.hzb-region-gpu rendering.hzb-region-warp
+            PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
+    endif()
     add_executable(hs_ui_command_admission_tests Tests/ui_command_admission_tests.cpp)
     target_link_libraries(hs_ui_command_admission_tests PRIVATE hs_presentation)
     hs_configure_target(hs_ui_command_admission_tests)
