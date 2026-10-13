@@ -12,6 +12,9 @@
 #include <string_view>
 
 #if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <DbgHelp.h>
 #include <crtdbg.h>
