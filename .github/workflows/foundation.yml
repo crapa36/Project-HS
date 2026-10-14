@@ -55,3 +55,8 @@ jobs:
           echo "$RUNNER_TEMP/hs-build-tools/bin" >> "$GITHUB_PATH"
       - name: Verify core and portable correctness helpers
         run: cmake --workflow --preset verify-core-linux
+      - name: Verify Linux render data and asset pipeline
+        run: |
+          cmake --preset linux-core -DHS_BUILD_RENDER_DATA_TESTS=ON -DHS_BUILD_ASSET_PIPELINE_TESTS=ON
+          cmake --build Build/linux-core --target all hs_audio_content_recipe_identity --parallel 2
+          ctest --test-dir Build/linux-core --output-on-failure

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import struct
 import subprocess
 import tempfile
@@ -250,6 +251,17 @@ def main():
     for name in ('audio', 'generation', 'cmake', 'ninja'):
         parser.add_argument('--' + name, required=True)
     args = parser.parse_args()
+    identity = json.loads((Path(args.audio).parent / 'RecipeIdentity' /
+                           'hs_audio_content.json').read_text())
+    if identity['compiler'].startswith(('GNU-', 'Clang-', 'AppleClang-')):
+        link_lines = [line.removeprefix('link-command:')
+                      for line in identity['build_options'].splitlines()
+                      if line.startswith('link-command:')]
+        assert len(link_lines) == 1, 'producer must record its actual executable link'
+        arguments = shlex.split(link_lines[0])
+        assert '-c' not in arguments and '-o' in arguments
+        output = arguments[arguments.index('-o') + 1].replace('<build-root>', str(Path(args.audio).parent))
+        assert Path(output).name == Path(args.audio).name, 'recipe recorded another output or helper command'
     repo = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory(prefix='hs native asset ') as temporary:
         root = Path(temporary)

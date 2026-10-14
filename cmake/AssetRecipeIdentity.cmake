@@ -155,6 +155,18 @@ function(hs_generate_asset_recipe_identities)
             endif()
         endwhile()
 
+        # GCC/Clang report system headers in Ninja dependency records too.
+        # Keep their relative subdirectories: basename-only IDs collide for
+        # e.g. bits/alloc_traits.h and ext/alloc_traits.h. The ordered compiler
+        # roots avoid embedding machine-specific installation paths in IDs.
+        if(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+            set(implicit_index 0)
+            foreach(directory IN LISTS CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES)
+                file(REAL_PATH "${directory}" directory)
+                list(APPEND external_header_roots "compiler-implicit-${implicit_index}|${directory}")
+                math(EXPR implicit_index "${implicit_index} + 1")
+            endforeach()
+        endif()
         list(REMOVE_DUPLICATES visited)
         list(REMOVE_DUPLICATES authored_inputs)
         list(REMOVE_DUPLICATES sdk_binaries)
