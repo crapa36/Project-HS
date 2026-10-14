@@ -999,16 +999,16 @@ void TestVfxSessionReset()
     state.ClearDecoded(); // A successful catalog reload retains semantic episode history.
     Check(!state.MarkPersistentBurst(77, 3) && state.MarkPersistentBurst(77, 4),
           "catalog reload replayed an active burst or merged distinct visual kinds");
-    state.flashes.emplace_back();
-    state.ground_events.emplace_back();
-    state.ribbon_events.emplace_back();
-    state.light_events.emplace_back();
-    state.distortion_events.emplace_back();
-    state.decal_events.emplace_back();
-    state.particle_spawns.emplace_back();
-    state.effect_lines.emplace_back();
-    Check(state.Synchronize(2) && state.flashes.empty() && state.ground_events.empty() &&
-              state.particle_spawns.empty() && state.effect_lines.empty() && state.ribbon_events.empty() && state.light_events.empty() && state.distortion_events.empty() && state.decal_events.empty(),
+    state.decoded.flashes.emplace_back();
+    state.decoded.ground_events.emplace_back();
+    state.decoded.ribbon_events.emplace_back();
+    state.decoded.light_events.emplace_back();
+    state.decoded.distortion_events.emplace_back();
+    state.decoded.decal_events.emplace_back();
+    state.decoded.particle_spawns.emplace_back();
+    state.decoded.effect_lines.emplace_back();
+    Check(state.Synchronize(2) && state.decoded.flashes.empty() && state.decoded.ground_events.empty() &&
+              state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty() && state.decoded.ribbon_events.empty() && state.decoded.light_events.empty() && state.decoded.distortion_events.empty() && state.decoded.decal_events.empty(),
           "session restart retained an old visual");
     Check(state.MarkPersistentBurst(77, 3),
           "new simulation session retained an old burst episode");

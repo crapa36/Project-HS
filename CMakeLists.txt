@@ -1989,6 +1989,12 @@ if(HS_BUILD_TESTS)
         set_tests_properties(rendering.hzb-region-gpu rendering.hzb-region-warp
             PROPERTIES TIMEOUT 90 RESOURCE_LOCK projecths_d3d12)
     endif()
+    add_executable(hs_vfx_session_state_tests Tests/vfx_session_state_tests.cpp)
+    target_link_libraries(hs_vfx_session_state_tests PRIVATE hs_core hs_game_domain)
+    target_include_directories(hs_vfx_session_state_tests PRIVATE
+        Source/Runtime/Private Source/RendererD3D12/Public)
+    hs_configure_target(hs_vfx_session_state_tests)
+    add_test(NAME runtime.vfx-session-state COMMAND hs_vfx_session_state_tests)
     add_executable(hs_ui_command_admission_tests Tests/ui_command_admission_tests.cpp)
     target_link_libraries(hs_ui_command_admission_tests PRIVATE hs_presentation)
     hs_configure_target(hs_ui_command_admission_tests)

@@ -1080,11 +1080,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         runtime_detail::VfxSessionState vfx_session;
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
-        auto &pending_particle_spawns = vfx_session.particle_spawns;
-        auto &pending_effect_lines = vfx_session.effect_lines;
-        auto &active_vfx_flashes = vfx_session.flashes;
-        auto &active_vfx_ground_events = vfx_session.ground_events;
-        auto &active_vfx_ribbon_events = vfx_session.ribbon_events;
+        auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
+        auto &pending_effect_lines = vfx_session.decoded.effect_lines;
+        auto &active_vfx_flashes = vfx_session.decoded.flashes;
+        auto &active_vfx_ground_events = vfx_session.decoded.ground_events;
+        auto &active_vfx_ribbon_events = vfx_session.decoded.ribbon_events;
         // Smoke/recording runs retain the existing full-log analyzer contract.
         const bool capture_diagnostics = config.capture_diagnostics || config.smoke ||
             config.record_playtest || config.replay_compare || !config.replay_directory.empty();
@@ -1190,7 +1190,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             std::filesystem::path next_particle_path, next_program_path;
                             VfxCatalog replacement;
                             RendererVfxSpriteBindings sprite_bindings;
-                            runtime_detail::VfxSessionState prepared_session;
+                            runtime_detail::DecodedVfxState prepared_decoded;
                             runtime_detail::VfxUpgradeMovementState prepared_movements;
                             runtime_detail::VfxPersistentSparkState prepared_sparks;
                             if (reloaded)
@@ -1229,8 +1229,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 stage = "vfx_retention";
                                 const auto &previous = vfx_catalog.Program();
                                 const auto &next = catalog_changed ? replacement.Program() : previous;
-                                prepared_session.entity_surface_captures = vfx_session.entity_surface_captures;
-                                std::erase_if(prepared_session.entity_surface_captures, [&](auto &capture) {
+                                prepared_decoded.entity_surface_captures = vfx_session.decoded.entity_surface_captures;
+                                std::erase_if(prepared_decoded.entity_surface_captures, [&](auto &capture) {
                                     const auto captured_generation = std::static_pointer_cast<const SelectedGeneration>(
                                         capture.generation_lease);
                                     if (!captured_generation || !runtime_detail::SameCapturedAssetClosure(
@@ -1247,24 +1247,24 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 });
                                 if (catalog_changed)
                                 {
-                                    prepared_session.ground_events = vfx_session.ground_events;
-                                    prepared_session.ribbon_events = vfx_session.ribbon_events;
-                                    prepared_session.light_events = vfx_session.light_events;
-                                    prepared_session.distortion_events = vfx_session.distortion_events;
-                                    prepared_session.decal_events = vfx_session.decal_events;
-                                    prepared_session.volume_events = vfx_session.volume_events;
-                                    prepared_session.screen_events = vfx_session.screen_events;
-                                    prepared_session.entity_surface_events = vfx_session.entity_surface_events;
-                                    prepared_session.point_rate_events = vfx_session.point_rate_events;
-                                    for (auto *events : {&prepared_session.ground_events, &prepared_session.ribbon_events,
-                                            &prepared_session.light_events, &prepared_session.distortion_events,
-                                            &prepared_session.decal_events, &prepared_session.volume_events,
-                                            &prepared_session.screen_events, &prepared_session.entity_surface_events,
-                                            &prepared_session.point_rate_events})
+                                    prepared_decoded.ground_events = vfx_session.decoded.ground_events;
+                                    prepared_decoded.ribbon_events = vfx_session.decoded.ribbon_events;
+                                    prepared_decoded.light_events = vfx_session.decoded.light_events;
+                                    prepared_decoded.distortion_events = vfx_session.decoded.distortion_events;
+                                    prepared_decoded.decal_events = vfx_session.decoded.decal_events;
+                                    prepared_decoded.volume_events = vfx_session.decoded.volume_events;
+                                    prepared_decoded.screen_events = vfx_session.decoded.screen_events;
+                                    prepared_decoded.entity_surface_events = vfx_session.decoded.entity_surface_events;
+                                    prepared_decoded.point_rate_events = vfx_session.decoded.point_rate_events;
+                                    for (auto *events : {&prepared_decoded.ground_events, &prepared_decoded.ribbon_events,
+                                            &prepared_decoded.light_events, &prepared_decoded.distortion_events,
+                                            &prepared_decoded.decal_events, &prepared_decoded.volume_events,
+                                            &prepared_decoded.screen_events, &prepared_decoded.entity_surface_events,
+                                            &prepared_decoded.point_rate_events})
                                         runtime_detail::RebindVfxGenerationEvents(previous, next, *events, rebound);
-                                    const auto ground_count = prepared_session.ground_events.size();
-                                    runtime_detail::RebindVfxGroundEventOwners(next, prepared_session.ground_events);
-                                    const auto retired_ground = ground_count - prepared_session.ground_events.size();
+                                    const auto ground_count = prepared_decoded.ground_events.size();
+                                    runtime_detail::RebindVfxGroundEventOwners(next, prepared_decoded.ground_events);
+                                    const auto retired_ground = ground_count - prepared_decoded.ground_events.size();
                                     rebound.retained -= retired_ground;
                                     rebound.incompatible += retired_ground;
                                     prepared_movements = vfx_upgrade_movements;
@@ -1273,8 +1273,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     retired_sparks = prepared_sparks.Rebind(previous, next);
                                     // Expanded legacy commands have no stable effect identity.
                                     // Empty prepared queues retire them at the same commit.
-                                    retired_legacy = vfx_session.particle_spawns.size() +
-                                        vfx_session.effect_lines.size() + vfx_session.flashes.size();
+                                    retired_legacy = vfx_session.decoded.particle_spawns.size() +
+                                        vfx_session.decoded.effect_lines.size() + vfx_session.decoded.flashes.size();
                                 }
                             }
                             if (reloaded)
@@ -1314,14 +1314,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     if (catalog_changed)
                                     {
                                         vfx_catalog.Swap(replacement);
-                                        vfx_session.SwapDecoded(prepared_session);
+                                        vfx_session.SwapDecoded(prepared_decoded);
                                         vfx_upgrade_movements.Swap(prepared_movements);
                                         persistent_sparks.Swap(prepared_sparks);
                                         ++vfx_catalog_generation;
                                     }
                                     else
-                                        vfx_session.entity_surface_captures.swap(
-                                            prepared_session.entity_surface_captures);
+                                        vfx_session.decoded.entity_surface_captures.swap(
+                                            prepared_decoded.entity_surface_captures);
                                     cooked_particle_effects_path.swap(next_particle_path);
                                     cooked_vfx_program_path.swap(next_program_path);
                                     render_generation.swap(next_generation);
@@ -1774,21 +1774,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 for (const auto &input : typed_vfx.events)
                 {
                     if (is_effect(input, "particle.boss.phase_change") || is_effect(input, "particle.boss.death"))
-                        vfx_session.entity_surface_events.push_back(input);
-                    if (is_effect(input, "particle.skill.trap")) vfx_session.point_rate_events.push_back(input);
+                        vfx_session.decoded.entity_surface_events.push_back(input);
+                    if (is_effect(input, "particle.skill.trap")) vfx_session.decoded.point_rate_events.push_back(input);
                 }
                 const auto terminal_phase = static_cast<SessionPhase>(
                     channels.session_phase.load(std::memory_order_acquire));
                 const Tick death_current_tick = vfx_session.UpdateTerminalClock(
                     surface_tick, terminal_phase, FixedStepClock::Clock::now());
-                std::erase_if(vfx_session.entity_surface_captures, [&](const auto &capture) {
+                std::erase_if(vfx_session.decoded.entity_surface_captures, [&](const auto &capture) {
                     const auto &effect = surface_program.effects[capture.input.effect_handle - 1];
                     const Tick current_tick = is_effect(capture.input, "particle.boss.death")
                         ? death_current_tick : surface_tick;
                     return current_tick >= capture.input.event_tick &&
                         static_cast<double>(current_tick - capture.input.event_tick) >= static_cast<double>(effect.seconds) * 60.0;
                 });
-                std::erase_if(vfx_session.entity_surface_events, [&](const auto &input) {
+                std::erase_if(vfx_session.decoded.entity_surface_events, [&](const auto &input) {
                     const auto &effect = surface_program.effects[input.effect_handle - 1];
                     const Tick current_tick = is_effect(input, "particle.boss.death")
                         ? death_current_tick : surface_tick;
@@ -1818,7 +1818,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         if (actual == snapshots.current.instances.end()) return false;
                         capture.instance = *actual;
                     }
-                    vfx_session.entity_surface_captures.push_back(std::move(capture));
+                    vfx_session.decoded.entity_surface_captures.push_back(std::move(capture));
                     return true;
                 });
                 std::vector<runtime_detail::VfxEntitySurfacePersistentCapture> surface_persistent;
@@ -1835,7 +1835,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         surface_persistent.push_back({input, *actual, visual->active_tick, visual->expires});
                 }
                 const auto typed_surfaces = runtime_detail::BuildVfxTypedEntitySurfaceCommands(surface_program,
-                    vfx_session.entity_surface_captures, surface_persistent, surface_tick,
+                    vfx_session.decoded.entity_surface_captures, surface_persistent, surface_tick,
                     death_current_tick);
                 const auto movement_owners = vfx_upgrade_movements.Emit(vfx_catalog.Program(), frame_events,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{});
@@ -1893,67 +1893,58 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             has_distortion |= output.profile == VfxOutputProfile::Distortion;
                             has_decal |= output.profile == VfxOutputProfile::Decal;
                         }
-                    if (has_light) vfx_session.light_events.push_back(input);
-                    if (has_distortion) vfx_session.distortion_events.push_back(input);
-                    if (has_decal) vfx_session.decal_events.push_back(input);
+                    if (has_light) vfx_session.decoded.light_events.push_back(input);
+                    if (has_distortion) vfx_session.decoded.distortion_events.push_back(input);
+                    if (has_decal) vfx_session.decoded.decal_events.push_back(input);
                     if (runtime_detail::IsVfxTypedVolumeEffect(program, input.effect_handle))
-                        vfx_session.volume_events.push_back(input);
+                        vfx_session.decoded.volume_events.push_back(input);
                     if (runtime_detail::IsVfxTypedScreenEffect(program, input.effect_handle))
-                        vfx_session.screen_events.push_back(input);
+                        vfx_session.decoded.screen_events.push_back(input);
                 }
                 const auto light_tick = current_snapshot.header.tick;
-                std::erase_if(vfx_session.screen_events, [&](const VfxEventInput &input) {
+                std::erase_if(vfx_session.decoded.screen_events, [&](const VfxEventInput &input) {
                     const auto &effect = vfx_catalog.Program().effects[input.effect_handle - 1];
                     return light_tick >= input.event_tick &&
                         static_cast<double>(light_tick - input.event_tick) / 60.0 >= effect.seconds;
                 });
                 std::vector<VfxScreenInput> typed_screen;
                 if (auto converted = runtime_detail::BuildVfxTypedScreenCommands(vfx_catalog.Program(),
-                        vfx_session.screen_events, typed_vfx.persistent, light_tick,
+                        vfx_session.decoded.screen_events, typed_vfx.persistent, light_tick,
                         active_vfx_quality, vfx_session.low_health_pulse, typed_screen); !converted)
                 {
                     record_thread_failure(converted);
                     break;
                 }
-                std::erase_if(vfx_session.volume_events, [&](const VfxEventInput &input) {
+                std::erase_if(vfx_session.decoded.volume_events, [&](const VfxEventInput &input) {
                     const auto &effect = vfx_catalog.Program().effects[input.effect_handle - 1];
                     return light_tick >= input.event_tick &&
                         static_cast<double>(light_tick - input.event_tick) / 60.0 >= effect.seconds;
                 });
                 std::vector<VfxVolumeInput> typed_volumes;
                 if (auto converted = runtime_detail::BuildVfxTypedVolumeCommands(vfx_catalog.Program(),
-                        vfx_session.volume_events, typed_vfx.persistent, light_tick,
+                        vfx_session.decoded.volume_events, typed_vfx.persistent, light_tick,
                         active_vfx_quality, typed_volumes); !converted)
                 {
                     record_thread_failure(converted);
                     break;
                 }
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.light_events,current_snapshot.persistent_vfx,light_tick);
-                std::erase_if(vfx_session.light_events,[&](const VfxEventInput &input) {
+                const auto owner_event_expired = [&](const VfxEventInput &input) {
                     if (input.geometry_owner_id != 0) return light_tick >= input.geometry_end_tick;
                     const auto &effect = vfx_catalog.Program().effects[input.effect_handle-1];
                     return effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
                         (light_tick >= input.event_tick && static_cast<double>(light_tick-input.event_tick)/60.0 >= effect.seconds);
-                });
-                const auto typed_lights=runtime_detail::BuildVfxTypedLightCommands(vfx_catalog.Program(),vfx_session.light_events,light_tick);
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.distortion_events,current_snapshot.persistent_vfx,light_tick);
-                std::erase_if(vfx_session.distortion_events,[&](const VfxEventInput &input) {
-                    if (input.geometry_owner_id != 0) return light_tick >= input.geometry_end_tick;
-                    const auto &effect = vfx_catalog.Program().effects[input.effect_handle-1];
-                    return effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
-                        (light_tick >= input.event_tick && static_cast<double>(light_tick-input.event_tick)/60.0 >= effect.seconds);
-                });
+                };
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.light_events,current_snapshot.persistent_vfx,light_tick);
+                std::erase_if(vfx_session.decoded.light_events, owner_event_expired);
+                const auto typed_lights=runtime_detail::BuildVfxTypedLightCommands(vfx_catalog.Program(),vfx_session.decoded.light_events,light_tick);
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.distortion_events,current_snapshot.persistent_vfx,light_tick);
+                std::erase_if(vfx_session.decoded.distortion_events, owner_event_expired);
                 const auto typed_distortions=runtime_detail::BuildVfxTypedDistortionCommands(
-                    vfx_catalog.Program(),vfx_session.distortion_events,typed_vfx.persistent,light_tick);
-                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decal_events,current_snapshot.persistent_vfx,light_tick);
-                std::erase_if(vfx_session.decal_events,[&](const VfxEventInput &input) {
-                    if (input.geometry_owner_id != 0) return light_tick >= input.geometry_end_tick;
-                    const auto &effect = vfx_catalog.Program().effects[input.effect_handle-1];
-                    return effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
-                        (light_tick >= input.event_tick && static_cast<double>(light_tick-input.event_tick)/60.0 >= effect.seconds);
-                });
+                    vfx_catalog.Program(),vfx_session.decoded.distortion_events,typed_vfx.persistent,light_tick);
+                runtime_detail::RefreshVfxGroundEventOwners(vfx_session.decoded.decal_events,current_snapshot.persistent_vfx,light_tick);
+                std::erase_if(vfx_session.decoded.decal_events, owner_event_expired);
                 const auto typed_decals=runtime_detail::BuildVfxTypedDecalCommands(
-                    vfx_catalog.Program(),vfx_session.decal_events,typed_vfx.persistent,light_tick);
+                    vfx_catalog.Program(),vfx_session.decoded.decal_events,typed_vfx.persistent,light_tick);
                 for (const auto &input : typed_vfx.events)
                 {
                     const auto &program = vfx_catalog.Program();
@@ -2125,11 +2116,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     visible_flashes.push_back(visible);
                     return false;
                 });
-                std::erase_if(vfx_session.point_rate_events, [&](const auto &input) {
+                std::erase_if(vfx_session.decoded.point_rate_events, [&](const auto &input) {
                     return ground_tick >= input.event_tick && ground_tick - input.event_tick >= 39;
                 });
                 const auto point_motes = runtime_detail::BuildVfxOwnedMoteCommands(
-                    vfx_catalog.Program(), vfx_session.point_rate_events, ground_tick);
+                    vfx_catalog.Program(), vfx_session.decoded.point_rate_events, ground_tick);
                 visible_flashes.insert(visible_flashes.end(), point_motes.begin(), point_motes.end());
                 const auto owned_motes = runtime_detail::BuildVfxOwnedMoteCommands(
                     vfx_catalog.Program(), active_vfx_ground_events, ground_tick);
