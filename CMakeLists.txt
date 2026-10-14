@@ -2015,6 +2015,15 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_sha256_tests)
     add_test(NAME foundation.sha256 COMMAND hs_sha256_tests)
     if(HS_BUILD_RUNTIME OR HS_BUILD_RENDER_DATA_TESTS)
+        add_executable(hs_vfx_typed_frame_tests
+            Tests/vfx_typed_frame_adapter_tests.cpp
+            Source/Runtime/Private/vfx_typed_frame_adapter.cpp
+            Source/Runtime/Private/vfx_typed_screen_commands.cpp)
+        target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_core hs_game_domain)
+        target_include_directories(hs_vfx_typed_frame_tests PRIVATE
+            Source/Runtime/Private Source/RendererD3D12/Public Source/AssetManifest/Public)
+        hs_configure_target(hs_vfx_typed_frame_tests)
+        add_test(NAME runtime.vfx-typed-frame COMMAND hs_vfx_typed_frame_tests)
         # DirectXMath comes from the Windows SDK; these tests create no device.
         if(WIN32)
             add_executable(hs_persistent_gpu_scene_tests
@@ -2495,11 +2504,6 @@ if(HS_BUILD_TESTS)
         Source/RendererD3D12/Public Source/RendererD3D12/Private)
     hs_configure_target(hs_vfx_persistent_tests)
     add_test(NAME rendering.vfx-persistent-lifetime COMMAND hs_vfx_persistent_tests)
-    add_executable(hs_vfx_typed_frame_tests Tests/vfx_typed_frame_adapter_tests.cpp)
-    target_link_libraries(hs_vfx_typed_frame_tests PRIVATE hs_runtime)
-    target_include_directories(hs_vfx_typed_frame_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
-    hs_configure_target(hs_vfx_typed_frame_tests)
-    add_test(NAME runtime.vfx-typed-frame COMMAND hs_vfx_typed_frame_tests)
     add_executable(hs_vfx_typed_flash_tests Tests/vfx_typed_flash_commands_tests.cpp)
     target_link_libraries(hs_vfx_typed_flash_tests PRIVATE hs_runtime hs_asset_manifest)
     target_include_directories(hs_vfx_typed_flash_tests PRIVATE Source/Runtime/Private Source/RendererD3D12/Public)
