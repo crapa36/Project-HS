@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <tuple>
+#include <utility>
 
 namespace
 {
@@ -37,6 +38,8 @@ int main()
 {
     try
     {
+        static_assert(noexcept(std::declval<hs::runtime_detail::VfxSessionState &>().SwapDecoded(
+            std::declval<hs::runtime_detail::DecodedVfxState &>())));
         using hs::SessionPhase;
         using Clock = hs::FixedStepClock;
         hs::runtime_detail::VfxSessionState state;

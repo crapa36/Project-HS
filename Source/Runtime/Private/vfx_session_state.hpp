@@ -12,8 +12,6 @@
 #include <limits>
 #include <optional>
 #include <unordered_set>
-#include <utility>
-#include <type_traits>
 #include <vector>
 
 namespace hs::runtime_detail
@@ -33,6 +31,25 @@ struct DecodedVfxState
     std::vector<VfxEventInput> entity_surface_events;
     std::vector<VfxEntitySurfaceEventCapture> entity_surface_captures;
     std::vector<VfxEventInput> point_rate_events;
+
+    // Member swaps preserve the original allocation-free publication operation,
+    // including implementations with debug iterator bookkeeping on moves.
+    void Swap(DecodedVfxState &prepared) noexcept
+    {
+        particle_spawns.swap(prepared.particle_spawns);
+        effect_lines.swap(prepared.effect_lines);
+        flashes.swap(prepared.flashes);
+        ground_events.swap(prepared.ground_events);
+        ribbon_events.swap(prepared.ribbon_events);
+        light_events.swap(prepared.light_events);
+        distortion_events.swap(prepared.distortion_events);
+        decal_events.swap(prepared.decal_events);
+        volume_events.swap(prepared.volume_events);
+        screen_events.swap(prepared.screen_events);
+        entity_surface_events.swap(prepared.entity_surface_events);
+        entity_surface_captures.swap(prepared.entity_surface_captures);
+        point_rate_events.swap(prepared.point_rate_events);
+    }
 
     void Clear() noexcept
     {
@@ -97,9 +114,7 @@ struct VfxSessionState
     // preserve the session clock, pending events and burst tombstones.
     void SwapDecoded(DecodedVfxState &prepared) noexcept
     {
-        static_assert(std::is_nothrow_swappable_v<DecodedVfxState>);
-        using std::swap;
-        swap(decoded, prepared);
+        decoded.Swap(prepared);
     }
 
     // Terminal simulation stops advancing after the final boss transition.
