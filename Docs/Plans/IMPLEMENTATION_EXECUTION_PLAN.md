@@ -343,7 +343,7 @@ Retained verification also includes composed source-scoped D/E/G receipts (12 ch
 
 Next checkpoint: retain the completed CLI source fix, corrected incremental Debug build and display-output source repair; latest PID59344 HWND/log validation remains pending and final-options GPU CTest was not rerun. The 592-path backup dry-run passes, but the remote name is absent. Then perform one whole-592-path backup commit on branch `codex/engine-v7-backup-20261008`, push it, and restore `main` to its original HEAD, index and working-tree bytes. Use pending `Build/tooling/backup-and-restore-main.receipt.json` as outcome authority; original main ref prefix is `5ee6bf8`, and commit/push/restoration are unclaimed until that receipt exists. Package/performance runs are not claimed. HLOD equivalence is closed with 0 changed digest/size across1245 products and a measured2.71x action speedup; no engine-wide old/new speedup percentage is available. Whole-plan completion remains pending.
 
-## Backup-branch correctness follow-up (2026-10-13)
+## Backup-branch correctness and structural follow-up (2026-10-14)
 
 Current user direction: work on `codex/engine-v7-backup-20261009`, including
 Linux setup when needed. This supersedes the historical main/staged-tree
@@ -370,11 +370,20 @@ Execution owner: main agent. This section tracks the attached
   remains open.
 - C04: bounded diagnostics and explicit streamed capture implemented/tested;
   native disk/close integration remains open.
-- 2026-10-14 resumed: S01 shared scene rules and bit-preserving visibility encoding
-  implemented; focused CPU scene/architecture checks passed. Full gates in progress.
-- S02/C05 investigation continues independently of unavailable hardware. Remaining
-  S/P/D work is pending; existing full-FHD DeviceHung remains unresolved.
-- Retained evidence and next steps: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
+- S01: shared scene rules and bit-preserving visibility encoding implemented.
+  Producer/submission history independence, all16 revision masks and reset/abort pass.
+- S02: decoded retention/terminal clock grouping and identical owner-expiry predicate
+  implemented. New session-state and existing typed-frame CPU regressions pass.
+- Linux: compiler-header basename collision and linker-command identification repaired.
+  Full portable32, then33 with existing VFX frame coverage, passed locally.
+- C05: source-policy audit found conflicting boundaries (HLOD reflection support versus
+  positive-only static capture and clamped raster normals). No blanket scale rejection.
+- Final source505272f CI38577118658 passes all3 jobs: Linux core18/portable33,
+  Windows core/portable35, production Runtime/Renderer compile and explicit WARP.
+  S01/S02 source completion is not reload-to-Render/GPU acceptance.
+  Remaining S03+/P/D work is pending; existing full-FHD DeviceHung remains unresolved.
+- Current evidence: `Docs/Verification/20261014-backup-structure/REPORT.md`.
+  Prior correctness evidence: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
   ASan/UBSan+LSan attempt failed on inaccessible /proc; no sanitizer PASS claim.
 
 Evidence directory (ignored build output):

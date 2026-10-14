@@ -1,0 +1,98 @@
+{
+  "source_commit": "505272f5254390687f5462bb6a686f02127bcae4",
+  "base": "1ba82b71e004cee1af0ca894f254c8e4710c46ec",
+  "files": [
+    {
+      "path": ".github/workflows/foundation.yml",
+      "sha256": "0d5eee2d3f7951e193f54a3cb20e27149e7e2fa37225fc8e62beb39adfe42efc"
+    },
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "b403e6e25ca82ca41f21f992b1a2dcfc0597006e14586af62dcf390fb41612de"
+    },
+    {
+      "path": "CMakePresets.json",
+      "sha256": "37b181a065caf4b415014820b10e7a350716f429b730b5dff631f87c444c51e7"
+    },
+    {
+      "path": "Source/Core/Private/render_snapshot.cpp",
+      "sha256": "4b507339574f4858795541aed570caeaa6ff0ff22da5ef216db9801eea5ff751"
+    },
+    {
+      "path": "Source/Core/Public/hs/core/render_snapshot.hpp",
+      "sha256": "ed57a2f8c340d594ff5a3ee378c63e27fa6d64418bab916102505fb70d0fc329"
+    },
+    {
+      "path": "Source/Presentation/Private/snapshot_projector.cpp",
+      "sha256": "a4bbb337d073f8d2266d45a2fb6184849fafb527324bde114876d77caaede35e"
+    },
+    {
+      "path": "Source/Presentation/Public/hs/presentation/projector.hpp",
+      "sha256": "1e96a85667a390ca84e62c98bb53c364b98b1a9df976c212bab55d34a0e259c7"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/persistent_gpu_scene.cpp",
+      "sha256": "4838dafdfbdeec19b0998955959d48f17ca054a044149693b5d433c18f1c8492"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/persistent_gpu_scene.hpp",
+      "sha256": "ae0dbfa77ed508bd78cf2f01329eab2d78fcdd5e800a24fe01b071b845e321b4"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/render_scene_extractor.cpp",
+      "sha256": "b63981ecb23ce1bcd1abec538906e303a8caf3ab99552b05c14809c4cc590e5a"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/render_scene_extractor.hpp",
+      "sha256": "2de5ebd3a98a99f5e68b4fed7070f5c6b3e4d30b51f8b9c00ec4f259c4ebab1c"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/renderer_frame.cpp",
+      "sha256": "595efee964126595fd2f1c1a9dbccc7840f839708545bd8bc6b7549997c6ffa6"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/skin_cache.cpp",
+      "sha256": "c3bb1c044f617ec63cdd398380f69f23e0b33f8cc32c34714199277a6e64a594"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/skin_cache.hpp",
+      "sha256": "caac537bad29ec213d65e784e402634555e54cfc8d36d077b8e5a21f3482d0a9"
+    },
+    {
+      "path": "Source/RendererD3D12/Private/visibility_encoding.hpp",
+      "sha256": "d985bde0d33d33b56108bb523c78525aa1d74150a90a42b0b700a166679886f0"
+    },
+    {
+      "path": "Source/Runtime/Private/application.cpp",
+      "sha256": "22ec9b8a258bcf880cfc8f07f2c8b12c31694623178dbbcb0746a864d9885f3e"
+    },
+    {
+      "path": "Source/Runtime/Private/vfx_session_state.hpp",
+      "sha256": "6b88e5bf2c60eb4b05958fb5b109905f07b572fffdaa4fc97e2243066c194280"
+    },
+    {
+      "path": "Tests/check_asset_pipeline_portable.py",
+      "sha256": "d225e4d953fca83c7fb7251039d91078249c0d9afd16f9a98a099ff9f91b51b4"
+    },
+    {
+      "path": "Tests/render_scene_extractor_tests.cpp",
+      "sha256": "1307248200b998635e44ae5134bcc72badaba64051eb9bda7bb979588c328ef1"
+    },
+    {
+      "path": "Tests/runtime_tests.cpp",
+      "sha256": "2821e414362475e8ade992906e18fb93b932742e91bcc4fb0ca8271a9707a3fa"
+    },
+    {
+      "path": "Tests/vfx_session_state_tests.cpp",
+      "sha256": "17a1fcb5181a5b4bd72bd562f54c172b22c9396a06a0181b2f77ba6ffb31f20b"
+    },
+    {
+      "path": "cmake/AssetRecipeIdentity.cmake",
+      "sha256": "9f4d8f3c0eff5aa9bdfdc9150f39afd8f49baf5b5a24a5613e199ec4697fa59a"
+    },
+    {
+      "path": "cmake/AssetRecipeIdentityBuild.cmake",
+      "sha256": "c7f88d85c706aca605f3d9bbb6ecc11014f21dc56b2a93d66b2136b57a5aa1c2"
+    }
+  ]
+}

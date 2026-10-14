@@ -185,14 +185,30 @@ The compiled helper readback harness replays CPU oracle inputs and has separate
 hardware and explicit WARP tests, both requiring debug layer and GBV. CI WARP
 passed with Debug layer and GBV; hardware scenes/DRS/cluster and full native verify remain open.
 LSan cannot read /proc here; the sanitizer attempt failed, not passed.
-S01 now shares pure scene keys/hash/revision comparison without sharing owner histories.
-The occlusion radius encoder preserves the previous shader ABI exactly.
-CPU scene-delta regressions now run in the low-level build; focused Linux scene/architecture
-checks passed. Full Linux and native CI verification is in progress.
-Continue independent S02/C05 investigation while native hardware gates remain unavailable.
-Hardware availability is not a dependency for every structural item. No whole-plan claim.
-Exact contracts, limits, source hashes and retained logs:
-`Docs/Verification/20261013-backup-correctness/REPORT.md`.
+S01 shares pure scene keys/hash/revision comparison while preserving distinct publication
+and successful-submission histories. Named occlusion encoding preserves shader bits.
+S02 groups decoded retention and uses one optional terminal clock; catalog publication
+cannot reset semantic session state. Existing typed-frame tests now run portably.
+Linux portable checks pass33/33, including scene-delta, VFX session/typed-frame,
+architecture, deterministic simulation and real asset publication. Linux recipe identity
+now preserves compiler include subdirectories and records the actual executable link.
+Final source505272f CI38577118658 passes all3 jobs: Linux core18/portable33,
+Windows core and portable35, production Runtime/Renderer compile and explicit WARP
+with Debug layer/GBV. These results do not qualify unexecuted hardware scenes.
+C05 remains unresolved: HLOD baking explicitly supports reflections and rejects zero
+scale, while raster normals clamp signed scales and ray inverse divides directly;
+static capture requires positive scale. Read-only audit of390 FBX files found8729
+Model records/536 explicit scale properties with no nonfinite or <=0.0001 component;
+animation/composed transforms and five Blend files remain unevaluated. Do not impose a
+blanket rejection or claim mirror support without reconciling those boundaries.
+Next S03/S04 work requires the real frame-call graph and submission-failure invariants;
+retain existing successful-view history and once-per-package event consumption. Full
+hardware scene/DRS/cluster, reload-to-Render, native disk/close and full verify remain
+unavailable through the disconnected PC tunnel. S03+ and P/D packages remain pending.
+Do not treat unavailable hardware as a blanket dependency for independent CPU work.
+No performance, visual quality or whole-plan completion claim.
+Current evidence: `Docs/Verification/20261014-backup-structure/REPORT.md`.
+Prior C01-C04 contracts: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
 
 ### Engine and content migration (2026-10-10)
 
