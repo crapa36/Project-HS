@@ -352,7 +352,7 @@ initial index/worktree clean. User PC tunnel is disconnected; no local PC
 worktree was inspected or changed.
 
 Execution owner: main agent. This section tracks the attached
-`Project_HS_종합조사_정밀수정계획.md` first implementation batch;
+`Project_HS_종합조사_정밀수정계획.md` full requested follow-up;
 `DEV_STATE.md` remains the technical resume record.
 
 - B00/G01: original CPU baseline and candidate 16-test Linux integration passed;
@@ -370,7 +370,10 @@ Execution owner: main agent. This section tracks the attached
   remains open.
 - C04: bounded diagnostics and explicit streamed capture implemented/tested;
   native disk/close integration remains open.
-- Later C05/S/P/D work remains pending. Existing full-FHD DeviceHung unresolved.
+- 2026-10-14 resumed: S01 shared scene rules and bit-preserving visibility encoding
+  implemented; focused CPU scene/architecture checks passed. Full gates in progress.
+- S02/C05 investigation continues independently of unavailable hardware. Remaining
+  S/P/D work is pending; existing full-FHD DeviceHung remains unresolved.
 - Retained evidence and next steps: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
   ASan/UBSan+LSan attempt failed on inaccessible /proc; no sanitizer PASS claim.
 

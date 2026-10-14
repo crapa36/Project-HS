@@ -167,12 +167,12 @@ review, independently review the separate hair study, then continue layered part
 Do not import a hair candidate without inspecting front/side/back/three-quarter
 renders. Engine/runtime files were not changed by this part-modeling work.
 
-### Backup correctness implementation (2026-10-13)
+### Backup correctness and structural implementation (2026-10-14)
 
 Current authorized engine work is on `codex/engine-v7-backup-20261009`, based on
 `a0d98d477099509fe7eb0db379de537d2cbf8ac9`, in an isolated clean Linux checkout.
 This supersedes the historical main/staged-tree instructions below for this task;
-no user-PC worktree was accessed. The current plan is the 2026-10-13 section of
+no user-PC worktree was accessed. The current plan is the backup-branch follow-up section of
 `Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. First C01/C02A/C02B/C03/C04 source
 batch is implemented. Original jobs failure timeouts reproduced; Linux core16,
 Windows core17 and portable31 passed. MSVC Debug string-proxy OOM termination
@@ -185,7 +185,12 @@ The compiled helper readback harness replays CPU oracle inputs and has separate
 hardware and explicit WARP tests, both requiring debug layer and GBV. CI WARP
 passed with Debug layer and GBV; hardware scenes/DRS/cluster and full native verify remain open.
 LSan cannot read /proc here; the sanitizer attempt failed, not passed.
-Next: hardware/native first-batch gates before structural work. No performance or whole-plan claim.
+S01 now shares pure scene keys/hash/revision comparison without sharing owner histories.
+The occlusion radius encoder preserves the previous shader ABI exactly.
+CPU scene-delta regressions now run in the low-level build; focused Linux scene/architecture
+checks passed. Full Linux and native CI verification is in progress.
+Continue independent S02/C05 investigation while native hardware gates remain unavailable.
+Hardware availability is not a dependency for every structural item. No whole-plan claim.
 Exact contracts, limits, source hashes and retained logs:
 `Docs/Verification/20261013-backup-correctness/REPORT.md`.
 

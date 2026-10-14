@@ -25,15 +25,6 @@ Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtrac
 float LengthSquared(Float2 v) noexcept{return v.x*v.x+v.y*v.y;} Float2 Normalize(Float2 v) noexcept{auto l=std::sqrt(LengthSquared(v));return l>.0001f?Multiply(v,1/l):Float2{0,1};} Float2 Rotate(Float2 v,float r) noexcept{auto c=std::cos(r),s=std::sin(r);return {v.x*c-v.y*s,v.x*s+v.y*c};}
 } // namespace
 
-std::size_t RenderSceneProjectionState::KeyHash::operator()(
-    RenderSceneInstanceKey key) const noexcept
-{
-    auto value = key.stable_id;
-    value ^= static_cast<std::uint64_t>(key.fallback_ordinal) +
-             0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
-    return static_cast<std::size_t>(value ^ (value >> 32u));
-}
-
 bool RenderSceneProjectionState::Build(std::span<const RenderInstance> instances,
                                        std::uint64_t session_id,
                                        RenderSceneDelta &delta)
@@ -55,9 +46,8 @@ bool RenderSceneProjectionState::Build(std::span<const RenderInstance> instances
     {
         auto source = instances[index];
         PopulateRenderInstanceRevisions(source);
-        RenderSceneInstanceKey key{
-            source.stable_id,
-            source.stable_id == 0 ? static_cast<std::uint32_t>(index + 1) : 0u};
+        const auto key = MakeRenderSceneInstanceKey(
+            source.stable_id, static_cast<std::uint32_t>(index));
         if (!pending_.emplace(key, source.revisions).second)
         {
             Abort();
@@ -72,21 +62,13 @@ bool RenderSceneProjectionState::Build(std::span<const RenderInstance> instances
         if (previous == previous_.end())
         {
             item.kind = RenderSceneDeltaKind::Created;
-            item.revision_mask = RenderSceneTransformChanged | RenderScenePoseChanged |
-                                 RenderSceneMaterialChanged | RenderSceneContentChanged;
+            item.revision_mask = kRenderSceneAllRevisions;
             ++delta.created;
         }
         else
         {
-            const auto &before = previous->second;
-            if (before.transform != source.revisions.transform)
-                item.revision_mask |= RenderSceneTransformChanged;
-            if (before.pose != source.revisions.pose)
-                item.revision_mask |= RenderScenePoseChanged;
-            if (before.material != source.revisions.material)
-                item.revision_mask |= RenderSceneMaterialChanged;
-            if (before.content != source.revisions.content)
-                item.revision_mask |= RenderSceneContentChanged;
+            item.revision_mask = CompareRenderInstanceRevisions(
+                previous->second, source.revisions);
             item.kind = item.revision_mask == 0 ? RenderSceneDeltaKind::Unchanged
                                                 : RenderSceneDeltaKind::Updated;
             if (item.kind == RenderSceneDeltaKind::Updated) ++delta.updated;

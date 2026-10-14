@@ -1952,6 +1952,15 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_tests)
 
     add_test(NAME foundation.core COMMAND hs_tests foundation)
+    add_executable(hs_render_scene_extractor_tests
+        Tests/render_scene_extractor_tests.cpp
+        Source/RendererD3D12/Private/render_scene_extractor.cpp)
+    target_link_libraries(hs_render_scene_extractor_tests PRIVATE hs_core hs_presentation)
+    target_include_directories(hs_render_scene_extractor_tests PRIVATE
+        Source/RendererD3D12/Private)
+    hs_configure_target(hs_render_scene_extractor_tests)
+    add_test(NAME rendering.scene-delta
+        COMMAND hs_render_scene_extractor_tests)
     add_executable(hs_hzb_region_tests Tests/hzb_region_tests.cpp)
     hs_configure_target(hs_hzb_region_tests)
     add_test(NAME rendering.hzb-region-cpu COMMAND hs_hzb_region_tests)
@@ -2000,6 +2009,18 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_sha256_tests)
     add_test(NAME foundation.sha256 COMMAND hs_sha256_tests)
     if(HS_BUILD_RUNTIME OR HS_BUILD_RENDER_DATA_TESTS)
+        # DirectXMath comes from the Windows SDK; these tests create no device.
+        if(WIN32)
+            add_executable(hs_persistent_gpu_scene_tests
+                Tests/persistent_gpu_scene_tests.cpp
+                Source/RendererD3D12/Private/persistent_gpu_scene.cpp)
+            target_link_libraries(hs_persistent_gpu_scene_tests PRIVATE hs_core)
+            target_include_directories(hs_persistent_gpu_scene_tests PRIVATE
+                Source/RendererD3D12/Private)
+            hs_configure_target(hs_persistent_gpu_scene_tests)
+            add_test(NAME rendering.persistent-gpu-scene
+                COMMAND hs_persistent_gpu_scene_tests)
+        endif()
         add_executable(hs_render_feature_tests
             Tests/render_feature_tests.cpp
             Source/RendererD3D12/Private/render_features.cpp)
@@ -2520,22 +2541,6 @@ if(HS_BUILD_TESTS)
     add_test(NAME rendering.transient-graph COMMAND hs_render_graph_tests)
     set_tests_properties(rendering.transient-graph PROPERTIES TIMEOUT 45
         RESOURCE_LOCK projecths_d3d12)
-    add_executable(hs_persistent_gpu_scene_tests
-        Tests/persistent_gpu_scene_tests.cpp)
-    target_link_libraries(hs_persistent_gpu_scene_tests PRIVATE hs_renderer_d3d12)
-    target_include_directories(hs_persistent_gpu_scene_tests PRIVATE
-        Source/RendererD3D12/Private)
-    hs_configure_target(hs_persistent_gpu_scene_tests)
-    add_test(NAME rendering.persistent-gpu-scene
-        COMMAND hs_persistent_gpu_scene_tests)
-    add_executable(hs_render_scene_extractor_tests
-        Tests/render_scene_extractor_tests.cpp)
-    target_link_libraries(hs_render_scene_extractor_tests PRIVATE hs_renderer_d3d12)
-    target_include_directories(hs_render_scene_extractor_tests PRIVATE
-        Source/RendererD3D12/Private)
-    hs_configure_target(hs_render_scene_extractor_tests)
-    add_test(NAME rendering.scene-delta
-        COMMAND hs_render_scene_extractor_tests)
     add_executable(hs_skin_cache_tests Tests/skin_cache_tests.cpp)
     target_link_libraries(hs_skin_cache_tests PRIVATE hs_renderer_d3d12)
     target_include_directories(hs_skin_cache_tests PRIVATE

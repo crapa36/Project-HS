@@ -42,10 +42,7 @@ class SkinCache
     }
 
   private:
-    struct KeyHash
-    {
-        [[nodiscard]] std::size_t operator()(RenderSceneInstanceKey key) const noexcept;
-    };
+    using KeyHash = RenderSceneInstanceKeyHash;
     struct Entry
     {
         std::uint64_t pose_revision{};

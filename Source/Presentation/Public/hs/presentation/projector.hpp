@@ -127,10 +127,7 @@ class RenderSceneProjectionState
     void Clear() noexcept;
 
   private:
-    struct KeyHash
-    {
-        [[nodiscard]] std::size_t operator()(RenderSceneInstanceKey key) const noexcept;
-    };
+    using KeyHash = RenderSceneInstanceKeyHash;
 
     std::unordered_map<RenderSceneInstanceKey, RenderInstance::Revisions, KeyHash> previous_;
     std::unordered_map<RenderSceneInstanceKey, RenderInstance::Revisions, KeyHash> pending_;

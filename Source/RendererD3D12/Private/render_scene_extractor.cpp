@@ -6,14 +6,6 @@
 namespace hs
 {
 
-std::size_t RenderSceneExtractor::KeyHash::operator()(RenderSceneInstanceKey key) const noexcept
-{
-    auto value = key.stable_id;
-    value ^= static_cast<std::uint64_t>(key.fallback_ordinal) +
-             0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
-    return static_cast<std::size_t>(value ^ (value >> 32u));
-}
-
 bool RenderSceneExtractor::Build(std::span<const RenderInstance> instances,
                                  RenderSceneDelta &delta, bool reset_history)
 {
@@ -27,9 +19,8 @@ bool RenderSceneExtractor::Build(std::span<const RenderInstance> instances,
     {
         auto source = instances[index];
         PopulateRenderInstanceRevisions(source);
-        RenderSceneInstanceKey key{
-            source.stable_id,
-            source.stable_id == 0 ? static_cast<std::uint32_t>(index + 1) : 0u};
+        const auto key = MakeRenderSceneInstanceKey(
+            source.stable_id, static_cast<std::uint32_t>(index));
         if (key.fallback_ordinal == 0 && key.stable_id == 0) return false;
         if (!pending_.emplace(key, source.revisions).second) return false;
 
@@ -41,21 +32,13 @@ bool RenderSceneExtractor::Build(std::span<const RenderInstance> instances,
         if (previous == previous_.end())
         {
             item.kind = RenderSceneDeltaKind::Created;
-            item.revision_mask = RenderSceneTransformChanged | RenderScenePoseChanged |
-                                 RenderSceneMaterialChanged | RenderSceneContentChanged;
+            item.revision_mask = kRenderSceneAllRevisions;
             ++delta.created;
         }
         else
         {
-            const auto &before = previous->second;
-            if (before.transform != source.revisions.transform)
-                item.revision_mask |= RenderSceneTransformChanged;
-            if (before.pose != source.revisions.pose)
-                item.revision_mask |= RenderScenePoseChanged;
-            if (before.material != source.revisions.material)
-                item.revision_mask |= RenderSceneMaterialChanged;
-            if (before.content != source.revisions.content)
-                item.revision_mask |= RenderSceneContentChanged;
+            item.revision_mask = CompareRenderInstanceRevisions(
+                previous->second, source.revisions);
             item.kind = item.revision_mask == 0 ? RenderSceneDeltaKind::Unchanged
                                                 : RenderSceneDeltaKind::Updated;
             if (item.kind == RenderSceneDeltaKind::Updated) ++delta.updated;
@@ -85,9 +68,8 @@ bool RenderSceneExtractor::Adopt(std::span<const RenderInstance> instances,
     {
         auto source = instances[index];
         PopulateRenderInstanceRevisions(source);
-        RenderSceneInstanceKey key{
-            source.stable_id,
-            source.stable_id == 0 ? static_cast<std::uint32_t>(index + 1) : 0u};
+        const auto key = MakeRenderSceneInstanceKey(
+            source.stable_id, static_cast<std::uint32_t>(index));
         if (key.fallback_ordinal == 0 && key.stable_id == 0) return false;
         if (!pending_.emplace(key, source.revisions).second) return false;
     }

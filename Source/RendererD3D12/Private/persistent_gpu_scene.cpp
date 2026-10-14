@@ -87,14 +87,6 @@ GpuSceneSerializedSlot SerializeGpuSceneSlot(std::uint32_t slot,
     return result;
 }
 
-std::size_t PersistentGpuSceneSlots::KeyHash::operator()(PersistentGpuSceneKey key) const noexcept
-{
-    auto value = key.stable_id;
-    value ^= static_cast<std::uint64_t>(key.fallback_ordinal) +
-             0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
-    return static_cast<std::size_t>(value ^ (value >> 32u));
-}
-
 void PersistentGpuSceneSlots::BeginFrame(bool reset_scene)
 {
     Abort();

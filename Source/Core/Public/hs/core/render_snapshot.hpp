@@ -210,6 +210,19 @@ struct RenderSceneInstanceKey
     [[nodiscard]] bool operator==(const RenderSceneInstanceKey &) const noexcept = default;
 };
 
+// Anonymous identities retain their original source order, even when draw order
+// changes. Callers validate the instance count before converting the index.
+[[nodiscard]] constexpr RenderSceneInstanceKey MakeRenderSceneInstanceKey(
+    std::uint64_t stable_id, std::uint32_t source_index) noexcept
+{
+    return {stable_id, stable_id == 0 ? source_index + 1u : 0u};
+}
+
+struct RenderSceneInstanceKeyHash
+{
+    [[nodiscard]] std::size_t operator()(RenderSceneInstanceKey key) const noexcept;
+};
+
 enum class RenderSceneDeltaKind : std::uint8_t
 {
     Unchanged,
@@ -224,6 +237,20 @@ enum RenderSceneRevisionMask : std::uint8_t
     RenderSceneMaterialChanged = 1u << 2,
     RenderSceneContentChanged = 1u << 3,
 };
+
+inline constexpr std::uint8_t kRenderSceneAllRevisions =
+    RenderSceneTransformChanged | RenderScenePoseChanged |
+    RenderSceneMaterialChanged | RenderSceneContentChanged;
+
+[[nodiscard]] constexpr std::uint8_t CompareRenderInstanceRevisions(
+    const RenderInstance::Revisions &before,
+    const RenderInstance::Revisions &after) noexcept
+{
+    return (before.transform != after.transform ? RenderSceneTransformChanged : 0) |
+           (before.pose != after.pose ? RenderScenePoseChanged : 0) |
+           (before.material != after.material ? RenderSceneMaterialChanged : 0) |
+           (before.content != after.content ? RenderSceneContentChanged : 0);
+}
 
 struct RenderSceneDeltaItem
 {

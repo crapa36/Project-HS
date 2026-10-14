@@ -1,5 +1,9 @@
 #include "render_scene_extractor.hpp"
+#include "visibility_encoding.hpp"
+#include <hs/presentation/projector.hpp>
 
+#include <bit>
+#include <limits>
 #include <cstdio>
 #include <stdexcept>
 #include <vector>
@@ -20,12 +24,94 @@ hs::RenderInstance Instance(std::uint64_t id, float x)
     hs::PopulateRenderInstanceRevisions(instance);
     return instance;
 }
+
+void CheckSharedSceneRules()
+{
+    hs::RenderSceneProjectionState producer;
+    hs::RenderSceneExtractor consumer;
+    hs::RenderSceneDelta published, submitted;
+    std::vector<hs::RenderInstance> instances{Instance(0, 1), Instance(42, 2)};
+    const auto compare = [&] {
+        Check(published.created == submitted.created &&
+                  published.updated == submitted.updated &&
+                  published.unchanged == submitted.unchanged &&
+                  published.destroyed == submitted.destroyed &&
+                  published.instances.size() == submitted.instances.size(),
+              "producer and consumer scene counts/retirements must agree");
+        for (std::size_t i = 0; i < published.instances.size(); ++i)
+        {
+            const auto &a = published.instances[i], &b = submitted.instances[i];
+            Check(a.key == b.key && a.source_index == b.source_index &&
+                      a.revisions == b.revisions && a.kind == b.kind &&
+                      a.revision_mask == b.revision_mask,
+                  "producer and consumer deltas must agree");
+        }
+    };
+    Check(producer.Build(instances, 7, published) && consumer.Build(instances, submitted),
+          "initial shared scene rules");
+    compare();
+    Check(published.instances[0].key == hs::RenderSceneInstanceKey{0, 1} &&
+              published.instances[1].key == hs::RenderSceneInstanceKey{42, 0} &&
+              published.instances[0].revision_mask == 15,
+          "legacy identity and create-mask encoding");
+    producer.Commit(); consumer.Commit();
+    for (unsigned mask = 0; mask < 16; ++mask)
+    {
+        auto &r = instances[1].revisions;
+        if (mask & 1) ++r.transform;
+        if (mask & 2) ++r.pose;
+        if (mask & 4) ++r.material;
+        if (mask & 8) ++r.content;
+        Check(producer.Build(instances, 7, published) && consumer.Build(instances, submitted),
+              "all combinations of revision changes");
+        compare();
+        Check(published.instances[1].revision_mask == mask,
+              "revision bits retain their original ABI");
+        producer.Commit(); consumer.Commit();
+    }
+    // Publication can advance while submission fails. Each owner retains its
+    // own committed history and the next renderer fallback catches both edits.
+    ++instances[1].revisions.transform;
+    Check(producer.Build(instances, 7, published) && consumer.Build(instances, submitted),
+          "prepare skipped submission");
+    producer.Commit(); consumer.Abort();
+    ++instances[1].revisions.material;
+    Check(producer.Build(instances, 7, published) && consumer.Build(instances, submitted),
+          "recover skipped submission");
+    Check(published.instances[1].revision_mask == 4 &&
+              submitted.instances[1].revision_mask == 5,
+          "publication and successful-submission histories remain independent");
+    producer.Commit(); consumer.Commit();
+    Check(producer.Build(instances, 8, published) && consumer.Build(instances, submitted, true),
+          "reset session");
+    compare();
+    Check(published.base_generation == 0 && published.generation == 1,
+          "session restart resets producer generation");
+    producer.Abort(); consumer.Abort();
+    Check(producer.Build(instances, 7, published) && consumer.Build(instances, submitted),
+          "abort reset retains both histories");
+    compare();
+    Check(published.unchanged == 2, "aborted reset must not become a create");
+    Check(hs::MakeRenderSceneInstanceKey(0, std::numeric_limits<std::uint32_t>::max() - 1)
+              .fallback_ordinal == std::numeric_limits<std::uint32_t>::max(),
+          "largest valid anonymous source ordinal");
+
+    for (float radius : {0.0f, 0.035f, 1.0f, 128.5f})
+    {
+        Check(std::bit_cast<std::uint32_t>(hs::EncodeGrassDeformationRadius(
+                  radius, hs::OcclusionMode::Enabled)) == std::bit_cast<std::uint32_t>(radius) &&
+                  std::bit_cast<std::uint32_t>(hs::EncodeGrassDeformationRadius(
+                  radius, hs::OcclusionMode::Disabled)) == std::bit_cast<std::uint32_t>(-radius),
+              "occlusion root constant preserves legacy bits including signed zero");
+    }
+}
 } // namespace
 
 int main()
 {
     try
     {
+        CheckSharedSceneRules();
         hs::RenderSceneExtractor extractor;
         hs::RenderSceneDelta delta;
         std::vector<hs::RenderInstance> instances{Instance(11, 1.0f), Instance(22, 2.0f)};

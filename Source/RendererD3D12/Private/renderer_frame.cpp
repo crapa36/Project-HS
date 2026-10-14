@@ -1,6 +1,7 @@
 #include "renderer_impl.hpp"
 #include "renderer_quality.hpp"
 #include "renderer_instance_order.hpp"
+#include "visibility_encoding.hpp"
 #include "renderer_caster_storage.hpp"
 #include "vfx_ribbon_resources.hpp"
 #include <DirectXPackedVector.h>
@@ -717,7 +718,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 const auto environment = is_environment_mesh(source.mesh);
                 const float vertical_offset = environment ? 0.0f : source.scale.y * 0.5f;
                 const auto mesh = static_cast<std::uint32_t>(source.mesh) |
-                    (environment ? 0x10000u : 0u);
+                    (environment ? kEnvironmentMeshFlag : 0u);
                 const auto seed = source.mesh == RenderMesh::Ground ||
                                   source.mesh == RenderMesh::DirtPatch
                     ? std::bit_cast<float>(source.environment_seed) : 0.0f;
@@ -3709,7 +3710,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                              : source.scale.y * 0.5f;
         auto mesh = static_cast<std::uint32_t>(source.mesh);
         if (is_environment_mesh(source.mesh))
-            mesh |= 0x10000u;
+            mesh |= kEnvironmentMeshFlag;
         float animation_time = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch
             ? std::bit_cast<float>(source.environment_seed) : 0.0f;
         AnimationPoseRef resolved_skin_pose;
@@ -3742,9 +3743,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         else if (source.mesh == RenderMesh::Archer || is_monster(source.mesh))
         {
-            const RenderSceneInstanceKey key{
-                source.stable_id,
-                source.stable_id == 0 ? ordered_source_indices[index] + 1 : 0u};
+            const auto key = MakeRenderSceneInstanceKey(
+                source.stable_id, ordered_source_indices[index]);
             const auto skin = impl_->skin_cache.Resolve(
                 key, source, skin_pose,
                 source.mesh == RenderMesh::Archer ? 1.75f : 1.5f);
@@ -5215,9 +5215,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         list->SetComputeRootUnorderedAccessView(21, frame.geometry_draw_records.resource->GetGPUVirtualAddress());
         const std::array<UINT, 2> visibility_constants{
             static_cast<UINT>(visible_ref_stride),
-            std::bit_cast<UINT>(impl_->hzb_history_valid
-                                    ? grass_visibility_radius
-                                    : -grass_visibility_radius)};
+            std::bit_cast<UINT>(EncodeGrassDeformationRadius(
+                grass_visibility_radius, impl_->hzb_history_valid
+                    ? OcclusionMode::Enabled : OcclusionMode::Disabled))};
         list->SetComputeRoot32BitConstants(
             6, static_cast<UINT>(visibility_constants.size()), visibility_constants.data(), 0);
         list->SetComputeRootShaderResourceView(
@@ -5248,7 +5248,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             list->SetComputeRootUnorderedAccessView(22, dynamic_lod_state.states.resource->GetGPUVirtualAddress());
             const std::array<UINT, 2> dynamic_constants{
                 static_cast<UINT>(dynamic_visible_ref_stride),
-                std::bit_cast<UINT>(-grass_visibility_radius)};
+                std::bit_cast<UINT>(EncodeGrassDeformationRadius(
+                    grass_visibility_radius, OcclusionMode::Disabled))};
             list->SetComputeRoot32BitConstants(
                 6, static_cast<UINT>(dynamic_constants.size()),
                 dynamic_constants.data(), 0);
@@ -5525,7 +5526,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         list->SetComputeRootUnorderedAccessView(21, frame.geometry_draw_records.resource->GetGPUVirtualAddress());
         const std::array<UINT, 2> visibility_constants{
             static_cast<UINT>(visible_ref_stride),
-            std::bit_cast<UINT>(grass_visibility_radius)};
+            std::bit_cast<UINT>(EncodeGrassDeformationRadius(
+                grass_visibility_radius, OcclusionMode::Enabled))};
         list->SetComputeRoot32BitConstants(
             6, static_cast<UINT>(visibility_constants.size()),
             visibility_constants.data(), 0);
@@ -6622,7 +6624,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 const bool environment = is_environment_mesh(source.mesh);
                 const GpuInstance draw{{source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0},
                     {source.scale.x, source.scale.y, source.scale.z, 1}, source.color_rgba,
-                    static_cast<std::uint32_t>(source.mesh) | (environment ? 0x10000u : 0u), source.yaw,
+                    static_cast<std::uint32_t>(source.mesh) | (environment ? kEnvironmentMeshFlag : 0u), source.yaw,
                     environment ? 0.0f : std::bit_cast<float>(source.environment_seed)};
                 if (auto appended = append_ray(source, draw, 0x80000000u | static_cast<std::uint32_t>(index),
                         impl_->static_gpu_scene->instance_generation, UINT32_MAX); !appended) return appended;

@@ -211,10 +211,7 @@ class PersistentGpuSceneSlots
     void Clear() noexcept;
 
   private:
-    struct KeyHash
-    {
-        [[nodiscard]] std::size_t operator()(PersistentGpuSceneKey key) const noexcept;
-    };
+    using KeyHash = RenderSceneInstanceKeyHash;
     struct Entry
     {
         PersistentGpuSceneKey key{};

@@ -114,6 +114,7 @@
         "hs_simulation_rules_serialization_tests",
         "hs_task_system_failure_tests",
         "hs_hzb_region_tests",
+        "hs_render_scene_extractor_tests",
         "hs_ui_command_admission_tests",
         "hs_runtime_diagnostics_tests",
         "hs_project_hs_arguments_tests"
@@ -161,7 +162,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|rendering\\.hzb-region-cpu$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
+          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|rendering\\.(hzb-region-cpu|scene-delta)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {

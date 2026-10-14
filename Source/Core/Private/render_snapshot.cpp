@@ -6,6 +6,16 @@
 
 namespace hs
 {
+
+std::size_t RenderSceneInstanceKeyHash::operator()(
+    RenderSceneInstanceKey key) const noexcept
+{
+    auto value = key.stable_id;
+    value ^= static_cast<std::uint64_t>(key.fallback_ordinal) +
+             0x9e3779b97f4a7c15ull + (value << 6u) + (value >> 2u);
+    return static_cast<std::size_t>(value ^ (value >> 32u));
+}
+
 namespace
 {
 constexpr std::uint64_t kFnvOffset = 14695981039346656037ull;
