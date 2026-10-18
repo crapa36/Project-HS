@@ -379,7 +379,16 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         return snapshot.AddInstance(instance);
     };
     const auto add_visual = [&](PersistentVfxVisual visual) {
-        visual.position = grounded(visual.position);
+        const bool body_trail = visual.projectile_owner_id != 0 &&
+            visual.projectile_hitbox_radius > 0.0f &&
+            (visual.kind == PersistentVfxKind::ProjectileTrail ||
+             visual.kind == PersistentVfxKind::RicochetProjectileTrail ||
+             visual.kind == PersistentVfxKind::ProjectileTrailOuter);
+        // The short segment is behind the body, but shares its center height.
+        // Sampling terrain at that offset would detach it on banks and slopes.
+        auto anchor = body_trail ? visual.projectile_current_position : visual.position;
+        anchor.y = visual.position.y;
+        visual.position.y = grounded(anchor).y;
         if (visual.projectile_hitbox_radius > 0.0f) {
             visual.projectile_current_position = grounded(visual.projectile_current_position);
             visual.projectile_previous_position = grounded(visual.projectile_previous_position);

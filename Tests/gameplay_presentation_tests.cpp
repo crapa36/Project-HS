@@ -443,6 +443,13 @@ void TestCharacterInformationPage()
           "next page exposes the remaining four upgrades");
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
     Check(test_ui.character_details_page == 1, "last upgrade page cannot advance");
+    SetCursor(held, 1330, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "previous returns to the first upgrade page");
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "first upgrade page cannot go back");
+    SetCursor(held, 1530, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
     SetCursor(held, 700, 165);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
     Check(test_ui.character_details_page == 0, "switching a character tab resets its detail page");

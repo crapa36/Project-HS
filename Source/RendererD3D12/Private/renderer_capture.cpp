@@ -2256,7 +2256,9 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     return invalid(std::format(
                         "Classified hero pixel {} has invalid opaque hero ordinal {}.",
                         pixel, binding->hero_ordinal));
-                if (variant != 16u + binding->hero_ordinal)
+                // Match HsHeroVisibilityVariantBegin in the producer contract:
+                // variant zero is the builtin path, followed by authored materials.
+                if (variant != 1u + kAuthoredMaterialNames.size() + binding->hero_ordinal)
                     return invalid(std::format(
                         "Classified hero pixel {} variant {} mismatches opaque ordinal {}.",
                         pixel, variant, binding->hero_ordinal));

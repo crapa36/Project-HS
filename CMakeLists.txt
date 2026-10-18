@@ -1935,6 +1935,12 @@ if(HS_BUILD_TESTS)
     add_executable(hs_runtime_diagnostics_tests Tests/runtime_diagnostics_tests.cpp)
     hs_configure_target(hs_runtime_diagnostics_tests)
     add_test(NAME runtime.diagnostics-bounds COMMAND hs_runtime_diagnostics_tests)
+    # Preserve the independent diagnostics writer's regression without reviving
+    # the obsolete renderer timing API or adding runtime/SDK dependencies.
+    add_executable(hs_performance_log_tests Tests/performance_log_tests.cpp)
+    hs_configure_target(hs_performance_log_tests)
+    add_test(NAME runtime.performance-log COMMAND hs_performance_log_tests
+        "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/performance-log-unit")
     add_executable(hs_project_hs_arguments_tests
         Tests/project_hs_arguments_tests.cpp
         Source/Apps/ProjectHS/command_line.cpp)

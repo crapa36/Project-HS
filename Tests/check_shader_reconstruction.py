@@ -451,6 +451,9 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn("return variant < HsHeroVisibilityVariantBegin;", classify)
         self.assertIn("variant = HsHeroVisibilityVariantBegin + ordinal;", classify)
         self.assertNotRegex(classify, r"\b17u\b")
+        capture = (root / "Source/RendererD3D12/Private/renderer_capture.cpp").read_text()
+        self.assertIn("variant != 1u + kAuthoredMaterialNames.size() + binding->hero_ordinal", capture)
+        self.assertNotRegex(capture, r"variant\s*!=\s*\d+u\s*\+\s*binding->hero_ordinal")
         feedback = (SHADERS / "texture_streaming.hlsli").read_text()
         self.assertIn("HsTextureFeedback[HS_RENDER_AUTHORED_MATERIAL_COUNT * HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT]", feedback)
 

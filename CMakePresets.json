@@ -118,6 +118,7 @@
         "hs_ui_command_admission_tests",
         "hs_vfx_session_state_tests",
         "hs_runtime_diagnostics_tests",
+        "hs_performance_log_tests",
         "hs_project_hs_arguments_tests"
       ]
     },
@@ -163,7 +164,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|rendering\\.(hzb-region-cpu|scene-delta)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
+          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|rendering\\.(hzb-region-cpu|scene-delta)$|runtime\\.(ui-command-admission|diagnostics-bounds|performance-log|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {

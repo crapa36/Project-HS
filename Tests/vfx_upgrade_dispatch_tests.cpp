@@ -3,6 +3,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/projector.hpp>
 #include <algorithm>
 #include <array>
@@ -943,6 +944,8 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
             (void)simulation.TickFixed(input,fixed_step);
         }
         Check(found,label);
+        const auto ground_height = model.arena_half_extent >= 14.0f
+            ? hs::MeadowGroundHeight(area.position) : 0.0f;
         Check(owner.stable_id!=0 && owner.cast_id!=0 && owner.skill==static_cast<std::uint8_t>(skill) &&
               owner.source_upgrade==upgrade_index && owner.active_tick==area.active_tick &&
               owner.expires==area.expires && owner.active_tick<owner.expires &&
@@ -950,7 +953,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
               snapshot.View().header.tick<owner.expires &&
               std::abs(owner.position.x-area.position.x)<0.0001f &&
               std::abs(owner.position.z-area.position.y)<0.0001f &&
-              std::abs(owner.position.y-0.018f)<0.0001f &&
+              std::abs(owner.position.y-(0.018f+ground_height))<0.0001f &&
               std::abs(owner.radius-area.radius)<0.0001f,
               "slow-area owner metadata or geometry changed in the snapshot");
 
@@ -979,6 +982,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
               "slow-area alias and base collapsed their distinct typed identities");
         const auto &circle=std::get<hs::VfxCirclePayload>(adapted.persistent.front().payload);
         Check(std::abs(circle.center.x-owner.position.x)<0.0001f &&
+              std::abs(circle.center.y-owner.position.y)<0.0001f &&
               std::abs(circle.center.z-owner.position.z)<0.0001f &&
               std::abs(circle.radius-owner.radius)<0.0001f &&
               circle.lifetime01>=0.0f && circle.lifetime01<1.0f,
@@ -992,6 +996,70 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
     check_cast(hs::SkillKind::ArrowRain,7,0xA77001u,3,
                "particle.upgrade.arrow_rain.finish_slow",
                "real arrow-rain finish slow owner did not spawn");
+
+    // Project the same authored slow-area owner at a known meadow depression
+    // and on flat ground. Its alias and geometry must survive both heights.
+    hs::AreaView slow_area;
+    slow_area.id={37};
+    slow_area.kind=hs::AreaViewKind::Slow;
+    slow_area.position={-2.6f,-7.0f};
+    slow_area.radius=1.25f;
+    slow_area.active_tick=10;
+    slow_area.expires=40;
+    slow_area.skill=hs::SkillKind::Trap;
+    slow_area.cast_id=73;
+    slow_area.source_upgrade=1;
+    const auto meadow_height=hs::MeadowGroundHeight(slow_area.position);
+    Check(std::abs(meadow_height)>0.001f,
+          "slow-area terrain fixture must sample a non-flat meadow depression");
+    const hs::PresentationCatalog presentation{};
+    const hs::PresentationUiState ui{};
+    const hs::SettingsData settings{};
+    for(const auto extent:{12.0f,24.0f})
+    {
+        hs::GameReadModelStorage model;
+        model.tick=20;
+        model.session_id=7;
+        model.session.phase=hs::SessionPhase::Playing;
+        model.arena_half_extent=extent;
+        model.AddArea(slow_area);
+        hs::RenderSnapshotStorage snapshot(32,2,2,8);
+        Check(hs::ProjectRenderSnapshot(model.View(),presentation,ui,settings,snapshot),
+              "project slow-area on flat ground and authored meadow");
+        const auto visuals=snapshot.View().persistent_vfx;
+        const auto owner=std::ranges::find_if(visuals,[](const auto &visual) {
+            return visual.kind==hs::PersistentVfxKind::UpgradeSlowArea;
+        });
+        Check(owner!=visuals.end() &&
+              std::ranges::count_if(visuals,[](const auto &visual) {
+                  return visual.kind==hs::PersistentVfxKind::UpgradeSlowArea;
+              })==1, "slow-area projection must retain exactly one upgraded owner");
+        const auto expected_y=0.018f+(extent>=14.0f?meadow_height:0.0f);
+        Check(owner->stable_id!=0 && owner->cast_id==slow_area.cast_id &&
+              owner->skill==static_cast<std::uint8_t>(slow_area.skill) &&
+              owner->source_upgrade==slow_area.source_upgrade &&
+              owner->active_tick==slow_area.active_tick && owner->expires==slow_area.expires &&
+              std::abs(owner->position.x-slow_area.position.x)<0.0001f &&
+              std::abs(owner->position.y-expected_y)<0.0001f &&
+              std::abs(owner->position.z-slow_area.position.y)<0.0001f &&
+              std::abs(owner->radius-slow_area.radius)<0.0001f,
+              "slow-area owner must preserve exact flat/meadow geometry and metadata");
+        const auto adapted=hs::runtime_detail::BuildVfxTypedFrameInputs(
+            UpgradeSlowProgram(),{},std::array{*owner},{},snapshot.View().header.tick);
+        Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==2 &&
+              adapted.persistent[0].effect_handle==2 &&
+              adapted.persistent[0].stable_id==owner->stable_id &&
+              adapted.persistent[1].effect_handle==1 &&
+              adapted.persistent[1].stable_id!=adapted.persistent[0].stable_id,
+              "flat/meadow slow-area alias and bound base must both dispatch");
+        const auto *circle=std::get_if<hs::VfxCirclePayload>(
+            &adapted.persistent.front().payload);
+        Check(circle && std::abs(circle->center.x-owner->position.x)<0.0001f &&
+              std::abs(circle->center.y-expected_y)<0.0001f &&
+              std::abs(circle->center.z-owner->position.z)<0.0001f &&
+              std::abs(circle->radius-slow_area.radius)<0.0001f,
+              "flat/meadow typed slow-area circle must preserve grounded center and radius");
+    }
 }
 void RealArrowRainPullProjectsAndDispatches()
 {

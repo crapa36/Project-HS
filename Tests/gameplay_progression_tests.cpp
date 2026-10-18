@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include <hs/presentation/environment_layout.hpp>
 
 #include <algorithm>
 #include <array>
@@ -85,15 +86,54 @@ void TestStartingEnemyBalanceAndBoundary()
     std::uint32_t grass_count{};
     std::uint32_t dirt_count{};
     std::uint32_t rock_count{};
+    std::array<std::uint32_t, 2> meadow_surface_counts{};
     for (const auto &instance : snapshot.View().static_scene->instances)
     {
-        if (instance.mesh == hs::RenderMesh::Ground) ++ground_count;
+        if (instance.mesh == hs::RenderMesh::Ground)
+        {
+            ++ground_count;
+            Check(std::abs(instance.position.x) - instance.scale.x * 0.5f >= 12.0f - 0.00001f ||
+                      std::abs(instance.position.z) - instance.scale.z * 0.5f >= 12.0f - 0.00001f,
+                  "exterior ground slabs must not overlap the authored meadow interior");
+            Check(instance.scale.x >= 2.0f * data.arena_half_extent ||
+                      instance.scale.z >= 24.0f,
+                  "exterior ground slabs must reach the authored tree perimeter");
+        }
+        if (instance.mesh == hs::RenderMesh::MeadowSurface)
+        {
+            Check(instance.environment_variant < meadow_surface_counts.size(),
+                  "meadow surface has an unsupported ground/water variant");
+            ++meadow_surface_counts[instance.environment_variant];
+        }
         if (instance.mesh == hs::RenderMesh::TreeTrunk) ++tree_count;
         if (instance.mesh == hs::RenderMesh::Grass) ++grass_count;
         if (instance.mesh == hs::RenderMesh::DirtPatch) ++dirt_count;
         if (instance.mesh == hs::RenderMesh::Rock) ++rock_count;
     }
-    Check(ground_count == 1, "continuous ground covers the arena and decorative tree perimeter");
+    Check(data.arena_half_extent >= 14.0f && ground_count == 4 &&
+              meadow_surface_counts == std::array<std::uint32_t, 2>{1, 1},
+          "meadow uses four exterior ground slabs and one ground/water surface each");
+    hs::ArenaBoundary flat_boundary{};
+    flat_boundary.count = 4;
+    flat_boundary.points[0] = {-12.0f, -12.0f};
+    flat_boundary.points[1] = {-12.0f, 12.0f};
+    flat_boundary.points[2] = {12.0f, 12.0f};
+    flat_boundary.points[3] = {12.0f, -12.0f};
+    const auto flat_layout = hs::BuildEnvironmentLayout(
+        12.0f, flat_boundary, std::span<const hs::ArenaObstacle2D>{}, 10);
+    const auto flat_ground = std::ranges::find_if(flat_layout.instances, [](const auto &instance) {
+        return instance.mesh == hs::RenderMesh::Ground;
+    });
+    Check(std::ranges::count_if(flat_layout.instances, [](const auto &instance) {
+              return instance.mesh == hs::RenderMesh::Ground;
+          }) == 1 &&
+              std::ranges::none_of(flat_layout.instances, [](const auto &instance) {
+                  return instance.mesh == hs::RenderMesh::MeadowSurface;
+              }) &&
+              flat_ground != flat_layout.instances.end() &&
+              flat_ground->position.x == 0.0f && flat_ground->position.z == 0.0f &&
+              flat_ground->scale.x == 56.0f && flat_ground->scale.z == 56.0f,
+          "flat arena retains one continuous ground slab without meadow surfaces");
     Check(tree_count > data.arena_obstacle_count,
           "dense tree wall surrounds the authored interior obstacles");
     Check(grass_count > 100 && dirt_count == 0 && rock_count > 0,

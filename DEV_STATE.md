@@ -3,6 +3,52 @@
 Implementation continuity only: current contracts, verified receipts and unresolved technical work.
 
 ## Current technical state
+### Workspace conflict recovery (2026-10-18)
+
+The working root is Documents/GitHub/Project-HS, on branch
+codex/renderer-meadow-backup-20261018; conflict recovery used baseline HEAD
+90a1d852. All 18 stash conflicts were resolved with source/index preimages
+retained. The recovery itself did not reset, commit, push, delete stashes or
+touch other worktrees. The 47 staged Elin source/validation assets and five
+stashes were protected by byte, staged-blob and identity checks.
+
+Invalid temporal history binds a typed null SRV; shader early return and frame
+completion contracts remain intact. Runtime UI-page resets and replay numeric
+range checks retain current APIs. The standalone performance writer is tested,
+but is not connected to removed timing APIs. Projectile trail centers sample
+their owner's ground XZ, while endpoint histories retain their own grounding;
+24 flat/meadow regression combinations cover this distinction.
+
+Full verification exposed stale meadow CPU oracles and a visibility diagnostic
+using 16 instead of builtin 1 + authored material count. Exact terrain fixtures
+and catalog-derived diagnostics now pass the focused 6/6, including grass history
+and material reload. Core 20/20 passed. Initial full verify 106/111 is retained as
+failed evidence. The final configured full verify passed 111/111, exit 0, full_gate
+true: Build/verification/verify-20261018T140746948Z-32008.json.
+
+The historical barrier cache differed from fresh same-mode temporal history.
+Two fresh legacy and two enhanced runs were byte-identical, with native exit 0
+and validation errors 0. Default barrier comparisons now use fresh paired runs;
+explicit baseline input, original pixel tolerances and 180-frame/option/error
+checks remain. The final full gate's paired captures also differ by zero pixels.
+This does not establish the original history divergence's exact publication cause.
+
+Recovery Validation is RelWithDebInfo with ordinary D3D12 validation ON. Optional
+Brixelizer/Streamline/FSR/XeSS/DirectStorage remain OFF as found. Runtime-full
+Generation is 0da36dde9a9d18bf46051aa67aab9a12cc22c9d17a9cdbf5cd3d16a0e32c1719.
+Configured native unit GBV coverage is not proof for the prior all-features game
+configuration. No FPS/latency improvement or Debug/Release export is claimed.
+The report is Docs/Verification/20261018-workspace-recovery/REPORT.md; final
+preservation evidence is under Build/20261018-workspace-conflict-recovery/.
+After the full gate, nine ignored temporary fixture/build/capture directories
+were pruned (63.76 GiB of logical file sizes; hardlinks may reduce physical
+reclaim). The complete verification JSON/XML/logs, protected conflict preimages,
+source assets, stashes, independent worktrees and repo-local CMake tooling were
+preserved. Cleanup receipt: Build/verification/cleanup-20261018.json; final
+paired barrier summary was copied to Build/verification/barrier-comparison-verified.json.
+Deleted validation binary/Generation products must be rebuilt before rerunning
+GPU tests. Older ZIP/native-GI evidence below belongs to its recorded configuration.
+
 ### ZIP omissions and integrated renderer follow-up (2026-10-18)
 
 Exact2original ZIPs recovered/read with priorSHA match; primary310 rows/HTML and
@@ -17,7 +63,7 @@ and9bins with group reservations and mutable-only stores; dead-slot CAS unchange
 SSR3level reduction preserves odd/ceil/MAX and reduces FHDdispatch12->5; exact high
 PCF Gather keeps scalar border path/static-probe;64cell light view bounds shared.
 FrameConstants12848B; upload prefix14KiB retains disabled fog/exposure boundary.
-Current validation Generation 7a86b9c93ec7ac8dd2fa8ad4b2c7eb260bc3b3841eb62598c7c066e012a8ed19;
+Prior ZIP validation Generation 7a86b9c93ec7ac8dd2fa8ad4b2c7eb260bc3b3841eb62598c7c066e012a8ed19;
 Debug/Release retain e7e754cc earlier coherent hosts/content, no new export.
 69focused checks and existing4test narrow Tools/verify batch PASS; FHDenhanced
 lockstep4frames exit0/assertions true/16particles/complete diagnostics/empty
@@ -34,8 +80,8 @@ Docs/Verification/20261018-zip-followup/REPORT.md.
 ### Current meadow art and hosts (2026-10-18)
 
 Earlier meadow art Generation `e7e754cc192ec7e2b5a996ff0612950c94f510f8693b707b162e7186e8cf6312` (3,646 products)
-remains in Debug/Release. Validation host now uses the newer coherent Generation
-listed above, with unchanged meadow source art and updated shaders. Prior art
+remains in Debug/Release. The ZIP-stage Validation host used the coherent Generation
+listed in that section, with unchanged meadow source art and updated shaders. Prior art
 receipts refer to their exact older Generation and are not current GPU gain proof.
 Terrain uses shared mild macro relief, banks/spill-limited water and baked UV wet/dry
 controls; generated terrain remains world mapped. Ground triangles119110/117926/117466

@@ -4174,7 +4174,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     temporal_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     temporal_view.Texture2D.MipLevels = 1;
     impl_->device->CreateShaderResourceView(
-        impl_->temporal_history[temporal_read_index].resource.Get(), &temporal_view,
+        impl_->temporal_history_valid
+            ? impl_->temporal_history[temporal_read_index].resource.Get() : nullptr, &temporal_view,
         temporal_cpu);
     temporal_cpu.ptr += impl_->srv_stride;
     impl_->device->CreateShaderResourceView(

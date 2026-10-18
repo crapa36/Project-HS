@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include <hs/presentation/meadow_surface.hpp>
 
 #include <algorithm>
 #include <array>
@@ -270,21 +271,96 @@ void TestAttackStopsMovementAndFacesAim()
               std::abs(projectile->position.z -
                        projectile_model.View().projectiles.front().position.y) < 0.0001f,
           "basic arrow keeps its compact visual size and collision center");
-    Check(std::ranges::any_of(
-              projectile_snapshot.View().persistent_vfx,
-              [projectile_radius](const hs::PersistentVfxVisual &visual) {
-                  return visual.kind == hs::PersistentVfxKind::ProjectileTrail &&
-                         visual.radius < projectile_radius && visual.radius >= 0.05f &&
-                         visual.length <= 0.45f &&
-                         std::abs(visual.position.y - 1.17f) < 0.0001f;
-              }),
-          "basic arrow trail stays visible at the GPU arrow body's center height");
+    const auto body_center_height = projectile->position.y + projectile->scale.y * 0.5f;
+    const auto ground_height = projectile_model.View().arena_half_extent >= 14.0f
+        ? hs::MeadowGroundHeight({projectile->position.x, projectile->position.z}) : 0.0f;
+    Check(std::abs(body_center_height - ground_height - 1.17f) < 0.0001f,
+          "basic arrow body retains its terrain-relative center height");
+    const auto trail = std::ranges::find_if(projectile_snapshot.View().persistent_vfx,
+        [&](const hs::PersistentVfxVisual &visual) {
+            return visual.kind == hs::PersistentVfxKind::ProjectileTrail &&
+                   visual.stable_id == projectile->stable_id;
+        });
+    Check(trail != projectile_snapshot.View().persistent_vfx.end(),
+          "basic arrow has its own persistent trail");
+    Check(trail->radius < projectile_radius && trail->radius >= 0.05f && trail->length <= 0.45f,
+          "basic arrow trail keeps its bounded radius and length");
+    Check(std::abs(trail->position.y - body_center_height) < 0.0001f,
+          std::format("basic arrow trail must share the rendered body center: trail={} body={}",
+                      trail->position.y, body_center_height));
 
     held.basic_attack_held = false;
     (void)Tick(simulation, held);
     Check(simulation.GetObservation().player_position.x > attacking.player_position.x,
           "held RMB reissues movement after the basic attack ends");
     Check(simulation.Shutdown().Succeeded(), "attack movement shutdown");
+}
+
+void TestProjectileTrailsShareBodyGrounding()
+{
+    constexpr std::array skills{hs::SkillKind::BasicAttack, hs::SkillKind::MultiShot,
+        hs::SkillKind::ChargedShot, hs::SkillKind::RicochetArrow};
+    constexpr std::array positions{hs::Float2{0.6f, 1.2f}, hs::Float2{-2.6f, -7.0f},
+        hs::Float2{12.2f, 0.0f}};
+    bool different_ground_samples = false;
+    for (const auto extent : {12.0f, 24.0f})
+    for (const auto skill : skills)
+    for (const auto position : positions)
+    {
+        hs::GameReadModelStorage model;
+        model.tick = 20;
+        model.session_id = 7;
+        model.session.phase = hs::SessionPhase::Playing;
+        model.arena_half_extent = extent;
+        hs::ProjectileView source;
+        source.id = {37}; source.player_owned = true; source.position = position;
+        source.previous_position = {position.x - 0.15f, position.y - 0.2f};
+        source.velocity = {9.0f, 12.0f}; source.spawned_tick = 10;
+        source.skill = skill; source.radius = 0.36f; source.charge_ratio = 0.7f;
+        model.AddProjectile(source);
+        hs::AreaView area;
+        area.id = {38}; area.kind = hs::AreaViewKind::Slow;
+        area.position = {-2.6f, -7.0f}; area.radius = 0.5f;
+        area.active_tick = 10; area.expires = 40;
+        model.AddArea(area);
+        hs::RenderSnapshotStorage snapshot(32, 2, 2, 64);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+            hs::PresentationUiState{}, hs::SettingsData{}, snapshot), "project terrain trail fixture");
+        const auto ground = [extent](hs::Float2 point) {
+            return extent >= 14.0f ? hs::MeadowGroundHeight(point) : 0.0f;
+        };
+        const auto body = std::ranges::find_if(snapshot.View().instances,
+            [](const auto &instance) { return instance.mesh == hs::RenderMesh::PlayerProjectile; });
+        Check(body != snapshot.View().instances.end(), "terrain trail fixture has a body");
+        const auto body_center = body->position.y + body->scale.y * 0.5f;
+        Check(std::abs(body->position.y - (1.05f + ground(source.position))) < 0.0001f,
+              "projectile body uses current-position ground exactly once");
+        std::size_t trails = 0;
+        for (const auto &visual : snapshot.View().persistent_vfx)
+        {
+            if (visual.kind != hs::PersistentVfxKind::ProjectileTrail &&
+                visual.kind != hs::PersistentVfxKind::RicochetProjectileTrail &&
+                visual.kind != hs::PersistentVfxKind::ProjectileTrailOuter) continue;
+            ++trails;
+            Check(visual.projectile_owner_id == source.id.value &&
+                      std::abs(visual.position.y - body_center) < 0.0001f,
+                  "every projectile trail shares its owner's rendered center height");
+            Check(std::abs(visual.projectile_current_position.y - body->position.y) < 0.0001f &&
+                      std::abs(visual.projectile_previous_position.y -
+                          (1.05f + ground(source.previous_position))) < 0.0001f,
+                  "trail motion endpoints retain their independent terrain samples");
+            different_ground_samples |= std::abs(ground({visual.position.x, visual.position.z}) -
+                ground(source.position)) > 0.001f;
+        }
+        Check(trails == (skill == hs::SkillKind::ChargedShot ? 2u : 1u),
+              "fixture covers inner, outer and ricochet trail kinds without losing outputs");
+        const auto ground_visual = std::ranges::find_if(snapshot.View().persistent_vfx,
+            [](const auto &visual) { return visual.kind == hs::PersistentVfxKind::SlowArea; });
+        Check(ground_visual != snapshot.View().persistent_vfx.end() &&
+                  std::abs(ground_visual->position.y - (0.018f + ground(area.position))) < 0.0001f,
+              "ground-bound area effects still use their own terrain anchor");
+    }
+    Check(different_ground_samples, "terrain trail fixture exercises non-flat anchor differences");
 }
 
 void TestBasicAttackStopsAtFirstEnemy()
@@ -1131,6 +1207,7 @@ void RunGameplayCombatTests()
     TestCombatVfxCoverage();
     TestArrowReleaseCarriesAuthoritativeDirection();
     TestAttackStopsMovementAndFacesAim();
+    TestProjectileTrailsShareBodyGrounding();
     TestSkillMovementPauseAndResume();
     TestBasicAttackStopsAtFirstEnemy();
     TestTenMinuteBossApproachesAttackRange();

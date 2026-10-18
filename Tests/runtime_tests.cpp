@@ -921,27 +921,32 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     std::ifstream input_stream(directory / "inputs.ndjson");
     const std::string trace((std::istreambuf_iterator<char>(input_stream)), {});
     input_stream.close();
-    const auto reject_edge = [&](std::string_view original, std::string_view replacement) {
+    const auto reject_input = [&](std::string_view original, std::string_view replacement) {
         auto invalid = trace;
         const auto position = invalid.find(original);
-        Check(position != std::string::npos, "find recorded edge field for corruption test");
+        Check(position != std::string::npos, "find recorded field for corruption test");
         invalid.replace(position, original.size(), replacement);
         {
             std::ofstream output(directory / "inputs.ndjson", std::ios::trunc);
             output << invalid;
-            Check(output.good(), "write malformed replay edge");
+            Check(output.good(), "write malformed replay input");
         }
-        Check(!hs::LoadPlaytestReplay(directory, replay), "reject an invalid replay edge enum");
-        Check(replay.frames.size() == 3 &&
+        Check(!hs::LoadPlaytestReplay(directory, replay), "reject invalid replay input");
+        Check(replay.frames.size() == 3 && replay.frames[0].expected_checksum == 1234 &&
                   replay.frames[0].ordered_edges[1].action == hs::GameAction::CharacterPage,
               "failed replay load preserves the previous valid recording");
     };
-    reject_edge("\"action\":6", "\"action\":7");
-    reject_edge("\"action\":6", "\"action\":256");
-    reject_edge("\"action\":6", "\"action\":-1");
-    reject_edge("\"action\":6", "\"action\":1.5");
-    reject_edge("\"kind\":0", "\"kind\":2");
-    reject_edge("\"kind\":0", "\"kind\":256");
+    for (const auto value : {"7", "256", "-1", "1.5", "18446744073709551615"})
+        reject_input("\"action\":6", std::string("\"action\":") + value);
+    for (const auto value : {"2", "256", "-1", "0.5"})
+        reject_input("\"kind\":0", std::string("\"kind\":") + value);
+    for (const auto value : {"256", "-1", "0.5", "18446744073709551615"})
+    {
+        reject_input("\"value\":0", std::string("\"value\":") + value);
+        reject_input("\"secondary\":1", std::string("\"secondary\":") + value);
+    }
+    for (const auto value : {"8", "256", "-1", "0.5"})
+        reject_input("\"kind\":7", std::string("\"kind\":") + value);
 }
 
 void TestRecordingFileFinalization(const std::filesystem::path &root)

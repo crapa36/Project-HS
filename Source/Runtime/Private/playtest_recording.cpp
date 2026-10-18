@@ -710,13 +710,21 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             }
             for (const auto &action_json : json.at("ui_actions"))
             {
-                const auto kind = action_json.at("kind").get<std::uint8_t>();
-                if (kind > static_cast<std::uint8_t>(UiActionKind::SwapLoadoutSlots))
+                const auto &value_json = action_json.at("value");
+                const auto secondary_json = action_json.value("secondary", Json(0u));
+                if (!action_json.at("kind").is_number_unsigned() ||
+                    !value_json.is_number_unsigned() || !secondary_json.is_number_unsigned())
+                    return Invalid("Playtest UI action fields must be unsigned integers.");
+                const auto kind = action_json.at("kind").get<std::uint64_t>();
+                const auto value = value_json.get<std::uint64_t>();
+                const auto secondary = secondary_json.get<std::uint64_t>();
+                if (kind > static_cast<std::uint64_t>(UiActionKind::SwapLoadoutSlots) ||
+                    value > UINT8_MAX || secondary > UINT8_MAX)
                     return Invalid("Playtest input contains an invalid UI action.");
                 frame.ui_actions.push_back(
                     {static_cast<UiActionKind>(kind),
-                     action_json.at("value").get<std::uint8_t>(),
-                     action_json.value("secondary", std::uint8_t{})});
+                     static_cast<std::uint8_t>(value),
+                     static_cast<std::uint8_t>(secondary)});
             }
             parsed.frames.push_back(std::move(frame));
         }

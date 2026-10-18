@@ -2887,7 +2887,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         channels.ui_page.store(static_cast<std::uint8_t>(UiPage::Root),
                                                std::memory_order_release);
+                        channels.character_details_page.store(0, std::memory_order_release);
                         continue;
+                    }
+                    if (action.kind == EdgeKind::Pressed && action.action == GameAction::Pause &&
+                        current_phase == SessionPhase::Paused &&
+                        (ui_page == UiPage::CharacterOverview || ui_page == UiPage::CharacterSkills ||
+                         ui_page == UiPage::CharacterStats))
+                    {
+                        channels.ui_page.store(static_cast<std::uint8_t>(UiPage::Root),
+                                               std::memory_order_release);
+                        channels.character_details_page.store(0, std::memory_order_release);
+                        channels.loadout_source.store(0xFF, std::memory_order_release);
                     }
                     if (action.kind == EdgeKind::Pressed &&
                         action.action == GameAction::CharacterPage)
@@ -2899,6 +2910,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     : UiPage::Root),
                             std::memory_order_release);
                         channels.loadout_source.store(0xFF, std::memory_order_release);
+                        channels.character_details_page.store(0, std::memory_order_release);
                     }
                     action_storage[action_count++] = action;
                 }

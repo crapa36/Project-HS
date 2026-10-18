@@ -23,7 +23,16 @@ $ensureArgs = @{
     GenerationPointer = $GenerationPointer
     ArtifactsRoot = $BaselineRoot
 }
-if ($BaselineDirectory) { $ensureArgs.BaselineDirectory = $BaselineDirectory }
+if ($BaselineDirectory) {
+    $ensureArgs.BaselineDirectory = $BaselineDirectory
+} else {
+    # Asset/probe publication can leave different temporal histories even when
+    # final scene inputs match. Compare fresh paired runs, not a prior run's
+    # cached history. The regular integration smoke still reuses its baseline.
+    $ensureArgs.ArtifactsRoot = Join-Path $BaselineRoot ('barrier-pair-' + [Guid]::NewGuid().ToString('N'))
+}
+$executableHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
+$generationHash = (Get-FileHash -LiteralPath $GenerationPointer -Algorithm SHA256).Hash
 $legacy = @(& $ensure @ensureArgs) | Select-Object -Last 1
 if (!$legacy -or !(Test-Path -LiteralPath $legacy -PathType Container)) {
     throw 'Legacy render baseline is unavailable.'
@@ -150,6 +159,10 @@ function Test-LockstepTimeline([string]$Directory) {
 if ($LASTEXITCODE -ne 0) {
     throw "Enhanced barrier smoke failed."
 }
+if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -cne $executableHash -or
+    (Get-FileHash -LiteralPath $GenerationPointer -Algorithm SHA256).Hash -cne $generationHash) {
+    throw 'Barrier comparison inputs changed between paired captures.'
+}
 
 $legacyResult = Get-Content (Join-Path $legacy "result.json") -Raw | ConvertFrom-Json
 $enhancedResult = Get-Content (Join-Path $enhanced "result.json") -Raw | ConvertFrom-Json
@@ -235,6 +248,24 @@ try {
     $changedPixels = $comparison[0]
     $maximumDifference = $comparison[1]
     $allowedChangedPixels = [Math]::Ceiling($legacyPng.Width * $legacyPng.Height * 0.0001)
+    $comparisonReceipt = [ordered]@{
+        schema_version = 1
+        baseline_policy = if ($BaselineDirectory) { 'explicit-baseline' } else { 'fresh-paired' }
+        legacy_directory = [IO.Path]::GetFullPath($legacy)
+        enhanced_directory = [IO.Path]::GetFullPath($enhanced)
+        executable_sha256 = $executableHash
+        generation_pointer_sha256 = $generationHash
+        width = $legacyPng.Width
+        height = $legacyPng.Height
+        changed_pixels = $changedPixels
+        maximum_channel_difference = $maximumDifference
+        allowed_changed_pixels = $allowedChangedPixels
+        allowed_channel_difference = 1
+        passed = $maximumDifference -le 1 -and $changedPixels -le $allowedChangedPixels
+    }
+    [IO.File]::WriteAllText((Join-Path $Artifacts 'comparison.json'),
+        (($comparisonReceipt | ConvertTo-Json -Depth 4) + "`n"),
+        [Text.UTF8Encoding]::new($false))
     if ($maximumDifference -gt 1 -or $changedPixels -gt $allowedChangedPixels) {
         throw "Barrier captures exceed tolerance: changed=$changedPixels, max=$maximumDifference."
     }
