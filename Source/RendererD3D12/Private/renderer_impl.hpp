@@ -131,6 +131,7 @@ constexpr auto kResidentMaterialCount = kAuthoredMaterialNames.size() + kHeroMat
 constexpr auto kTerrainMaterialOrdinal = render_data::kTerrainMaterialOrdinal;
 constexpr std::uint32_t kVisibilityVariantCount = static_cast<std::uint32_t>(kResidentMaterialCount + 1);
 constexpr std::uint32_t kParticleCount = 10'000;
+constexpr std::uint32_t kParticleDrawBinCount = 9; // sprite, seven atlas meshes, legacy shell
 constexpr std::uint32_t kUiWidth = 1'920;
 constexpr std::uint32_t kUiHeight = 1'080;
 constexpr std::uint32_t kPostTextureDescriptorCount = 10;

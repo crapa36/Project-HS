@@ -1168,7 +1168,7 @@ void TestRenderBindingCompilerContract()
             value("HS_RENDER_GROUND_DETAIL_GEOMETRY_BEGIN")==rd::kGroundDetailGeometryBegin &&
             value("HS_RENDER_GROUND_DETAIL_MATERIAL_ORDINAL")==rd::kGroundDetailMaterialOrdinal,
             "compiler binding definitions diverged from the public catalog");
-    Require(value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")*value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==90 &&
+    Require(value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")*value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==105 &&
             value("HS_RENDER_AUTHORED_MATERIAL_COUNT")*value("HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT")==96 &&
             1+value("HS_RENDER_AUTHORED_MATERIAL_COUNT")+value("HS_RENDER_HERO_MATERIAL_COUNT")==24,
             "existing geometry, feedback or visibility ABI changed");
@@ -1179,25 +1179,29 @@ void TestGroundDetailCatalogMapping()
     Require(static_cast<std::uint32_t>(hs::RenderMesh::DirtPatch)==20u &&
             static_cast<std::uint32_t>(hs::RenderMesh::GroundDetail)==21u &&
             static_cast<std::uint32_t>(hs::RenderMesh::MeadowSurface)==22u &&
-            rd::kEnvironmentMaterialNames[28]=="meadow_ground" && rd::kEnvironmentMaterialNames[29]=="meadow_water",
+            rd::kEnvironmentMaterialNames[33]=="meadow_ground" && rd::kEnvironmentMaterialNames[34]=="meadow_water",
             "existing render mesh ordinals changed");
-    Require(rd::kEnvironmentMaterialNames.size()==30 && rd::kAuthoredMaterialNames.size()==16 &&
+    Require(rd::kEnvironmentMaterialNames.size()==35 && rd::kAuthoredMaterialNames.size()==16 &&
             rd::kAuthoredMaterialNames[14]=="terrain" && rd::kAuthoredMaterialNames[15]=="ground_detail",
             "geometry append changed fixed terrain/material ordinals");
+    constexpr std::array additions{"fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy"};
+    Require(hs::kGroundDetailVariantCount==19, "ground-detail variant append is incomplete");
+    for (std::size_t i=0;i<additions.size();++i)
+        Require(rd::kEnvironmentMaterialNames[28+i]==additions[i], "new prop geometry order changed");
     for(std::uint32_t ordinal=0;ordinal<rd::kEnvironmentMaterialNames.size();++ordinal)
     {
         const auto mesh=rd::EnvironmentMeshForOrdinal(ordinal);
         const auto variant=ordinal<3?ordinal:ordinal<6?ordinal-3:ordinal<10?ordinal-6:
-            ordinal<14?ordinal-10:ordinal<28?ordinal-14:ordinal-28;
+            ordinal<14?ordinal-10:ordinal<33?ordinal-14:ordinal-33;
         Require(rd::IsEnvironmentMesh(mesh) && rd::EnvironmentGeometryOrdinal(mesh,variant)==ordinal,
                 "geometry family/variant mapping is not reversible");
-        Require(rd::EnvironmentGeometryMaterialOrdinal(ordinal)==(ordinal<14?ordinal:ordinal==28?14u:15u),
+        Require(rd::EnvironmentGeometryMaterialOrdinal(ordinal)==(ordinal<14?ordinal:ordinal==33?14u:15u),
                 "ground geometry ordinal leaked into the shared material table");
         hs::RenderInstance instance{};instance.mesh=mesh;instance.environment_variant=variant;
         hs::PopulateRenderInstanceRevisions(instance);
         Require(instance.asset_id.value==hs::MakeAssetId("render/"+std::string(rd::kEnvironmentMaterialNames[ordinal])+".rpkg").value,
                 "core geometry asset identity differs from the cooked catalog");
-        Require(instance.material_id.value==(ordinal<14?instance.asset_id.value:ordinal==28?hs::MakeAssetId("render/material/terrain.rpkg").value:hs::MakeAssetId("render/material/ground_detail.rpkg").value),
+        Require(instance.material_id.value==(ordinal<14?instance.asset_id.value:ordinal==33?hs::MakeAssetId("render/material/terrain.rpkg").value:hs::MakeAssetId("render/material/ground_detail.rpkg").value),
                 "detail material identity differs from the actual standalone product");
     }
     Require(!rd::IsEnvironmentMesh(hs::RenderMesh::DirtPatch) &&
@@ -1368,6 +1372,7 @@ void TestAuthoredTerrainMaterial()
             hlsl.find("HsMaterialTexture5") != std::string::npos &&
             hlsl.find("ctx.mesh") != std::string::npos &&
             hlsl.find("ctx.seed") != std::string::npos &&
+            hlsl.find(", ctx.uv)") != std::string::npos &&
             hlsl.find("ctx.view_direction") != std::string::npos &&
             hlsl.find("MaterialParameters[ctx.parameter_base + 1]") != std::string::npos &&
             hlsl.find("result.normal_is_world = true") != std::string::npos,

@@ -377,9 +377,9 @@ Result RendererTextureFeedback::Consume(std::uint32_t slot, const CompletionSet 
         if (FAILED(hr)) return NativeFailure("Map decoded material feedback", hr);
         const auto *mapped = static_cast<const std::byte *>(address);
         UINT mip = UINT32_MAX;
-        for (UINT slice = 0; slice < owner.slices; ++slice)
-            for (UINT y = 0; y < owner.height; ++y)
-                for (UINT x = 0; x < owner.width; ++x)
+        for (UINT slice = 0; slice < owner.slices && mip != 0u; ++slice)
+            for (UINT y = 0; y < owner.height && mip != 0u; ++y)
+                for (UINT x = 0; x < owner.width && mip != 0u; ++x)
                 {
                     const auto value = std::to_integer<UINT>(mapped[owner.footprints[slice].Offset +
                         static_cast<SIZE_T>(y) * owner.footprints[slice].Footprint.RowPitch + x]);

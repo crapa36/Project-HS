@@ -3,6 +3,7 @@
 Run: blender --background --factory-startup --python this_file -- --root REPO --stage geometry
 Then inspect preview/blockout.png before running --stage finish (loads the checkpoint).
 --stage verify reopens the final .blend and round-trips all seven FBX exports.
+Use --revision v002 for foliage refinement and --stage register after visual/export review.
 Runtime JSON uses indexed triangle lists in (x,z,-y), with UV V flipped before tangent calculation.
 """
 import argparse, hashlib, json, math, random, struct, sys, zlib
@@ -15,10 +16,12 @@ from mathutils import Vector
 
 ARGS = argparse.ArgumentParser()
 ARGS.add_argument("--root", type=Path, required=True)
-ARGS.add_argument("--stage", choices=("geometry", "finish", "verify"), required=True)
+ARGS.add_argument("--stage", choices=("geometry", "finish", "verify", "register"), required=True)
+ARGS.add_argument("--revision", choices=("v001", "v002"), default="v001")
 OPT = ARGS.parse_args(sys.argv[sys.argv.index("--") + 1:])
 ROOT = OPT.root.resolve()
-OUT = ROOT / "ContentSource/Models/Environment/GroundDetail"
+SOURCE = ROOT / "ContentSource/Models/Environment/GroundDetail"
+OUT = SOURCE if OPT.revision == "v001" else SOURCE / OPT.revision
 PACK = ROOT / "ContentSource/Textures/Environment"
 TEX = PACK / "textures"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -285,8 +288,9 @@ class Builder:
             # Give side faces finite UV area as well as physical thickness.
             uvs[2]=(uvs[2][0]+.0005,uvs[2][1]+.0005);uvs[3]=(uvs[3][0]+.0005,uvs[3][1]+.0005)
             self.face(pts,uvs,tile)
-    def heart(self, base, direction, length, width, segments, phase, tile="clover"):
-        base=Vector(base);f=Vector((math.cos(direction),math.sin(direction),0));r=Vector((-f.y,f.x,0));up=Vector((0,0,1))
+    def heart(self, base, direction, length, width, segments, phase, tile="clover", pitch=0):
+        base=Vector(base);r=Vector((-math.sin(direction),math.cos(direction),0))
+        f=Vector((math.cos(direction)*math.cos(pitch),math.sin(direction)*math.cos(pitch),math.sin(pitch)));up=f.cross(r)
         outline=[]
         for j in range(segments):
             a=math.tau*j/segments
@@ -340,12 +344,12 @@ class Builder:
 
 def flowers(name, lod):
     b=Builder();rng=random.Random(3100+NAMES.index(name)*71)
-    count=(7,5,3)[lod];rows=(6,4,3)[lod];sides=(8,6,5)[lod]
+    count=(7,5,3)[lod];rows=(5,4,3)[lod];sides=(8,6,5)[lod]
     centers=[(-.21,-.16),(.25,.20),(-.27,.23),(.03,-.21),(.22,-.02),(-.15,.10),(.07,.16)]
     for i,(cx,cy) in enumerate(centers[:count]):
         rng=random.Random(3100+NAMES.index(name)*71+i*983)
         cx+=rng.uniform(-.018,.018);cy+=rng.uniform(-.018,.018)
-        h=(.34 if i==0 else rng.uniform(.19,.32)) if name!="flower_violet" else (.22 if i==0 else rng.uniform(.15,.21))
+        h=(.43 if i==0 else rng.uniform(.27,.40)) if name!="flower_violet" else (.31 if i==0 else rng.uniform(.22,.29))
         bend=Vector((rng.uniform(-.025,.025),rng.uniform(-.035,.035),0))
         p=Vector((cx,cy,0))
         path=[p+Vector((0,0,h*t))+bend*(t*t) for t in np.linspace(0,1,(5,4,3)[lod])]
@@ -353,30 +357,30 @@ def flowers(name, lod):
         for k in range((3,2,1)[lod] if name!="flower_violet" else 0):
             t=.24+k*.18;angle=rng.uniform(0,math.tau)
             f=Vector((math.cos(angle),math.sin(angle),.35)).normalized();r=Vector((-math.sin(angle),math.cos(angle),0))
-            b.sheet(p+Vector((0,0,h*t))+bend*t*t,r,f,(0,0,1),rng.uniform(.065,.095),.023,"leaf_green",rows=rows,curl=.006,cup=.003,serration=.12,phase=i)
+            b.sheet(p+Vector((0,0,h*t))+bend*t*t,r,f,(0,0,1),rng.uniform(.050,.075),.017,"leaf_green",rows=rows,curl=.006,cup=.003,serration=.12,phase=i)
         head=path[-1]
         rng=random.Random(6200+NAMES.index(name)*71+i*983)
         tilt=Vector((rng.uniform(-.18,.18),rng.uniform(-.18,.18),1)).normalized()
         if name=="flower_violet":
-            tilt=Vector((rng.uniform(-.25,.25),-.68,.74)).normalized()
+            tilt=Vector((rng.uniform(-.22,.22),-.40,.92)).normalized()
             for k in range((3,2,1)[lod]):
                 a=rng.uniform(0,math.tau)
                 basal=Vector((cx+.018*math.cos(a),cy+.018*math.sin(a),rng.uniform(.025,.05)))
                 b.tube([(cx,cy,0),basal],[.0014,.0008],sides=sides)
-                b.heart(basal,a,.060,.055,(24,16,10)[lod],i,"leaf_green")
+                b.heart(basal,a,.047,.036,(20,16,10)[lod],i,"leaf_green",pitch=rng.uniform(.15,.50))
         rx=Vector((1,0,-tilt.x/max(tilt.z,.1))).normalized();ry=tilt.cross(rx).normalized()
         if name=="flower_daisy":
-            petals=(15,11,8)[lod];radius=rng.uniform(.035,.047)
+            petals=(12,10,8)[lod];radius=rng.uniform(.045,.058)
             for j in range(petals):
                 a=j/petals*math.tau+rng.uniform(-.045,.045)
                 f=rx*math.cos(a)+ry*math.sin(a);r=tilt.cross(f)
-                b.sheet(head+f*.006,r,f,tilt,radius*rng.uniform(.88,1.12),.013*rng.uniform(.8,1.1),"daisy",rows=rows,curl=rng.uniform(-.009,-.002),cup=.0018,phase=j)
-            b.dome(head,.010,.006,rings=(3,2,1)[lod],sides=(16,12,8)[lod])
+                b.sheet(head+f*.006,r,f,tilt,radius*rng.uniform(.88,1.12),.017*rng.uniform(.8,1.1),"daisy",rows=rows,curl=rng.uniform(-.006,.002),cup=.0018,phase=j)
+            b.dome(head,.0135,.0075,rings=(3,2,1)[lod],sides=(16,12,8)[lod])
         elif name=="flower_buttercup":
             for j in range(5):
                 a=j/5*math.tau+rng.uniform(-.08,.08);f=rx*math.cos(a)+ry*math.sin(a);r=tilt.cross(f)
-                b.sheet(head+f*.002,r,f,tilt,rng.uniform(.026,.036),rng.uniform(.025,.033),"buttercup",rows=rows,curl=.009,cup=.007,phase=j)
-            b.dome(head+tilt*.001,.007,.004,rings=(3,2,1)[lod],sides=(12,10,6)[lod])
+                b.sheet(head+f*.002,r,f,tilt,rng.uniform(.035,.042),rng.uniform(.030,.037),"buttercup",rows=rows,curl=.014,cup=.005,phase=j)
+            b.dome(head+tilt*.001,.009,.005,rings=(3,2,1)[lod],sides=(12,10,6)[lod])
             if lod==0:
                 for j in range(9):
                     a=j/9*math.tau;b.tube([head+Vector((.005*math.cos(a),.005*math.sin(a),.002)),head+Vector((.006*math.cos(a),.006*math.sin(a),.008))],[.0008,.0011],"pollen",sides=4)
@@ -384,7 +388,7 @@ def flowers(name, lod):
             for j in range(5):
                 a=j/5*math.tau+math.pi*.5;f=rx*math.cos(a)+ry*math.sin(a);r=tilt.cross(f)
                 bottom=j==2
-                b.sheet(head+f*.003,r,f,tilt,.040 if bottom else .031,.032 if bottom else .024,
+                b.sheet(head+f*.003,r,f,tilt,.050 if bottom else .040,.037 if bottom else .030,
                         "violet_lower" if bottom else "violet_upper",rows=rows,curl=(-.009 if bottom else .004),cup=.0035,phase=j)
             # Violet rear spur and small yellow throat are geometry, not a painted sphere.
             b.tube([head,head-ry*.014+Vector((0,0,-.005)),head-ry*.022+Vector((0,0,-.008))],[.0035,.0025,.0009],"violet_upper",sides=sides)
@@ -401,11 +405,19 @@ def clover(lod):
     b=Builder();rng=random.Random(493)
     points=[(-.22,-.18),(.25,-.02),(-.23,.19),(.24,.23),(-.07,-.20),(.14,-.18),(-.18,.02),(0,.02),(.15,.09),(-.08,.20),(.08,.24),(-.3,-.05)]
     for i,(x,y) in enumerate(points[:(12,8,4)[lod]]):
-        h=.105 if i==0 else rng.uniform(.048,.10);a=rng.uniform(0,math.tau);head=Vector((x+.008*math.cos(a),y+.008*math.sin(a),h))
+        h=.15 if i==0 else rng.uniform(.060,.135);a=rng.uniform(0,math.tau);head=Vector((x+.008*math.cos(a),y+.008*math.sin(a),h))
         b.tube([(x,y,0),(x,y,h*.5),head],[.0014,.0012,.0009],sides=(7,5,4)[lod])
         for j in range(3):
             angle=a+j*math.tau/3
-            b.heart(head,angle,rng.uniform(.043,.054),rng.uniform(.039,.052),(32,20,12)[lod],i*.8)
+            b.heart(head,angle,rng.uniform(.033,.045),rng.uniform(.029,.040),(20,16,10)[lod],i*.8,pitch=rng.uniform(-.20,.55))
+        if i < (2,1,1)[lod]:
+            bloom=head+Vector((-.014,.008,.060))
+            b.tube([head,bloom],[.0011,.0008],sides=(6,5,4)[lod])
+            florets=(8,6,4)[lod]
+            for j in range(florets):
+                angle=j*math.tau/florets
+                center=bloom+Vector((.008*math.cos(angle),.008*math.sin(angle),.003*(j%2)))
+                b.dome(center,.0045,.009,rings=(2,1,1)[lod],sides=(6,5,4)[lod],tile="violet_lower")
     return b
 
 
@@ -507,7 +519,7 @@ def fence(lod):
 
 
 def new_scene():
-    scene=bpy.data.scenes.new("HS_Ground_Detail_v001")
+    scene=bpy.data.scenes.new("HS_Ground_Detail_"+OPT.revision)
     bpy.context.window.scene=scene
     scene.unit_settings.system="METRIC";scene.unit_settings.scale_length=1
     assets=bpy.data.collections.new("COL-ground-detail-assets");scene.collection.children.link(assets)
@@ -585,7 +597,7 @@ def geometry():
         src=bpy.data.objects[name];ob=src.copy();ob.data=src.data;ob.name="PREVIEW-"+name;previews.objects.link(ob)
         ob.hide_render=False;ob.hide_set(False);ob.location=loc;ob["hs_base"]=name
     setup_render(scene);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/"ground_detail_blockout_v001.blend"))
+    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_blockout_"+OPT.revision+".blend")))
     render(scene,OUT/"preview"/"blockout.png",1200,900)
     print("GROUND_DETAIL_GEOMETRY_READY",json.dumps({n:len(bpy.data.objects[n].data.polygons) for n in NAMES}))
 
@@ -644,24 +656,25 @@ def register(records,stats):
     temporary=path.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(document,separators=(",",":"),ensure_ascii=False),encoding="utf-8")
     temporary.replace(path)
-    material_path=ROOT/"ContentSource/Materials/ground_detail.json"
-    source=json.loads((ROOT/"ContentSource/Materials/trunk_0.json").read_text(encoding="utf-8"))
-    source["id"]="ground_detail"
-    source["textures"]=[t for t in source["textures"] if t["id"]!="detail"]
-    for texture in source["textures"]:
-        texture["product_id"]="render/texture/environment_ground_detail_"+texture["id"].replace("base_color","basecolor")+".rpkg"
-    remove={"material_distance","material_faded_detail","material_composed_normal"}
-    source["nodes"]=[n for n in source["nodes"] if "detail" not in n["id"] and n["id"] not in remove]
-    next(n for n in source["nodes"] if n["id"]=="material_closure")["normal"]["node"]="material_decoded_normal"
-    assert len(source["textures"])==3
-    material_path.write_text(json.dumps(source,indent=2)+"\n",encoding="utf-8")
-    p=PACK/"project_hs_environment_materials_v9_LEAN.json";doc=json.loads(p.read_text(encoding="utf-8"))
-    addition={"id":"mesh_ground_detail","mapping":{"mode":"uv0_atlas","atlas_size":[2048,2048],"gutter_px":GUTTER,"layers":1,"material_index":0,"opaque_geometry_silhouette":True},
-              "textures":{"base_color":"textures/"+ATLAS_NAMES["basecolor"],"normal":"textures/"+ATLAS_NAMES["normal"],"surface_ra":"textures/"+ATLAS_NAMES["surface"]}}
-    previous=[m for m in doc["opaque_mesh"]["materials"] if m["id"]!="mesh_ground_detail"]
-    doc["opaque_mesh"]["materials"]=previous+[addition];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
-    p=PACK/"baked_materials.json";doc=json.loads(p.read_text(encoding="utf-8"))
-    doc["ground_detail"]=[addition["textures"]];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
+    if OPT.revision == "v001":
+        material_path=ROOT/"ContentSource/Materials/ground_detail.json"
+        source=json.loads((ROOT/"ContentSource/Materials/trunk_0.json").read_text(encoding="utf-8"))
+        source["id"]="ground_detail"
+        source["textures"]=[t for t in source["textures"] if t["id"]!="detail"]
+        for texture in source["textures"]:
+            texture["product_id"]="render/texture/environment_ground_detail_"+texture["id"].replace("base_color","basecolor")+".rpkg"
+        remove={"material_distance","material_faded_detail","material_composed_normal"}
+        source["nodes"]=[n for n in source["nodes"] if "detail" not in n["id"] and n["id"] not in remove]
+        next(n for n in source["nodes"] if n["id"]=="material_closure")["normal"]["node"]="material_decoded_normal"
+        assert len(source["textures"])==3
+        material_path.write_text(json.dumps(source,indent=2)+"\n",encoding="utf-8")
+        p=PACK/"project_hs_environment_materials_v9_LEAN.json";doc=json.loads(p.read_text(encoding="utf-8"))
+        addition={"id":"mesh_ground_detail","mapping":{"mode":"uv0_atlas","atlas_size":[2048,2048],"gutter_px":GUTTER,"layers":1,"material_index":0,"opaque_geometry_silhouette":True},
+                  "textures":{"base_color":"textures/"+ATLAS_NAMES["basecolor"],"normal":"textures/"+ATLAS_NAMES["normal"],"surface_ra":"textures/"+ATLAS_NAMES["surface"]}}
+        previous=[m for m in doc["opaque_mesh"]["materials"] if m["id"]!="mesh_ground_detail"]
+        doc["opaque_mesh"]["materials"]=previous+[addition];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
+        p=PACK/"baked_materials.json";doc=json.loads(p.read_text(encoding="utf-8"))
+        doc["ground_detail"]=[addition["textures"]];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
     (OUT/"verification"/"runtime_mesh_validation.json").write_text(json.dumps({"complete":True,"baseline_mesh_count":len(base),"baseline_mesh_values_sha256":before,
         "unowned_mesh_values_preserved":True,"total_meshes":len(merged),"new_meshes":stats,"coordinate_transform":"Blender Z-up -> engine Y-up: (x,z,-y), proper rotation determinant +1",
         "uv_tangent_contract":"Flip V into PNG coordinates before calc_tangents; rotate tangent with position/normal and preserve recalculated bitangent sign"},indent=2),encoding="utf-8")
@@ -681,80 +694,103 @@ def exports():
     bpy.ops.object.select_all(action="DESELECT")
     for name in NAMES:bpy.data.objects[name].select_set(True)
     bpy.context.view_layer.objects.active=bpy.data.objects[NAMES[0]]
-    bpy.ops.export_scene.gltf(filepath=str(OUT/"ground_detail_v001.glb"),export_format="GLB",use_selection=True,
+    bpy.ops.export_scene.gltf(filepath=str(OUT/("ground_detail_"+OPT.revision+".glb")),export_format="GLB",use_selection=True,
                              export_animations=False,export_yup=True,use_active_scene=True,export_normals=True,export_tangents=True,export_materials="EXPORT")
     for ob in assets.objects:ob.hide_set(True)
     bpy.ops.object.select_all(action="DESELECT")
 
 
 def finish():
-    bpy.ops.wm.open_mainfile(filepath=str(OUT/"ground_detail_blockout_v001.blend"))
-    scene=bpy.data.scenes["HS_Ground_Detail_v001"];bpy.context.window.scene=scene
-    atlas();m=material()
-    for ob in bpy.data.collections["COL-ground-detail-assets"].objects:
-        ob.data.materials.clear();ob.data.materials.append(m)
-    records,stats=runtime_records();register(records,stats);exports()
-    # Packed engineering source keeps all map inputs portable; FBX uses relative external PNGs.
-    for im in bpy.data.images:
-        if im.source=="FILE" and "ground_detail" in im.name:im.pack()
-    camera(scene,(3,-4.5,4),(0,0,.13),3.5)
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/"ground_detail_v001.blend"))
-    render(scene,OUT/"preview"/"all_assets.png",1600,1200)
-    previews=bpy.data.collections["COL-ground-detail-preview"]
-    for ob in previews.objects:ob.hide_render=True
-    for name in NAMES:
-        ob=bpy.data.objects["PREVIEW-"+name];old=ob.location.copy();ob.location=(0,0,0);ob.hide_render=False
-        scale=2.15 if name=="fence_short" else .82
-        camera(scene,(1.2,-1.6,1.3 if name!="fence_short" else 1.0),(0,0,.32 if name=="fence_short" else .10),scale)
-        render(scene,OUT/"preview"/(name+"_close.png"),800,800)
-        camera(scene,(1.2,-1.6,1.7),(0,0,.18),2.7 if name=="fence_short" else 1.9)
-        render(scene,OUT/"preview"/(name+"_game_scale.png"),400,400)
-        ob.hide_render=True;ob.location=old
-    for ob in previews.objects:ob.hide_render=False
-    for lod in (1,2):
-        set_preview_lod(lod);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
-        render(scene,OUT/"preview"/("all_assets_lod"+str(lod)+".png"),1200,900)
-    set_preview_lod(0);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/"ground_detail_v001.blend"))
-    print("GROUND_DETAIL_FINISH_READY",json.dumps({x["name"]:x["triangles"] for x in stats}))
+    bpy.ops.wm.open_mainfile(filepath=str(OUT/("ground_detail_blockout_"+OPT.revision+".blend")))
+    with bpy.context.temp_override(window=bpy.context.window_manager.windows[0]):
+        scene=bpy.data.scenes["HS_Ground_Detail_"+OPT.revision];bpy.context.window_manager.windows[0].scene=scene
+        if OPT.revision == "v001":
+            atlas()
+        else:
+            import shutil
+            for name in ("ground_detail_normal_opengl.png", "ground_detail_roughness.png"):
+                shutil.copy2(SOURCE/"FBXTextures"/name, OUT/"FBXTextures"/name)
+            shutil.copy2(SOURCE/"atlas_regions.json", OUT/"atlas_regions.json")
+        m=material()
+        for ob in bpy.data.collections["COL-ground-detail-assets"].objects:
+            ob.data.materials.clear();ob.data.materials.append(m)
+        records,stats=runtime_records()
+        (OUT/"runtime_records.json").write_text(json.dumps({"meshes":records,"stats":stats},separators=(",",":")),encoding="utf-8")
+        exports()
+        # Packed engineering source keeps all map inputs portable; FBX uses relative external PNGs.
+        for im in bpy.data.images:
+            if im.source=="FILE" and "ground_detail" in im.name:im.pack()
+        camera(scene,(3,-4.5,4),(0,0,.13),3.5)
+        bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_"+OPT.revision+".blend")))
+        render(scene,OUT/"preview"/"all_assets.png",1600,1200)
+        previews=bpy.data.collections["COL-ground-detail-preview"]
+        for ob in previews.objects:ob.hide_render=True
+        for name in NAMES:
+            ob=bpy.data.objects["PREVIEW-"+name];old=ob.location.copy();ob.location=(0,0,0);ob.hide_render=False
+            scale=2.15 if name=="fence_short" else .95 if name.startswith("flower") else .82
+            camera(scene,(1.2,-1.6,1.3 if name!="fence_short" else 1.0),(0,0,.32 if name=="fence_short" else .20 if name.startswith("flower") else .10),scale)
+            render(scene,OUT/"preview"/(name+"_close.png"),800,800)
+            camera(scene,(1.2,-1.6,1.7),(0,0,.18),2.7 if name=="fence_short" else 1.9)
+            render(scene,OUT/"preview"/(name+"_game_scale.png"),400,400)
+            ob.hide_render=True;ob.location=old
+        for ob in previews.objects:ob.hide_render=False
+        for lod in (1,2):
+            set_preview_lod(lod);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
+            render(scene,OUT/"preview"/("all_assets_lod"+str(lod)+".png"),1200,900)
+        set_preview_lod(0);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
+        bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_"+OPT.revision+".blend")))
+        print("GROUND_DETAIL_FINISH_READY",json.dumps({x["name"]:x["triangles"] for x in stats}))
 
 
 def verify():
-    bpy.ops.wm.open_mainfile(filepath=str(OUT/"ground_detail_v001.blend"))
-    source={name:sum(len(p.vertices)-2 for p in bpy.data.objects[name].data.polygons) for name in [n+suffix for n in NAMES for suffix in ("","_lod1","_lod2")]}
-    report=[]
-    for name in NAMES:
-        scene=bpy.data.scenes.new("VERIFY-"+name);bpy.context.window.scene=scene
-        bpy.ops.import_scene.fbx(filepath=str(OUT/"FBX"/(name+".fbx")))
-        meshes=[o for o in scene.objects if o.type=="MESH"]
-        assert len(meshes)==3,(name,len(meshes))
-        entries=[]
+    bpy.ops.wm.open_mainfile(filepath=str(OUT/("ground_detail_"+OPT.revision+".blend")))
+    with bpy.context.temp_override(window=bpy.context.window_manager.windows[0]):
+        source={name:sum(len(p.vertices)-2 for p in bpy.data.objects[name].data.polygons) for name in [n+suffix for n in NAMES for suffix in ("","_lod1","_lod2")]}
+        report=[]
+        for name in NAMES:
+            scene=bpy.data.scenes.new("VERIFY-"+name);bpy.context.window_manager.windows[0].scene=scene
+            bpy.ops.import_scene.fbx(filepath=str(OUT/"FBX"/(name+".fbx")))
+            meshes=[o for o in scene.objects if o.type=="MESH"]
+            assert len(meshes)==3,(name,len(meshes))
+            entries=[]
+            for ob in meshes:
+                key=next(k for k in source if ob.name==k or ob.name.startswith(k+".")) if ob.name not in source else ob.name
+                ob.data.calc_loop_triangles();actual=len(ob.data.loop_triangles)
+                assert actual==source[key],(key,actual,source[key])
+                assert ob.data.uv_layers.active and len(ob.data.materials)==1
+                assert all(p.material_index==0 for p in ob.data.polygons)
+                assert all(math.isfinite(v) for p in ob.data.vertices for v in p.co)
+                expected=bpy.data.objects[key]
+                diff=max(abs(ob.dimensions[i]-expected.dimensions[i]) for i in range(3))
+                assert diff<.00005,(key,diff,list(ob.dimensions),list(expected.dimensions))
+                entries.append({"name":key,"triangles":actual,"dimension_max_error_m":diff,"uv0":True,"one_opaque_material":True})
+            report.append({"file":"FBX/"+name+".fbx","meshes":entries,"bytes":(OUT/"FBX"/(name+".fbx")).stat().st_size})
+        scene=bpy.data.scenes.new("VERIFY-glb");bpy.context.window_manager.windows[0].scene=scene
+        bpy.ops.import_scene.gltf(filepath=str(OUT/("ground_detail_"+OPT.revision+".glb")))
+        meshes=[o for o in scene.objects if o.type=="MESH"];assert len(meshes)==7
         for ob in meshes:
-            key=next(k for k in source if ob.name==k or ob.name.startswith(k+".")) if ob.name not in source else ob.name
-            ob.data.calc_loop_triangles();actual=len(ob.data.loop_triangles)
-            assert actual==source[key],(key,actual,source[key])
+            ob.data.calc_loop_triangles()
+            key=next(k for k in NAMES if ob.name==k or ob.name.startswith(k+"."))
+            assert len(ob.data.loop_triangles)==source[key]
             assert ob.data.uv_layers.active and len(ob.data.materials)==1
-            assert all(p.material_index==0 for p in ob.data.polygons)
-            assert all(math.isfinite(v) for p in ob.data.vertices for v in p.co)
-            expected=bpy.data.objects[key]
-            diff=max(abs(ob.dimensions[i]-expected.dimensions[i]) for i in range(3))
-            assert diff<.00005,(key,diff,list(ob.dimensions),list(expected.dimensions))
-            entries.append({"name":key,"triangles":actual,"dimension_max_error_m":diff,"uv0":True,"one_opaque_material":True})
-        report.append({"file":"FBX/"+name+".fbx","meshes":entries,"bytes":(OUT/"FBX"/(name+".fbx")).stat().st_size})
-    scene=bpy.data.scenes.new("VERIFY-glb");bpy.context.window.scene=scene
-    bpy.ops.import_scene.gltf(filepath=str(OUT/"ground_detail_v001.glb"))
-    meshes=[o for o in scene.objects if o.type=="MESH"];assert len(meshes)==7
-    for ob in meshes:
-        ob.data.calc_loop_triangles()
-        key=next(k for k in NAMES if ob.name==k or ob.name.startswith(k+"."))
-        assert len(ob.data.loop_triangles)==source[key]
-        assert ob.data.uv_layers.active and len(ob.data.materials)==1
-    (OUT/"verification"/"export_roundtrip.json").write_text(json.dumps({"complete":True,"blender_version":bpy.app.version_string,
-        "fbx_roundtrip":report,"glb_roundtrip":{"meshes":7,"embedded_maps":True,"triangles_match":True},"actual_visual_review":"See preview images; human/agent image review is separate from structural checks."},indent=2),encoding="utf-8")
-    print("GROUND_DETAIL_ROUNDTRIP_PASS",len(report),"FBX files + GLB; 21 LOD meshes.")
+        (OUT/"verification"/"export_roundtrip.json").write_text(json.dumps({"complete":True,"blender_version":bpy.app.version_string,
+            "runtime_records_sha256":hashlib.sha256((OUT/"runtime_records.json").read_bytes()).hexdigest(),
+            "fbx_roundtrip":report,"glb_roundtrip":{"meshes":7,"embedded_maps":True,"triangles_match":True},"actual_visual_review":"See preview images; human/agent image review is separate from structural checks."},indent=2),encoding="utf-8")
+        print("GROUND_DETAIL_ROUNDTRIP_PASS",len(report),"FBX files + GLB; 21 LOD meshes.")
+
+
+def register_verified():
+    report=json.loads((OUT/"verification/export_roundtrip.json").read_text(encoding="utf-8"))
+    encoded=(OUT/"runtime_records.json").read_bytes()
+    assert report["complete"] and hashlib.sha256(encoded).hexdigest()==report["runtime_records_sha256"], "Runtime records changed after export verification"
+    data=json.loads(encoded)
+    owned={n+s for n in NAMES[:4] for s in ("","_lod1","_lod2")} if OPT.revision == "v002" else {m["name"] for m in data["meshes"]}
+    register([m for m in data["meshes"] if m["name"] in owned], [m for m in data["stats"] if m["name"] in owned])
+    print("GROUND_DETAIL_REGISTERED",len(owned),"verified meshes")
 
 
 if __name__=="__main__":
     if OPT.stage=="geometry":geometry()
     elif OPT.stage=="finish":finish()
-    else:verify()
+    elif OPT.stage=="verify":verify()
+    else:register_verified()

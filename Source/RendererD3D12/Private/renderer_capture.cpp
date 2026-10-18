@@ -152,12 +152,13 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
     impl_->device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, &rows, &row_size,
                                          &total_size);
 
+    constexpr auto particle_argument_bytes = kParticleDrawBinCount * kRibbonArgumentStride;
     AllocationResource readback;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
     if (auto result = impl_->CreateAllocation(
             readback, allocation,
-            BufferDescription(total_size + sizeof(D3D12_DRAW_ARGUMENTS)),
+            BufferDescription(total_size + particle_argument_bytes),
             D3D12_RESOURCE_STATE_COPY_DEST);
         !result)
     {
@@ -195,7 +196,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         D3D12_BARRIER_ACCESS_COPY_SOURCE);
     impl_->command_list->CopyBufferRegion(readback.resource.Get(), total_size,
                                           impl_->indirect_arguments.resource.Get(), 0,
-                                          sizeof(D3D12_DRAW_ARGUMENTS));
+                                          particle_argument_bytes);
     impl_->TransitionBuffer(
         impl_->indirect_arguments.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
@@ -215,7 +216,7 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
 
     void *mapped_data{};
     D3D12_RANGE read_range{
-        0, static_cast<SIZE_T>(total_size + sizeof(D3D12_DRAW_ARGUMENTS))};
+        0, static_cast<SIZE_T>(total_size + particle_argument_bytes)};
     result = readback.resource->Map(0, &read_range, &mapped_data);
     if (FAILED(result))
     {
@@ -232,14 +233,24 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path)
         png_pitch = impl_->width * 4;
     }
     const auto write = impl_->WritePng(path, png_pixels, png_pitch);
-    const auto *draw_arguments = reinterpret_cast<const D3D12_DRAW_ARGUMENTS *>(
-        static_cast<const std::byte *>(mapped_data) + total_size);
-    impl_->last_particle_count = draw_arguments->InstanceCount;
-    std::ofstream(path.parent_path() / "particle_stats.json", std::ios::trunc)
-        << std::format("{{\"alive\":{},\"capacity\":{}}}\n", impl_->last_particle_count,
-                       kParticleCount * std::clamp(impl_->config.particle_percentage, 50u,
-                                                   100u) /
-                           100u);
+    std::array<D3D12_DRAW_ARGUMENTS, kParticleDrawBinCount> particle_draws{};
+    impl_->last_particle_count = 0;
+    for (std::size_t bin = 0; bin < particle_draws.size(); ++bin)
+    {
+        std::memcpy(&particle_draws[bin], static_cast<const std::byte *>(mapped_data) +
+            total_size + bin * kRibbonArgumentStride + sizeof(std::uint32_t), sizeof(D3D12_DRAW_ARGUMENTS));
+        impl_->last_particle_count += particle_draws[bin].InstanceCount;
+    }
+    std::ofstream particle_stats(path.parent_path() / "particle_stats.json", std::ios::trunc);
+    particle_stats << std::format("{{\"alive\":{},\"capacity\":{},\"draw_bins\":[",
+        impl_->last_particle_count, kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) / 100u);
+    for (std::size_t bin = 0; bin < particle_draws.size(); ++bin)
+    {
+        if (bin != 0) particle_stats << ',';
+        particle_stats << std::format("{{\"bin\":{},\"vertices\":{},\"instances\":{}}}",
+            bin, particle_draws[bin].VertexCountPerInstance, particle_draws[bin].InstanceCount);
+    }
+    particle_stats << "]}\n";
     D3D12_RANGE no_write{};
     readback.resource->Unmap(0, &no_write);
     if (const auto *hlod = impl_->ActiveHlodView(); write && hlod)
@@ -1010,7 +1021,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             index + 1 == surfaces.size() ? "" : ",");
     }
     metadata_output << std::format(
-        "  ],\n  \"light_list\": {{\"index_encoding\": \"bitset_u32x4\", "
+        "  ],\n  \"light_list\": {{\"index_encoding\": \"bitset_u32x4_complete\", "
         "\"allocation_bytes\": {}, \"upload_allocation_bytes\": {}, "
         "\"capacity\": {{\"width\": {}, \"height\": {}}}, "
         "\"frame_slot_count\": {}, \"frame_slot\": {}}},\n",

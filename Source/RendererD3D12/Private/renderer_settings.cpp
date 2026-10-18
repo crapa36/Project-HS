@@ -271,8 +271,8 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.dynamic_min_percent = config.dynamic_min_percent;
     actual.dynamic_max_percent = config.dynamic_max_percent;
     actual.sharpening = config.sharpening;
-    actual.frame_generation_multiplier = presentation.observed_multiplier
-        ? presentation.observed_multiplier : presentation.requested.multiplier;
+    // Configured policy is stable; SDK present counts remain separate telemetry.
+    actual.frame_generation_multiplier = presentation.requested.multiplier;
     actual.low_latency = presentation.low_latency_active ? GraphicsAutoToggle::On : GraphicsAutoToggle::Off;
     actual.texture_quality = config.texture_quality;
     actual.texture_budget_mib = config.texture_budget_mib;

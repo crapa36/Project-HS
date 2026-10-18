@@ -12,6 +12,35 @@ string(REPLACE "\tPERMUTATION_OUTPUTS)" "\tPERMUTATION_OUTPUT_VARIABLE)\n\tset(P
 string(REPLACE "set(\${PERMUTATION_OUTPUTS} \${PERMUTATION_OUTPUTS} PARENT_SCOPE)" "set(\${PERMUTATION_OUTPUT_VARIABLE} \${PERMUTATION_OUTPUTS} PARENT_SCOPE)" brix_compile_functions "${brix_compile_functions}")
 string(REPLACE "WORKING_DIRECTORY" "JOB_POOL hs_brixelizer_shader_compile\n            WORKING_DIRECTORY" brix_compile_functions "${brix_compile_functions}")
 string(REPLACE "DEPENDS \${PASS_SHADER}" "DEPENDS \${PASS_SHADER} \${FFX_SC_EXECUTABLE} \${HS_BRIXELIZER_COMPILER_INPUTS}" brix_compile_functions "${brix_compile_functions}")
+# The pinned SC reads its top-level source with std::ifstream and silently
+# compiles an empty buffer at MAX_PATH. Keep dependency/identity paths intact;
+# only its Windows compiler input uses the native extended-length spelling.
+if(WIN32)
+    # Its include resolver also constructs temporary paths relative to CWD;
+    # the nested build directory can overflow those before normalization.
+    string(REPLACE "WORKING_DIRECTORY \${CMAKE_BINARY_DIR}"
+        "WORKING_DIRECTORY \${CMAKE_SOURCE_DIR}"
+        brix_compile_functions "${brix_compile_functions}")
+    set(brix_shader_input_adapter [=[
+        file(TO_NATIVE_PATH "${PASS_SHADER}" HS_BRIXELIZER_SHADER_INPUT)
+        string(PREPEND HS_BRIXELIZER_SHADER_INPUT "\\\\?\\")
+]=])
+    set(brix_shader_include_adapter [=[
+        file(TO_NATIVE_PATH "${INC}" INC)
+        string(PREPEND INC "\\\\?\\")
+]=])
+    # SC's custom include resolver requires the source and -I paths to use
+    # the same Win32 namespace, including when the includes fit MAX_PATH.
+    string(REPLACE "foreach(INC \${INCLUDES_ARGS})"
+        "foreach(INC \${INCLUDES_ARGS})\n${brix_shader_include_adapter}"
+        brix_compile_functions "${brix_compile_functions}")
+    string(REPLACE "get_filename_component(PASS_SHADER_TARGET \${PASS_SHADER} NAME_WLE)"
+        "get_filename_component(PASS_SHADER_TARGET \${PASS_SHADER} NAME_WLE)\n${brix_shader_input_adapter}"
+        brix_compile_functions "${brix_compile_functions}")
+    string(REPLACE "-output=\${OUTPUT_PATH} \${PASS_SHADER}"
+        "-output=\${OUTPUT_PATH} \"\${HS_BRIXELIZER_SHADER_INPUT}\""
+        brix_compile_functions "${brix_compile_functions}")
+endif()
 set(HS_BRIXELIZER_DEPFILE_ADAPTER "${CMAKE_CURRENT_SOURCE_DIR}/NormalizeShaderDepfile.cmake")
 # The pinned SC writes absolute dependency paths without GCC escaping. Repair
 # that serialization before CMake imports it, retaining every actual include.

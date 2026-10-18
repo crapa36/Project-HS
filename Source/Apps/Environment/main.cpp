@@ -45,7 +45,7 @@ std::vector<std::string> MeshProductNames()
         "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
         "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
     "ground_leaves", "twig_cluster", "fence_short",
-    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
     std::vector<std::string> products;
     for (const auto* name : names) for (const auto* lod : {"", "_lod1", "_lod2"})
         products.push_back("environment_" + std::string(name) + lod + ".meshbin");

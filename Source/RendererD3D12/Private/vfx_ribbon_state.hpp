@@ -4,6 +4,8 @@
 #include <hs/renderer/vfx_ribbon_input.hpp>
 #include <span>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace hs::renderer_detail
@@ -25,6 +27,11 @@ public:
                                         std::size_t output_capacity) const;
 
 private:
+    using Key = std::tuple<std::uint64_t, VfxEffectHandle, std::uint32_t>;
+    struct KeyHash
+    {
+        std::size_t operator()(const Key &key) const noexcept;
+    };
     struct Slot
     {
         std::uint64_t owner_id{};
@@ -37,9 +44,12 @@ private:
         std::vector<GpuRibbonOutput> outputs;
         bool occupied{};
         bool analytic{};
+        bool winner{};
+        bool seen{};
     };
 
     std::vector<Slot> slots_;
+    std::unordered_map<Key, std::size_t, KeyHash> slot_by_key_;
     std::vector<GpuRibbonSourceUpdate> updates_;
     std::vector<GpuRibbonOutput> outputs_;
     std::uint64_t session_{};

@@ -102,6 +102,10 @@ class ResidencyManager
         ResidencyStorage storage{};
     };
 
+    void UpdateAdmissionTotals(ResidencyStorage storage, std::uint64_t previous, std::uint64_t next) noexcept;
+
+    std::uint64_t gpu_reserved_{}, host_held_{};
+    bool gpu_reserved_overflow_{}, host_held_overflow_{};
     ResidencyBudgetSnapshot budget_{};
     std::unordered_map<std::uint64_t, Allocation> allocations_;
     std::uint64_t next_ticket_{1};

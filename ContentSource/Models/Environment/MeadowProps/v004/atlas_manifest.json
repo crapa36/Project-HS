@@ -1,0 +1,55 @@
+{
+  "size": [
+    2048,
+    2048
+  ],
+  "gutter_px": 24,
+  "opaque": true,
+  "array_layer": 1,
+  "normal_convention": "Runtime UV V-down; Blender preview flips green",
+  "surface_channels": {
+    "R": "roughness",
+    "G": "AO",
+    "B": "unused zero",
+    "A": "opaque"
+  },
+  "source_reuse": [
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\ground_detail_basecolor.png",
+      "sha256": "c830a6f72592ed4ad02efb5ed9f1b3b72607a24f133c0f39dc7d4b561e1e8809"
+    },
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\ground_detail_surface_ra.png",
+      "sha256": "a29077e9462acbb1e0bdfce9ca81e3a026246ee66d02438125c5d7cf11573a81"
+    },
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\ground_detail_normal.png",
+      "sha256": "7fdd533db35598742e2bf6e127184486bf7ca8fa849115ed13c7f477d34ae2ac"
+    },
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\mesh_rock_basecolor.png",
+      "sha256": "7c05625d3b2e166a506acbe4a848a765de839c920ba330af597db08c530de3dc"
+    },
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\mesh_rock_surface_ra.png",
+      "sha256": "57fda89e1f96e585cebd98e247543dc66612bc288b9ed8bc7fa82ebd37a760ea"
+    },
+    {
+      "path": "ContentSource\\Textures\\Environment\\textures\\mesh_rock_normal.png",
+      "sha256": "47493dc938ef5c24e2e4b1998552e600e0bc0a43d1541f81a5dc210dfa9f9a0b"
+    }
+  ],
+  "overrides": {
+    "daisy": "jute",
+    "stem": "rope",
+    "leaf_ochre": "stone",
+    "leaf_brown": "moss"
+  },
+  "textures": {
+    "basecolor": "ContentSource\\Textures\\Environment\\textures\\meadow_additions_v004_basecolor.png",
+    "surface": "ContentSource\\Textures\\Environment\\textures\\meadow_additions_v004_surface_ra.png",
+    "normal": "ContentSource\\Textures\\Environment\\textures\\meadow_additions_v004_normal.png"
+  },
+  "unowned_cells_pixel_identical": true,
+  "moss_pattern": "isotropic random clusters and fine particle normal; no directional sine grain"
+}

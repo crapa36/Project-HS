@@ -2564,6 +2564,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
     }
+    const auto ground_quad_end = std::partition(gpu_ground_rings, gpu_ground_rings + ground_ring_count,
+        [](const GpuParticleSpawnCommand &command) {
+            return !((command.metadata.z == 5u || command.metadata.z == 6u) &&
+                command.shape_extent_speed_min.x > command.shape_extent_speed_min.y * 0.45f);
+        });
+    const auto ground_quad_count = static_cast<std::uint32_t>(ground_quad_end - gpu_ground_rings);
     constexpr auto particle_capacity = kParticleCount;
     std::uint32_t gpu_particle_spawn_count{};
     std::uint32_t total_particles_to_spawn{};
@@ -4872,9 +4878,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             dispatch_phase(3, total_particles_to_spawn);
             synchronize_particle_state();
         }
-        dispatch_phase(4, particle_capacity);
-        context.UavBarrier(particle_alive_output);
-        context.UavBarrier(particle_counters);
         dispatch_phase(5, 1);
         context.UavBarrier(particle_counters);
         context.UavBarrier(indirect_arguments);
@@ -6304,6 +6307,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     LightListInputs light_inputs;
     light_inputs.lights = frame_lights;
+    light_inputs.local_shadow_records = local_shadow_outputs.light_records;
     light_inputs.transient_light_ids = transient_light_ids;
     light_inputs.render_active = impl_->view_state.render_active;
     light_inputs.frame_slot = back_buffer_index;
@@ -6483,6 +6487,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return Result::Success();
         };
     };
+    std::uint32_t excluded_masked_count{}, excluded_thin_count{}, excluded_translucent_count{};
     std::vector<SoftwareSceneGeometry> brixelizer_geometries;
     std::vector<BrixelizerSceneInstance> brixelizer_instances;
     BrixelizerGeometryLookup brixelizer_geometry_lookup;
@@ -6574,11 +6579,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             const auto *page = impl_->FindGeometryPage(page_slot);
             if (!page)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene candidate has no complete resident geometry page.");
-            std::array<ResourceVersion, 2> versions{
-                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->vertices), Access::VertexBuffer, "SceneCanonicalVertices")),
-                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->indices), Access::IndexBuffer, "SceneCanonicalIndices"))};
-            add_read(versions[0], page->vertices.resource.Get());
-            add_read(versions[1], page->indices.resource.Get());
             const bool masked = environment && render_data::ClassifyEnvironmentMaterial(
                 impl_->environment_meshes[geometry_ordinal * 3].material) == render_data::EnvironmentMaterialVariant::MaskedTwoSided;
             const bool builtin = page->page_slot == kProceduralGeometryPage;
@@ -6588,11 +6588,32 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             if (builtin) flags |= SceneGeometryBuiltin;
             if (!hero && (builtin || HasEnvironmentWind(source.mesh, source.environment_variant))) flags |= SceneGeometryDeformed;
             if (source.mesh == RenderMesh::EnemyProjectile) flags |= SceneGeometryTransmissive;
-            jobs.push_back({1u + page->page_slot * kGeometryBuffersPerPage,
+            const SceneGeometryRecord job{1u + page->page_slot * kGeometryBuffersPerPage,
                 2u + page->page_slot * kGeometryBuffersPerPage, 0u, page->index_count,
                 0u, sizeof(Vertex), page->vertex_count, 0u, stable_slot, generation,
-                skin_slot, static_cast<std::uint32_t>(source.mesh), ordinal, flags});
-            draws.push_back({draw.position, draw.scale, draw.color, draw.mesh, draw.yaw, draw.padding});
+                skin_slot, static_cast<std::uint32_t>(source.mesh), ordinal, flags};
+            const SceneDrawInstance instance{draw.position, draw.scale, draw.color, draw.mesh, draw.yaw, draw.padding};
+            if (environment && !hero)
+            {
+                const auto capabilities = ordinal < kAuthoredMaterialNames.size()
+                    ? impl_->material_surface_layouts[ordinal].capability_mask : 0u;
+                const auto domain = ClassifyBrixelizerDomain(capabilities,
+                    (flags & SceneGeometryTwoSided) != 0, (flags & SceneGeometryTransmissive) != 0);
+                if (domain != BrixelizerGeometryDomain::Opaque && domain != BrixelizerGeometryDomain::AuthoredCoverage)
+                {
+                    if (auto valid = ValidateSceneGeometryRecord(job, instance); !valid) return valid;
+                    auto &count = domain == BrixelizerGeometryDomain::UnsupportedMasked ? excluded_masked_count :
+                        domain == BrixelizerGeometryDomain::UnsupportedThin ? excluded_thin_count : excluded_translucent_count;
+                    return AddBrixelizerExcludedCount(count, page->submeshes.size());
+                }
+            }
+            std::array<ResourceVersion, 2> versions{
+                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->vertices), Access::VertexBuffer, "SceneCanonicalVertices")),
+                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->indices), Access::IndexBuffer, "SceneCanonicalIndices"))};
+            add_read(versions[0], page->vertices.resource.Get());
+            add_read(versions[1], page->indices.resource.Get());
+            jobs.push_back(job);
+            draws.push_back(instance);
             scene_pages.push_back(page);
             scene_sources.push_back(&source);
             scene_page_versions.push_back(versions);
@@ -6701,7 +6722,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                             brixelizer_geometry_lookup,brixelizer_geometries,brixelizer_instances); !appended) return appended;
                 }
             }
-
         }
     }
     // Signal composition follows the existing native graph boundaries. Handles
@@ -6753,6 +6773,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const auto register_software_gi_scene = [&]() -> Result {
         BrixelizerSceneInputs native_scene;
         native_scene.geometries = brixelizer_geometries; native_scene.instances = brixelizer_instances;
+        native_scene.excluded_masked_count = excluded_masked_count;
+        native_scene.excluded_thin_count = excluded_thin_count;
+        native_scene.excluded_translucent_count = excluded_translucent_count;
         native_scene.sdf_center = lod_eye; native_scene.frame_slot = back_buffer_index;
         native_scene.frame_index = impl_->frame_number; native_scene.scene_revision = impl_->pipeline_revision + 1;
         native_scene.completed = impl_->graph_queue_executor.Completed(); native_scene.owners = brixelizer_owners;
@@ -7419,13 +7442,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             12,
             impl_->particle_alive[particle_output_index].resource->GetGPUVirtualAddress());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        for (UINT bin = 0; bin < 2; ++bin)
-        {
-            list->SetGraphicsRoot32BitConstant(6, bin, 0);
-            list->ExecuteIndirect(
-                impl_->draw_signature.Get(), 1, impl_->indirect_arguments.resource.Get(),
-                bin * sizeof(D3D12_DRAW_ARGUMENTS), nullptr, 0);
-        }
+        // Reuse the existing root-constant + draw signature for all exact-size bins.
+        list->ExecuteIndirect(impl_->ribbon_draw_signature.Get(), kParticleDrawBinCount,
+            impl_->indirect_arguments.resource.Get(), 0, nullptr, 0);
         list->SetGraphicsRoot32BitConstant(6, 0, 0);
         if (ground_ring_count != 0)
         {
@@ -7433,7 +7452,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             list->SetGraphicsRootShaderResourceView(
                 11, frame.upload.resource->GetGPUVirtualAddress() +
                         ground_ring_data_offset);
-            list->DrawInstanced(6, ground_ring_count, 0, 0);
+            if (ground_quad_count != 0u) list->DrawInstanced(6, ground_quad_count, 0, 0);
+            if (ground_quad_count != ground_ring_count)
+            {
+                list->SetGraphicsRootShaderResourceView(11,
+                    frame.upload.resource->GetGPUVirtualAddress() + ground_ring_data_offset +
+                    ground_quad_count * sizeof(GpuParticleSpawnCommand));
+                list->DrawInstanced(32u * 6u, ground_ring_count - ground_quad_count, 0, 0);
+            }
         }
 
         if (owner_mesh_count != 0)

@@ -1,0 +1,220 @@
+{
+  "complete": true,
+  "blender_version": "5.2.2 LTS",
+  "fbx_meshes": [
+    {
+      "name": "fence_broken",
+      "triangles": 640,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fence_broken_lod1",
+      "triangles": 480,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fence_broken_lod2",
+      "triangles": 224,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fence_splitrail",
+      "triangles": 432,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fence_splitrail_lod1",
+      "triangles": 312,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fence_splitrail_lod2",
+      "triangles": 216,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "sack_tied",
+      "triangles": 1776,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "sack_tied_lod1",
+      "triangles": 908,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "sack_tied_lod2",
+      "triangles": 448,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fallen_log",
+      "triangles": 1284,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fallen_log_lod1",
+      "triangles": 640,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "fallen_log_lod2",
+      "triangles": 372,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "rock_mossy",
+      "triangles": 640,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "rock_mossy_lod1",
+      "triangles": 160,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "rock_mossy_lod2",
+      "triangles": 100,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_intact",
+      "triangles": 1728,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_intact_lod1",
+      "triangles": 1296,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_intact_lod2",
+      "triangles": 864,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_broken",
+      "triangles": 1600,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_broken_lod1",
+      "triangles": 1200,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "crate_broken_lod2",
+      "triangles": 800,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_intact",
+      "triangles": 2600,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_intact_lod1",
+      "triangles": 1624,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_intact_lod2",
+      "triangles": 904,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_broken",
+      "triangles": 2028,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_broken_lod1",
+      "triangles": 1248,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "barrel_broken_lod2",
+      "triangles": 692,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "cart_broken",
+      "triangles": 3284,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "cart_broken_lod1",
+      "triangles": 2396,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    },
+    {
+      "name": "cart_broken_lod2",
+      "triangles": 1580,
+      "dimension_max_error_m": 0.0,
+      "uv0": true,
+      "opaque_materials": 1
+    }
+  ],
+  "glb_files": 2,
+  "glb_meshes": 10,
+  "runtime_records_per_set": 15,
+  "registry_modified": false
+}

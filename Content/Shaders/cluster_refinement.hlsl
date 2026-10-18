@@ -144,7 +144,9 @@ bool ConstantsValid()
     Children.GetDimensions(count, stride); valid = valid && ChildCount <= count;
     Pages.GetDimensions(count, stride); valid = valid && PageCount <= count;
     Candidates.GetDimensions(count, stride); valid = valid && CandidateCount <= count;
-    CutCounts.GetDimensions(count, stride); valid = valid && CandidateCount <= count;
+    CutCounts.GetDimensions(count, stride);
+    valid = valid && CandidateCount <= count / 2u && Range(CandidateCount * 2u, OutputCapacity, count) &&
+        OutputCapacity >= CandidateCount;
     CutOffsets.GetDimensions(count, stride); valid = valid && CandidateCount <= count;
     BlockSums.GetDimensions(count, stride); valid = valid && PrefixBlockCount <= count;
     BlockOffsets.GetDimensions(count, stride); valid = valid && PrefixBlockCount <= count;
@@ -380,6 +382,9 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
     candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
+    const uint cache_stride = OutputCapacity / CandidateCount;
+    const uint cache_base = CandidateCount * 2u + candidate_index * cache_stride;
+    uint selected_groups = 0u;
     uint count = 0u;
     uint node = candidate.FirstRoot;
     for (uint visited = 0u; node != Invalid && visited < candidate.GroupCount; ++visited)
@@ -405,9 +410,13 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
             Fault(FailureErrorDomain); continue;
         }
         if (group.ClusterCount > Invalid - count) { Fault(FailureCapacity); return; }
+        if (selected_groups >= cache_stride) { Fault(FailureCapacity); return; }
+        CutCounts[cache_base + selected_groups++] = uint2(id, mask);
         count += group.ClusterCount;
     }
     if (node != Invalid) { Fault(FailureAncestorRange); return; }
+    // Publish directory only after the immutable traversal completes.
+    CutCounts[CandidateCount + candidate_index] = uint2(count, selected_groups);
     CutCounts[candidate_index] = uint2(count, 0u);
 }
 
@@ -560,18 +569,26 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     const uint2 expected = CutCounts[candidate_index];
     // Count validated the immutable cut; an empty cut has no records or history to emit.
     if (all(expected == uint2(0u, 0u))) return;
+    uint cache_elements, cache_element_stride;
+    CutCounts.GetDimensions(cache_elements, cache_element_stride);
+    if (CandidateCount > cache_elements / 2u ||
+        !Range(CandidateCount * 2u, OutputCapacity, cache_elements)) { Fault(FailureCapacity); return; }
+    const uint cache_stride = OutputCapacity / CandidateCount;
+    const uint cache_base = CandidateCount * 2u + candidate_index * cache_stride;
+    const uint2 selected = CutCounts[CandidateCount + candidate_index];
+    if (expected.y != 0u || selected.x != expected.x || selected.y == 0u || selected.y > cache_stride)
+    { Fault(FailureCatalog); return; }
     uint count = 0u;
     uint3 cascade_suffix = uint3(0u, 0u, 0u);
-    uint node = candidate.FirstRoot;
-    for (uint visited = 0u; node != Invalid && visited < candidate.GroupCount; ++visited)
+    for (uint selected_index = 0u; selected_index < selected.y; ++selected_index)
     {
-        const uint id = node;
+        const uint2 selection = CutCounts[cache_base + selected_index];
+        const uint id = selection.x;
+        const uint mask = selection.y;
         ClusterGroup group;
         if (!GroupValid(id, candidate, group)) return;
-        uint mask; float priority; bool desired;
-        const bool refined = Refinement(id, group, candidate, instance, mask, priority, desired);
-        node = refined ? Children[group.FirstChild] : group.NextSubtree;
-        if (refined || mask == 0u) continue;
+        if (mask == 0u || (mask & ~candidate.ViewMask) != 0u || group.ClusterCount > expected.x - count)
+        { Fault(FailureCatalog); return; }
         if (!CompleteRepresentation(id, group) || ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u))
         {
             Fault(FailureMissingPage | FailureErrorDomain); return;
@@ -589,7 +606,6 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
         if ((mask & 4u) != 0u) cascade_suffix.y = max(cascade_suffix.y, end);
         if ((mask & 8u) != 0u) cascade_suffix.z = max(cascade_suffix.z, end);
     }
-    if (node != Invalid) { Fault(FailureAncestorRange); return; }
     if (expected.y != 0u || count != expected.x)
     {
         Fault(FailureCatalog); return;

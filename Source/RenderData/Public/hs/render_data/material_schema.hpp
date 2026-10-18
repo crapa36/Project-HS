@@ -77,12 +77,12 @@ void ValidateMaterialParameterLayout(
     std::span<const std::byte> bytes, AssetId expected_asset_id);
 
 // Geometry catalog order; the appended detail geometries share one authored material.
-inline constexpr std::array<std::string_view, 30> kEnvironmentMaterialNames{
+inline constexpr std::array<std::string_view, 35> kEnvironmentMaterialNames{
     "trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1", "leaf_2",
     "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3",
     "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
     "ground_leaves", "twig_cluster", "fence_short",
-    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
 inline constexpr std::array<std::string_view, 16> kAuthoredMaterialNames{
     "trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1", "leaf_2",
     "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3", "terrain", "ground_detail"};
@@ -90,8 +90,8 @@ inline constexpr std::uint32_t kEnvironmentGeometryLodCount = 3;
 inline constexpr std::uint32_t kTerrainMaterialOrdinal = 14;
 inline constexpr std::uint32_t kGroundDetailMaterialOrdinal = 15;
 inline constexpr std::uint32_t kGroundDetailGeometryBegin = 14;
-inline constexpr std::uint32_t kMeadowGeometryBegin = 28;
-inline constexpr std::uint32_t kMeadowWaterGeometry = 29;
+inline constexpr std::uint32_t kMeadowGeometryBegin = 33;
+inline constexpr std::uint32_t kMeadowWaterGeometry = 34;
 [[nodiscard]] constexpr bool IsEnvironmentMesh(RenderMesh mesh) noexcept
 { return (mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass) || mesh == RenderMesh::GroundDetail || mesh == RenderMesh::MeadowSurface; }
 [[nodiscard]] constexpr std::uint32_t EnvironmentGeometryOrdinal(RenderMesh mesh, std::uint32_t variant) noexcept

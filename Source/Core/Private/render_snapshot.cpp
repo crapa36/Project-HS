@@ -57,7 +57,7 @@ AssetId PackagedRenderAsset(RenderMesh mesh, std::uint32_t variant) noexcept
         "render/clover_patch.rpkg", "render/ground_leaves.rpkg", "render/twig_cluster.rpkg",
         "render/fence_short.rpkg",
         "render/shrub_low.rpkg", "render/stump_roots.rpkg", "render/crate_intact.rpkg",
-        "render/crate_broken.rpkg", "render/barrel_intact.rpkg", "render/barrel_broken.rpkg", "render/cart_broken.rpkg"};
+        "render/crate_broken.rpkg", "render/barrel_intact.rpkg", "render/barrel_broken.rpkg", "render/cart_broken.rpkg", "render/fence_broken.rpkg", "render/fence_splitrail.rpkg", "render/sack_tied.rpkg", "render/fallen_log.rpkg", "render/rock_mossy.rpkg"};
     switch (mesh)
     {
     case RenderMesh::Archer:

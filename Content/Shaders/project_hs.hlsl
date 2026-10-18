@@ -237,7 +237,6 @@ Texture2D<float4> MonsterEmissive : register(t1, space1);
 Texture2D<float4> MonsterRam : register(t2, space1);
 Texture2DArray<float4> FamilyDiffuse : register(t3, space1);
 Texture2DArray<float4> FamilyNormal : register(t4, space1);
-SamplerState LinearClamp : register(s0);
 SamplerComparisonState ShadowCompare : register(s1);
 SamplerState MaterialSampler : register(s2);
 
@@ -353,7 +352,7 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
     ctx.tangent = input.WorldTangent;
     ctx.normal = float3(0, 0, 1);
     ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
-    ctx.mesh = input.Mesh == 22u && input.Material == 0u ? 9u : input.Mesh;
+    ctx.mesh = input.Mesh;
     ctx.seed = input.EnvironmentSeed;
     ctx.view_direction = CameraTime.xyz - input.WorldPosition;
     ctx.parameter_base = materialWord >> 1;
@@ -390,7 +389,7 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
         const float4 color = input.Mesh == 19
             ? GrassBase.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy)
             : LeafBase.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy);
-        ctx.sampled_base_color = color.rgb;
+        ctx.sampled_base_color = color.rgb * (input.Mesh == 19u ? input.Color.rgb : float3(1,1,1));
         ctx.sampled_alpha = color.a;
         ctx.normal = EnvDecode(input.Mesh == 19
             ? GrassNormal.SampleGrad(FoliageClamp, uv, ctx.d_uv_dx, ctx.d_uv_dy).rg
@@ -950,7 +949,7 @@ HsMaterialContext HsHeroMaterialContext(SceneOutput input, bool front,
     ctx.stable_world_position = input.WorldPosition;
     ctx.d_stable_world_dx = gradients.worldDx;
     ctx.d_stable_world_dy = gradients.worldDy;
-    ctx.mesh = input.Mesh == 22u && input.Material == 0u ? 9u : input.Mesh;
+    ctx.mesh = input.Mesh;
     ctx.seed = input.EnvironmentSeed;
     ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
     ctx.view_direction = normalize(CameraTime.xyz - input.WorldPosition);
@@ -1634,93 +1633,59 @@ void CatchUpBallistic(inout ParticleData particle, uint now)
     particle.PositionLife.w = particle.InitialVelocityMaxLife.w - max(0.0, age);
 }
 
-[shader("compute")]
-[numthreads(256, 1, 1)]
-void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
+uint ParticleDrawBin(uint metadata)
 {
-    uint index = dispatch_id.x;
-    uint capacity = ParticleOptions.x;
+    if (((metadata >> 8u) & 0xffu) != 3u) return 0u;
+    const uint primitive = (metadata >> 16u) & 0xffu;
+    const uint selector = metadata >> 24u;
+    if (selector != 0u) return selector;
+    return primitive == 11u ? 8u : primitive == 7u ? 1u : primitive == 10u ? 7u : 2u;
+}
 
-    if (PassValue == 0)
+// Group-local ranks reserve each global list once; dead-slot admission is unchanged.
+groupshared uint ParticleGroupCounts[10];
+groupshared uint ParticleGroupBases[10];
+groupshared uint ParticleGroupAliveBase;
+void AppendParticleGroup(uint lane, bool active, bool alive, uint particle_index, uint bin)
+{
+    if (lane < 10u) ParticleGroupCounts[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    uint rank = 0u;
+    const uint category = alive ? bin : 9u;
+    if (active) InterlockedAdd(ParticleGroupCounts[category], 1u, rank);
+    GroupMemoryBarrierWithGroupSync();
+    if (lane == 0u)
     {
-        if (index < capacity)
-        {
-            DeadIndices[index] = capacity - index - 1;
-        }
-        if (index == 0)
-        {
-            ParticleCounters.Store(0, 0);
-            ParticleCounters.Store(4, 0);
-            ParticleCounters.Store(12, 0);
-            ParticleCounters.Store(16, 0);
-            ParticleCounters.Store(8, capacity);
-            IndirectArguments.Store4(0, uint4(24, 0, 0, 0));
-        }
-        return;
+        uint alive_count = 0u;
+        [unroll] for (uint i = 0u; i < 9u; ++i) alive_count += ParticleGroupCounts[i];
+        ParticleGroupAliveBase = 0u;
+        if (alive_count != 0u) ParticleCounters.InterlockedAdd(4u, alive_count, ParticleGroupAliveBase);
     }
+    if (lane < 10u && ParticleGroupCounts[lane] != 0u)
+        ParticleCounters.InterlockedAdd(lane == 9u ? 8u : 12u + lane * 4u,
+            ParticleGroupCounts[lane], ParticleGroupBases[lane]);
+    GroupMemoryBarrierWithGroupSync();
+    if (!active) return;
+    if (!alive) { DeadIndices[ParticleGroupBases[9] + rank] = particle_index; return; }
+    uint prefix = 0u;
+    [unroll] for (uint i = 0u; i < 9u; ++i)
+        if (i < bin) prefix += ParticleGroupCounts[i];
+    AliveOutput[ParticleGroupAliveBase + prefix + rank] = particle_index;
+    AliveOutput[ParticleOptions.x * (1u + bin) + ParticleGroupBases[bin] + rank] = particle_index;
+}
 
-    if (PassValue == 1)
-    {
-        if (index == 0)
-        {
-            ParticleCounters.Store(4, 0);
-            ParticleCounters.Store(12, 0);
-            ParticleCounters.Store(16, 0);
-            IndirectArguments.Store4(0, uint4(24, 0, 0, 0));
-        }
-        return;
-    }
-
-    if (PassValue == 2)
-    {
-        uint alive_count = ParticleCounters.Load(0);
-        if (index >= alive_count)
-        {
-            return;
-        }
-
-        uint particle_index = AliveInput[index];
-        ParticleData particle = WritableParticles[particle_index];
-        if (particle.Authored.x != 0)
-        {
-            const float age = max(0.0, (float(AuthoredParticleClock.x - particle.Authored.z) - particle.InitialPositionSpawnTime.w) / 60.0);
-            particle.PositionLife.w = particle.InitialVelocityMaxLife.w - age;
-            if (particle.PositionLife.w > 0) CatchUpBallistic(particle, AuthoredParticleClock.x);
-        }
-        else
-        {
-            float age = max(CameraTime.w - particle.InitialPositionSpawnTime.w, 0.0);
-            particle.PositionLife.xyz = particle.InitialPositionSpawnTime.xyz + particle.InitialVelocityMaxLife.xyz * age;
-            particle.PositionLife.y += 0.5 * particle.PhysicsMetadata.x * age * age;
-            particle.PositionLife.w = particle.InitialVelocityMaxLife.w - age;
-        }
-        if (particle.PositionLife.w > 0.0)
-        {
-            uint output_index;
-            ParticleCounters.InterlockedAdd(4, 1, output_index);
-            AliveOutput[output_index] = particle_index;
-            WritableParticles[particle_index] = particle;
-        }
-        else
-        {
-            uint dead_index;
-            ParticleCounters.InterlockedAdd(8, 1, dead_index);
-            DeadIndices[dead_index] = particle_index;
-        }
-        return;
-    }
-
-    if (PassValue == 3)
-    {
+bool SpawnParticle(uint index, out uint particle_index, out uint bin)
+{
+    particle_index = 0u; bin = 0u;
         if (index >= ParticleOptions.z)
         {
-            return;
+            return false;
         }
 
         uint command_index = ParticleSpawnOwners[index];
         if (command_index >= ParticleOptions.y)
         {
-            return;
+            return false;
         }
 
         ParticleSpawnCommandGpu command = ParticleSpawnCommands[command_index];
@@ -1734,7 +1699,7 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
                               ParticleRandom(seed));
         if (age >= lifetime)
         {
-            return;
+            return false;
         }
 
         uint old_dead_count = ParticleCounters.Load(8);
@@ -1751,10 +1716,10 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         }
         if (old_dead_count == 0)
         {
-            return;
+            return false;
         }
 
-        uint particle_index = DeadIndices[old_dead_count - 1];
+        particle_index = DeadIndices[old_dead_count - 1];
         float u = ParticleRandom(seed + 1);
         float v = ParticleRandom(seed + 2);
         float angle = v * 6.2831853;
@@ -1843,21 +1808,87 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
         }
         WritableParticles[particle_index] = particle;
 
-        uint output_index;
-        ParticleCounters.InterlockedAdd(4, 1, output_index);
-        AliveOutput[output_index] = particle_index;
+        bin = ParticleDrawBin(visual_metadata);
+        return true;
+}
+
+[shader("compute")]
+[numthreads(256, 1, 1)]
+void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID, uint lane : SV_GroupIndex)
+{
+    uint index = dispatch_id.x;
+    uint capacity = ParticleOptions.x;
+
+    if (PassValue == 0)
+    {
+        if (index < capacity)
+        {
+            DeadIndices[index] = capacity - index - 1;
+        }
+        if (index == 0)
+        {
+            ParticleCounters.Store(0, 0);
+            ParticleCounters.Store(4, 0);
+            [unroll] for (uint bin = 0u; bin < 9u; ++bin)
+                ParticleCounters.Store(12u + bin * 4u, 0u);
+            ParticleCounters.Store(8, capacity);
+        }
         return;
     }
 
-    if (PassValue == 4)
+    if (PassValue == 1)
     {
-        if (index >= ParticleCounters.Load(4)) return;
-        uint particle_index = AliveOutput[index];
-        uint metadata = asuint(WritableParticles[particle_index].PhysicsMetadata.z);
-        uint bin = ((metadata >> 8u) & 0xffu) == 3u ? 1u : 0u;
-        uint draw_index;
-        ParticleCounters.InterlockedAdd(12 + bin * 4, 1, draw_index);
-        AliveOutput[capacity * (1 + bin) + draw_index] = particle_index;
+        if (index == 0)
+        {
+            ParticleCounters.Store(4, 0);
+            [unroll] for (uint bin = 0u; bin < 9u; ++bin)
+                ParticleCounters.Store(12u + bin * 4u, 0u);
+        }
+        return;
+    }
+
+    if (PassValue == 2)
+    {
+        const bool active = index < ParticleCounters.Load(0);
+        bool alive = false;
+        uint particle_index = 0u, bin = 0u;
+        if (active)
+        {
+            particle_index = AliveInput[index];
+            ParticleData particle = WritableParticles[particle_index];
+            if (particle.Authored.x != 0)
+            {
+                const float age = max(0.0, (float(AuthoredParticleClock.x - particle.Authored.z) - particle.InitialPositionSpawnTime.w) / 60.0);
+                particle.PositionLife.w = particle.InitialVelocityMaxLife.w - age;
+                if (particle.PositionLife.w > 0) CatchUpBallistic(particle, AuthoredParticleClock.x);
+            }
+            else
+            {
+                float age = max(CameraTime.w - particle.InitialPositionSpawnTime.w, 0.0);
+                particle.PositionLife.xyz = particle.InitialPositionSpawnTime.xyz + particle.InitialVelocityMaxLife.xyz * age;
+                particle.PositionLife.y += 0.5 * particle.PhysicsMetadata.x * age * age;
+                particle.PositionLife.w = particle.InitialVelocityMaxLife.w - age;
+            }
+            alive = particle.PositionLife.w > 0.0;
+            if (alive)
+            {
+                bin = ParticleDrawBin(asuint(particle.PhysicsMetadata.z));
+                WritableParticles[particle_index].PositionLife = particle.PositionLife;
+                if (particle.Authored.x != 0u)
+                {
+                    WritableParticles[particle_index].CurrentVelocityDrag = particle.CurrentVelocityDrag;
+                    WritableParticles[particle_index].Authored = particle.Authored;
+                }
+            }
+        }
+        AppendParticleGroup(lane, active, alive, particle_index, bin);
+        return;
+    }
+    if (PassValue == 3)
+    {
+        uint particle_index, bin;
+        const bool spawned = SpawnParticle(index, particle_index, bin);
+        AppendParticleGroup(lane, spawned, true, particle_index, bin);
         return;
     }
 
@@ -1865,11 +1896,16 @@ void ParticleCS(uint3 dispatch_id : SV_DispatchThreadID)
     {
         uint alive_count = ParticleCounters.Load(4);
         ParticleCounters.Store(0, alive_count);
-        uint vertex_count = 6;
-        [unroll] for (uint mesh = 0; mesh < 7; ++mesh)
-            vertex_count = max(vertex_count, VfxMeshAtlas.Load(24 + mesh * 12));
-        IndirectArguments.Store4(0, uint4(6, ParticleCounters.Load(12), 0, 0));
-        IndirectArguments.Store4(16, uint4(vertex_count, ParticleCounters.Load(16), 0, 0));
+        [unroll] for (uint bin = 0u; bin < 9u; ++bin)
+        {
+            uint vertex_count = 6u;
+            if (bin == 8u) vertex_count = 24u;
+            else if (bin != 0u) vertex_count = VfxMeshAtlas.Load(24u + (bin - 1u) * 12u);
+            const uint argument = bin * 20u;
+            IndirectArguments.Store(argument, bin);
+            IndirectArguments.Store4(argument + 4u,
+                uint4(vertex_count, ParticleCounters.Load(12u + bin * 4u), 0u, 0u));
+        }
     }
 }
 
@@ -2044,7 +2080,7 @@ ParticleOutput GroundRingVS(uint vertex_id : SV_VertexID, uint instance_id : SV_
         float2(-1, -1), float2(1, 1), float2(1, -1)
     };
     const ParticleSpawnCommandGpu command = ParticleSpawnCommands[instance_id];
-    const float2 corner = corners[vertex_id];
+    float2 corner = corners[vertex_id % 6u];
     const float extent = command.SizeRange.x;
     const bool is_annulus = (command.Metadata.z >= 5 && command.Metadata.z <= 8) || command.Metadata.z == 10 || command.Metadata.z == 11;
     const bool is_safe_sector = command.Metadata.z == 9;
@@ -2061,7 +2097,22 @@ ParticleOutput GroundRingVS(uint vertex_id : SV_VertexID, uint instance_id : SV_
                  command.ShapeExtentSpeedMin.y * 0.5 + command.ShapeExtentSpeedMin.z) : is_repeating_chevron
         ? command.ShapeExtentSpeedMin.xy + command.ShapeExtentSpeedMin.z : is_line
         ? (is_cone ? command.ShapeExtentSpeedMin.xx : command.ShapeExtentSpeedMin.xy) + command.ShapeExtentSpeedMin.z : extent.xx;
-    const float2 local = corner * half_extent;
+    float2 local = corner * half_extent;
+    // Circumscribed outside, inscribed hole: the existing analytic mask keeps the exact radii.
+    const bool bounded_annulus = (command.Metadata.z == 5u || command.Metadata.z == 6u) &&
+        command.ShapeExtentSpeedMin.x > command.ShapeExtentSpeedMin.y * 0.45;
+    if (bounded_annulus)
+    {
+        const uint segment = vertex_id / 6u;
+        const uint point = vertex_id % 6u;
+        const bool next = point == 2u || point == 4u || point == 5u;
+        const bool outer_vertex = point == 1u || point == 2u || point == 4u;
+        const float angle = float(segment + (next ? 1u : 0u)) * (-6.28318530718 / 32.0);
+        const float radius = outer_vertex ? command.ShapeExtentSpeedMin.y / 0.99518472667 + 0.0001
+                                         : max(0.0, command.ShapeExtentSpeedMin.x - 0.0001);
+        local = float2(cos(angle), sin(angle)) * radius;
+        corner = local / half_extent;
+    }
     const float3 forward = (is_line || is_safe_sector || is_axial_fracture || is_repeating_chevron)
         ? command.DirectionLifetimeMax.xyz : float3(0,0,1);
     const float3 right = float3(forward.z,0,-forward.x);
@@ -2271,7 +2322,8 @@ RWTexture2D<uint> HeroOverflowCounter : register(u0, space14);
 
 float3 HsHeroLayerBackground(float3 world, float3 direction, float optical_path, float2 pixel)
 {
-    float3 background=HsFogSky(EnvironmentSkyRadiance(direction), pixel * ScreenSize.zw);
+    // Rejected displaced lookups retain the valid source behind this interface.
+    float3 background=HeroLayerBackground.Load(int3(int2(pixel),0)).rgb;
     const float3 exit_world=world+direction*optical_path;
     const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
     if(exit_clip.w<=0.0) return background;
@@ -2335,7 +2387,19 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,
     float2 background_uv=pixel*ScreenSize.zw;
     float background_view_depth=VmDepthRange.x;
     const bool fog_enabled=HsFogEnabled();
-    if(layer_transport) background=HsFogSky(background,background_uv);
+    if(layer_transport) background=HeroLayerBackground.Load(int3(int2(pixel),0)).rgb;
+    else
+    {
+        const int3 source_pixel=int3(int2(pixel),0);
+        const float source_depth=SurfaceDepth.Load(source_pixel);
+        if(source_depth>0.0)
+        {
+            const float3 source_world=HsReconstructSurfaceRelative(
+                HsSurfaceRasterUv(int2(pixel)),source_depth)+SurfaceViewOrigin.xyz;
+            background=fog_enabled ? VmRawOpaqueHdr.Load(source_pixel).rgb : HdrColor.Load(source_pixel).rgb;
+            background_view_depth=HsFogViewDepth(source_world);
+        }
+    }
     const float3 exit_world=world+transmitted*optical_path;
     const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
     if(layer_transport && MaterialQualityOptions.w>0.0)
@@ -2402,9 +2466,10 @@ HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGr
     if(input.Mesh==22u && input.Material==1u)
     {
         const float thickness=max(0.001,input.Uv.x);
-        HsSurfaceClosure water=HsMaterialMakeSurfaceClosure(float3(.97,.985,.96),float3(0,1,0),.09,0,1,1);
+        HsSurfaceClosure water=HsMaterialMakeSurfaceClosure(float3(.97,.985,.96),float3(0,1,0),.18,0,1,1);
         water.solid_transmission_weight=1; water.ior=1.333;
-        water.absorption_per_m=float3(5.0,2.5,1.4);water.thickness_m=thickness;
+        // Suspended soil removes blue first; clear-water absorption made shallow mud look icy.
+        water.absorption_per_m=float3(3.0,8.0,16.0);water.thickness_m=thickness;
         water.normal_is_world=true;return water;
     }
     const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;

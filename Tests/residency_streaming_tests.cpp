@@ -38,6 +38,56 @@ int main()
         Check(accounting.live_total == 80 && accounting.reclaimed_total == 240,
               "residency explicit release accounting mismatch");
 
+        // Admission uses cached domain totals; verify mutations and overflow recovery against the ledger.
+        hs::ResidencyManager admission;
+        admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
+        const auto gpu_reservation = admission.ReserveGpu(300);
+        const auto host_reservation = admission.ReserveHost(700);
+        Check(gpu_reservation && host_reservation && admission.CanAdmit(600) && !admission.CanAdmit(601) &&
+            admission.CanStage(300) && !admission.CanStage(301), "reservation admission boundaries changed");
+        Check(!admission.CommitHost(host_reservation, 701) && !admission.CommitHost(host_reservation, 0) &&
+            !admission.CanStage(301), "failed host commit changed admission");
+        Check(admission.CommitHost(host_reservation, 400) && admission.CanStage(600) && !admission.CanStage(601),
+            "host commit did not shrink held admission");
+        Check(admission.Retire(gpu_reservation, {1, 0, 0}) && admission.Collect({}) == 0 &&
+            !admission.CanAdmit(601) && admission.Collect({1, 0, 0}) == 1 && admission.CanAdmit(900),
+            "retiring reservation admission changed before completion");
+        Check(admission.ReleaseNow(host_reservation) && admission.CanStage(1000), "host abort leaked admission");
+        for (const auto storage : {hs::ResidencyStorage::GpuReservation, hs::ResidencyStorage::HostReservation,
+                                   hs::ResidencyStorage::HostStaging})
+        {
+            admission.Reset();
+            const auto huge = admission.Register(hs::ResidencyCategory::Staging, UINT64_MAX, false, storage);
+            const auto extra = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
+            Check(huge && extra && admission.CanAdmit(1) && admission.CanStage(1),
+                "invalid budget policy changed for overflowing ledger");
+            admission.UpdateBudget({true, UINT64_MAX, 0, 0, 0, true, UINT64_MAX});
+            const auto allowed = [&](std::uint64_t bytes) {
+                return storage == hs::ResidencyStorage::GpuReservation ? admission.CanAdmit(bytes, 0) : admission.CanStage(bytes);
+            };
+            Check(!allowed(0), "overflowed admission sum accepted");
+            Check(admission.ReleaseNow(extra) && allowed(0) && !allowed(1), "overflow release did not restore exact maximum");
+            const auto again = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
+            Check(again && !allowed(0) && admission.Retire(again, {2, 0, 0}) &&
+                admission.Collect({1, 0, 0}) == 0 && !allowed(0) &&
+                admission.Collect({2, 0, 0}) == 1 && allowed(0), "overflow collect recovery failed");
+            if (storage == hs::ResidencyStorage::HostReservation)
+            {
+                const auto staged = admission.Register(hs::ResidencyCategory::Staging, 1, false, hs::ResidencyStorage::HostStaging);
+                Check(staged && !allowed(0) && admission.CommitHost(huge, UINT64_MAX - 1) && allowed(0),
+                    "overflow host commit recovery failed");
+                Check(admission.ReleaseNow(staged), "mixed host staging release failed");
+            }
+            Check(admission.ReleaseNow(huge) && allowed(UINT64_MAX), "domain release retained cached bytes");
+        }
+        admission.Reset();
+        admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
+        const auto native = admission.Register(hs::ResidencyCategory::Texture, 100, false);
+        Check(native && admission.CanAdmit(800) && !admission.CanAdmit(801) && admission.ReleaseNow(native) &&
+            !admission.CanAdmit(801), "release incorrectly credited an old DXGI snapshot");
+        admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
+        Check(admission.CanAdmit(900) && admission.CanStage(1000), "fresh snapshot/reset admission mismatch");
+
         hs::StreamingManager streaming;
         const auto request = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",
                                                "mips:0-3", "generation-a", 100);

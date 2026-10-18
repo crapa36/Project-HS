@@ -439,11 +439,30 @@
       "type": "float"
     },
     {
+      "id": "instance_color",
+      "op": "context",
+      "type": "float3",
+      "name": "sampled_base_color"
+    },
+    {
+      "id": "instance_tinted_base",
+      "op": "multiply",
+      "type": "float3",
+      "a": {
+        "node": "material_tinted_base",
+        "type": "float3"
+      },
+      "b": {
+        "node": "instance_color",
+        "type": "float3"
+      }
+    },
+    {
       "id": "material_closure",
       "op": "metallic_roughness_closure",
       "type": "surface_closure",
       "base_color": {
-        "node": "material_tinted_base",
+        "node": "instance_tinted_base",
         "type": "float3"
       },
       "normal": {

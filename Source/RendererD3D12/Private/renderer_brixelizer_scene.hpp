@@ -81,6 +81,10 @@ private:
         BrixelizerGeometryKeyHash> entries_;
 };
 
+// Shared domain precedence for homogeneous early exclusions and mixed-page expansion.
+[[nodiscard]] BrixelizerGeometryDomain ClassifyBrixelizerDomain(std::uint32_t capabilities, bool masked, bool transmissive);
+[[nodiscard]] Result AddBrixelizerExcludedCount(std::uint32_t &count, std::size_t submeshes);
+
 // Preserve actual submesh ranges when a page mixes opaque and translucent
 // character slots. The vectors are CPU registration inputs for this frame.
 [[nodiscard]] Result AppendBrixelizerLeaf(

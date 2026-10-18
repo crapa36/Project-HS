@@ -765,7 +765,7 @@ Result D3D12Renderer::Impl::ActivateView(ViewId id)
 Result D3D12Renderer::Impl::PrepareDecalSurface(const RendererConfig &candidate_config,
     ViewExtent capacity, bool admitted_work, DecalSurfaceCandidate &candidate) const
 {
-    return decal_surface.Prepare(device.Get(), allocator, root_signature.Get(), capacity, kFrameCount,
+    return decal_surface.Prepare(device.Get(), allocator, root_signature.Get(), pipeline_cache, capacity, kFrameCount,
         admitted_work, [&](std::string_view name, std::vector<std::byte> &bytes) {
             std::filesystem::path path;
             if (auto r = candidate_config.ResolveProduct("render/shader/" + std::string(name), path); !r) return r;

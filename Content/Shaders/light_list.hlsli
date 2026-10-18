@@ -18,7 +18,8 @@ StructuredBuffer<HsGpuLightRecord> HsLightRecords : register(t0, space19);
 static const uint HsLightDirectionalMask = 1u;
 static const uint HsLightLocalMask = 30u;
 static const uint HsLightAllMask = 31u;
-static const uint HsLightWorldQueryFlag = 1u;
+static const uint HsLightCapacityOverflowFlag = 1u; // Diagnostic only; all candidates fit the mask.
+static const uint HsLightWorldQueryFlag = 2u;
 static const uint HsLightHeaderBytes = 256u;
 static const uint HsLightMaskWords = 4u; // The CPU rejects more than128 authoritative lights.
 
@@ -29,7 +30,7 @@ float HsLocalShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal)
 {
     float visibility=1.0;
     if((light.metadata.z&1u)!=0u)
-        HsLocalShadowLookup(light.identity,light.metadata.xy,world,normal,visibility);
+        HsLocalShadowLookup(light.metadata.z >> 1u,light.identity,light.metadata.xy,world,normal,visibility);
     return visibility;
 }
 float HsLightShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal,bool world_query)
@@ -37,7 +38,7 @@ float HsLightShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal,
     return HsLocalShadowVisibility(light,world,normal);
 }
 // t1 starts with the immutable 256-byte LightListConstants header. Each cell
-// then owns uint4(inline count, spill count, exact world-query flag, total count).
+// then owns uint4(inline count, spill count, diagnostic/world-query flags, total count).
 ByteAddressBuffer HsLightRanges : register(t1, space19);
 StructuredBuffer<uint> HsLightInline : register(t2, space19);
 StructuredBuffer<uint> HsLightSpill : register(t3, space19);
@@ -108,8 +109,8 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
                 HsLightInline[base + 2u], HsLightInline[base + 3u]);
         }
     }
-    // An overflow cell ignores its partial inline/spill lists and scans every
-    // authoritative local record exactly once. Off-frustum queries do the same.
+    // Finite cells retain every candidate in the 128-bit mask, even above the
+    // diagnostic inline/spill capacity. Invalid/off-frustum queries scan all locals.
     query.local_cursor = query.world_query ? query.directional_count : 0u;
     return query;
 }

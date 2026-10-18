@@ -4,7 +4,7 @@
 #include <bit>
 #include <cmath>
 #include <limits>
-#include <set>
+#include <unordered_set>
 #include <tuple>
 
 namespace hs::renderer_detail
@@ -33,25 +33,33 @@ std::uint32_t MotionCode(VfxMotionKind motion)
 }
 }
 
+std::size_t VfxRibbonState::KeyHash::operator()(const Key &key) const noexcept
+{
+    auto hash = std::hash<std::uint64_t>{}(std::get<0>(key));
+    hash ^= std::hash<VfxEffectHandle>{}(std::get<1>(key)) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+    hash ^= std::hash<std::uint32_t>{}(std::get<2>(key)) + 0x9e3779b9u + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
 bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sources,
                                      std::size_t output_capacity) const
 {
-    std::set<Key> source_keys;
+    std::vector<bool> included(slots_.size(), false);
     for (const auto &source : sources)
     {
         if (source.outputs.size() > output_capacity) return true;
         output_capacity -= source.outputs.size();
-        source_keys.insert(SourceKey(source));
+        if (const auto found = slot_by_key_.find(SourceKey(source)); found != slot_by_key_.end())
+            included[found->second] = true;
     }
-    for (const auto &slot : slots_)
-        if (slot.occupied && !source_keys.contains(Key{slot.owner_id, slot.effect_handle, slot.source_id}))
+    for (std::size_t i = 0; i < slots_.size(); ++i)
+        if (slots_[i].occupied && !included[i])
         {
-            if (slot.outputs.size() > output_capacity) return true;
-            output_capacity -= slot.outputs.size();
+            if (slots_[i].outputs.size() > output_capacity) return true;
+            output_capacity -= slots_[i].outputs.size();
         }
     return false;
 }
-
 bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
                             std::uint64_t catalog_generation,
@@ -73,6 +81,7 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
     if (!initialized_ || session != session_ || catalog_generation != catalog_generation_ || capacity != capacity_ || tick < last_tick_)
     {
         slots_.clear();
+        slot_by_key_.clear();
         updates_.clear();
         outputs_.clear();
         capacity_ = capacity;
@@ -119,42 +128,41 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
             }
         }
     }
-    std::set<Key> input_keys;
-    for (const auto &source : sources)
-        if (!input_keys.insert(SourceKey(source)).second)
-        {
-            error = "Ribbon frame contains a duplicate owner, effect, and source key";
-            return false;
-        }
-
+    if (sources.size() > 1)
+    {
+        std::unordered_set<Key, KeyHash> input_keys;
+        input_keys.reserve(sources.size());
+        for (const auto &source : sources)
+            if (!input_keys.insert(SourceKey(source)).second)
+            {
+                error = "Ribbon frame contains a duplicate owner, effect, and source key";
+                return false;
+            }
+    }
     const auto winner_count = std::min<std::size_t>(capacity_, order.size());
     dropped_sources_ = static_cast<std::uint32_t>(order.size() - winner_count);
-    std::vector<bool> seen(slots_.size(), false);
-    auto find_slot = [&](const auto &source) -> std::size_t {
-        const auto key = SourceKey(source);
-        for (std::size_t i = 0; i < slots_.size(); ++i)
-            if (slots_[i].occupied && Key{slots_[i].owner_id, slots_[i].effect_handle, slots_[i].source_id} == key) return i;
-        return slots_.size();
-    };
-    const auto winner_owns_slot = [&](const Slot &slot) {
-        const Key key{slot.owner_id, slot.effect_handle, slot.source_id};
-        for (std::size_t i = 0; i < winner_count; ++i)
-            if (SourceKey(sources[order[i]]) == key) return true;
-        return false;
-    };
-    auto reclaim_retired = [&]() {
-        for (auto &slot : slots_)
-            if (slot.occupied && !slot.analytic && tick >= slot.last_seen + static_cast<Tick>(std::ceil(slot.history_seconds * 60.0f))) slot.occupied = false;
-    };
-    reclaim_retired();
-
+    for (auto &slot : slots_)
+    {
+        slot.winner = slot.seen = false;
+        if (slot.occupied && !slot.analytic && tick >= slot.last_seen + static_cast<Tick>(std::ceil(slot.history_seconds * 60.0f)))
+        {
+            slot_by_key_.erase(Key{slot.owner_id, slot.effect_handle, slot.source_id});
+            slot.occupied = false;
+        }
+    }
+    for (std::size_t i = 0; i < winner_count; ++i)
+        if (const auto found = slot_by_key_.find(SourceKey(sources[order[i]])); found != slot_by_key_.end())
+            slots_[found->second].winner = true;
+    std::size_t next_reusable{};
     updates_.clear();
     outputs_.clear();
     for (std::size_t winner = 0; winner < winner_count; ++winner)
     {
         const auto index = order[winner];
         const auto &source = sources[index];
-        auto slot_index = find_slot(source);
+        const auto key = SourceKey(source);
+        const auto found = slot_by_key_.find(key);
+        auto slot_index = found != slot_by_key_.end() ? found->second : slots_.size();
         bool reset = false;
         if (slot_index == slots_.size())
         {
@@ -165,13 +173,14 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
             }
             else
             {
-                auto retired = std::find_if(slots_.begin(), slots_.end(), [&](const Slot &slot) {
-                    return !slot.occupied || !winner_owns_slot(slot);
-                });
-                if (retired == slots_.end()) continue;
-                slot_index = static_cast<std::size_t>(std::distance(slots_.begin(), retired));
+                while (next_reusable < slots_.size() && slots_[next_reusable].occupied && slots_[next_reusable].winner)
+                    ++next_reusable;
+                if (next_reusable == slots_.size()) continue;
+                slot_index = next_reusable++;
             }
             auto &slot = slots_[slot_index];
+            if (slot.occupied) slot_by_key_.erase(Key{slot.owner_id, slot.effect_handle, slot.source_id});
+            slot_by_key_.emplace(key, slot_index);
             slot.owner_id = source.owner_id;
             slot.effect_handle = source.effect_handle;
             slot.source_id = source.source_id;
@@ -194,8 +203,7 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
             slot.current_head = source.position;
         slot.last_seen = tick;
         slot.history_seconds = source.history_seconds;
-        seen.resize(slots_.size(), false);
-        seen[slot_index] = true;
+        slot.winner = slot.seen = true;
         GpuRibbonSourceUpdate update{};
         update.position_duration = {source.position.x, source.position.y, source.position.z, source.history_seconds};
         update.previous_interpolation = {source.previous_position.x, source.previous_position.y, source.previous_position.z, interpolation};
@@ -237,12 +245,13 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
     for (std::size_t i = 0; i < slots_.size(); ++i)
     {
         auto &slot = slots_[i];
-        if (!slot.occupied || (i < seen.size() && seen[i])) continue;
+        if (!slot.occupied || slot.seen) continue;
         if (slot.analytic)
         {
             GpuRibbonSourceUpdate clear{};
             clear.identity = {static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(tick), slot.generation, 4u};
             updates_.push_back(clear);
+            slot_by_key_.erase(Key{slot.owner_id, slot.effect_handle, slot.source_id});
             slot.occupied = false;
             slot.outputs.clear();
             continue;

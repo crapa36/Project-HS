@@ -1215,7 +1215,8 @@ std::string ContextExpression(const OptimizedGraph &graph, const MaterialGraph &
         Require(texture_slot_base != kNoMaterialInput, "terrain requires actual texture binding slots");
         for (std::size_t slot = 0; slot < 6; ++slot)
             result += ", " + std::to_string(texture_slot_base + graph.nodes[node.inputs[slot]].declaration_index) + "u";
-        return result + ")";
+        // Meadow ground reuses its authored UV channel for static wet/dry controls.
+        return result + ", ctx.uv)";
     }
     case MaterialOp::TerrainField:
     {

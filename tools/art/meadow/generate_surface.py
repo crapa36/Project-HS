@@ -36,9 +36,11 @@ for i,r in enumerate(records):
     r.setdefault('side',-1 if i%2 else 1)
     r['c']=math.cos(r['yaw']);r['s']=math.sin(r['yaw'])
 
+relief=source['relief']
 def base(x,z):
-    f=max(0,min(1,(12-max(abs(x),abs(z)))/1.5)); f=f*f*(3-2*f)
-    return .024*math.sin(x*.28)*math.sin(z*.24)*f
+    # A squared envelope joins the slab at zero height and zero slope.
+    f=max(0,1-(x/12)**2)**2*max(0,1-(z/12)**2)**2
+    return (relief['broad_amplitude']*math.sin(x*.22+.5)*math.cos(z*.18-.35)+relief['meso_amplitude']*math.sin(x*.48+z*.31-.6))*f
 
 def shape(r,x,z):
     dx=x-r['x']; dz=z-r['z']
@@ -57,12 +59,53 @@ def depth(r,x,z):
     return r['depth']*max(0,1-q)**2*(1+.22*max(-1,min(1,(z-r['z'])/r['rz']))) if q<1 else 0
 
 def ridge(r,q):
-    # Displaced earth follows the warped rut edge, without a repeated tread pattern.
-    return r['depth']*.32*max(0,1-((q-1.05)/.65)**2)**2 if r['kind']==0 else 0
+    # Bank and cut integrals balance; the original warped support avoids more fine cells.
+    return r['depth']*relief['rut_bank_scale']*max(0,1-((q-1.05)/.65)**2)**2 if r['kind']==0 else 0
 
 def height(x,z): return base(x,z)+max([0]+[ridge(r,shape(r,x,z)) for r in records])-max([0]+[depth(r,x,z) for r in records])
 height=lru_cache(maxsize=262144)(height)
-for r in records: r['level']=base(r['x'],r['z'])-r['depth']*(1-r['fill']) if r['fill'] else -100
+def basin_point(r,u,v):
+    if r['kind']==0:u+=.24*r['side']*max(0,1-v*v)*(v+.35)
+    if r['kind']==1:u=u*(.72+.28*max(0,min(1,(v+1)*.5)))+r['side']*.16*max(0,1-4*v*v)
+    return r['x']+r['c']*r['rx']*u+r['s']*r['rz']*v,r['z']-r['s']*r['rx']*u+r['c']*r['rz']*v
+
+# Connected cuts share a spill height and a horizontal water plane.
+rims=[];interiors=[]
+for r in records:
+    rim=[];inside=[]
+    for i in range(128):
+        angle=(i+.5)*2*math.pi/128
+        for side in ((-1,1) if r['kind']==2 else (0,)):
+            for j in range(17):
+                radius=j/16;u=radius*math.cos(angle);v=radius*math.sin(angle)
+                if side:u=side*(.48+.43*u)
+                point=basin_point(r,u,v);inside.append(point)
+                if j==16:rim.append(point)
+    rims.append(rim);interiors.append(inside)
+parents=list(range(len(records)))
+def group(i):
+    while parents[i]!=i:i=parents[i]
+    return i
+for i,r in enumerate(records):
+    for j in range(i):
+        other=records[j]
+        if any(shape(other,*p)<1 for p in rims[i]) or any(shape(r,*p)<1 for p in rims[j]):parents[group(i)]=group(j)
+water_groups={}
+for i,r in enumerate(records):water_groups.setdefault(group(i),[]).append(i)
+for key,ids in water_groups.items():
+    fill=max(records[i]['fill'] for i in ids)
+    for i in ids:records[i]['level']=-100;records[i]['water_group']=key
+    if not fill:continue
+    rim=[height(*p) for i in ids for p in rims[i] if not any(shape(records[j],*p)<1-1e-6 for j in ids if i!=j)]
+    low=min(height(*p) for i in ids for p in interiors[i]);spill=min(rim)
+    assert spill>low+.001, ('no closed connected water basin on slope',ids,low,spill)
+    for i in ids:
+        records[i]['level']=low+(spill-low)*fill
+        if not records[i]['fill']:records[i]['fill']=fill
+
+water_members={}
+for i,r in enumerate(records):
+ if r['level']>-10:water_members.setdefault(r['level'],[]).append(i)
 if not MESHES_ONLY: (OUT/'meadow_surface.json').write_text(json.dumps(source,indent=2)+'\n')
 
 # A single source table feeds C++ contact height and shader wetness/transport.
@@ -82,8 +125,8 @@ ROWS
 }};
 inline bool MeadowContains(Float2 p) noexcept { return std::abs(p.x)<=12 && std::abs(p.y)<=12; }
 inline float MeadowBaseHeight(Float2 p) noexcept {
- float f=std::clamp((12-std::max(std::abs(p.x),std::abs(p.y)))/1.5f,0.0f,1.0f); f=f*f*(3-2*f);
- return .024f*std::sin(p.x*.28f)*std::sin(p.y*.24f)*f;
+ float x=std::max(0.0f,1-p.x*p.x/144),z=std::max(0.0f,1-p.y*p.y/144);
+ return (BROADf*std::sin(p.x*.22f+.5f)*std::cos(p.y*.18f-.35f)+MESOf*std::sin(p.x*.48f+p.y*.31f-.6f))*x*x*z*z;
 }
 inline float MeadowDepressionQ(const MeadowDepression& r, Float2 p) noexcept {
  const float dx=p.x-r.x,dz=p.y-r.z,c=r.c,s=r.s;
@@ -96,7 +139,7 @@ inline float MeadowDepressionQ(const MeadowDepression& r, Float2 p) noexcept {
 }
 inline float MeadowGroundHeight(Float2 p) noexcept {
  if(!MeadowContains(p))return 0;
- float d=0,b=0; for(const auto&r:kMeadowDepressions){float q=MeadowDepressionQ(r,p);if(r.kind==0){float t=std::max(0.0f,1-((q-1.05f)/.65f)*((q-1.05f)/.65f));b=std::max(b,r.depth*.32f*t*t);}if(q<1)d=std::max(d,r.depth*(1-q)*(1-q)*(1+.22f*std::clamp((p.y-r.z)/r.rz,-1.0f,1.0f)));}
+ float d=0,b=0; for(const auto&r:kMeadowDepressions){float q=MeadowDepressionQ(r,p);if(r.kind==0){float t=std::max(0.0f,1-((q-1.05f)/.65f)*((q-1.05f)/.65f));b=std::max(b,r.depth*BANKf*t*t);}if(q<1)d=std::max(d,r.depth*(1-q)*(1-q)*(1+.22f*std::clamp((p.y-r.z)/r.rz,-1.0f,1.0f)));}
  return MeadowBaseHeight(p)+b-d;
 }
 inline float MeadowWetness(Float2 p) noexcept {
@@ -122,6 +165,7 @@ inline float MeadowPressed(Float2 p) noexcept {return std::max(MeadowCartWear(p)
 '''.replace('COUNT',str(len(rows))).replace('ROWS','\n'.join(' {'+', '.join(x+'f' for x in row.split(', '))+'},' for row in rows))
 # The project Float2 contract is defined here, independent of renderer ownership.
 cpp=cpp.replace('hs/core/math.hpp','hs/core/render_snapshot.hpp')
+for key,value in [('BROAD',relief['broad_amplitude']),('MESO',relief['meso_amplitude']),('BANK',relief['rut_bank_scale'])]:cpp=cpp.replace(key,f'{value:.12f}')
 if not MESHES_ONLY: (ROOT/'Source/Presentation/Public/hs/presentation/meadow_surface.hpp').write_text(cpp)
 hlsl='''#ifndef HS_MEADOW_SURFACE
 #define HS_MEADOW_SURFACE
@@ -130,7 +174,8 @@ static const MeadowDepression MeadowRecords[COUNT]={
 ROWS
 };
 float MeadowQ(MeadowDepression r,float2 p){float c=r.c,s=r.s;float2 d=p-float2(r.x,r.z);if(any(abs(d)>2*(r.rx+r.rz)))return 100;float u=(c*d.x-s*d.y)/r.rx,v=(s*d.x+c*d.y)/r.rz;if(r.kind==0)u-=.24*r.side*max(0,1-v*v)*(v+.35);if(r.kind==1){u-=r.side*.16*max(0,1-4*v*v);u/=.72+.28*saturate((v+1)*.5);}if(r.kind==2)u=(abs(u)-.48)/.43;return u*u+v*v;}
-float MeadowGroundHeight(float2 p){float f=saturate((12-max(abs(p.x),abs(p.y)))/1.5);f=f*f*(3-2*f);float d=0,b=0;[loop]for(uint i=0;i<COUNT;++i){MeadowDepression r=MeadowRecords[i];float q=MeadowQ(r,p);if(r.kind==0){float t=max(0,1-((q-1.05)/.65)*((q-1.05)/.65));b=max(b,r.depth*.32*t*t);}if(q<1)d=max(d,r.depth*(1-q)*(1-q)*(1+.22*clamp((p.y-r.z)/r.rz,-1,1)));}return .024*sin(p.x*.28)*sin(p.y*.24)*f+b-d;}
+float MeadowBaseHeight(float2 p){float2 f=max(0,1-p*p/144);return (BROAD*sin(p.x*.22+.5)*cos(p.y*.18-.35)+MESO*sin(p.x*.48+p.y*.31-.6))*f.x*f.x*f.y*f.y;}
+float MeadowGroundHeight(float2 p){if(any(abs(p)>12))return 0;float d=0,b=0;[loop]for(uint i=0;i<COUNT;++i){MeadowDepression r=MeadowRecords[i];float q=MeadowQ(r,p);if(r.kind==0){float t=max(0,1-((q-1.05)/.65)*((q-1.05)/.65));b=max(b,r.depth*BANK*t*t);}if(q<1)d=max(d,r.depth*(1-q)*(1-q)*(1+.22*clamp((p.y-r.z)/r.rz,-1,1)));}return MeadowBaseHeight(p)+b-d;}
 float MeadowWetness(float2 p){if(any(abs(p)>12))return 0;float w=0;[loop]for(uint i=0;i<COUNT;++i)if(MeadowRecords[i].level>-10)w=max(w,saturate(1-MeadowQ(MeadowRecords[i],p)/2.5));return w;}
 float MeadowRoadCoverage(float2 p,float edge){float main=1-smoothstep(1.15,1.65,abs(p.x-sin(p.y*.085)*6.5)+edge);float spur=(1-smoothstep(1.15,1.65,abs(p.y-3)+edge))*smoothstep(1.4+edge,2.2+edge,p.x)*(1-smoothstep(11-edge,11.7-edge,p.x));return max(main,spur);}
 float MeadowCartWear(float2 p){if(any(abs(p)>12))return 0;float a=abs(abs(p.x-sin(p.y*.085)*6.5)-.82);float spur=p.x>4.5&&p.x<11.5?abs(abs(p.y-3)-.82):100;return saturate(1-min(a,spur)/.35);}
@@ -138,6 +183,9 @@ float MeadowWalkWear(float2 p){if(any(abs(p)>12))return 0;return saturate(1-abs(
 float MeadowPressed(float2 p){return max(MeadowCartWear(p),MeadowWalkWear(p));}
 #endif
 '''.replace('COUNT',str(len(rows))).replace('ROWS','\n'.join(' {'+row+'},' for row in rows))
+for key,value in [('BROAD',relief['broad_amplitude']),('MESO',relief['meso_amplitude']),('BANK',relief['rut_bank_scale'])]:hlsl=hlsl.replace(key,f'{value:.12f}')
+hlsl=hlsl.replace('#endif','float MeadowSoilDryness(float2 p,float wetness){return MeadowRoadCoverage(p,0)*(1-saturate(wetness*1.4))*lerp(.55,1,saturate(.5+MeadowBaseHeight(p)*2));}\n#endif')
+
 dry_rows=[]
 for patch in source.get('dry_grass_patches',[]):
     x,z=patch['center'];rx,rz=patch['radius'];strength=patch['strength']
@@ -155,6 +203,21 @@ dry_hlsl='float3 MeadowDryGrassGain(float2 p){\n    if(any(abs(p)>12))return flo
 hlsl=hlsl.replace('#endif',dry_hlsl+'#endif')
 if not MESHES_ONLY: (ROOT/'Content/Shaders/meadow_surface.hlsli').write_text(hlsl)
 
+
+def road_coverage(x,z,edge=0):
+ def smooth(a,b,value):
+  t=max(0,min(1,(value-a)/(b-a)));return t*t*(3-2*t)
+ main=1-smooth(1.15,1.65,abs(x-cart(z))+edge)
+ spur=(1-smooth(1.15,1.65,abs(z-3)+edge))*smooth(1.4+edge,2.2+edge,x)*(1-smooth(11-edge,11.7-edge,x))
+ return max(main,spur)
+
+def wetness(x,z):
+ if max(abs(x),abs(z))>12:return 0
+ return max([0]+[max(0,min(1,1-shape(r,x,z)/2.5)) for r in records if r['level']>-10])
+
+def soil_dryness(x,z,wet):
+ return road_coverage(x,z)*(1-max(0,min(1,wet*1.4)))*(.55+.45*max(0,min(1,.5+base(x,z)*2)))
+
 # Adaptive cells share edge samples with their neighbours; no T junction holes.
 N=48; S=.5; fine={}
 for iz in range(N):
@@ -163,13 +226,16 @@ for iz in range(N):
   near=[r for r in records if abs(x-r['x'])<(abs(r['c'])*r['rx']+abs(r['s'])*r['rz'])*(1.6 if r['kind']==0 else 1)+.28 and abs(z-r['z'])<(abs(r['s'])*r['rx']+abs(r['c'])*r['rz'])*(1.6 if r['kind']==0 else 1)+.28]
   if near:fine[(ix,iz)]=max(32 if r['kind']==2 else 16 if r['kind']==1 else 8 if r['kind']==0 else 4 for r in near)
 ground=[];water=[];water_count=[0]*len(records)
+@lru_cache(maxsize=262144)
 def vertex(x,z,y=None,normal=None):
- y=height(x,z) if y is None else y
+ ground_vertex=y is None
+ y=height(x,z) if ground_vertex else y
  if normal is None:
   e=.002;dx=(height(x+e,z)-height(x-e,z))/(2*e);dz=(height(x,z+e)-height(x,z-e))/(2*e);l=math.sqrt(dx*dx+1+dz*dz);normal=(-dx/l,1/l,-dz/l)
  # Tangent perpendicular to normal, standard UV orientation.
  tx=normal[1];ty=-normal[0];l=math.sqrt(tx*tx+ty*ty)
- return [x,y,z,*normal,x/12,z/12,tx/l,ty/l,0,-1,0]
+ wet=wetness(x,z) if ground_vertex else 0
+ return (x,y,z,*normal,wet,soil_dryness(x,z,wet) if ground_vertex else 0,tx/l,ty/l,0,-1,0)
 def water_triangle_cooks(pts):
  # Match serialized decimal positions and the cooker's float32 cross-product gate.
  def f(v):return struct.unpack('f',struct.pack('f',v))[0]
@@ -182,8 +248,10 @@ def triangle(a,b,c):
  vs=[vertex(*p) for p in (a,b,c)]; ground.extend(vs)
  # Clip each selected basin against its common horizontal level. Ground and water agree at shoreline.
  cx=sum(p[0] for p in (a,b,c))/3;cz=sum(p[1] for p in (a,b,c))/3
+ used_levels=set()
  for ri,r in enumerate(records):
-  if r['level']<-10 or min(shape(r,*p) for p in (a,b,c))>1.3:continue
+  if r['level'] in used_levels or r['level']<-10 or min(shape(r,*p) for p in (a,b,c))>1.3:continue
+  used_levels.add(r['level'])
   level=r['level'];poly=[(v[0],v[2],v[1]) for v in vs];clipped=[]
   for j,p in enumerate(poly):
    q=poly[(j+1)%3]; pin=p[2]<level;qin=q[2]<level
@@ -194,9 +262,11 @@ def triangle(a,b,c):
    pts=[clipped[0],clipped[j],clipped[j+1]]
    area=abs((pts[1][0]-pts[0][0])*(pts[2][1]-pts[0][1])-(pts[2][0]-pts[0][0])*(pts[1][1]-pts[0][1]))
    if area<1e-10 or not water_triangle_cooks(pts):continue
+   center=(sum(p[0] for p in pts)/3,sum(p[1] for p in pts)/3)
+   owner=min(water_members[level],key=lambda i:shape(records[i],*center))
    for p in pts:
-    v=vertex(p[0],p[1],level,(0,1,0));v[6]=max(0,level-p[2]);v[7]=ri+100;v[12]=0;water.append(v)
-   water_count[ri]+=1
+    v=list(vertex(p[0],p[1],level,(0,1,0)));v[6]=max(0,level-p[2]);v[7]=owner+100;v[12]=0;water.append(v)
+   water_count[owner]+=1
 for iz in range(N):
  for ix in range(N):
   x=-12+ix*S;z=-12+iz*S;n=fine.get((ix,iz),1)
@@ -207,8 +277,8 @@ for iz in range(N):
      steps=max(1,fine.get(neighbor,1)//n) if border else 1
      ring.extend((start[0]+(end[0]-start[0])*t/steps,start[1]+(end[1]-start[1])*t/steps) for t in range(steps))
     for t in range(len(ring)):triangle((x0+step/2,z0+step/2),ring[t],ring[(t+1)%len(ring)])
-assert all(water_count[i]>0 for i,r in enumerate(records) if r['fill'])
-assert all(abs(v[1])<.12 for v in ground)
+assert all(any(water_count[i]>0 for i in ids) for ids in water_groups.values() if any(records[i]['fill'] for i in ids))
+assert all(abs(v[1])<.4 for v in ground)
 # Only empty parts of the old fine cells may coarsen; authored depressions keep
 # their exact original tessellation, and wet macro-cells remain byte-identical.
 def support(r):
@@ -241,16 +311,48 @@ def rut_overlaps(r,x0,z0,x1,z1):
  def nearest(a,b):return 0 if a<=0<=b else min(abs(a),abs(b))
  return nearest(ulo,uhi)**2+nearest(vlo,vhi)**2<=1.7
 
+def rectangle_without_center(center, ring):
+ # Attribute error bounds also preserve shallow water and authored marks.
+ if len(ring)!=4:return None
+ if any(v[11]!=center[11] or v[12]!=center[12] for v in ring):return None
+ if len({v[0] for v in ring})!=2 or len({v[2] for v in ring})!=2:return None
+ choices=[]
+ for diagonal in (0,1):
+  a,b=ring[diagonal],ring[diagonal+2];maximum=0.;valid=True
+  for packed in (False,True):
+   def encode(v):
+    q=[round(x,7) for x in v]
+    return struct.unpack('<13f',struct.pack('<13f',*q)) if packed else q
+   c,p,q=map(encode,(center,a,b));errors=[abs(c[i]-(p[i]+q[i])*.5) for i in range(13)]
+   valid &= c[0]==(p[0]+q[0])*.5 and c[2]==(p[2]+q[2])*.5
+   valid &= max(errors[:3])<=.00005 and max(errors[3:6])<=1e-5 and max(errors[8:11])<=1e-5
+   valid &= max(errors[6:8])<=1e-7 and c[11]==p[11]==q[11] and c[12]==p[12]==q[12]
+   maximum=max(maximum,max(errors))
+  if valid:choices.append((maximum,diagonal))
+ if not choices:return None
+ diagonal=min(choices)[1]
+ q=ring[diagonal:]+ring[:diagonal]
+ return [q[0],q[1],q[2],q[0],q[2],q[3]]
+
 def optimized_ground(lod):
  result=[]
  for iz in range(N):
   for ix in range(N):
    x=-12+ix*S;z=-12+iz*S;n=fine.get((ix,iz),1);unit=S/32
-   minimum=32//n;maximum=max(minimum,8 if max(abs(x),abs(x+S),abs(z),abs(z+S))>10.5 else (8,16,32)[lod]);leaves=[]
+   minimum=32//n;maximum=max(minimum,8 if max(abs(x+S/2),abs(z+S/2))<(6,3,0)[lod] else 32);leaves=[]
    nearby=[(r,b) for r,b in zip(records,supports) if overlaps(b,x-.002,z-.002,x+S+.002,z+S+.002)]
    def divide(a,b,size):
     preserve=(ix,iz) in wet_cells or any(rut_overlaps(r,x+a*unit,z+b*unit,x+(a+size)*unit,z+(b+size)*unit) if r['kind']==0 else overlaps(q,x+a*unit,z+b*unit,x+(a+size)*unit,z+(b+size)*unit) for r,q in nearby)
-    if size>minimum and (preserve or size>maximum):
+    # Coarsening smooth hills must also preserve the 100 micrometre oracle.
+    corners=[base(x+(a+dx)*unit,z+(b+dz)*unit) for dx,dz in ((0,0),(size,0),(size,size),(0,size))]
+    center_h=base(x+(a+size/2)*unit,z+(b+size/2)*unit)
+    curvature=abs(center_h-sum(corners)/4)
+    for k,(u,v) in enumerate(((0,0),(1,0),(1,1),(0,1))):
+     quarter=base(x+(a+size*(.25+.5*u))*unit,z+(b+size*(.25+.5*v))*unit)
+     next_u,next_v=((1,0),(1,1),(0,1),(0,0))[k]
+     edge=base(x+(a+size*(u+next_u)/2)*unit,z+(b+size*(v+next_v)/2)*unit)
+     curvature=max(curvature,abs(quarter-(center_h+corners[k])/2),abs(edge-(corners[k]+corners[(k+1)%4])/2))
+    if size>minimum and (preserve or size>maximum or curvature>.00007):
      h=size//2
      for dz,dx in ((0,0),(0,h),(h,0),(h,h)):divide(a+dx,b+dz,h)
     else:leaves.append((a,b,size))
@@ -272,9 +374,11 @@ def optimized_ground(lod):
     ring += [(a+size,t) for t in sorted(vertical[a+size],reverse=True) if b<t<=b+size]
     ring += [(t,b) for t in sorted(horizontal[b],reverse=True) if a<t<=a+size]
     center=vertex(x+(a+size/2)*unit,z+(b+size/2)*unit)
-    for i,(u,v) in enumerate(ring):
-     q=ring[(i+1)%len(ring)]
-     result.extend((center,vertex(x+u*unit,z+v*unit),vertex(x+q[0]*unit,z+q[1]*unit)))
+    boundary=[vertex(x+u*unit,z+v*unit) for u,v in ring]
+    reduced=rectangle_without_center(center,boundary)
+    if reduced is not None:result.extend(reduced)
+    else:
+     for i in range(len(boundary)):result.extend((center,boundary[i],boundary[(i+1)%len(boundary)]))
  return result
 meshes=[];counts=[]
 for lod in range(3):

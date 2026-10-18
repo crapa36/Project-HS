@@ -161,8 +161,9 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     // selected-generation product and actual native admission remain separate.
     feature_capabilities.adaptive_raster_consumer = true;
     feature_capabilities.adaptive_compute_consumer = true;
+    // Instrumented PSOs stay in memory; disk identity is shared with ordinary runs.
     if (auto cached = pipeline_cache.Initialize(device.Get(), adapter.Get(),
-            configuration.artifact_directory.empty() ? std::filesystem::path{} :
+            configuration.gpu_validation || configuration.artifact_directory.empty() ? std::filesystem::path{} :
                 configuration.artifact_directory / "pso-cache"); !cached) return cached;
     if (auto prepared = PrepareReconstructionProvider(config.reconstruction_request
             ? &*config.reconstruction_request : nullptr, config.dynamic_resolution,

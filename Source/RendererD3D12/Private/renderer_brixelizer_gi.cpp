@@ -1,4 +1,5 @@
 #include "renderer_brixelizer_gi.hpp"
+#include "renderer_brixelizer_scene.hpp"
 #include "d3d12_resources.hpp"
 #include <hs/render_data/texture_package.hpp>
 #include <D3D12MemAlloc.h>
@@ -502,12 +503,17 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     // Validate every input before mutating SDK CPU identity and invalidations.
     std::set<BrixelizerStorage::InstanceKey> wanted_static;
     std::set<BrixelizerStorage::BufferKey> wanted_buffers;
-    BrixelizerStatus counts=s->status;counts.static_instances=counts.dynamic_instances=counts.unsupported_masked=counts.unsupported_thin=counts.excluded_translucent=0;
+    BrixelizerStatus counts=s->status;counts.static_instances=counts.dynamic_instances=0;
+    counts.unsupported_masked=in.excluded_masked_count;counts.unsupported_thin=in.excluded_thin_count;
+    counts.excluded_translucent=in.excluded_translucent_count;
     for(const auto &instance:in.instances)
     {
-        if(instance.domain==BrixelizerGeometryDomain::Translucent){++counts.excluded_translucent;continue;}
-        if(instance.domain==BrixelizerGeometryDomain::UnsupportedMasked){++counts.unsupported_masked;continue;}
-        if(instance.domain==BrixelizerGeometryDomain::UnsupportedThin){++counts.unsupported_thin;continue;}
+        if(instance.domain==BrixelizerGeometryDomain::Translucent)
+        {if(auto result=AddBrixelizerExcludedCount(counts.excluded_translucent,1);!result)return result;continue;}
+        if(instance.domain==BrixelizerGeometryDomain::UnsupportedMasked)
+        {if(auto result=AddBrixelizerExcludedCount(counts.unsupported_masked,1);!result)return result;continue;}
+        if(instance.domain==BrixelizerGeometryDomain::UnsupportedThin)
+        {if(auto result=AddBrixelizerExcludedCount(counts.unsupported_thin,1);!result)return result;continue;}
         if(instance.geometry_index>=in.geometries.size()||!instance.generation||!Finite(instance.world)||
             !Finite(instance.bounds_min)||!Finite(instance.bounds_max)||instance.bounds_min.x>instance.bounds_max.x||
             instance.bounds_min.y>instance.bounds_max.y||instance.bounds_min.z>instance.bounds_max.z)
@@ -577,7 +583,9 @@ Result BrixelizerGiSystem::RegisterScene(RenderGraphBuilder &graph,const Brixeli
     FfxBrixelizerUpdateDescription update{};update.resources=SdfResources(*s,FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     update.frameIndex=std::uint32_t(in.frame_index);update.sdfCenter[0]=in.sdf_center.x;update.sdfCenter[1]=in.sdf_center.y;update.sdfCenter[2]=in.sdf_center.z;
     update.maxReferences=s->settings.max_references;update.triangleSwapSize=s->settings.triangle_swap_bytes;update.maxBricksPerBake=s->settings.max_bricks_per_bake;
-    std::size_t scratch_bytes{};update.outScratchBufferSize=&scratch_bytes;p.baked=std::make_shared<FfxBrixelizerBakedUpdateDescription>();
+    // Pinned BakeUpdate clears the entire descriptor before writing any field.
+    // Avoid value-zeroing the same 8 MiB allocation immediately beforehand.
+    std::size_t scratch_bytes{};update.outScratchBufferSize=&scratch_bytes;p.baked=std::make_shared_for_overwrite<FfxBrixelizerBakedUpdateDescription>();
     if(auto result=Sdk("ffxBrixelizerBakeUpdate",ffxBrixelizerBakeUpdate(s->sdf.get(),&update,p.baked.get()));!result)return mutation_failure(result);
     if(scratch_bytes>Bytes(s->scratch))
     {
@@ -856,7 +864,8 @@ Result BrixelizerGiSystem::RegisterLighting(RenderGraphBuilder &graph,const Brix
         std::memcpy(desc.prevView,&camera.previous_view,sizeof(camera.previous_view));std::memcpy(desc.prevProjection,&camera.previous_projection,sizeof(camera.previous_projection));
         desc.cameraPosition[0]=camera.position.x;desc.cameraPosition[1]=camera.position.y;desc.cameraPosition[2]=camera.position.z;
         desc.startCascade=s->settings.logical_cascades*2;desc.endCascade=s->settings.logical_cascades*3-1;
-        desc.rayPushoff=desc.specularRayPushoff=0.002f;desc.sdfSolveEps=desc.specularSDFSolveEps=0.001f;desc.tMin=0.0f;desc.tMax=1000.0f;
+        // A quarter-voxel ray offset avoids unstable self-hits on the SDF surface.
+        desc.rayPushoff=desc.specularRayPushoff=0.25f;desc.sdfSolveEps=desc.specularSDFSolveEps=0.001f;desc.tMin=0.0f;desc.tMax=1000.0f;
         auto read_screen=[&](Screen index){return Resource(s->screens[index]->resource.Get(),FFX_RESOURCE_STATE_COMPUTE_READ);};
         desc.environmentMap=Resource(environment.Get(),FFX_RESOURCE_STATE_COMPUTE_READ);desc.environmentMap.description.type=FFX_RESOURCE_TYPE_TEXTURE_CUBE;
         desc.prevLitOutput=read_screen(history?CacheHistory:CacheCurrent);desc.depth=read_screen(Depth);desc.normal=read_screen(Normal);

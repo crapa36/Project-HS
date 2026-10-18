@@ -1,4 +1,5 @@
 #include "renderer_light_list.hpp"
+#include "renderer_local_shadow.hpp"
 #include "d3d12_resources.hpp"
 
 #include <D3D12MemAlloc.h>
@@ -19,6 +20,7 @@ namespace
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kTilePixels = 16, kSlices = 24;
 constexpr std::uint32_t kMaxLights = 128, kMaskWords = kMaxLights / 32;
+static_assert(kLightShadowRequested == 1u); // Packed metadata.z reserves higher bits for record+1.
 constexpr std::uint32_t kDescriptorCount = 4, kHeaderBytes = sizeof(LightListConstants);
 constexpr std::uint64_t kMaxBufferBytes = UINT64(UINT32_MAX) & ~UINT64(3);
 
@@ -377,6 +379,9 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
         !storage->frames[inputs.frame_slot].completion.IsSatisfiedBy(inputs.completed) ||
         inputs.lights.size() > storage->max_lights)
         return LightFailure(ErrorCode::InvalidArgument, "Invalid light-list active extent, completed frame slot or light capacity; inputs are never truncated.");
+    for (const auto &reference : inputs.local_shadow_records)
+        if (reference.record_index >= 64u)
+            return LightFailure(ErrorCode::InvalidArgument, "Local shadow record reference exceeds the 64-slot cache contract.");
     if (!Finite(inputs.unjittered_view) || !Finite(inputs.unjittered_projection) ||
         !Finite(Float3{inputs.camera_origin.x, inputs.camera_origin.y, inputs.camera_origin.z}) ||
         !std::isfinite(inputs.near_plane) || !std::isfinite(inputs.far_plane) ||
@@ -436,6 +441,16 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
     for (std::size_t index = 0; index < sorted.size(); ++index)
     {
         if (auto result = EncodeLight(*sorted[index], records[index]); !result) return result;
+        const auto &light = *sorted[index];
+        if (light.type != LightType::Directional && (light.shadow_flags & kLightShadowRequested) != 0u)
+        {
+            const auto reference = std::ranges::find_if(inputs.local_shadow_records, [&](const auto &shadow) {
+                return shadow.stable_id == light.stable_id && shadow.generation == light.generation &&
+                    shadow.revision == light.revision && shadow.type == light.type;
+            });
+            if (reference != inputs.local_shadow_records.end())
+                records[index].metadata.z |= (reference->record_index + 1u) << 1u;
+        }
         if (std::ranges::binary_search(transient, sorted[index]->stable_id)) records[index].metadata.w |= 8u;
         if (sorted[index]->type == LightType::Directional)
         {

@@ -86,7 +86,7 @@ function Assert-FiniteFloatPayload {
         $stream.Dispose()
     }
 }
-$sets=@(@('terrain',4,12,@('basecolor','surface','normal','detail','height')),@('rock',4,12,@('basecolor','surface','normal','detail')),@('bark',3,12,@('basecolor','surface','normal','detail')),@('grass',2,6,@('basecolor','normal','roughness')),@('leaf',3,6,@('basecolor','normal','roughness')),@('ground_detail',1,12,@('basecolor','surface','normal')))
+$sets=@(@('terrain',4,12,@('basecolor','surface','normal','detail','height')),@('rock',4,12,@('basecolor','surface','normal','detail')),@('bark',3,12,@('basecolor','surface','normal','detail')),@('grass',2,6,@('basecolor','normal','roughness')),@('leaf',3,6,@('basecolor','normal','roughness')),@('ground_detail',2,12,@('basecolor','surface','normal')))
 $renderTextureNames=@('terrain_gaussian','terrain_surface','terrain_normal','terrain_detail','terrain_height',
     'rock_basecolor','rock_surface','rock_normal','rock_detail',
     'bark_basecolor','bark_surface','bark_normal','bark_detail',
@@ -136,7 +136,7 @@ foreach($special in @(@('gaussian',2048,2048,12,98),@('histogram',256,16,1,2))){
 $meshes=0
 $meshNames=@()
 foreach($set in @(@('trunk',3),@('leaf',3),@('rock',4),@('grass',4))){for($variant=0;$variant -lt $set[1];++$variant){$meshNames+="$($set[0])_$variant"}}
-$meshNames+=@('flower_daisy','flower_buttercup','flower_violet','clover_patch','ground_leaves','twig_cluster','fence_short')
+$meshNames+=@('flower_daisy','flower_buttercup','flower_violet','clover_patch','ground_leaves','twig_cluster','fence_short','shrub_low','stump_roots','crate_intact','crate_broken','barrel_intact','barrel_broken','cart_broken','fence_broken','fence_splitrail','sack_tied','fallen_log','rock_mossy')
 foreach($name in $meshNames){
     [long]$previous=3000001
     for($lod=0;$lod -lt 3;++$lod){

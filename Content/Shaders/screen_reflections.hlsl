@@ -120,20 +120,51 @@ void ScreenReflectionDepthInitCS(uint3 dispatch : SV_DispatchThreadID)
     if (any(dispatch.xy >= uint2(SsrRenderSize.xy))) return;
     SsrClosestDepth[SsrDepthIndex(dispatch.xy, 0)] = SurfaceDepth.Load(int3(dispatch.xy, 0));
 }
+groupshared float SsrDepthTile8[64];
+groupshared float SsrDepthTile4[16];
 [numthreads(8, 8, 1)]
-void ScreenReflectionDepthReduceCS(uint3 dispatch : SV_DispatchThreadID)
+void ScreenReflectionDepthReduceCS(uint3 dispatch : SV_DispatchThreadID,
+    uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID)
 {
-    uint level = SsrHierarchyLevel;
-    if (level == 0u || level >= SsrFrameInfo.z || any(dispatch.xy >= SsrLevelActive(level))) return;
-    uint2 previousActive = SsrLevelActive(level - 1u);
+    const uint level = SsrHierarchyLevel;
+    if (level == 0u || level >= SsrFrameInfo.z) return;
     float nearest = 0.0;
-    [unroll] for (uint y = 0; y < 2; ++y)
-    [unroll] for (uint x = 0; x < 2; ++x)
+    if (all(dispatch.xy < SsrLevelActive(level)))
     {
-        uint2 p = dispatch.xy * 2u + uint2(x, y);
-        if (all(p < previousActive)) nearest = max(nearest, SsrClosestDepth[SsrDepthIndex(p, level - 1u)]);
+        const uint2 previousActive = SsrLevelActive(level - 1u);
+        [unroll] for (uint y = 0; y < 2; ++y)
+        [unroll] for (uint x = 0; x < 2; ++x)
+        {
+            const uint2 p = dispatch.xy * 2u + uint2(x, y);
+            if (all(p < previousActive)) nearest = max(nearest, SsrClosestDepth[SsrDepthIndex(p, level - 1u)]);
+        }
+        SsrClosestDepth[SsrDepthIndex(dispatch.xy, level)] = nearest;
     }
-    SsrClosestDepth[SsrDepthIndex(dispatch.xy, level)] = nearest;
+    // Invalid edge lanes supply the zero identity; every lane reaches each group barrier.
+    SsrDepthTile8[local.y * 8u + local.x] = nearest;
+    if (level + 1u >= SsrFrameInfo.z) return;
+    GroupMemoryBarrierWithGroupSync();
+    if (all(local.xy < 4u))
+    {
+        const uint source = local.y * 16u + local.x * 2u;
+        const float reduced = max(max(SsrDepthTile8[source], SsrDepthTile8[source + 1u]),
+            max(SsrDepthTile8[source + 8u], SsrDepthTile8[source + 9u]));
+        SsrDepthTile4[local.y * 4u + local.x] = reduced;
+        const uint2 p = group.xy * 4u + local.xy;
+        if (all(p < SsrLevelActive(level + 1u)))
+            SsrClosestDepth[SsrDepthIndex(p, level + 1u)] = reduced;
+    }
+    if (level + 2u >= SsrFrameInfo.z) return;
+    GroupMemoryBarrierWithGroupSync();
+    if (all(local.xy < 2u))
+    {
+        const uint source = local.y * 8u + local.x * 2u;
+        const float reduced = max(max(SsrDepthTile4[source], SsrDepthTile4[source + 1u]),
+            max(SsrDepthTile4[source + 4u], SsrDepthTile4[source + 5u]));
+        const uint2 p = group.xy * 2u + local.xy;
+        if (all(p < SsrLevelActive(level + 2u)))
+            SsrClosestDepth[SsrDepthIndex(p, level + 2u)] = reduced;
+    }
 }
 uint SsrHash(uint value)
 {

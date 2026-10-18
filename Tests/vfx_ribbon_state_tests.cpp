@@ -89,6 +89,88 @@ hs::Result TryRibbonBufferUpdate(VfxRibbonState &state, std::array<TestRibbonBuf
     return result;
 }
 
+void TestRibbonLookupLifecycle()
+{
+    VfxRibbonState state;
+    std::string error;
+    auto a = Source(20);
+    auto b = Source(10); b.effect_handle = 2;
+    auto c = Source(10); c.source_id = 3;
+    const auto update = [&](std::vector<VfxRibbonSourceInput> sources, hs::Tick tick) {
+        Check(state.Update(sources, tick, 1, 1, 256, .5f, {}, error), error.c_str());
+    };
+    update({a, b, c}, 1);
+    const auto c_generation = state.Updates()[0].identity[2];
+    const auto b_generation = state.Updates()[1].identity[2];
+    const auto a_generation = state.Updates()[2].identity[2];
+    Check(state.Updates()[0].identity[0] == 0 && state.Updates()[1].identity[0] == 1 &&
+          state.Updates()[2].identity[0] == 2, "source-key ordering did not assign ascending slots");
+    a.importance = 9; b.importance = 5;
+    update({c, a, b}, 2);
+    Check(state.Updates()[0].identity[0] == 2 && state.Updates()[0].identity[2] == a_generation &&
+          state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] == b_generation &&
+          state.Updates()[2].identity[0] == 0 && state.Updates()[2].identity[2] == c_generation,
+        "reordered priorities changed a source's slot or generation");
+    update({b, a}, 3);
+    Check(state.Updates().size() == 3 && state.Updates()[2].identity[0] == 0 &&
+          state.Updates()[2].identity[3] == 0 && state.Outputs()[2].metadata[0] == 0,
+        "missing source tail lost slot order after priority reordering");
+    update({}, 100);
+    auto d = Source(40);
+    update({d}, 101);
+    Check(state.Updates()[0].identity[0] == 3 && (state.Updates()[0].identity[3] & 2u),
+        "new source did not preserve append-before-reuse policy");
+    auto e = Source(50, 10);
+    update({c, e}, 102);
+    Check(state.Updates().size() == 3 && state.Updates()[0].identity[0] == 0 &&
+          state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] != c_generation &&
+          state.Updates()[2].identity[0] == 3 && state.Updates()[2].identity[3] == 0,
+        "expired keys or tail protection corrupted deterministic slot reuse");
+    c.analytic = true; c.history_seconds = 0; c.outputs[0].motion = VfxMotionKind::CurvedLinkTravelingHead;
+    update({d, c, e}, 103);
+    const auto first_analytic_generation = state.Updates()[1].identity[2];
+    auto history = c; history.analytic = false; history.history_seconds = .2f;
+    history.outputs[0].motion = VfxMotionKind::HistoryRibbonTaperedFlow;
+    update({d, history, e}, 103);
+    Check(state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[3] == 3u &&
+          state.Updates()[1].identity[2] != first_analytic_generation,
+        "same-tick analytic-to-history change did not reset the same slot");
+    update({d, c, e}, 103);
+    const auto analytic_generation = state.Updates()[1].identity[2];
+    Check(state.Updates()[1].identity[0] == 1 && (state.Updates()[1].identity[3] & 7u) == 7u,
+        "history-to-analytic change did not reset the same slot");
+    update({d, e}, 104);
+    Check(state.Updates().size() == 3 && state.Updates()[2].identity[0] == 1 &&
+          state.Updates()[2].identity[3] == 4u, "missing analytic key did not clear exactly once");
+    c.analytic = false; c.history_seconds = .2f; c.outputs[0].motion = VfxMotionKind::HistoryRibbonTaperedFlow;
+    update({c, e, d}, 105);
+    Check(state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] != analytic_generation &&
+          state.Updates()[1].identity[3] == 3u, "cancelled analytic key survived slot reuse");
+    auto f = Source(60, 12);
+    auto g = Source(70, 11);
+    e.importance = 10; c.importance = 9; d.importance = 0;
+    update({d, c, g, e, f}, 106);
+    Check(state.DroppedSources() == 1 && state.Updates().size() == 4 &&
+          state.Updates()[0].identity[0] == 2 && state.Updates()[1].identity[0] == 3 &&
+          state.Updates()[2].identity[0] == 0 && state.Updates()[3].identity[0] == 1,
+        "overflow replacement stole a later winner or changed first reusable slot order");
+    const auto before_duplicate = state.Updates()[0].identity;
+    auto duplicate = d; duplicate.importance = 99;
+    Check(!state.Update(std::vector{f, g, e, c, d, duplicate}, 107, 1, 1, 256, .5f, {}, error) &&
+          state.Updates()[0].identity == before_duplicate,
+        "overflow loser duplicate was accepted or mutated the successful frame");
+
+    for (unsigned reset = 0; reset != 4; ++reset)
+    {
+        auto reset_state = state;
+        Check(reset_state.Update(std::vector{c, e}, reset == 2 ? 105 : 107,
+              reset == 0 ? 2 : 1, reset == 1 ? 2 : 1, reset == 3 ? 128 : 256, .5f, {}, error), error.c_str());
+        Check(reset_state.Updates().size() == 2 && reset_state.Updates()[0].identity[0] == 0 &&
+              reset_state.Updates()[1].identity[0] == 1 && reset_state.Updates()[0].identity[3] == 3u &&
+              reset_state.Updates()[1].identity[3] == 3u,
+            "session/catalog/rewind/capacity reset retained a stale key index");
+    }
+}
 void TestRibbonBufferFailureRecovery()
 {
     using namespace hs::renderer_detail;
@@ -181,6 +263,7 @@ int main()
 {
     try
     {
+        TestRibbonLookupLifecycle();
         TestRibbonBufferFailureRecovery();
         std::string error;
         auto source = Source(10);

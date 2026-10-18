@@ -14,6 +14,8 @@ cbuffer LightListConstants : register(b0, space19)
 RWByteAddressBuffer LightRanges : register(u0, space19);
 RWStructuredBuffer<uint> LightInline : register(u1, space19);
 RWStructuredBuffer<uint> LightSpill : register(u2, space19);
+// Per-dispatch light/camera data is invariant across the group's 64 cells.
+groupshared float4 HsLightViewBounds[HsLightMaskWords * 32u];
 
 void HsClusterBounds(uint3 cell, out float3 lower, out float3 upper)
 {
@@ -40,8 +42,16 @@ void HsClusterBounds(uint3 cell, out float3 lower, out float3 upper)
 }
 
 [numthreads(64, 1, 1)]
-void BuildLightLists(uint3 dispatch : SV_DispatchThreadID)
+void BuildLightLists(uint3 dispatch : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
+    [loop] for (uint index = Grid.w + lane; index < Limits.x; index += 64u)
+    {
+        const HsGpuLightRecord light = HsLightRecords[index];
+        const float3 center = mul(float4(light.position_range.xyz - CameraOriginNear.xyz, 1.0), WorldToView).xyz;
+        const float bound=light.position_range.w+(light.identity.w>=3u?light.shape_cone.y:0.0);
+        HsLightViewBounds[index] = float4(center, bound * bound);
+    }
+    GroupMemoryBarrierWithGroupSync();
     const uint cell_index = dispatch.x + dispatch.y * (65535u * 64u);
     if (cell_index >= Limits.w) return;
     const uint3 cell = uint3(cell_index % Grid.x, (cell_index / Grid.x) % Grid.y, cell_index / (Grid.x * Grid.y));
@@ -49,25 +59,24 @@ void BuildLightLists(uint3 dispatch : SV_DispatchThreadID)
     HsClusterBounds(cell, lower, upper);
     uint inline_count = 0u, spill_count = 0u, total_count = 0u;
     uint4 membership = 0u;
-    bool world_query = !all(isfinite(lower)) || !all(isfinite(upper));
+    const bool world_query = !all(isfinite(lower)) || !all(isfinite(upper));
+    bool capacity_overflow = false;
     [loop] for (uint index = Grid.w; index < Limits.x; ++index)
     {
-        const HsGpuLightRecord light = HsLightRecords[index];
-        const float3 center = mul(float4(light.position_range.xyz - CameraOriginNear.xyz, 1.0), WorldToView).xyz;
-        const float3 separation = max(max(lower - center, center - upper), 0.0);
-        // A Spot's bounded range sphere also encloses its entire cone. Exact
-        // angular rejection happens at shading, so this broad phase cannot lose it.
-        const float bound=light.position_range.w+(light.identity.w>=3u?light.shape_cone.y:0.0);
-        if (dot(separation, separation) > bound * bound) continue;
+        const float4 bounds = HsLightViewBounds[index];
+        const float3 separation = max(max(lower - bounds.xyz, bounds.xyz - upper), 0.0);
+        // A Spot's range sphere encloses its cone; area bounds include emitter extent.
+        if (dot(separation, separation) > bounds.w) continue;
         if (inline_count < Limits.y) ++inline_count;
         else if (spill_count < Limits.z) ++spill_count;
-        else world_query = true;
-        if (total_count < Limits.y + Limits.z) membership[index / 32u] |= 1u << (index % 32u);
+        else capacity_overflow = true;
+        membership[index / 32u] |= 1u << (index % 32u);
         ++total_count;
     }
     [unroll] for (uint word = 0u; word < HsLightMaskWords; ++word)
         LightInline[cell_index * HsLightMaskWords + word] = membership[word];
     if (cell_index == 0u) LightSpill[0] = 0u; // Retain the existing four-resource binding contract.
     LightRanges.Store4(HsLightHeaderBytes + cell_index * 16u,
-        uint4(inline_count, spill_count, world_query ? HsLightWorldQueryFlag : 0u, total_count));
+        uint4(inline_count, spill_count, (world_query ? HsLightWorldQueryFlag : 0u) |
+            (capacity_overflow ? HsLightCapacityOverflowFlag : 0u), total_count));
 }

@@ -20,9 +20,11 @@ std::pair<Order, Ranges> LegacyOrder(std::span<const RenderInstance> sources, fl
         return mesh >= RenderMesh::MonsterMelee && mesh <= RenderMesh::BossFinal;
     };
     const auto environment = [](RenderMesh mesh) {
-        return (mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass) || mesh == RenderMesh::GroundDetail;
+        return (mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass) || mesh == RenderMesh::GroundDetail || mesh == RenderMesh::MeadowSurface;
     };
     const auto environment_index = [](const RenderInstance &source) {
+        if (source.mesh == RenderMesh::MeadowSurface)
+            return std::size_t{14} + kGroundDetailVariantCount + source.environment_variant % 2u;
         if (source.mesh == RenderMesh::GroundDetail)
             return std::size_t{14} + source.environment_variant % kGroundDetailVariantCount;
         constexpr std::array<std::size_t, 4> offsets{0, 3, 6, 10}, counts{3, 3, 4, 4};
@@ -47,7 +49,7 @@ std::pair<Order, Ranges> LegacyOrder(std::span<const RenderInstance> sources, fl
                    static_cast<std::size_t>(RenderMesh::MonsterMelee) == asset;
         });
     scan([](const auto &source) { return source.mesh == RenderMesh::EnemyProjectile; });
-    for (std::size_t asset = 0; asset < 14 + kGroundDetailVariantCount; ++asset)
+    for (std::size_t asset = 0; asset < 16 + kGroundDetailVariantCount; ++asset)
         scan([&](const auto &source) { return environment(source.mesh) && environment_index(source) == asset; });
     scan([&](const auto &source) { return terrain(source.mesh); });
     scan([&](const auto &source) {
@@ -115,6 +117,17 @@ void TestGroundDetailOrder()
         Check(order[pair * 2] == scene.size() - 2 - pair * 2 &&
               order[pair * 2 + 1] == order[pair * 2] + 1,
               "new geometry families changed stable per-variant source order");
+}
+
+void TestMeadowCatalogOrder()
+{
+    std::array<RenderInstance, 4> scene{};
+    scene[0].mesh=RenderMesh::MeadowSurface; scene[0].environment_variant=1;
+    scene[1].mesh=RenderMesh::GroundDetail; scene[1].environment_variant=18;
+    scene[2].mesh=RenderMesh::MeadowSurface;
+    scene[3].mesh=RenderMesh::Ground;
+    Order order; CheckOrder(scene, 0.0f, order);
+    Check(order==Order{1,2,0,3}, "new props, meadow ground/water and fallback terrain buckets overlap");
 }
 
 void TestRandomizedEquivalence()
@@ -222,6 +235,7 @@ int main()
     {
         TestExplicitOrderAndReuse();
         TestGroundDetailOrder();
+        TestMeadowCatalogOrder();
         TestRandomizedEquivalence();
         TestInstanceLookup();
         TestGrassBenders();

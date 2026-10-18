@@ -12,6 +12,7 @@
 
 namespace hs
 {
+class RendererPipelineCache;
 // Append these ranges to existing root table32, all in space36. The service
 // writes its descriptors into a waited frame bank in the caller's main heap.
 inline constexpr std::uint32_t kDecalSurfaceCbvOffset = 0;
@@ -86,7 +87,7 @@ class DecalSurfaceSystem
 {
   public:
     using ShaderReader = std::function<Result(std::string_view, std::vector<std::byte> &)>;
-    [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *, ID3D12RootSignature *,
+    [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *, ID3D12RootSignature *, RendererPipelineCache &,
         ViewExtent capacity, std::uint32_t frame_slots, bool has_admitted_work,
         const ShaderReader &, DecalSurfaceCandidate &) const;
     [[nodiscard]] Result Commit(DecalSurfaceCandidate &&, const CompletionSet &);

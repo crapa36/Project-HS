@@ -30,9 +30,9 @@ def cross(a, b):
 
 def bitset_light_query(candidates, directional, kinds, capacity, type_mask, transient=(), world=False):
     words = [0] * 4
-    for index in candidates[:2 * capacity]:
+    for index in candidates:
         words[index // 32] |= 1 << (index % 32)
-    if world or len(candidates) > 2 * capacity:
+    if world:
         selected = list(range(directional, len(kinds)))
     else:
         selected = []
@@ -187,10 +187,10 @@ class ShaderContracts(unittest.TestCase):
                     # Even maximally different path colors have no finite boundary jump.
                     self.assertLess(abs((1-at(.001)) - (1-at(-.001))), 2e-6)
         self.assertEqual(blend(0, 0), 1.)
-        self.assertIn("const float path=TerrainMeadowRoad(world.xz,warp);", text)
+        self.assertIn("const float path=TerrainMeadowRoad(world.xz,warp,meso);", text)
         self.assertNotIn("smoothstep(2.8,5.8", text)
         traces = text.split("void TerrainGroundTraces(",1)[1].split("HsMaterialTerrainResult EnvTerrain(",1)[0]
-        self.assertIn("MeadowWetness(world.xz)*meadow", traces)
+        self.assertIn("wetness*meadow", traces)
         self.assertIn("path*(1.0-grassCoverage)*(1.0-meadow)", traces)
         self.assertIn("float moss=edge*smoothstep(0.12,0.55,broad+fine*0.25)*(1.0-meadow)", traces)
 
@@ -267,7 +267,7 @@ class ShaderContracts(unittest.TestCase):
         self.assertLess(normalize, apply)
         self.assertLess(apply, text.index("m.base_color*=0.6*(1+macro*0.08+meso*0.04)"))
         for retained in ("for(uint layer=0;layer<4;++layer)", "if(mesh==20) w=float4(1,0,0,0)",
-                         "float weight=w[layer]*exp2((n.height-0.5)*2)",
+                         "float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)))",
                          "m.base_color+=n.base_color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight",
                          "m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight"):
             self.assertIn(retained, text)
@@ -286,7 +286,7 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn("floor(walkZ/0.62)", body)
         self.assertIn("abs(across)-0.82-fine*0.045", body)
         self.assertIn("float edge=smoothstep(0.03,0.16,path)*(1.0-smoothstep(0.45,0.8,path))", body)
-        call = text.index("TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed)")
+        call = text.index("TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed,wetness,dryness)")
         self.assertLess(text.index("m.normal=normalize(m.normal);m.detail=normalize(m.detail)"), call)
         self.assertLess(text.index("m.roughness=lerp(m.roughness,1.0,0.8*grassCoverage)"), call)
 
@@ -343,13 +343,65 @@ class ShaderContracts(unittest.TestCase):
         self.assertEqual(demand_tile, min(sizes))
         self.assertIn("uv=world.xz/tile,dx=worldDx.xz/tile,dy=worldDy.xz/tile", text)
 
+    def test_terrain_pom_skips_only_bounded_subpixel_displacement(self):
+        shader = (SHADERS / "material_terrain.hlsli").read_text(encoding="utf-8-sig")
+        pom = shader.split("float2 TerrainParallaxUv(", 1)[1].split("HsMaterialTerrainResult TerrainSample(", 1)[0]
+        self.assertIn("if (!pom || steps == 0u || distanceToEye >= 55.0) return uv", pom)
+        self.assertIn("gradientEnergy=dot(dx,dx)+dot(dy,dy)", pom)
+        self.assertIn("gradientArea=abs(dx.x*dy.y-dx.y*dy.x)", pom)
+        self.assertIn("gradientEnergy>1e-20 && gradientArea>gradientEnergy*1e-6", pom)
+        self.assertIn("length(ray)*(sqrt(gradientEnergy)/gradientArea)", pom)
+        self.assertIn("if(isfinite(parallaxPixels))", pom)
+        self.assertLess(pom.index("if(pomWeight<=0) return uv"), pom.index("HsTexturePrepareGrad(height_slot)"))
+        self.assertIn("return start-ray*((previous+depth)*0.5*pomWeight)", pom)
+        lo, hi = map(float, re.search(r"smoothstep\(([0-9.]+),([0-9.]+),parallaxPixels\)", pom).groups())
+        self.assertEqual((lo, hi), (.25, .5))
+        sample = shader.split("HsMaterialTerrainResult TerrainSample(", 1)[1].split("float3 TerrainGrassPalette(", 1)[0]
+        self.assertIn("m.height=HsTextureSampleGrad(height,height_slot", sample)
+        self.assertLess(sample.index("uv=TerrainParallaxUv("), sample.index("m.height=HsTextureSampleGrad"))
+
+        def weight(dx, dy, ray):
+            energy = sum(v*v for v in (*dx, *dy))
+            area = abs(dx[0]*dy[1] - dx[1]*dy[0])
+            if not (energy > 1e-20 and area > energy*1e-6):
+                return 1., math.inf
+            bound = math.hypot(*ray) * math.sqrt(energy) / area
+            if not math.isfinite(bound):
+                return 1., math.inf
+            t = min(1., max(0., (bound-lo)/(hi-lo)))
+            return t*t*(3.-2.*t), bound
+
+        # Build UV rays from known screen displacement, independent of the bound.
+        for scale, ratio, angle, shear in itertools.product(
+                (1e-8, 1e-4, 1.), (1., 8., 1024., 100000.), (0., .37, 1.8), (0., .4, .999)):
+            c, s = math.cos(angle), math.sin(angle)
+            rotate = lambda v: (c*v[0]-s*v[1], s*v[0]+c*v[1])
+            dx, dy = rotate((scale*ratio, 0.)), rotate((scale*shear, scale))
+            for pixels in ((.02, .03), (.24, 0.), (0., .25), (.5, .5), (3., -8.)):
+                ray = tuple(dx[i]*pixels[0] + dy[i]*pixels[1] for i in range(2))
+                fade, bound = weight(dx, dy, ray)
+                actual = math.hypot(*pixels)
+                self.assertGreaterEqual(bound*(1.+1e-10), actual)
+                if fade == 0.:
+                    self.assertLessEqual(actual, lo*(1.+1e-10))
+
+        thresholds = (0., .1, .25, .3, .4, .5, 8.)
+        fades = [weight((1., 0.), (0., 1.), (p/math.sqrt(2.), 0.))[0] for p in thresholds]
+        self.assertEqual(fades[:3], [0., 0., 0.])
+        self.assertEqual(fades[-2:], [1., 1.])
+        self.assertEqual(fades, sorted(fades))
+        for dx, dy in (((0., 0.), (0., 0.)), ((1., 0.), (1., 1e-8)),
+                       ((1e-20, 0.), (0., 1e-20)), ((math.inf, 0.), (0., 1.)),
+                       ((math.nan, 0.), (0., 1.))):
+            self.assertEqual(weight(dx, dy, (.1, .2))[0], 1.)
+
     def test_terrain_histogram_uses_available_gaussian_mip(self):
         text = (SHADERS / "material_terrain.hlsli").read_text(encoding="utf-8-sig")
         clamp = text.index("lod=max(lod,float(HsTextureMipMetadata[gaussian_slot].y))")
         self.assertLess(text.index("float lod=0.5*log2"), clamp)
         self.assertLess(clamp, text.index("x.base_color=DecodeTerrainHistogram"))
         streaming = (SHADERS / "texture_streaming.hlsli").read_text()
-        self.assertIn("float clamp_mip = float(mip.y - min(mip.x, mip.y))", streaming)
+        self.assertIn("state.clamp_mip = float(mip.y - min(mip.x, mip.y))", streaming)
         for ideal, resident, expected in ((2.5, 0, 2.5), (2.5, 4, 4), (0, 1, 1)):
             self.assertEqual(max(ideal, resident), expected)
 
@@ -488,6 +540,38 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn(product, runtime)
         for text in (producer, runtime):
             self.assertNotIn("render/shader/local_probe_capture_vs.dxil", text)
+
+    def test_meadow_controls_use_authored_uv_without_changing_world_mapping(self):
+        terrain = (SHADERS / "material_terrain.hlsli").read_text(encoding="utf-8-sig")
+        scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")
+        self.assertIn("ctx.mesh = input.Mesh;", scene)
+        controls = terrain.split("[branch] if(mesh==22u)", 1)[1].split("else", 1)[0]
+        self.assertIn("wetness=saturate(authoredControls.x)", controls)
+        self.assertIn("dryness=saturate(authoredControls.y)", controls)
+        self.assertNotIn("MeadowWetness(", controls)
+        self.assertNotIn("MeadowSoilDryness(", controls)
+        self.assertIn("float2 uv=world.xz/tile", terrain)
+        self.assertIn("w=lerp(w,float4(1-dryness,0,dryness,0),path)", terrain)
+        for values in itertools.product((-1., 1.), repeat=3):
+            edge = sum(a*b for a,b in zip(values, (.12,.07,.09)))
+            self.assertLess(.82+edge, 1.15)
+
+    def test_transmission_fallback_preserves_scene_and_fog_domains(self):
+        scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")
+        layer = scene.split("float3 HsHeroLayerBackground(", 1)[1].split("// Authored-thickness", 1)[0]
+        # Offscreen/foreground rejection must keep the covered layer, not substitute sky.
+        fallback = layer.split("const float3 exit_world", 1)[0]
+        self.assertIn("HeroLayerBackground.Load", fallback)
+        self.assertNotIn("EnvironmentSkyRadiance", fallback)
+        lighting = scene.split("float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world,", 1)[1]
+        fallback = lighting.split("const float3 exit_world", 1)[0]
+        self.assertIn("SurfaceDepth.Load(source_pixel)", fallback)
+        self.assertIn("VmRawOpaqueHdr.Load(source_pixel)", fallback)
+        self.assertIn("HdrColor.Load(source_pixel)", fallback)
+        self.assertIn("background_view_depth=HsFogViewDepth(source_world)", fallback)
+        # Foreground rejection and interval fog remain enforced for displaced samples.
+        self.assertIn("if(depth>0.0 && depth<=exit_clip.z/exit_clip.w)", lighting)
+        self.assertIn("HsSampleVolumetricInterval(background_uv", lighting)
 
     def test_virtual_shadow_depth_only_receivers_preserve_coverage_contract(self):
         shader = (SHADERS / "virtual_shadow.hlsl").read_text(encoding="utf-8")
@@ -685,7 +769,7 @@ class ShaderContracts(unittest.TestCase):
         empty = body.index("if (all(expected == uint2(0u, 0u))) return;")
         for guard in ("CutStatus.Load(16u) != 0u", "if (!CandidateValid(", "if (base.y != 0u)"):
             self.assertLess(body.index(guard), empty)
-        self.assertLess(empty, body.index("for (uint visited"))
+        self.assertLess(empty, body.index("for (uint selected_index"))
         self.assertIn("if (expected.y != 0u || count != expected.x)", body)
 
     def test_cluster_main_suffix_keeps_full_retest_transaction(self):
@@ -729,9 +813,8 @@ class ShaderContracts(unittest.TestCase):
             type_mask = rng.randrange(32)
             transient = set(rng.sample(range(total), rng.randrange(total + 1)))
             world = rng.choice((False, True))
-            # Independent old query: inline then spill, or authoritative world table.
-            local = list(range(directional, total)) if world or len(candidates) > 2 * capacity else (
-                candidates[:capacity] + candidates[capacity:2 * capacity])
+            # Complete membership is independent of diagnostic inline/spill limits.
+            local = list(range(directional, total)) if world else candidates
             expected = [index for index in list(range(directional)) + local
                         if type_mask & (1 << kinds[index]) and index not in transient]
             self.assertEqual(bitset_light_query(candidates, directional, kinds, capacity,

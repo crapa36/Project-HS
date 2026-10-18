@@ -1288,7 +1288,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
         for (auto &alive : particle_alive)
         {
             if (auto created = CreateAllocation(alive, default_allocation,
-                                                BufferDescription(3 * kParticleCount * sizeof(std::uint32_t),
+                                                BufferDescription((1 + kParticleDrawBinCount) * kParticleCount * sizeof(std::uint32_t),
                                                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 !created)
@@ -1305,14 +1305,14 @@ Result D3D12Renderer::Impl::CreateGpuData()
         }
         if (auto created = CreateAllocation(
                 particle_counters, default_allocation,
-                BufferDescription(20, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+                BufferDescription((3 + kParticleDrawBinCount) * sizeof(std::uint32_t), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             !created)
         {
             return created;
         }
         const auto indirect_description =
-            BufferDescription(2 * sizeof(D3D12_DRAW_ARGUMENTS),
+            BufferDescription(kParticleDrawBinCount * kRibbonArgumentStride,
                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         if (auto created = CreateAllocation(indirect_arguments, default_allocation, indirect_description,
                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS); !created)

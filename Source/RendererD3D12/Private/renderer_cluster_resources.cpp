@@ -589,6 +589,14 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
             ClusterCutBuffers next;
             next.candidate_capacity = std::max(cut.candidate_capacity, candidate_capacity);
             next.output_capacity = std::max(cut.output_capacity, output_capacity);
+            // Both structured uint2 and raw-clear descriptors cover the entire allocation.
+            // Check the larger raw R32 element count before allocating or casting NumElements.
+            const std::uint64_t count_cache_elements = 2ull * next.candidate_capacity + next.output_capacity;
+            const std::uint64_t count_cache_bytes = count_cache_elements * 8u;
+            constexpr std::uint64_t maximum_buffer_elements = 1ull << D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP;
+            if (count_cache_bytes > UINT32_MAX || count_cache_elements > UINT32_MAX ||
+                count_cache_bytes / 4u > maximum_buffer_elements)
+                return ClusterFailure("Cluster selected-cut cache exceeds structured/raw UAV addressing.");
             next.history_instance_capacity = std::max(cut.history_instance_capacity, history_capacity);
             next.history_words_per_instance = history_words;
             const auto blocks = (static_cast<std::uint64_t>(next.candidate_capacity) + 63u) / 64u;
@@ -600,8 +608,10 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
             if (auto result = make(next.constants, 3u * kClusterConstantStride, D3D12_HEAP_TYPE_UPLOAD); !result) return result;
             if (auto result = make(next.occlusion_constants, kClusterOcclusionPhases * kClusterOcclusionConstantStride,
                 D3D12_HEAP_TYPE_UPLOAD); !result) return result;
-            for (auto *buffer : {&next.counts, &next.offsets})
-                if (auto result = make(*buffer, static_cast<std::uint64_t>(next.candidate_capacity) * 8u); !result) return result;
+            // Counts, cut directories, then immutable selected (group, mask) entries.
+            // One UAV preserves the existing Count/Prefix/Emit dependency chain.
+            if (auto result = make(next.counts, count_cache_bytes); !result) return result;
+            if (auto result = make(next.offsets, static_cast<std::uint64_t>(next.candidate_capacity) * 8u); !result) return result;
             for (auto *buffer : {&next.block_sums, &next.block_offsets})
                 if (auto result = make(*buffer, blocks * 8u); !result) return result;
             if (auto result = make(next.demand, runtime.cpu.pages.size() * 4u); !result) return result;

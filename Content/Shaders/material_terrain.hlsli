@@ -57,19 +57,30 @@ float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment
     if (!pom || steps == 0u || distanceToEye >= 55.0) return uv;
     float tile=TerrainTileSize(layer); float heightScale=layer==3?0.05:layer==2?0.035:0.025;
     float2 ray=TerrainRotate(viewTs.xy,rotation)/max(abs(viewTs.z),0.05)*heightScale/tile*(1-smoothstep(35,55,distanceToEye));
+    float pomWeight=1;
+    const float gradientEnergy=dot(dx,dx)+dot(dy,dy);
+    const float gradientArea=abs(dx.x*dy.y-dx.y*dy.x);
+    // The inverse-Jacobian norm bounds displacement even across anisotropic footprints.
+    if(gradientEnergy>1e-20 && gradientArea>gradientEnergy*1e-6)
+    {
+        const float parallaxPixels=length(ray)*(sqrt(gradientEnergy)/gradientArea);
+        if(isfinite(parallaxPixels)) pomWeight=smoothstep(0.25,0.5,parallaxPixels);
+        [branch] if(pomWeight<=0) return uv;
+    }
+    const HsTextureGradState height_state = HsTexturePrepareGrad(height_slot);
     float depth=0,previous=0; float2 start=uv;
     [loop] for(uint j=0;j<steps;++j)
     {
-        if(depth>=1-HsTextureSampleGrad(height,height_slot,environment_wrap,float3(uv,layer),dx,dy).r) break;
+        if(depth>=1-HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(uv,layer),dx,dy,height_state).r) break;
         previous=depth; depth+=1.0/steps; uv=start-ray*depth;
     }
     [loop] for(uint k=0;k<refinementSteps;++k)
     {
         float mid=(previous+depth)*0.5; float2 trial=start-ray*mid;
-        if(mid>=1-HsTextureSampleGrad(height,height_slot,environment_wrap,float3(trial,layer),dx,dy).r) depth=mid;
+        if(mid>=1-HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(trial,layer),dx,dy,height_state).r) depth=mid;
         else previous=mid;
     }
-    return start-ray*((previous+depth)*0.5);
+    return start-ray*((previous+depth)*0.5*pomWeight);
 }
 
 HsMaterialTerrainResult TerrainSample(
@@ -165,25 +176,26 @@ float TerrainMeadowBlend(float2 world)
     return smoothstep(0.0,1.5,12.0-max(abs(world.x),abs(world.y)));
 }
 
-float TerrainMeadowRoad(float2 world,float2 warp)
+float TerrainMeadowRoad(float2 world,float2 warp,float edgeDetail)
 {
-    const float edge=warp.x*.18+warp.y*.10;
+    const float edge=warp.x*.12+warp.y*.07+edgeDetail*.09;
     return max(MeadowPressed(world)*TerrainMeadowBlend(world),MeadowRoadCoverage(world,edge)*.82);
 }
 
 // Fixed metre-scale environmental marks for terrain materials.
 // Albedo gains preserve the sampled 2K detail; these are shallow material depressions, not water.
-void TerrainGroundTraces(inout HsMaterialTerrainResult m,float3 world,float path,float grassCoverage,uint mesh,uint seed)
+void TerrainGroundTraces(inout HsMaterialTerrainResult m,float3 world,float path,float grassCoverage,uint mesh,uint seed,float wetness,float dryness)
 {
     const float meadow=TerrainMeadowBlend(world.xz);
     if(meadow>0)
     {
-        const float wet=MeadowWetness(world.xz)*meadow;
+        const float wet=wetness*meadow;
         const float rut=MeadowCartWear(world.xz)*meadow;
         m.base_color*=lerp(float3(1,1,1),float3(.72,.68,.62),rut);
         m.base_color*=lerp(float3(1,1,1),float3(.65,.60,.53),wet);
         m.roughness=lerp(m.roughness,.48,wet);
         m.roughness=lerp(m.roughness,.24,smoothstep(.82,1.0,wet)*.65);
+        m.roughness=lerp(m.roughness,max(m.roughness,.88),dryness*.7);
         if(meadow>=1) return;
     }
     if(mesh==20u||path<=0.015) return;
@@ -248,13 +260,25 @@ HsMaterialTerrainResult EnvTerrain(
     SamplerState environment_wrap, SamplerState linear_clamp,
     float3 world,float3 worldDx,float3 worldDy,uint mesh,uint seed,
     float3 viewDirection,float distanceToEye,
-    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot)
+    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
+    float2 authoredControls)
 {
     float4 w=max(float4(0.5-TerrainNoise(world.xz/12,seed),0.7+TerrainNoise(world.xz/16,seed+9),TerrainNoise(world.xz/22,seed+31),TerrainNoise(world.xz/9,seed+71)),0);
     w.x=max(w.x,0.05);
     const float2 warp=float2(TerrainNoise(world.xz/7,seed+413),TerrainNoise(world.xz/7,seed+827));
-    const float path=TerrainMeadowRoad(world.xz,warp);
-    w=lerp(w,float4(1,0,0,0),path);
+    const float meso=TerrainNoise(world.xz/.85,seed+571);
+    const float path=TerrainMeadowRoad(world.xz,warp,meso);
+    // Static controls use meadow UVs; texture mapping remains in world metres.
+    float wetness,dryness;
+    [branch] if(mesh==22u)
+    {
+        wetness=saturate(authoredControls.x);dryness=saturate(authoredControls.y);
+    }
+    else
+    {
+        wetness=MeadowWetness(world.xz);dryness=MeadowSoilDryness(world.xz,wetness);
+    }
+    w=lerp(w,float4(1-dryness,0,dryness,0),path);
     if(mesh==20) w=float4(1,0,0,0);
     float total=0;
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
@@ -262,7 +286,7 @@ HsMaterialTerrainResult EnvTerrain(
     {
         if(w[layer]<=0) continue;
         HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewDirection,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot);
-        float weight=w[layer]*exp2((n.height-0.5)*2);
+        float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)));
         m.base_color+=n.base_color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight;
         m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight;
     }
@@ -274,12 +298,12 @@ HsMaterialTerrainResult EnvTerrain(
     m.base_color*=lerp(float3(1,1,1),MeadowDryGrassGain(world.xz),grassCoverage);
     // Dense turf occludes sky fill and its pale reflection between the individual grass cards.
     m.ao*=lerp(1.0,0.1,grassCoverage);
-    float macro=TerrainNoise(world.xz/18,seed+173),meso=TerrainNoise(world.xz/3,seed+571);
+    float macro=TerrainNoise(world.xz/18,seed+173);
     // Keep terrain reflectance below the washed-out daylight range without darkening UI or actors.
     m.base_color*=0.6*(1+macro*0.08+meso*0.04);m.roughness=saturate(m.roughness+macro*0.04);
     m.roughness=lerp(m.roughness,1.0,0.8*grassCoverage);
     m.normal=normalize(m.normal);m.detail=normalize(m.detail);
-    TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed);
+    TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed,wetness,dryness);
     return m;
 }
 
@@ -290,10 +314,11 @@ HsMaterialTerrainResult HsMaterialTerrainStochastic(
     SamplerState environment_wrap, SamplerState linear_clamp,
     float3 world,float3 worldDx,float3 worldDy,uint mesh,uint seed,
     float3 viewDirection,float distanceToEye,
-    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot)
+    uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
+    float2 authoredControls)
 {
     return EnvTerrain(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,
                       world,worldDx,worldDy,mesh,seed,viewDirection,distanceToEye,
-                      gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot);
+                      gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,authoredControls);
 }
 #endif

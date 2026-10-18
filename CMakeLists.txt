@@ -1250,7 +1250,7 @@ set(HS_AUTHORED_MATERIAL_NAMES
     grass_0 grass_1 grass_2 grass_3 terrain ground_detail)
 set(HS_GROUND_DETAIL_MESH_NAMES
     flower_daisy flower_buttercup flower_violet clover_patch ground_leaves twig_cluster fence_short
-    shrub_low stump_roots crate_intact crate_broken barrel_intact barrel_broken cart_broken)
+    shrub_low stump_roots crate_intact crate_broken barrel_intact barrel_broken cart_broken fence_broken fence_splitrail sack_tied fallen_log rock_mossy)
 set(HS_HERO_MATERIAL_NAMES
     archer_skin archer_cloth archer_cutout archer_equipment slime_features slime_body monster_pbr)
 set(HS_DEFERRED_MATERIAL_INPUTS)
@@ -1965,6 +1965,14 @@ if(HS_BUILD_TESTS)
             add_test(NAME rendering.persistent-gpu-scene
                 COMMAND hs_persistent_gpu_scene_tests)
         endif()
+        if(WIN32 AND HS_BUILD_RUNTIME)
+            add_executable(hs_brixelizer_scene_input_tests Tests/brixelizer_scene_input_tests.cpp)
+            target_link_libraries(hs_brixelizer_scene_input_tests PRIVATE hs_renderer_d3d12 hs_render_data)
+            target_include_directories(hs_brixelizer_scene_input_tests PRIVATE Source/RendererD3D12/Private)
+            target_compile_definitions(hs_brixelizer_scene_input_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+            hs_configure_target(hs_brixelizer_scene_input_tests)
+            add_test(NAME rendering.brixelizer-scene-inputs COMMAND hs_brixelizer_scene_input_tests)
+        endif()
         add_executable(hs_render_feature_tests
             Tests/render_feature_tests.cpp
             Source/RendererD3D12/Private/render_features.cpp)
@@ -2000,6 +2008,20 @@ if(HS_BUILD_TESTS)
             add_test(NAME rendering.shader-reconstruction-contracts
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shader_reconstruction.py")
+            add_test(NAME rendering.light-shadow-lookup-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_light_shadow_lookup.py")
+            add_test(NAME rendering.particle-draw-bin-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_draw_bins.py")
+            add_test(NAME rendering.ssr-depth-reduction-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_depth_reduction.py")
+            add_test(NAME rendering.shadow-gather-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shadow_gather.py")
+            add_test(NAME rendering.particle-group-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_group.py")
+            add_test(NAME rendering.ground-annulus-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ground_annulus.py")
             add_test(NAME rendering.ssr-spatial-composition-contracts
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_spatial_composition.py")

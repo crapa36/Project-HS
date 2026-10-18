@@ -189,7 +189,7 @@ Result ScreenReflectionsSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator
     if (auto result = CheckFormat(device, DXGI_FORMAT_R32G32B32A32_FLOAT, true); !result) return result;
     if (auto result = CheckFormat(device, DXGI_FORMAT_R32G32B32A32_UINT, true); !result) return result;
     if (auto result = CheckFormat(device, DXGI_FORMAT_R16G16B16A16_FLOAT, false); !result) return result;
-    if (auto result = CreateTexture(allocator, capacity, DXGI_FORMAT_R32G32B32A32_FLOAT, next->raw); !result) return result;
+    if (auto result = CreateTexture(allocator, next->trace_capacity, DXGI_FORMAT_R32G32B32A32_FLOAT, next->raw); !result) return result;
     if (auto result = CreateTexture(allocator, capacity, DXGI_FORMAT_R16G16B16A16_FLOAT, next->composed); !result) return result;
     for (std::uint32_t index = 0; index < 2; ++index)
     {
@@ -423,10 +423,12 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
                 commands->SetPipelineState(storage->pipelines[0].Get());
                 commands->Dispatch((inputs.render_active.width + 7) / 8, (inputs.render_active.height + 7) / 8, 1);
                 context.UavBarrier(hierarchyHandle);
-                ViewExtent levelActive = inputs.render_active;
-                for (std::uint32_t level = 1; level < storage->hierarchy_count; ++level)
+                // Each group reduces three levels without cross-group reads of its new outputs.
+                for (std::uint32_t level = 1; level < storage->hierarchy_count; level += 3)
                 {
-                    levelActive = {(levelActive.width + 1) / 2, (levelActive.height + 1) / 2};
+                    const auto scale = 1u << level;
+                    const ViewExtent levelActive{(inputs.render_active.width + scale - 1) / scale,
+                                                 (inputs.render_active.height + scale - 1) / scale};
                     commands->SetComputeRoot32BitConstant(3, level, 0);
                     commands->SetPipelineState(storage->pipelines[1].Get());
                     commands->Dispatch((levelActive.width + 7) / 8, (levelActive.height + 7) / 8, 1);

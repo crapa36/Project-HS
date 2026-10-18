@@ -1,9 +1,27 @@
 #include "renderer_impl.hpp"
 #include "renderer_brixelizer_scene.hpp"
 #include <hs/render_data/material_ir.hpp>
+#include <limits>
 
 namespace hs
 {
+BrixelizerGeometryDomain ClassifyBrixelizerDomain(std::uint32_t capabilities, bool masked, bool transmissive)
+{
+    constexpr auto thin = static_cast<std::uint32_t>(render_data::MaterialClosureCapability::ThinTransmission) |
+        static_cast<std::uint32_t>(render_data::MaterialClosureCapability::SolidTransmission);
+    return transmissive ? BrixelizerGeometryDomain::Translucent :
+        masked ? BrixelizerGeometryDomain::UnsupportedMasked :
+        (capabilities & thin) ? BrixelizerGeometryDomain::UnsupportedThin : BrixelizerGeometryDomain::Opaque;
+}
+
+Result AddBrixelizerExcludedCount(std::uint32_t &count, std::size_t submeshes)
+{
+    if (submeshes > std::numeric_limits<std::uint32_t>::max() - count)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Excluded SDF submesh count overflows status accounting.");
+    count += static_cast<std::uint32_t>(submeshes);
+    return Result::Success();
+}
+
 Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareSceneInstance &instance,
     std::span<const render_data::GeometrySubmesh> submeshes,
     std::span<const render_data::CharacterMaterialBinding> bindings,
@@ -19,10 +37,7 @@ Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareS
     for (std::size_t part = 0; part < submeshes.size(); ++part)
     {
         const auto &range = submeshes[part];
-        auto domain = transmissive ? BrixelizerGeometryDomain::Translucent :
-            masked ? BrixelizerGeometryDomain::UnsupportedMasked :
-            (environment_capabilities & thin) ? BrixelizerGeometryDomain::UnsupportedThin :
-            BrixelizerGeometryDomain::Opaque;
+        auto domain = ClassifyBrixelizerDomain(environment_capabilities, masked, transmissive);
         auto material = instance.material_id;
         if (!bindings.empty())
         {

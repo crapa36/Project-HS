@@ -220,7 +220,7 @@
             2048
           ],
           "gutter_px": 24,
-          "layers": 1,
+          "layers": 2,
           "material_index": 0,
           "opaque_geometry_silhouette": true
         },

@@ -1,4 +1,5 @@
 #include "renderer_decal_surface.hpp"
+#include "renderer_pipeline_cache.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -52,7 +53,7 @@ std::uint64_t DecalSurfaceCandidate::AllocatedBytes() const noexcept { return ta
 std::uint64_t DecalSurfaceSystem::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 
 Result DecalSurfaceSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
-    ID3D12RootSignature *root, ViewExtent capacity, std::uint32_t frames, bool has_work,
+    ID3D12RootSignature *root, RendererPipelineCache &cache, ViewExtent capacity, std::uint32_t frames, bool has_work,
     const ShaderReader &read, DecalSurfaceCandidate &candidate) const
 {
     candidate = {};
@@ -76,7 +77,7 @@ Result DecalSurfaceSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     if (auto r = read("decal_surface_cs.dxil", shader); !r) return r;
     if (shader.size() < 32) return Failure(ErrorCode::InvalidArgument, "Selected decal Surface shader is absent or truncated.");
     D3D12_COMPUTE_PIPELINE_STATE_DESC pso{}; pso.pRootSignature = root; pso.CS = {shader.data(), shader.size()};
-    auto hr = device->CreateComputePipelineState(&pso, IID_PPV_ARGS(&next->pipeline));
+    auto hr = cache.CreateCompute(&pso, IID_PPV_ARGS(&next->pipeline));
     if (FAILED(hr)) return Native("Create decal Surface pipeline", hr);
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;

@@ -1,6 +1,7 @@
 """Structural validation of the authored meadow geometry and actual partial water fills."""
 import ast, json, math, struct, sys, time
 from collections import Counter
+from functools import lru_cache
 started=time.perf_counter()
 from pathlib import Path
 root=Path(__file__).resolve().parents[1]
@@ -68,7 +69,10 @@ for mesh in meshes:
    for v in (a,b,c):
     if abs(abs(v[0])-12)<1e-6 or abs(abs(v[2])-12)<1e-6:assert abs(v[1])<1e-6, 'slab boundary seam'
 assert {0,1,2,3}<=water_types
-assert all(i in counts for i,r in enumerate(rows) if r['fill']>0)
+wet_groups={r.get('water_group',i) for i,r in enumerate(rows) if r['fill']>0}
+assert all(any(i in counts for i,r in enumerate(rows) if r.get('water_group',i)==group) for group in wet_groups)
+for group in wet_groups:
+ assert len({r['level'] for i,r in enumerate(rows) if r.get('water_group',i)==group})==1, 'connected basins have different water planes'
 assert all(any(r['kind']==kind and r['fill']==0 for r in rows) for kind in (0,1,2))
 assert all(0<r['fill']<1 for r in rows if r['fill'])
 # Validate the emitted mesh, independently of the generator's subdivision code.
@@ -79,6 +83,8 @@ triangles=[len(m['vertices'])//3 for m in grounds]
 # Rut banks now require 6.25 cm samples; retain a bounded budget and distinct LODs.
 assert 125000>triangles[0]>triangles[1]>triangles[2], ('ground LOD reduction',triangles)
 assert waters[0]['vertices']==waters[1]['vertices']==waters[2]['vertices'], 'water changed across LODs'
+water_faces=[tuple(sorted(tuple(v[:3]) for v in waters[0]['vertices'][i:i+3])) for i in range(0,len(waters[0]['vertices']),3)]
+assert len(set(water_faces))==len(water_faces), 'overlapping connected-basin water faces'
 def cell(triangle):
  # Each clipped water triangle remains inside one original half-metre cell.
  return tuple(min(47,max(0,math.floor((sum(v[k] for v in triangle)/3+12)*2))) for k in (0,2))
@@ -111,8 +117,29 @@ assert perimeters[0]==perimeters[1]==perimeters[2], 'LOD perimeter positions/nor
 assert wet_support[0]==wet_support[1]==wet_support[2], 'ground support under wet cells differs'
 # Sample emitted geometry against the shared authored height field without executing generation.
 generator=ast.parse((root/'tools/art/meadow/generate_surface.py').read_text(encoding='utf-8-sig'))
-functions=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name in ('base','shape','depth','ridge','height')],type_ignores=[])
-field={'math':math,'records':rows};exec(compile(functions,'meadow_height_contract','exec'),field)
+functions=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name in ('base','shape','depth','ridge','height','basin_point','cart','road_coverage','wetness','soil_dryness')],type_ignores=[])
+field={'math':math,'records':rows,'relief':src['relief']};exec(compile(functions,'meadow_height_contract','exec'),field)
+# Extract only the pure helper; importing the generator would regenerate assets.
+helper=ast.Module(body=[n for n in generator.body if isinstance(n,ast.FunctionDef) and n.name=='rectangle_without_center'],type_ignores=[])
+scope={'struct':struct};exec(compile(helper,'meadow_rectangle_contract','exec'),scope)
+reduce=scope['rectangle_without_center']
+def probe_vertex(x,z):return [x,0,z,0,1,0,x,z,1,0,0,-1,0]
+center=probe_vertex(0,0);ring=[probe_vertex(-1,-1),probe_vertex(-1,1),probe_vertex(1,1),probe_vertex(1,-1)]
+assert len(reduce(center,ring))==6
+assert reduce(center,ring+[ring[0]]) is None
+for component,delta in [(1,.001),(3,.01),(8,.01),(11,1),(12,1)]:
+ changed=center.copy();changed[component]+=delta
+ assert reduce(changed,ring) is None, ('unsafe center removed',component)
+for component,value in [(1,.00005006),(3,.00001006),(8,.00001006)]:
+ changed=center.copy();changed[component]=value
+ assert reduce(changed,ring) is None, ('rounded threshold exceeded',component)
+second=[v.copy() for v in ring];second[0][1]=second[2][1]=.001
+assert reduce(center,second)==[second[i] for i in (1,2,3,1,3,0)], 'second diagonal was not selected'
+for component in (11,12):
+ mismatch=[v.copy() for v in ring];mismatch[1][component]+=1
+ assert reduce(center,mismatch) is None, 'ring material/handedness seam removed'
+
+
 height_error=0
 for mesh in grounds:
  for v in mesh['vertices'][::max(1,len(mesh['vertices'])//1500)]:
@@ -122,7 +149,54 @@ for r in rows:
  if r['kind']!=0:continue
  assert .18<=r['rx']<=.24 and .05<=r['depth']<=.09
  # Earth displacement peaks outside the cut, stays low, and fades to zero.
- assert 0<field['ridge'](r,1.05)<.03
+ assert 0<field['ridge'](r,1.05)<.05
  assert field['ridge'](r,0)==field['ridge'](r,1.8)==0
 assert all(field['height'](x,z)==0 for x,z in [(-12,0),(12,0),(0,-12),(0,12)])
-print(json.dumps({'ground_lod_triangles':triangles,'water_triangles':len(waters[0]['vertices'])//3,'filled_basins':len(counts),'wet_trace_types':sorted(water_types),'wet_cells_checked':len(wet_cells),'wet_support_triangles':len(wet_support[0]),'perimeter_vertices':len(perimeters[0]),'coverage_m2':576,'elapsed_seconds':round(time.perf_counter()-started,3),'sampled_height_error_m':height_error,'valid':True}))
+
+# Banks return the excavated soil volume, including the warped footprint.
+volume_errors=[];net_volume_errors=[]
+for r in rows:
+ if r['kind']!=0:continue
+ cut=bank=net_cut=net_bank=0
+ for j in range(96):
+  q=(j+.5)/96
+  for k in range(128):
+   angle=(k+.5)*2*math.pi/128
+   point=field['basin_point'](r,math.sqrt(q)*math.cos(angle),math.sqrt(q)*math.sin(angle))
+   cut+=field['depth'](r,*point)
+   bank+=1.3*field['ridge'](r,.4+1.3*q)
+   qnet=q*1.7
+   point=field['basin_point'](r,math.sqrt(qnet)*math.cos(angle),math.sqrt(qnet)*math.sin(angle))
+   delta=field['ridge'](r,qnet)-field['depth'](r,*point)
+   net_cut+=max(0,-delta);net_bank+=max(0,delta)
+ volume_errors.append(abs(bank/cut-1));net_volume_errors.append(abs(net_bank/net_cut-1))
+assert max(volume_errors)<.01, ('rut displaced-volume mismatch',max(volume_errors))
+assert max(net_volume_errors)<.01, ('final rut net-bank/net-cut mismatch',max(net_volume_errors))
+
+# Measure the max-union wheel deformation on the actual emitted mesh, too.
+cart_rows=[r for r in rows if r['kind']==0]
+@lru_cache(maxsize=None)
+def cart_volumes(x,z):
+ return max(field['ridge'](r,field['shape'](r,x,z)) for r in cart_rows),max(field['depth'](r,x,z) for r in cart_rows)
+union_bank=union_cut=0
+for i in range(0,len(grounds[0]['vertices']),3):
+ tri=grounds[0]['vertices'][i:i+3];a,b,c=tri
+ area=abs((b[0]-a[0])*(c[2]-a[2])-(b[2]-a[2])*(c[0]-a[0]))/2
+ volumes=[cart_volumes(v[0],v[2]) for v in tri]
+ union_bank+=area*sum(v[0] for v in volumes)/3;union_cut+=area*sum(v[1] for v in volumes)/3
+union_volume_error=abs(union_bank/union_cut-1)
+assert union_volume_error<.02, ('emitted wheel-union volume mismatch',union_bank,union_cut)
+
+base_samples=[field['base'](x/2,z/2) for x in range(-24,25) for z in range(-24,25)]
+assert .15<max(base_samples)-min(base_samples)<.4, ('missing/oversized hills',min(base_samples),max(base_samples))
+macro_grade=max(math.hypot((field['base'](x+.002,z)-field['base'](x-.002,z))/.004,(field['base'](x,z+.002)-field['base'](x,z-.002))/.004) for x in range(-11,12) for z in range(-11,12))
+assert macro_grade<.12, ('macro hill is too steep',macro_grade)
+baked_control_error=0
+for mesh in grounds:
+ for v in mesh['vertices'][::max(1,len(mesh['vertices'])//2500)]:
+  wet=field['wetness'](v[0],v[2]);dry=field['soil_dryness'](v[0],v[2],wet)
+  assert 0<=v[6]<=1 and 0<=v[7]<=1
+  baked_control_error=max(baked_control_error,abs(v[6]-wet),abs(v[7]-dry))
+assert baked_control_error<1e-7, ('baked ground controls mismatch',baked_control_error)
+
+print(json.dumps({'ground_lod_triangles':triangles,'water_triangles':len(waters[0]['vertices'])//3,'filled_basins':len(counts),'wet_trace_types':sorted(water_types),'wet_cells_checked':len(wet_cells),'wet_support_triangles':len(wet_support[0]),'perimeter_vertices':len(perimeters[0]),'coverage_m2':576,'elapsed_seconds':round(time.perf_counter()-started,3),'sampled_height_error_m':height_error,'macro_height_range_m':[min(base_samples),max(base_samples)],'max_macro_grade':macro_grade,'max_rut_volume_relative_error':max(volume_errors),'max_final_rut_net_volume_relative_error':max(net_volume_errors),'wheel_union_bank_m3':union_bank,'wheel_union_excavation_m3':union_cut,'wheel_union_volume_relative_error':union_volume_error,'baked_control_error':baked_control_error,'connected_water_groups':len(wet_groups),'valid':True}))

@@ -103,7 +103,8 @@ def pass_feature_group(row):
     if name.startswith(("SSR", "HybridReflection", "RRSpecular", "RRReflection", "ReflectionNRD")): return "reflections"
     if name.startswith(("LocalProbe",)): return "shared_probes"
     if name.startswith(("FSR RR", "DLSS RR")) or identity >= 3000: return "denoising"
-    if name.startswith("SceneGeometry"): return "geometry"
+    # Current SceneGeometry preparation is consumed only by SoftwareHybrid GI.
+    if name.startswith("SceneGeometry"): return "gi"
     if name.startswith(("RayScene", "RayGeometry", "OpacityMicromap")): return "ray_scene"
     if name.startswith(("HdrPostSignedCoC", "HdrPostForegroundDilation", "HdrPostDepthOfField")): return "depth_of_field"
     if name == "HdrPostMotionBlur": return "motion_blur"

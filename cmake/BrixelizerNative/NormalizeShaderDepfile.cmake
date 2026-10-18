@@ -19,6 +19,8 @@ if(includes MATCHES "[\r\n;]" OR includes STREQUAL "")
     message(FATAL_ERROR "Invalid native shader dependency records: ${HS_DEPFILE}")
 endif()
 set(source_prefix "${HS_DEPFILE_SOURCE_ROOT}/")
+# SC extended Win32 input/include paths still name the same authenticated files.
+string(REPLACE "//?/${source_prefix}" "${source_prefix}" includes "${includes}")
 string(FIND "${includes}" "${source_prefix}" first_include)
 if(NOT first_include EQUAL 0)
     message(FATAL_ERROR "Native shader include is outside the authenticated SDK")

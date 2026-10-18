@@ -114,12 +114,82 @@ void TestGroundDetailCanonicalLayoutDigest()
     Validate(cooked,options.max_group_pages);
     Check(cooked.scene.members.size() == members.size(),"small detail cook lost source coverage");
 }
+void TestSharedMaterialAtlasSelectors()
+{
+    // Identical material IDs must not collapse atlas selectors, even when all
+    // remaining shading keys (including the instance variant) are identical.
+    const auto grid = Grid();
+    std::vector<rd::ExpandedVertex> vertices;
+    for (std::uint16_t selector = 0; selector < 2; ++selector)
+        for (const auto index : grid.indices)
+        {
+            auto vertex = grid.vertices[index];
+            vertex.material_index = selector; vertex.position[0] += 10.0f * selector;
+            vertices.push_back(vertex);
+        }
+    const auto geometry = gc::CookGeometry(vertices, 0);
+    const std::string source_id = "render/fence_broken.rpkg";
+    const std::string material_id = "render/material/ground_detail.rpkg";
+    const std::array materials{material_id, material_id};
+    const std::array sources{gc::SceneHlodCookSource{
+        hs::MakeAssetId(source_id), source_id, &geometry, materials}};
+    std::vector<gc::SceneHlodCookMember> members;
+    std::vector<rd::SceneHlodMember> layout;
+    for (std::uint32_t i = 0; i < 2; ++i)
+    {
+        hs::RenderInstance instance{};
+        instance.mesh = hs::RenderMesh::GroundDetail; instance.environment_variant = 14;
+        instance.stable_id = i + 1; instance.asset_id = sources[0].asset_id;
+        instance.material_id = hs::MakeAssetId(material_id);
+        instance.position = {0, 0, 24.0f * i}; instance.scale = {1, 1, 1};
+        instance.color_rgba = 0xffffffffu;
+        members.push_back({instance, i + 1});
+        rd::SceneHlodMember record{};
+        record.stable_id = instance.stable_id; record.object_id = i + 1;
+        record.asset_id = instance.asset_id; record.mesh_semantic = static_cast<std::uint32_t>(instance.mesh);
+        record.variant = instance.environment_variant; record.tint_rgba = instance.color_rgba;
+        record.position = instance.position; record.scale = instance.scale; record.yaw = instance.yaw;
+        layout.push_back(record);
+    }
+    gc::SceneHlodCookOptions options;
+    options.objects_per_leaf = 1; options.children_per_group = 2; options.error_worker_count = 1;
+    const auto cooked = gc::CookSceneHlod(hs::MakeAssetId("render/scene/atlas-selectors.shlod"),
+        1, rd::ComputeSceneHlodLayoutDigest(1, layout), members, sources,
+        "render/hlod/atlas-selectors", options);
+    Validate(cooked, options.max_group_pages);
+    const auto decoded = rd::DecodeSceneHlod(rd::EncodeSceneHlod(cooked.scene));
+    Check(std::ranges::count(decoded.dependencies, material_id) == 1,
+          "shared material product was not canonically deduplicated");
+    bool mixed_parent{};
+    for (const auto &group : decoded.groups)
+    {
+        if (group.child_count == 0 || group.proxy_count == 0) continue;
+        std::array<bool, 2> selectors{};
+        for (std::uint32_t i = group.first_proxy; i < group.first_proxy + group.proxy_count; ++i)
+        {
+            const auto &proxy = decoded.proxies[i];
+            Check(decoded.dependencies[proxy.material_dependency] == material_id && proxy.atlas_selector < 2,
+                  "aggregate lost shared material or atlas identity");
+            selectors[proxy.atlas_selector] = true;
+            const auto asset = hs::MakeAssetId(decoded.pages[proxy.page_index].logical_id);
+            const auto payload = rd::DecodeGeometryPagePayload(
+                rd::BuildGeometryPage(asset, {}, cooked.pages[proxy.page_index]), asset,
+                cooked.pages[proxy.page_index].flags);
+            for (std::uint32_t j = proxy.first_index; j < proxy.first_index + proxy.index_count; ++j)
+                Check(payload.vertices[payload.indices[j]].material_index == proxy.atlas_selector,
+                      "encoded parent vertex remapped a shared-material atlas selector");
+        }
+        mixed_parent |= selectors[0] && selectors[1];
+    }
+    Check(mixed_parent, "fixture failed to produce a parent with distinct slice0/slice1 proxies");
+}
 } // namespace
 int main()
 {
     try
     {
         TestGroundDetailCanonicalLayoutDigest();
+        TestSharedMaterialAtlasSelectors();
         const auto geometry = Grid();
         const auto nonplanar_geometry = Grid(true);
         const std::string source_id = "render/rock_0.rpkg";

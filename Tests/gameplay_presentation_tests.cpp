@@ -982,9 +982,9 @@ void TestAuthoredEnvironmentProjection()
             ++grass;
             const bool meadow = hs::MeadowContains({item.position.x, item.position.z});
             Check(item.environment_variant < 4 && item.scale.x == item.scale.z &&
-                      item.scale.x >= (meadow ? .45f : .55f) && item.scale.x <= 1.2f &&
-                      item.scale.y >= (meadow ? .07f : (hs::MeadowRoadCoverage({item.position.x, item.position.z}, -.25f) > .02f ? .09f : .18f)) && item.scale.y <= 0.4f,
-                  "grass retains dense horizontal coverage at the reduced meter-scale height");
+                      item.scale.x >= (meadow ? (hs::MeadowRoadCoverage({item.position.x, item.position.z}) > 0 ? .35f : .45f) : .55f) && item.scale.x <= 1.2f &&
+                      item.scale.y >= (meadow ? .07f : (hs::MeadowRoadCoverage({item.position.x, item.position.z}, -.25f) > .02f ? .09f : .18f)) && item.scale.y <= .65f,
+                  "grass retains low ground coverage and bounded long meadow clumps");
         }
     }
     Check(trees > 0 && grass > 0 && ground > 0, "authored environment is present in normal gameplay");
@@ -1029,12 +1029,15 @@ void TestDenseGrassProjection()
     const auto repeated = project_grass();
     Check(grass.size() > 600 && grass.size() == repeated.size(), "grass forms dense patches within allowed terrain");
     std::array<bool, 4> variants{};
-    std::size_t grouped{}, central_grass{}, pressed_grass{};
+    std::size_t grouped{}, central_grass{}, pressed_grass{}, tall_grass{}, low_grass{}, meadow_fill{}, long_fill{}, short_fill{}, dry_grass{};
+    std::array<bool, 31> central_segments{};
+    std::unordered_set<std::uint32_t> grass_colors;
     for (std::size_t i = 0; i < grass.size(); ++i)
     {
         const auto &item = grass[i];
         Check(item.position.x == repeated[i].position.x && item.position.z == repeated[i].position.z &&
                   item.yaw == repeated[i].yaw && item.scale.x == repeated[i].scale.x &&
+                  item.scale.y == repeated[i].scale.y && item.color_rgba == repeated[i].color_rgba &&
                   item.environment_variant == repeated[i].environment_variant,
               "grass placement is deterministic for the map seed");
         const hs::Float2 position{item.position.x, item.position.z};
@@ -1044,6 +1047,23 @@ void TestDenseGrassProjection()
                   (hs::MeadowRoadCoverage(position) == 0.0f || across <= .35f) &&
                   (!meadow || (hs::MeadowPressed(position) <= .2f && !std::isfinite(hs::MeadowWaterLevel(position)))),
               "grass preserves arena inset, worn wheel/foot paths and actual water");
+        if (meadow && hs::MeadowRoadCoverage(position, -.25f) == 0.0f && hs::MeadowPressed(position) <= .02f) {
+            tall_grass += item.scale.y > .27f;
+            low_grass += item.scale.y < .21f;
+            grass_colors.insert(item.color_rgba);
+        }
+        if ((item.stable_id >> 56u) == 0x6Au) {
+            ++meadow_fill;
+            short_fill += item.scale.y <= .18f;
+            long_fill += item.scale.y >= .5f;
+            Check(meadow && item.scale.y <= .65f, "bounded meadow fill escaped its visible area or height contract");
+        }
+        dry_grass += item.color_rgba == 0xFF2869E0u;
+        if (meadow && hs::MeadowRoadCoverage(position) > 0.0f) {
+            Check(across <= .12f && item.scale.x == .35f && item.scale.y <= .11f,
+                  "central weeds must leave both wheel tracks clear and stay below the path edge");
+            central_segments[static_cast<std::size_t>((position.y + 12.0f) * 1.25f)] = true;
+        }
         if (meadow && across < .4f) ++central_grass;
         if (meadow && hs::MeadowPressed(position) > .02f) {
             ++pressed_grass;
@@ -1064,6 +1084,12 @@ void TestDenseGrassProjection()
         }
         if (neighbours >= 3) ++grouped;
     }
+    Check(meadow_fill > 1000 && meadow_fill <= 3072 && short_fill > 800 && long_fill > 50 && dry_grass > 10,
+          "visible meadow needs a bounded dense short floor, longer clumps and dry colonies");
+    const auto covered_segments = std::ranges::count(central_segments, true);
+    Check(covered_segments > 5 && covered_segments < 25, "central weed strip must retain visible breaks");
+    Check(tall_grass > 20 && low_grass > 20 && grass_colors.size() >= 3,
+          "meadow needs taller stands, low openings and broad foliage color variation");
     Check(pressed_grass > 0, "representative route omits all pressed-grass transitions");
     Check(central_grass > 0, "cart route must retain grass between its worn wheel tracks");
     Check(grouped * 4 > grass.size() * 3, "most grass has several nearby neighbours instead of isolated tufts");
@@ -1192,8 +1218,8 @@ void TestMeadowPresentationGrounding()
                 if (grass.mesh != hs::RenderMesh::Grass) continue;
                 for (const auto &prop : view.static_scene->instances) {
                     if (prop.mesh != hs::RenderMesh::GroundDetail || prop.environment_variant < 7) continue;
-                    constexpr std::array<float, 7> radii{1,1.3f,.75f,.75f,.65f,.65f,2};
-                    const auto required = radii[prop.environment_variant - 7] + .45f;
+                    constexpr std::array<float, 12> radii{1,1.3f,.75f,.75f,.65f,.65f,2,1.35f,1.4f,.5f,1.75f,1.05f};
+                    const auto required = radii[prop.environment_variant - 7] * prop.scale.x + .45f;
                     Check(std::hypot(grass.position.x-prop.position.x, grass.position.z-prop.position.z) >= required - 1e-5f,
                           "grass intersects an authored prop footprint");
                 }
@@ -1229,7 +1255,7 @@ void TestStaticEnvironmentSceneLease()
           "static scene lease preserves dynamic pose indices and content identity");
     std::array<bool, hs::kGroundDetailVariantCount> detail_variants{};
     std::unordered_set<std::uint64_t> identities;
-    std::size_t details{}, pebbles{}, short_tufts{};
+    std::size_t details{}, pebbles{}, short_tufts{}, clover_links{}, stacked_crates{}, roadside_details{}, packing_tufts{};
     for (const auto &instance : first->instances)
     {
         Check(instance.stable_id && identities.insert(instance.stable_id).second,
@@ -1237,27 +1263,64 @@ void TestStaticEnvironmentSceneLease()
         if (instance.mesh == hs::RenderMesh::GroundDetail)
         {
             ++details;
+            if ((instance.stable_id & 0xFFF00000ull) == 0x400000ull) {
+                ++clover_links;
+                Check(instance.environment_variant == 3u, "colony links must retain low clover geometry");
+            }
+            const auto detail_key = instance.stable_id & 0xFFFFFFull;
+            if ((detail_key & 0xFFF00000ull) == 0x500000ull || (detail_key & 0xFFF00000ull) == 0x600000ull) {
+                ++roadside_details;
+                if (detail_key == 0x500012ull) {
+                    ++stacked_crates;
+                    const auto base = std::ranges::find(first->instances,
+                        (instance.stable_id & ~0xFFFFFFull) | 0x500010ull, &hs::RenderInstance::stable_id);
+                    Check(base != first->instances.end() && base->environment_variant == 9u &&
+                              instance.environment_variant == 9u && instance.position.x == base->position.x &&
+                              instance.position.z == base->position.z && instance.yaw == base->yaw &&
+                              std::abs(instance.position.y - base->position.y - .658665597f) < 1e-6f,
+                          "stacked crate must rest on the actual authored base height with aligned supports");
+                    const auto member = std::ranges::find(first->eligible_static_members,
+                        instance.stable_id, &hs::StaticRenderScene::EligibleStaticMember::stable_id);
+                    Check(member != first->eligible_static_members.end() && member->object_id == base->stable_id,
+                          "a crate stack must remain one HLOD object");
+                } else {
+                    Check(std::abs(instance.position.y - hs::MeadowGroundHeight({instance.position.x, instance.position.z})) < 1e-6f,
+                          "roadside debris and props must retain terrain contact");
+                }
+            }
             Check(instance.environment_variant < detail_variants.size() &&
                   instance.asset_id.value && instance.material_id.value == hs::MakeAssetId("render/material/ground_detail.rpkg").value,
                   "detail geometry is not bound to the actual shared material product");
             detail_variants[instance.environment_variant] = true;
             const auto variant = instance.environment_variant;
-            constexpr std::array<float, hs::kGroundDetailVariantCount> minimum_scale{1.2f, 1.2f, 1.6f, .8f, .8f, 1.2f, 1.35f, 1,1,1,1,1,1,1};
-            constexpr std::array<float, hs::kGroundDetailVariantCount> maximum_scale{1.725f, 1.725f, 2.3f, 1.15f, 1.1f, 1.65f, 1.575f, 1,1,1,1,1,1,1};
+            constexpr std::array<float, hs::kGroundDetailVariantCount> minimum_scale{1.2f, 1.2f, 1.6f, .8f, .8f, 1.2f, 1.35f, 1,1,1,1,1,1,1,1,1,1,1,1};
+            constexpr std::array<float, hs::kGroundDetailVariantCount> maximum_scale{1.725f, 1.725f, 2.3f, 1.15f, 1.1f, 1.65f, 1.575f, 1,1,1,1,1,1,1,1,1,1,1,1};
             Check(instance.scale.x >= minimum_scale[variant] - 1e-5f &&
                   instance.scale.x <= maximum_scale[variant] + 1e-5f,
                   "ground-detail species lost its player-relative placement scale");
-            constexpr std::array<float, hs::kGroundDetailVariantCount> footprint{.58f,.58f,.58f,.58f,.58f,.58f,1.05f,1,1.3f,.75f,.75f,.65f,.65f,2};
+            constexpr std::array<float, hs::kGroundDetailVariantCount> footprint{.58f,.58f,.58f,.58f,.58f,.58f,1.05f,1,1.3f,.75f,.75f,.65f,.65f,2,1.35f,1.4f,.5f,1.75f,1.05f};
             const auto radius = footprint[variant] * instance.scale.x;
             Check((variant == 13u || hs::MeadowRoadCoverage({instance.position.x, instance.position.z}, -radius) == 0.0f) &&
                   instance.scale.x == instance.scale.y && instance.scale.y == instance.scale.z,
                   "scaled static detail enters the clear path or loses uniform transforms");
+        }
+        if (instance.mesh == hs::RenderMesh::Grass && (instance.stable_id & 0xFFFFFCull) == 0x500200ull) {
+            ++packing_tufts;
+            const hs::Float2 point{instance.position.x, instance.position.z};
+            Check(instance.scale.y == .07f && instance.scale.x == instance.scale.z && instance.scale.x == 1.05f &&
+                      instance.color_rgba == 0xFF1865F0u && hs::MeadowWetness(point) <= .05f &&
+                      !std::isfinite(hs::MeadowWaterLevel(point)) && hs::MeadowRoadCoverage(point, -.55f) == 0.0f,
+                  "packing litter must remain low, dry and clear of the road");
         }
         if (instance.mesh == hs::RenderMesh::Rock && instance.scale.x <= .1f) ++pebbles;
         if (instance.mesh == hs::RenderMesh::Grass && instance.scale.y == .18f) ++short_tufts;
     }
     Check(details > 0 && details <= 320 && pebbles > 0 && pebbles <= 64 && short_tufts > 0 && short_tufts <= 64,
           "new detail, small-rock, or short-grass population escaped its explicit budget");
+    Check(stacked_crates == 1 && packing_tufts == 3 && roadside_details >= 14 && roadside_details <= 18,
+          "bounded roadside stories need their supply stack and broken-edge debris");
+    Check(clover_links > 0 && clover_links <= 16,
+          "large colonies need bounded clover links instead of a uniform flower border");
     for (std::size_t variant = 0; variant < detail_variants.size(); ++variant)
         Check(detail_variants[variant], std::format("normal play scene omits ground-detail variant {}", variant));
     auto cook_model = model;

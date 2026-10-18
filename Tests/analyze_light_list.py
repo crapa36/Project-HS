@@ -74,6 +74,8 @@ def analyze_frame(directory, frame):
                 and ids[directional:] == sorted(ids[directional:]) and len(set(ids)) == total,
                 "Stable record order or identity uniqueness changed")
 
+        encoding = status["index_encoding"]
+        complete_mask = encoding == "bitset_u32x4_complete"
         inline_count = min(local, inline_capacity)
         spill_count = min(local - inline_count, spill_capacity)
         overflow = local > inline_capacity + spill_capacity
@@ -82,7 +84,6 @@ def analyze_frame(directory, frame):
         require(occupancy == Counter({expected: cells}),
                 f"Unexpected occupancy/overflow or stale reused-slot ranges: {dict(occupancy)}")
         indices = list(range(directional, total))
-        encoding = status["index_encoding"]
         if encoding == "inline_spill_u32":
             for name, stride, expected_indices in (
                     ("light_inline", inline_capacity, indices[:inline_count]),
@@ -94,23 +95,24 @@ def analyze_frame(directory, frame):
                 packed = struct.pack(f"<{len(expected_indices)}I", *expected_indices)
                 require(all(buffer[cell * stride * 4:cell * stride * 4 + len(packed)] == packed
                             for cell in range(cells)), f"{name} lost or reordered a candidate")
-        elif encoding == "bitset_u32x4":
+        elif encoding in ("bitset_u32x4", "bitset_u32x4_complete"):
             words = [0] * 4
-            for index in indices[:inline_count + spill_count]:
+            for index in indices if complete_mask else indices[:inline_count + spill_count]:
                 words[index // 32] |= 1 << (index % 32)
             require(len(buffers["light_inline"]) == capacity_cells * 16 and len(buffers["light_spill"]) == 4,
                     "Bitset allocation changed")
             require(buffers["light_inline"][:cells * 16] == struct.pack("<4I", *words) * cells,
-                    "Bitset membership/order or zero-after-overflow clearing changed")
+                    "Bitset membership/order or empty-cell clearing changed")
         else:
             raise ValueError(f"Unknown index encoding: {encoding}")
-        # Overflow uses the complete authoritative table, never its partial stored set.
-        selected = indices if overflow else indices[:inline_count + spill_count]
+        # Complete masks retain all candidates; legacy overflow scans the authoritative table.
+        selected = indices if complete_mask or overflow else indices[:inline_count + spill_count]
         require(selected == indices, "The shading query would discard or repeat a local light")
         result = {"frame": frame, "frame_slot": status["frame_slot"], "local_lights": local,
                   "directional_lights": directional, "active_extent": [int(width), int(height)],
                   "capacity": capacity, "active_cells": cells, "occupied_cells": cells if local else 0,
-                  "overflow_cells": cells if overflow else 0, "occupancy": list(expected),
+                  "overflow_cells": cells if overflow else 0,
+                  "world_query_cells": cells if overflow and not complete_mask else 0, "occupancy": list(expected),
                   "index_encoding": encoding, "allocation_bytes": status["allocation_bytes"],
                   "upload_allocation_bytes": status["upload_allocation_bytes"],
                   "resource_allocation_bytes": {name: resources[name]["allocation_bytes"] for name in names},

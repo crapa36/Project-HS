@@ -58,6 +58,12 @@ struct LocalShadowStatus
     std::uint64_t allocated_bytes{};
     std::string reason;
 };
+struct LocalShadowLightReference
+{
+    std::uint64_t stable_id{}, revision{};
+    std::uint32_t generation{}, record_index{};
+    LightType type{};
+};
 struct LocalShadowOutputs
 {
     ResourceVersion metadata, records, static_bank, dynamic_bank, draw_records;
@@ -68,6 +74,8 @@ struct LocalShadowOutputs
     ID3D12Resource *indexed_arguments{}, *mesh_arguments{}, *counts_resource{};
     ViewExtent bank_extent;
     std::uint32_t descriptor_count{};
+    // Same pending graph/cache snapshot as records; valid until CompleteSubmission.
+    std::span<const LocalShadowLightReference> light_records;
 };
 struct LocalShadowInputs
 {

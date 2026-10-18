@@ -42,6 +42,23 @@ bool ValidRead(const RenderGraphBuilder &g,const SceneShaderRead &r)
     (r.access==Access::ComputeRead||r.access==Access::AllShaderRead||r.access==Access::ShaderRead);}
 } // namespace
 
+Result ValidateSceneGeometryRecord(const SceneGeometryRecord &g, const SceneDrawInstance &i)
+{
+    if(!g.vertex_descriptor||!g.index_descriptor||g.vertex_descriptor>=render_data::kGeometryDescriptorCount||g.index_descriptor>=render_data::kGeometryDescriptorCount||g.vertex_stride!=76||g.vertex_byte_offset%4||
+        g.vertex_count<3||g.index_count<3||g.index_count%3||!g.instance_generation||
+        (g.environment_ordinal!=~0u&&g.environment_ordinal>=render_data::kAuthoredMaterialNames.size())||(g.flags&~55u)||
+        (g.flags&SceneGeometryCachedSkin&&g.flags&SceneGeometryDeformed)||g.mesh_id!=(i.mesh&255u)||
+        !std::isfinite(i.yaw)||!std::isfinite(i.padding)||
+        !std::isfinite(i.position.x)||!std::isfinite(i.position.y)||!std::isfinite(i.position.z)||
+        !std::isfinite(i.scale.x)||!std::isfinite(i.scale.y)||!std::isfinite(i.scale.z)||
+        i.scale.x<=0||i.scale.y<=0||i.scale.z<=0)
+        return Fail(ErrorCode::InvalidArgument,"Scene geometry canonical layout, flags or exact instance transform is invalid.");
+    if(std::uint64_t(g.vertex_byte_offset)+std::uint64_t(g.vertex_count)*76>UINT_MAX||
+        (std::uint64_t(g.first_index)+g.index_count)*4>UINT_MAX)
+        return Fail(ErrorCode::InvalidArgument,"Scene geometry source range exceeds ByteAddressBuffer addressing.");
+    return Result::Success();
+}
+
 struct SceneGeometryStorage
 {
     struct Slot
@@ -124,18 +141,7 @@ Result SceneGeometrySystem::Register(RenderGraphBuilder &graph,const SceneGeomet
     for(std::size_t n=0;n<records.size();++n)
     {
         auto &g=records[n];const auto &i=in.instances[n];
-        if(!g.vertex_descriptor||!g.index_descriptor||g.vertex_descriptor>=render_data::kGeometryDescriptorCount||g.index_descriptor>=render_data::kGeometryDescriptorCount||g.vertex_stride!=76||g.vertex_byte_offset%4||
-            g.vertex_count<3||g.index_count<3||g.index_count%3||!g.instance_generation||
-            (g.environment_ordinal!=~0u&&g.environment_ordinal>=render_data::kAuthoredMaterialNames.size())||(g.flags&~55u)||
-            (g.flags&SceneGeometryCachedSkin&&g.flags&SceneGeometryDeformed)||g.mesh_id!=(i.mesh&255u)||
-            !std::isfinite(i.yaw)||!std::isfinite(i.padding)||
-            !std::isfinite(i.position.x)||!std::isfinite(i.position.y)||!std::isfinite(i.position.z)||
-            !std::isfinite(i.scale.x)||!std::isfinite(i.scale.y)||!std::isfinite(i.scale.z)||
-            i.scale.x<=0||i.scale.y<=0||i.scale.z<=0)
-            return Fail(ErrorCode::InvalidArgument,"Scene geometry canonical layout, flags or exact instance transform is invalid.");
-        if(std::uint64_t(g.vertex_byte_offset)+std::uint64_t(g.vertex_count)*76>UINT_MAX||
-            (std::uint64_t(g.first_index)+g.index_count)*4>UINT_MAX)
-            return Fail(ErrorCode::InvalidArgument,"Scene geometry source range exceeds ByteAddressBuffer addressing.");
+        if(auto valid=ValidateSceneGeometryRecord(g,i);!valid)return valid;
         if(g.flags&SceneGeometryDeformed){g.position_byte_offset=UINT(positionBytes);positionBytes+=std::uint64_t(g.vertex_count)*12;}
     }
     if(positionBytes>UINT_MAX)return Fail(ErrorCode::InvalidArgument,"Scene deformed positions exceed ByteAddressBuffer addressing.");

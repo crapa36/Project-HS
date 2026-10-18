@@ -714,6 +714,21 @@ def write_outputs(directory, result):
 
 
 def self_test():
+    # Shared classifier must include native GI preparation as well as SDK passes.
+    # Each GPU pass has one group; linked options repeat it, never add savings.
+    native_gi_passes = ((142, "SceneGeometryDeformation"), (143, "SceneGeometryUpload"),
+                       (259, "BrixelizerUploadPinnedNoise"), (260, "BrixelizerGuides"),
+                       (261, "BrixelizerSdfUpdate"), (262, "BrixelizerNativeGi"),
+                       (263, "BrixelizerMaterialResolve"), (264, "BrixelizerCacheInjectionExport"),
+                       (265, "BrixelizerRetainHistories"), (266, "BrixelizerCacheDirectDiffuseEmission"),
+                       (267, "BrixelizerComposeHDR"))
+    for identity, name in native_gi_passes:
+        row = {"pass_id": identity, "pass_name": name, "queue": 0}
+        assert graphics.pass_group(row) == "gi"
+        assert graphics.pass_group({**row, "queue": 2}) == "gi_copy_transfer"
+    assert "gi" in graphics.OPTIONS["gi_mode"][1]
+    assert "gi" in graphics.OPTIONS["gi_quality"][1]
+    assert graphics.pass_group({"pass_id": 4, "pass_name": "GBuffer+Depth", "queue": 0}) == "surface"
     with tempfile.TemporaryDirectory() as temp:
         directory = Path(temp)
         def write(name, rows):

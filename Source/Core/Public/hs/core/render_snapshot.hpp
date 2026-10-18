@@ -151,7 +151,7 @@ enum class RenderMesh : std::uint8_t
     MeadowSurface,
 };
 
-inline constexpr std::uint32_t kGroundDetailVariantCount = 14;
+inline constexpr std::uint32_t kGroundDetailVariantCount = 19;
 
 [[nodiscard]] constexpr bool HasEnvironmentWind(RenderMesh mesh, std::uint32_t variant) noexcept
 {

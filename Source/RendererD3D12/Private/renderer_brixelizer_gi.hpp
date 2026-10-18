@@ -51,6 +51,8 @@ struct BrixelizerSceneInputs
     CompletionSet completed{};
     // Actual AllocationResource/heap/Generation owners, not just COM references.
     std::vector<std::shared_ptr<const void>> owners;
+    // Validated homogeneous exclusions need no per-submesh instance storage.
+    std::uint32_t excluded_masked_count{},excluded_thin_count{},excluded_translucent_count{};
 };
 struct BrixelizerSceneOutputs { ResourceVersion sdf_atlas{}; std::uint32_t instance_count{}; };
 struct BrixelizerCacheInjectionInputs

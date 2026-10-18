@@ -86,6 +86,20 @@ uint HsLocalShadowCubeFace(float3 direction)
     if(a.y>=a.z)return direction.y>=0.0?2u:3u;
     return direction.z>=0.0?4u:5u;
 }
+// Gather returns lower-left, lower-right, upper-right, upper-left. Merge
+// each bank's matching texel before comparing, including static-only captures.
+float HsLocalShadowGatherSum(int2 upper_left,uint lane_mask,float2 inverse_extent,float reference)
+{
+    const float2 uv=(float2(upper_left)+1.0)*inverse_extent;
+    const float4 static_depth=HsLocalShadowStaticBank.GatherRed(LinearClamp,uv);
+#if defined(HS_LOCAL_PROBE_CAPTURE)
+    const float4 depth=static_depth;
+#else
+    const float4 depth=max(static_depth,HsLocalShadowDynamicBank.GatherRed(LinearClamp,uv));
+#endif
+    const float4 weights=float4(lane_mask&1u,(lane_mask>>1u)&1u,(lane_mask>>2u)&1u,(lane_mask>>3u)&1u);
+    return dot(float4(reference>=depth),weights);
+}
 bool HsLocalShadowFaceVisibility(uint index,HsLocalShadowRecord record,uint face,float3 biased_world,out float visibility)
 {
     visibility=1.0;
@@ -99,76 +113,80 @@ bool HsLocalShadowFaceVisibility(uint index,HsLocalShadowRecord record,uint face
     const int2 center=int2(floor(tile.xy+tile.w+(ndc.xy*float2(0.5,-0.5)+0.5)*tile.z));
     float sum=0.0;
     const uint samples=uint(record.parameters.w);
-    [loop]for(uint sample_index=0;sample_index<samples;++sample_index)
+    const int2 upper=origin+int(tile.z+2.0*tile.w)-1;
+    // Border clamping can repeat individual taps; retain their exact weights.
+    if((samples==8u||samples==12u||samples==16u)&&all(center-2>=origin)&&all(center+2<=upper))
     {
-        const int2 p=clamp(center+HsShadowFilterOffsets[sample_index],origin,origin+int(tile.z+2.0*tile.w)-1);
-        const float static_depth=HsLocalShadowStaticBank.Load(int3(p,0));
+        const float2 inverse_extent=rcp(asfloat(HsLocalShadowMetadata.Load2(16u)));
+        const uint group_count=samples==16u?6u:4u;
+        [loop]for(uint group=0u;group<group_count;++group)
+        {
+            const int4 footprint=HsShadowGatherFootprints[group+(samples==16u?4u:0u)];
+            const uint lane_mask=uint(samples==12u?footprint.w:footprint.z);
+            sum+=HsLocalShadowGatherSum(center+footprint.xy,lane_mask,inverse_extent,ndc.z+record.parameters.y);
+        }
+    }
+    else
+    {
+        [loop]for(uint sample_index=0;sample_index<samples;++sample_index)
+        {
+            const int2 p=clamp(center+HsShadowFilterOffsets[sample_index],origin,upper);
+            const float static_depth=HsLocalShadowStaticBank.Load(int3(p,0));
 #if defined(HS_LOCAL_PROBE_CAPTURE)
-        const float depth=static_depth;
+            const float depth=static_depth;
 #else
-        const float depth=max(static_depth,HsLocalShadowDynamicBank.Load(int3(p,0)));
+            const float depth=max(static_depth,HsLocalShadowDynamicBank.Load(int3(p,0)));
 #endif
-        sum+=ndc.z+record.parameters.y>=depth?1.0:0.0;
+            sum+=ndc.z+record.parameters.y>=depth?1.0:0.0;
+        }
     }
     visibility=sum/float(samples);return true;
 }
-bool HsLocalShadowLookup(uint4 identity,uint2 revision,float3 world,float3 normal,out float visibility)
+// A zero reference denotes an unselected light. References are rebuilt with
+// this graph's uploaded records; full identity/revision/state guard reused slots.
+bool HsLocalShadowLookup(uint record_reference,uint4 identity,uint2 revision,float3 world,float3 normal,out float visibility)
 {
     visibility=1.0;
     const uint4 counts=HsLocalShadowMetadata.Load4(0u);
-    if(counts.w==0u||identity.w<1u||identity.w>4u)return false;
-    [loop]for(uint index=0u;index<counts.x;++index)
+    if(counts.w==0u||record_reference==0u||record_reference>counts.x||identity.w<1u||identity.w>4u)return false;
+    const uint index=record_reference-1u;
+    const HsLocalShadowRecord record=HsLocalShadowLoadRecord(index);
+    if(any(record.identity!=identity)||any(record.revision.xy!=revision)||record.state.y==0u)return false;
+    const float3 delta=world-record.position_range.xyz;
+    if(dot(delta,delta)>record.position_range.w*record.position_range.w)return false;
+    const float3 n=dot(normal,normal)>1e-10?normalize(normal):0.0;
+    const float3 biased_world=world+n*record.parameters.z;
+    if(identity.w<3u)
     {
-        const HsLocalShadowRecord record=HsLocalShadowLoadRecord(index);
-        if(any(record.identity!=identity)||any(record.revision.xy!=revision)||record.state.y==0u)continue;
-        const float3 delta=world-record.position_range.xyz;
-        if(dot(delta,delta)>record.position_range.w*record.position_range.w)return false;
-        const float3 n=dot(normal,normal)>1e-10?normalize(normal):0.0;
-        const float3 biased_world=world+n*record.parameters.z;
-        if(identity.w<3u)
-        {
-            const uint face=identity.w==1u?HsLocalShadowCubeFace(biased_world-record.position_range.xyz):0u;
-            return HsLocalShadowFaceVisibility(index,record,face,biased_world,visibility);
-        }
-        const uint samples=record.revision.z;
-        if((samples!=1u&&samples!=2u&&samples!=4u)||record.revision.w!=samples*6u||
-            record.state.x!=((1u<<record.revision.w)-1u))return false;
-        float weighted_visibility=0.0,total_weight=0.0;
-        [loop]for(uint sample=0u;sample<samples;++sample)
-        {
-            const float3 toward=HsLocalShadowSamplePosition(index,sample)-biased_world;
-            const float distance_squared=dot(toward,toward);
-            if(distance_squared<=0.0||!isfinite(distance_squared))continue;
-            const float3 direction=toward*rsqrt(distance_squared);
-            float emitter_cosine=dot(record.emitter_normal_two_sided.xyz,-direction);
-            if(record.emitter_normal_two_sided.w>0.5)emitter_cosine=abs(emitter_cosine);
-            // World/froxel queries do not invent a receiving surface normal;
-            // their actual directional response is evaluated by their caller.
-            const float receiver_cosine=dot(n,n)>0.0?max(dot(n,direction),0.0):1.0;
-            const float weight=max(emitter_cosine,0.0)*receiver_cosine/distance_squared;
-            if(weight<=0.0||!isfinite(weight))continue;
-            const uint face=sample*6u+HsLocalShadowCubeFace(-toward);
-            float sample_visibility;
-            if(!HsLocalShadowFaceVisibility(index,record,face,biased_world,sample_visibility))return false;
-            weighted_visibility+=weight*sample_visibility;total_weight+=weight;
-        }
-        // Equal-area sample weights, radiance, emitter area and range taper
-        // cancel in this normalized scalar. Actual area BSDF/LTC energy remains
-        // in light_list.hlsli and is multiplied by this visibility exactly once.
-        if(total_weight<=0.0)return false;
-        visibility=saturate(weighted_visibility/total_weight);return true;
+        const uint face=identity.w==1u?HsLocalShadowCubeFace(biased_world-record.position_range.xyz):0u;
+        return HsLocalShadowFaceVisibility(index,record,face,biased_world,visibility);
     }
-    return false;
-}
-// Identity-only callers still check the cached record's full generation/type.
-// Prefer the revision-aware overload whenever the authoritative light is held.
-bool HsLocalShadowLookup(uint4 identity,float3 world,float3 normal,out float visibility)
-{
-    const uint4 counts=HsLocalShadowMetadata.Load4(0u);
-    visibility=1.0;if(counts.w==0u)return false;
-    [loop]for(uint i=0u;i<counts.x;++i)
-        if(all(HsLocalShadowRecords.Load4(i*HsLocalShadowRecordBytes)==identity))
-            return HsLocalShadowLookup(identity,HsLocalShadowRecords.Load2(i*HsLocalShadowRecordBytes+16u),world,normal,visibility);
-    return false;
+    const uint samples=record.revision.z;
+    if((samples!=1u&&samples!=2u&&samples!=4u)||record.revision.w!=samples*6u||
+        record.state.x!=((1u<<record.revision.w)-1u))return false;
+    float weighted_visibility=0.0,total_weight=0.0;
+    [loop]for(uint sample=0u;sample<samples;++sample)
+    {
+        const float3 toward=HsLocalShadowSamplePosition(index,sample)-biased_world;
+        const float distance_squared=dot(toward,toward);
+        if(distance_squared<=0.0||!isfinite(distance_squared))continue;
+        const float3 direction=toward*rsqrt(distance_squared);
+        float emitter_cosine=dot(record.emitter_normal_two_sided.xyz,-direction);
+        if(record.emitter_normal_two_sided.w>0.5)emitter_cosine=abs(emitter_cosine);
+        // World/froxel queries do not invent a receiving surface normal;
+        // their actual directional response is evaluated by their caller.
+        const float receiver_cosine=dot(n,n)>0.0?max(dot(n,direction),0.0):1.0;
+        const float weight=max(emitter_cosine,0.0)*receiver_cosine/distance_squared;
+        if(weight<=0.0||!isfinite(weight))continue;
+        const uint face=sample*6u+HsLocalShadowCubeFace(-toward);
+        float sample_visibility;
+        if(!HsLocalShadowFaceVisibility(index,record,face,biased_world,sample_visibility))return false;
+        weighted_visibility+=weight*sample_visibility;total_weight+=weight;
+    }
+    // Equal-area sample weights, radiance, emitter area and range taper
+    // cancel in this normalized scalar. Actual area BSDF/LTC energy remains
+    // in light_list.hlsli and is multiplied by this visibility exactly once.
+    if(total_weight<=0.0)return false;
+    visibility=saturate(weighted_visibility/total_weight);return true;
 }
 #endif

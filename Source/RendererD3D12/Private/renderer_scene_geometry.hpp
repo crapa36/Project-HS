@@ -61,6 +61,9 @@ struct SceneDrawInstance
     float yaw{},padding{};
 };
 static_assert(sizeof(SceneDrawInstance)==48);
+// Shared with early GI exclusions so unsupported domains retain source validation.
+[[nodiscard]] Result ValidateSceneGeometryRecord(const SceneGeometryRecord &, const SceneDrawInstance &);
+
 struct SceneShaderRead
 {
     ResourceVersion version{};

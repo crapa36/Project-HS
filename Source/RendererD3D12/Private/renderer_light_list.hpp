@@ -18,6 +18,7 @@
 
 namespace hs
 {
+struct LocalShadowLightReference;
 // Shared with light_list.hlsli. Directional records precede local records; both
 // partitions are sorted by stable identity, independently of submission order.
 struct alignas(16) GpuLightRecord
@@ -27,7 +28,7 @@ struct alignas(16) GpuLightRecord
     DirectX::XMFLOAT4 color_intensity{}; // RGB; W/m^2 Directional, W/sr Point/Spot, W/(m^2 sr) area.
     DirectX::XMFLOAT4 shape_cone{}; // Point/Spot radius^2, cone; area: area m^2, bound radius m,0,0.
     DirectX::XMUINT4 identity{}; // Stable ID lo/hi, generation, LightType.
-    DirectX::XMUINT4 metadata{}; // Revision lo/hi, shadow flags; legacy bit0 / primary shadow bit1 / two-sided bit2 / transient bit3.
+    DirectX::XMUINT4 metadata{}; // Revision lo/hi; Z: requested bit0, (shadow record+1)<<1; W: legacy/primary/two-sided/transient bits0..3.
     DirectX::XMFLOAT4 area_tangent_half_width{}; // Unit tangent; Rectangle half width or Disk radius-X.
     DirectX::XMFLOAT4 area_bitangent_half_height{}; // Unit cross(direction,tangent); half height or radius-Y.
 };
@@ -59,6 +60,7 @@ static_assert(offsetof(LightListConstants, limits) == 240);
 struct LightListInputs
 {
     std::span<const LightView> lights;
+    std::span<const LocalShadowLightReference> local_shadow_records; // Same graph's freshly prepared shadow slots.
     ViewExtent render_active;
     std::uint32_t frame_slot{};
     CompletionSet completed;
@@ -97,9 +99,9 @@ class LightListCandidate
     friend class LightListSystem;
 };
 
-// At most128 authoritative lights. Each cell stores ordered membership in four
-// uint mask words; exceeding quality's inline/spill counts keeps the exact world
-// query instead of consuming partial membership. No input or light truncation.
+// At most128 authoritative lights. Each finite cell stores complete ordered
+// membership in four uint mask words; inline/spill counts are diagnostics only.
+// Invalid cells and off-frustum consumers retain the exact world query.
 class LightListSystem
 {
   public:

@@ -1,0 +1,602 @@
+[
+  {
+    "name": "fence_broken",
+    "vertices": 340,
+    "bounds_blender_m": [
+      [
+        -1.1337685585021973,
+        -0.31680774688720703,
+        0.0
+      ],
+      [
+        1.1722524166107178,
+        0.09227923303842545,
+        1.0419628620147705
+      ]
+    ],
+    "planar_radius_m": 1.1752830887025536,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 640
+  },
+  {
+    "name": "fence_broken_lod1",
+    "vertices": 260,
+    "bounds_blender_m": [
+      [
+        -1.1337685585021973,
+        -0.31873178482055664,
+        0.0
+      ],
+      [
+        1.1817948818206787,
+        0.09227923303842545,
+        1.0419628620147705
+      ]
+    ],
+    "planar_radius_m": 1.1829738521673254,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 480
+  },
+  {
+    "name": "fence_broken_lod2",
+    "vertices": 126,
+    "bounds_blender_m": [
+      [
+        -1.12661612033844,
+        -0.3181564211845398,
+        0.0
+      ],
+      [
+        1.178246021270752,
+        0.09210003912448883,
+        1.0329638719558716
+      ]
+    ],
+    "planar_radius_m": 1.1828711839573844,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 224
+  },
+  {
+    "name": "fence_splitrail",
+    "vertices": 230,
+    "bounds_blender_m": [
+      [
+        -1.2210801839828491,
+        -0.16988375782966614,
+        0.0
+      ],
+      [
+        1.210272192955017,
+        0.16988301277160645,
+        1.028158187866211
+      ]
+    ],
+    "planar_radius_m": 1.222464916154686,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 432
+  },
+  {
+    "name": "fence_splitrail_lod1",
+    "vertices": 170,
+    "bounds_blender_m": [
+      [
+        -1.2210801839828491,
+        -0.17088481783866882,
+        0.0
+      ],
+      [
+        1.210272192955017,
+        0.17088405787944794,
+        1.027994155883789
+      ]
+    ],
+    "planar_radius_m": 1.222464916154686,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 312
+  },
+  {
+    "name": "fence_splitrail_lod2",
+    "vertices": 122,
+    "bounds_blender_m": [
+      [
+        -1.2115081548690796,
+        -0.16988375782966614,
+        0.0
+      ],
+      [
+        1.2015355825424194,
+        0.16988301277160645,
+        1.0276334285736084
+      ]
+    ],
+    "planar_radius_m": 1.211932172074573,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 216
+  },
+  {
+    "name": "sack_tied",
+    "vertices": 895,
+    "bounds_blender_m": [
+      [
+        -0.2885831594467163,
+        -0.2555494010448456,
+        0.0
+      ],
+      [
+        0.31671181321144104,
+        0.2623049020767212,
+        0.7649999856948853
+      ]
+    ],
+    "planar_radius_m": 0.31671181321144104,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1776
+  },
+  {
+    "name": "sack_tied_lod1",
+    "vertices": 461,
+    "bounds_blender_m": [
+      [
+        -0.2871549725532532,
+        -0.25682494044303894,
+        0.0
+      ],
+      [
+        0.3163844048976898,
+        0.26426535844802856,
+        0.7649491429328918
+      ]
+    ],
+    "planar_radius_m": 0.3163844048976898,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 908
+  },
+  {
+    "name": "sack_tied_lod2",
+    "vertices": 231,
+    "bounds_blender_m": [
+      [
+        -0.28015661239624023,
+        -0.2543148100376129,
+        0.0
+      ],
+      [
+        0.3144707977771759,
+        0.258394718170166,
+        0.7648746371269226
+      ]
+    ],
+    "planar_radius_m": 0.3144707977771759,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 448
+  },
+  {
+    "name": "fallen_log",
+    "vertices": 664,
+    "bounds_blender_m": [
+      [
+        -1.49006187915802,
+        -0.45286694169044495,
+        0.0
+      ],
+      [
+        1.2239999771118164,
+        0.4718562364578247,
+        0.6787996888160706
+      ]
+    ],
+    "planar_radius_m": 1.55198816662309,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1284
+  },
+  {
+    "name": "fallen_log_lod1",
+    "vertices": 342,
+    "bounds_blender_m": [
+      [
+        -1.4902021884918213,
+        -0.45276638865470886,
+        0.0
+      ],
+      [
+        1.2238575220108032,
+        0.47176143527030945,
+        0.6787996888160706
+      ]
+    ],
+    "planar_radius_m": 1.5518133159154683,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 640
+  },
+  {
+    "name": "fallen_log_lod2",
+    "vertices": 208,
+    "bounds_blender_m": [
+      [
+        -1.489012360572815,
+        -0.45252344012260437,
+        0.0
+      ],
+      [
+        1.223649024963379,
+        0.4715323746204376,
+        0.6787996888160706
+      ]
+    ],
+    "planar_radius_m": 1.5516878415794122,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 372
+  },
+  {
+    "name": "rock_mossy",
+    "vertices": 330,
+    "bounds_blender_m": [
+      [
+        -0.6716515421867371,
+        -0.5350046157836914,
+        0.0
+      ],
+      [
+        0.7373942732810974,
+        0.5158299207687378,
+        0.7214117050170898
+      ]
+    ],
+    "planar_radius_m": 0.7373942732810974,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 640
+  },
+  {
+    "name": "rock_mossy_lod1",
+    "vertices": 90,
+    "bounds_blender_m": [
+      [
+        -0.6355339884757996,
+        -0.5103010535240173,
+        0.0
+      ],
+      [
+        0.6968361735343933,
+        0.4644015431404114,
+        0.6672772169113159
+      ]
+    ],
+    "planar_radius_m": 0.7160947090562579,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 160
+  },
+  {
+    "name": "rock_mossy_lod2",
+    "vertices": 60,
+    "bounds_blender_m": [
+      [
+        -0.585771918296814,
+        -0.46338608860969543,
+        0.0
+      ],
+      [
+        0.6306591629981995,
+        0.4607434868812561,
+        0.7025203704833984
+      ]
+    ],
+    "planar_radius_m": 0.6306591629981995,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 100
+  },
+  {
+    "name": "crate_intact",
+    "vertices": 918,
+    "bounds_blender_m": [
+      [
+        -0.45547062158584595,
+        -0.4299086630344391,
+        0.0
+      ],
+      [
+        0.45549601316452026,
+        0.4304569661617279,
+        0.6586655974388123
+      ]
+    ],
+    "planar_radius_m": 0.6128605375357076,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1728
+  },
+  {
+    "name": "crate_intact_lod1",
+    "vertices": 702,
+    "bounds_blender_m": [
+      [
+        -0.45549893379211426,
+        -0.4291764497756958,
+        0.0
+      ],
+      [
+        0.4554801881313324,
+        0.4281972050666809,
+        0.6586655974388123
+      ]
+    ],
+    "planar_radius_m": 0.6128605375357076,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1296
+  },
+  {
+    "name": "crate_intact_lod2",
+    "vertices": 486,
+    "bounds_blender_m": [
+      [
+        -0.4554115831851959,
+        -0.4291764497756958,
+        0.0
+      ],
+      [
+        0.455336332321167,
+        0.42787063121795654,
+        0.645484447479248
+      ]
+    ],
+    "planar_radius_m": 0.6049347491980538,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 864
+  },
+  {
+    "name": "crate_broken",
+    "vertices": 850,
+    "bounds_blender_m": [
+      [
+        -0.45547062158584595,
+        -0.5086625814437866,
+        0.0
+      ],
+      [
+        0.45549601316452026,
+        0.4304569661617279,
+        0.6712526679039001
+      ]
+    ],
+    "planar_radius_m": 0.6314123838636144,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1600
+  },
+  {
+    "name": "crate_broken_lod1",
+    "vertices": 650,
+    "bounds_blender_m": [
+      [
+        -0.45549893379211426,
+        -0.5086625814437866,
+        0.0
+      ],
+      [
+        0.455336332321167,
+        0.4281972050666809,
+        0.6712526679039001
+      ]
+    ],
+    "planar_radius_m": 0.6314123838636144,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1200
+  },
+  {
+    "name": "crate_broken_lod2",
+    "vertices": 450,
+    "bounds_blender_m": [
+      [
+        -0.4554115831851959,
+        -0.5088743567466736,
+        0.0
+      ],
+      [
+        0.455336332321167,
+        0.42787063121795654,
+        0.6597122550010681
+      ]
+    ],
+    "planar_radius_m": 0.6311805146035212,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 800
+  },
+  {
+    "name": "barrel_intact",
+    "vertices": 1356,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.37534376978874207,
+        0.37534376978874207,
+        0.9104816317558289
+      ]
+    ],
+    "planar_radius_m": 0.3753437748887396,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 2600
+  },
+  {
+    "name": "barrel_intact_lod1",
+    "vertices": 860,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.37534376978874207,
+        0.37534376978874207,
+        0.9104831218719482
+      ]
+    ],
+    "planar_radius_m": 0.37534376978874207,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1624
+  },
+  {
+    "name": "barrel_intact_lod2",
+    "vertices": 492,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.37534376978874207,
+        0.37534376978874207,
+        0.9104816317558289
+      ]
+    ],
+    "planar_radius_m": 0.37534376978874207,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 904
+  },
+  {
+    "name": "barrel_broken",
+    "vertices": 1056,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.5432113409042358,
+        0.37534376978874207,
+        0.9243999719619751
+      ]
+    ],
+    "planar_radius_m": 0.595617703788245,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 2028
+  },
+  {
+    "name": "barrel_broken_lod1",
+    "vertices": 660,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.5432113409042358,
+        0.37534376978874207,
+        0.9243999719619751
+      ]
+    ],
+    "planar_radius_m": 0.595617703788245,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1248
+  },
+  {
+    "name": "barrel_broken_lod2",
+    "vertices": 376,
+    "bounds_blender_m": [
+      [
+        -0.37534376978874207,
+        -0.37534376978874207,
+        0.0
+      ],
+      [
+        0.5432546734809875,
+        0.37534376978874207,
+        0.9243999719619751
+      ]
+    ],
+    "planar_radius_m": 0.593899357647944,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 692
+  },
+  {
+    "name": "cart_broken",
+    "vertices": 1732,
+    "bounds_blender_m": [
+      [
+        -0.9809423089027405,
+        -1.6290907859802246,
+        0.0
+      ],
+      [
+        0.9771618843078613,
+        0.8104249238967896,
+        1.201725959777832
+      ]
+    ],
+    "planar_radius_m": 1.7234157016159302,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 3284
+  },
+  {
+    "name": "cart_broken_lod1",
+    "vertices": 1288,
+    "bounds_blender_m": [
+      [
+        -0.9809423089027405,
+        -1.6290907859802246,
+        0.0
+      ],
+      [
+        0.9771618843078613,
+        0.8104249238967896,
+        1.201725959777832
+      ]
+    ],
+    "planar_radius_m": 1.7234157016159302,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 2396
+  },
+  {
+    "name": "cart_broken_lod2",
+    "vertices": 880,
+    "bounds_blender_m": [
+      [
+        -0.9700000286102295,
+        -1.6239140033721924,
+        0.0
+      ],
+      [
+        0.9700002670288086,
+        0.7999999523162842,
+        1.1993000507354736
+      ]
+    ],
+    "planar_radius_m": 1.7210137972587782,
+    "merged_vertices": 0,
+    "removed_zero_faces": 0,
+    "triangles": 1580
+  }
+]

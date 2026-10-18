@@ -1,5 +1,6 @@
 #include "environment_mesh_cooker.hpp"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -38,7 +39,7 @@ std::array<Json, 2> Sources(bool indexed)
         "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
         "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
         "ground_leaves", "twig_cluster", "fence_short", "shrub_low", "stump_roots", "crate_intact",
-        "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
+        "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
     std::array<Json, 2> sources{Json{{"version", 1}, {"meshes", Json::array()}},
                                 Json{{"version", 1}, {"meshes", Json::array()}}};
     const auto vertices = Json::array({Vertex(-0.0, 0.0), Vertex(0.0, 1.0), Vertex(1.0, 1.0), Vertex(1.0, 0.0)});
@@ -48,14 +49,17 @@ std::array<Json, 2> Sources(bool indexed)
         {
             Json mesh{{"name", std::string(names[name]) + (lod ? "_lod" + std::to_string(lod) : "")},
                       {"vertices", Json::array()}};
+            auto selected_vertices = vertices;
+            if (name >= 28 && name < 33)
+                for (auto &vertex : selected_vertices) vertex[12] = 1;
             if (indexed)
             {
-                mesh["vertices"] = vertices; // Four unique records need not be a multiple of three.
+                mesh["vertices"] = selected_vertices; // Four unique records need not be a multiple of three.
                 mesh["indices"] = indices;
             }
             else
-                for (auto index : indices) mesh["vertices"].push_back(vertices[index]);
-            sources[name < 28 ? 0 : 1]["meshes"].push_back(std::move(mesh));
+                for (auto index : indices) mesh["vertices"].push_back(selected_vertices[index]);
+            sources[name < 33 ? 0 : 1]["meshes"].push_back(std::move(mesh));
         }
     return sources;
 }
@@ -88,9 +92,16 @@ void Run()
         Check(expected.size() == 16 + 6 * 76, "expanded meshbin layout changed");
         // The first position is negative zero; index expansion must copy float32 bits verbatim.
         Check(static_cast<unsigned char>(expected[19]) == 0x80, "negative-zero position was lost");
+        const auto filename = entry.path().filename().string();
+        constexpr std::array atlas1_names{"fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy"};
+        const bool atlas1 = std::ranges::any_of(atlas1_names, [&](const auto name) {
+            return filename.starts_with("environment_" + std::string(name));
+        });
+        Check(static_cast<unsigned char>(expected[16 + 72]) == (atlas1 ? 1u : 0u),
+              "shared ground-detail atlas selector was not preserved");
         ++compared;
     }
-    Check(compared == 90, "all environment and meadow LOD products compared");
+    Check(compared == 105, "all environment and meadow LOD products compared");
     auto mixed = indexed;
     mixed[0]["meshes"][0] = legacy[0]["meshes"][0];
     mixed[1]["meshes"][0] = legacy[1]["meshes"][0];
@@ -131,6 +142,10 @@ void Run()
     reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 1.0000000001; });
     reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = -1; });
     reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 3; });
+    reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 2; }, 28 * 3);
+    reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 2; }, 32 * 3);
+    reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 3; }, 32 * 3);
+    reject("indexed environment material", [](Json &mesh) { mesh["vertices"][0][12] = 1; }, 14 * 3);
     reject("normal, tangent", [](Json &mesh) { mesh["vertices"][0][4] = 0; });
     reject("normal, tangent", [](Json &mesh) { mesh["vertices"][0][11] = 0; });
     reject("Foliage UV", [](Json &mesh) { mesh["vertices"][0][6] = 1.1; }, 9);
@@ -140,7 +155,7 @@ void Run()
         auto unused = mesh["vertices"][0]; unused[0] = 1e40; mesh["vertices"].push_back(std::move(unused));
     });
     reject("triangle count", [](Json &mesh) { mesh.erase("indices"); });
-    std::cout << "Environment indexed source: 90 exact cooked products, mixed legacy/indexed, and malformed input checks passed.\n";
+    std::cout << "Environment indexed source: 105 exact cooked products, mixed legacy/indexed, and malformed input checks passed.\n";
 }
 }
 int main()

@@ -17,6 +17,8 @@ constexpr auto CategoryIndex(ResidencyCategory category) noexcept
 void ResidencyManager::Reset() noexcept
 {
     budget_ = {};
+    gpu_reserved_ = host_held_ = 0;
+    gpu_reserved_overflow_ = host_held_overflow_ = false;
     allocations_.clear();
     next_ticket_ = 1;
     reclaimed_total_ = 0;
@@ -42,28 +44,44 @@ bool ResidencyManager::CanAdmit(std::uint64_t bytes,
     std::uint64_t usage = budget_.local_usage;
     if (gpu_growth_since_snapshot_ > UINT64_MAX - usage) return false;
     usage += gpu_growth_since_snapshot_;
-    for (const auto &[ticket, allocation] : allocations_)
-    {
-        static_cast<void>(ticket);
-        if (allocation.storage != ResidencyStorage::GpuReservation) continue;
-        if (allocation.bytes > UINT64_MAX - usage) return false;
-        usage += allocation.bytes;
-    }
+    if (gpu_reserved_overflow_ || gpu_reserved_ > UINT64_MAX - usage) return false;
+    usage += gpu_reserved_;
     return usage <= safe_budget && bytes <= safe_budget - usage;
 }
 
 bool ResidencyManager::CanStage(std::uint64_t bytes) const noexcept
 {
     if (!budget_.host_budget_valid) return true;
-    std::uint64_t held{};
-    for (const auto &[ticket, allocation] : allocations_)
+    return !host_held_overflow_ && host_held_ <= budget_.host_staging_budget &&
+        bytes <= budget_.host_staging_budget - host_held_;
+}
+
+void ResidencyManager::UpdateAdmissionTotals(ResidencyStorage storage,
+    std::uint64_t previous, std::uint64_t next) noexcept
+{
+    const bool gpu = storage == ResidencyStorage::GpuReservation;
+    if (!gpu && storage != ResidencyStorage::HostStaging && storage != ResidencyStorage::HostReservation) return;
+    auto &total = gpu ? gpu_reserved_ : host_held_;
+    auto &overflow = gpu ? gpu_reserved_overflow_ : host_held_overflow_;
+    if (overflow)
     {
-        static_cast<void>(ticket);
-        if (allocation.storage != ResidencyStorage::HostStaging && allocation.storage != ResidencyStorage::HostReservation) continue;
-        if (allocation.bytes > UINT64_MAX - held) return false;
-        held += allocation.bytes;
+        // Mutations already reached the ledger; recompute only to recover an overflowed sum.
+        total = 0;
+        overflow = false;
+        for (const auto &[ticket, allocation] : allocations_)
+        {
+            static_cast<void>(ticket);
+            const bool included = gpu ? allocation.storage == ResidencyStorage::GpuReservation :
+                allocation.storage == ResidencyStorage::HostStaging || allocation.storage == ResidencyStorage::HostReservation;
+            if (!included) continue;
+            if (allocation.bytes > UINT64_MAX - total) { overflow = true; break; }
+            total += allocation.bytes;
+        }
+        return;
     }
-    return held <= budget_.host_staging_budget && bytes <= budget_.host_staging_budget - held;
+    total -= previous;
+    if (next > UINT64_MAX - total) overflow = true;
+    else total += next;
 }
 
 ResidencyTicket ResidencyManager::ReserveGpu(std::uint64_t bytes)
@@ -83,8 +101,10 @@ bool ResidencyManager::CommitHost(ResidencyTicket ticket, std::uint64_t bytes) n
     const auto found = allocations_.find(ticket.value);
     if (found == allocations_.end() || found->second.storage != ResidencyStorage::HostReservation ||
         !bytes || bytes > found->second.bytes) return false;
+    const auto previous = found->second.bytes;
     found->second.storage = ResidencyStorage::HostStaging;
     found->second.bytes = bytes;
+    UpdateAdmissionTotals(ResidencyStorage::HostStaging, previous, bytes);
     return true;
 }
 
@@ -98,6 +118,7 @@ ResidencyTicket ResidencyManager::Register(ResidencyCategory category,
     const auto ticket = ResidencyTicket{next_ticket_++};
     allocations_.emplace(ticket.value, Allocation{category, bytes, pinned, false, {}, storage});
     if (storage == ResidencyStorage::GpuAllocation) gpu_growth_since_snapshot_ += bytes;
+    UpdateAdmissionTotals(storage, 0, bytes);
     return ticket;
 }
 
@@ -116,7 +137,10 @@ bool ResidencyManager::ReleaseNow(ResidencyTicket ticket) noexcept
     const auto found = allocations_.find(ticket.value);
     if (found == allocations_.end()) return false;
     if (found->second.storage == ResidencyStorage::GpuAllocation) reclaimed_total_ += found->second.bytes;
+    const auto storage = found->second.storage;
+    const auto bytes = found->second.bytes;
     allocations_.erase(found);
+    UpdateAdmissionTotals(storage, bytes, 0);
     return true;
 }
 
@@ -131,7 +155,10 @@ std::uint32_t ResidencyManager::Collect(const CompletionSet &completed) noexcept
             continue;
         }
         if (it->second.storage == ResidencyStorage::GpuAllocation) reclaimed_total_ += it->second.bytes;
+        const auto storage = it->second.storage;
+        const auto bytes = it->second.bytes;
         it = allocations_.erase(it);
+        UpdateAdmissionTotals(storage, bytes, 0);
         ++collected;
     }
     return collected;

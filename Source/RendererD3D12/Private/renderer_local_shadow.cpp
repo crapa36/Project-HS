@@ -273,7 +273,8 @@ struct LocalShadowSystem::Impl
     struct Import{AllocationResource *resource;ResourceHandle handle;};
     std::shared_ptr<LocalShadowStorage> storage;
     struct Pending{const RenderGraphBuilder *graph{};UINT slot{};std::vector<Import> imports;
-        std::vector<LocalShadowStorage::CachedLight> cache;LocalShadowStatus status;}pending;
+        std::vector<LocalShadowStorage::CachedLight> cache;LocalShadowStatus status;
+        std::vector<LocalShadowLightReference> light_records;}pending;
     LocalShadowStatus status;
 };
 LocalShadowSystem::LocalShadowSystem():impl_(std::make_unique<Impl>()){}
@@ -497,6 +498,11 @@ Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowIn
         std::memcpy(frame.mapped+s->mesh_offset,mesh.data(),mesh.size()*sizeof(mesh[0]));}
     if(!counts.empty())std::memcpy(frame.mapped+s->count_offset,counts.data(),counts.size()*sizeof(counts[0]));
     auto &pending=impl_->pending;pending={};pending.graph=&graph;pending.slot=in.frame_slot;pending.cache=std::move(cache);pending.status=status;
+    pending.light_records.reserve(selected.size());
+    for(const auto &choice:selected)
+        pending.light_records.push_back({choice.light->stable_id,choice.light->revision,
+            choice.light->generation,choice.slot,choice.light->type});
+    out.light_records=pending.light_records;
     auto import=[&](AllocationResource &r,std::string_view name,bool texture=false)
     {const auto handle=texture?graph.ImportTexture({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name):
         graph.ImportBuffer({r.resource.Get(),r.graph_completion,r.graph_queue},r.graph_access,name);pending.imports.push_back({&r,handle});return graph.Version(handle);};

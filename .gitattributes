@@ -9,3 +9,7 @@
 
 # Reproducible upstream patch preimages use LF on Windows and Linux.
 *.patch text eol=lf
+
+# Exact upstream noise copies are authenticated against pinned raw bytes.
+ContentSource/Textures/BrixelizerNoise/samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_8spp.cpp text eol=lf
+ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt text eol=lf

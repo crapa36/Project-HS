@@ -62,8 +62,8 @@ std::vector<Group> Groups(const Json& j)
         if (id != "mesh_rock" && id != "mesh_bark" && id != "mesh_ground_detail") throw std::runtime_error("Unknown environment material " + id);
         Group group{id.substr(5)};
         for (const auto &page : j.at("baked_materials").at(group.name)) group.pages.push_back(page);
-        if (group.name == "ground_detail" && group.pages.size() != 1)
-            throw std::runtime_error("Expected one shared ground-detail atlas");
+        if (group.name == "ground_detail" && group.pages.size() != 2)
+            throw std::runtime_error("Expected two shared ground-detail atlas slices");
         groups.push_back(std::move(group));
     }
     for (const auto* name : {"grass", "leaf"}) {

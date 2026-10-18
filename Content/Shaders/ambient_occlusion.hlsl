@@ -147,6 +147,7 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
             {
                 int2 samplePixel = int2(round(float2(g.pixel) + offset * (side == 0 ? -1.0 : 1.0)));
                 if (any(samplePixel < 0) || any(samplePixel >= int2(AoRenderSize.xy))) continue;
+                if (all(samplePixel == g.pixel)) continue;
                 AoGuide other = AoLoadGuide(samplePixel);
                 if (!other.valid) continue;
                 float3 delta = other.position - g.position;

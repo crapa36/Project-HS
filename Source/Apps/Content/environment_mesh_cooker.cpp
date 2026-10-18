@@ -19,7 +19,7 @@ constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1",
     "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
     "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
     "ground_leaves", "twig_cluster", "fence_short",
-    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
 struct Mesh { std::string name; std::vector<SkinnedVertex> vertices; };
 std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
 {
@@ -52,7 +52,9 @@ std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
         if (indexed && (!indices->is_array() || indices->empty() || indices->size() % 3 != 0 || indices->size() > 3'000'000))
             throw std::runtime_error("Invalid environment index count: " + mesh.name);
         mesh.vertices.reserve(vertices.size());
-        const int material_count = mesh.name.starts_with("leaf_") ? 18 :
+        constexpr std::array atlas1_names{"fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy"};
+        const bool atlas1 = std::ranges::find(atlas1_names, base_name) != atlas1_names.end();
+        const int material_count = atlas1 ? 2 : mesh.name.starts_with("leaf_") ? 18 :
                                    mesh.name.starts_with("grass_") ? 30 :
                                    mesh.name.starts_with("trunk_") ? 3 :
                                    mesh.name.starts_with("rock_") ? 4 : 1;
