@@ -213,7 +213,7 @@ constexpr std::uint32_t kViewRtvOffset = kMaterialSidecarRtvOffset + 2;
 constexpr std::uint32_t kViewRtvCount = 7;
 constexpr std::uint32_t kLightingAuxRtvOffset = kViewRtvOffset + kViewRtvCount;
 constexpr std::uint32_t kLightingAuxRtvCount = 3;
-constexpr std::uint32_t kInstanceDataOffset = 13 * 1024;
+constexpr std::uint32_t kInstanceDataOffset = 14 * 1024;
 constexpr std::array<std::string_view, 25> kRenderPassNames{
     "Scene Buffer Upload", "GPU Particle Spawn/Update", "3-cascade Directional Shadow",
     "Static Visibility", "GBuffer+Depth", "Deferred Cel Lighting", "VFX Distortion Vectors",
@@ -417,10 +417,15 @@ struct FrameConstants
     DirectX::XMFLOAT4 previous_grass_state;
     DirectX::XMFLOAT4 previous_grass_origin_delta;
     DirectX::XMUINT4 scene_table_bounds;
+    DirectX::XMFLOAT4 grass_bender_grid;
+    std::array<DirectX::XMUINT4, 16> grass_bender_masks;
+    DirectX::XMFLOAT4 previous_grass_bender_grid;
+    std::array<DirectX::XMUINT4, 16> previous_grass_bender_masks;
+    DirectX::XMFLOAT4 particle_terrain;
 };
 
 constexpr std::uint32_t kExposureConstantsOffset = kInstanceDataOffset - 256;
-static_assert(sizeof(FrameConstants) == 12288);
+static_assert(sizeof(FrameConstants) == 12848);
 static_assert(offsetof(FrameConstants, screen_size) == 192);
 static_assert(offsetof(FrameConstants, lod_clock) == 11200);
 static_assert(offsetof(FrameConstants, output_size) == 11392);
@@ -429,6 +434,11 @@ static_assert(offsetof(FrameConstants, previous_grass_benders) == 11728);
 static_assert(offsetof(FrameConstants, previous_grass_state) == 12240);
 static_assert(offsetof(FrameConstants, previous_grass_origin_delta) == 12256);
 static_assert(offsetof(FrameConstants, scene_table_bounds) == 12272);
+static_assert(offsetof(FrameConstants, grass_bender_grid) == 12288);
+static_assert(offsetof(FrameConstants, grass_bender_masks) == 12304);
+static_assert(offsetof(FrameConstants, previous_grass_bender_grid) == 12560);
+static_assert(offsetof(FrameConstants, previous_grass_bender_masks) == 12576);
+static_assert(offsetof(FrameConstants, particle_terrain) == 12832);
 static_assert(sizeof(FrameConstants) <= kExposureConstantsOffset);
 
 struct ExposureConstants

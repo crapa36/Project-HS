@@ -138,30 +138,34 @@ struct HeroTransparencyTargets
         handle.ptr += UINT64(phase * kHeroTransparencyTableSize + offset) * inputs.descriptor_stride;
         return handle;
     }
+    void InitializeTable(std::uint32_t slot, std::uint32_t phase)
+    {
+        const auto constantSlot = slot * kHeroTransparencyPhaseCount + phase;
+        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{constants.resource->GetGPUVirtualAddress() + UINT64(constantSlot) * kConstantStride,
+                                          kConstantStride};
+        device->CreateConstantBufferView(&cbv, Cpu(slot, phase, 0));
+        for (std::uint32_t index = 0; index < kHeroTransparencyMaxLayers; ++index)
+        {
+            Srv(front[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 1 + index));
+            Srv(identity[index].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(slot, phase, 5 + index));
+            Srv(exit[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(slot, phase, 9 + index));
+        }
+        Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 14));
+        for (std::uint32_t index = 0; index < 5; ++index)
+            Srv(guides[index].resource.Get(), kGuideFormats[index], Cpu(slot, phase, 15 + index));
+        Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(slot, phase, 20));
+        Srv(guides[5].resource.Get(), kGuideFormats[5], Cpu(slot, phase, 21));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
+        uav.Format = DXGI_FORMAT_R32_UINT; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(overflow.resource.Get(), nullptr, &uav, Cpu(slot, phase, kUavOffset));
+    }
     void FillTable(const HeroTransparencyInputs &inputs, std::uint32_t phase, std::uint32_t layer,
         HeroTransparencyPhase semantic, ID3D12Resource *background)
     {
         const auto constantSlot = inputs.frame_slot * kHeroTransparencyPhaseCount + phase;
         const std::array<std::uint32_t, 4> values{layer, layer_count, static_cast<std::uint32_t>(semantic), 0};
         std::memcpy(mapped + SIZE_T(constantSlot) * kConstantStride, values.data(), sizeof(values));
-        D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{constants.resource->GetGPUVirtualAddress() + UINT64(constantSlot) * kConstantStride,
-                                          kConstantStride};
-        device->CreateConstantBufferView(&cbv, Cpu(inputs.frame_slot, phase, 0));
-        for (std::uint32_t index = 0; index < kHeroTransparencyMaxLayers; ++index)
-        {
-            Srv(front[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(inputs.frame_slot, phase, 1 + index));
-            Srv(identity[index].resource.Get(), DXGI_FORMAT_R32G32_UINT, Cpu(inputs.frame_slot, phase, 5 + index));
-            Srv(exit[index].resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(inputs.frame_slot, phase, 9 + index));
-        }
         Srv(background, kColor, Cpu(inputs.frame_slot, phase, 13));
-        Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(inputs.frame_slot, phase, 14));
-        for (std::uint32_t index = 0; index < 5; ++index)
-            Srv(guides[index].resource.Get(), kGuideFormats[index], Cpu(inputs.frame_slot, phase, 15 + index));
-        Srv(overflow.resource.Get(), DXGI_FORMAT_R32_UINT, Cpu(inputs.frame_slot, phase, 20));
-        Srv(guides[5].resource.Get(), kGuideFormats[5], Cpu(inputs.frame_slot, phase, 21));
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-        uav.Format = DXGI_FORMAT_R32_UINT; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        device->CreateUnorderedAccessView(overflow.resource.Get(), nullptr, &uav, Cpu(inputs.frame_slot, phase, kUavOffset));
         auto destination = inputs.table_cpu;
         destination.ptr += SIZE_T(phase * kHeroTransparencyTableSize) * inputs.descriptor_stride;
         device->CopyDescriptorsSimple(kHeroTransparencyTableSize, destination,
@@ -347,6 +351,10 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     native = next->constants.resource->Map(0, &noRead, &mapped);
     if (FAILED(native)) return NativeFailure("Map hero transparency constants", native);
     next->mapped = static_cast<std::byte *>(mapped);
+    // Resource identity, formats and CBV addresses are fixed for this target generation.
+    for (std::uint32_t slot = 0; slot < frameSlots; ++slot)
+        for (std::uint32_t phase = 0; phase < kHeroTransparencyPhaseCount; ++phase)
+            next->InitializeTable(slot, phase);
     auto include = [&](const AllocationResource &resource) { if (resource.allocation) next->bytes += resource.allocation->GetSize(); };
     include(next->constants); include(next->overflow);
     for (const auto &resource : next->front) include(resource);

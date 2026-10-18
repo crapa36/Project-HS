@@ -3,32 +3,40 @@
 Implementation continuity only: current contracts, verified receipts and unresolved technical work.
 
 ## Current technical state
-### Renderer lookup and VFX candidates (2026-10-18)
+### ZIP omissions and integrated renderer follow-up (2026-10-18)
 
-Frame-local direct selected shadow refs preserve full identity/revision/selection
-checks and128-byte light ABI. Complete128-bit light masks keep overflow diagnostic
-bit0 and invalid-cell world fallback bit1; capture encoding is explicit and older
-analysis format remains supported.9 particle bins use exact mesh counts and the
-existing20-byte root-constant+draw signature in one ExecuteIndirect. Existing alive
-index buffers grow560000 logical bytes total; dead-slot CAS admission is unchanged.
-Capture sums all9 commands and records actual bin counts (16 total:11 sprites/5 mesh).
-Ribbon persistent key lookup preserves900-frame exact differential output, with
-1024-source component median565.046->157.051us; this is not whole-frame FPS.
-Current CPU CTest6/6, native light-list/auxiliaries2/2, FHD VFX60 final,101 shader
-projection and all3 host builds pass. D3D12 errors0 and diagnostics complete.
-GPU/FPS benefit remains unproven:default capture has one measured GPU frame,
-not60; no significance/causality claim. Remaining candidate4/6-12 are deliberately
-unimplemented under their workload/policy/quality gates; shared canonical terrain
-height already exists and is not POM UV. Receipts:Build/20261018-logic-replacements/.
-Next technical work:representative full-frame GPU profiling before performance
-adoption, and unresolved GBV shutdown localization; no validation gate lowered.
+Exact2original ZIPs recovered/read with priorSHA match; primary310 rows/HTML and
+40directive tasks/14couplings/12adoption candidates now have individual decisions.
+21former no-followthrough IDs have reasons; not310implemented features.
+NewN15 retained slot staging preserves rollback/duplicate/generation; N20 immutable
+transparency descriptors prepared once per target/frame/phase; N07 SSS center-guide
+reuse; N08 zero-scattering skips lighting but writes emission+extinction; signed
+scale normal/tangent handedness corrected. Pending grass grids/Jacobian/canonical
+particle terrain contact are now wired. Particle update/spawn combines compaction
+and9bins with group reservations and mutable-only stores; dead-slot CAS unchanged.
+SSR3level reduction preserves odd/ceil/MAX and reduces FHDdispatch12->5; exact high
+PCF Gather keeps scalar border path/static-probe;64cell light view bounds shared.
+FrameConstants12848B; upload prefix14KiB retains disabled fog/exposure boundary.
+Current validation Generation 7a86b9c93ec7ac8dd2fa8ad4b2c7eb260bc3b3841eb62598c7c066e012a8ed19;
+Debug/Release retain e7e754cc earlier coherent hosts/content, no new export.
+69focused checks and existing4test narrow Tools/verify batch PASS; FHDenhanced
+lockstep4frames exit0/assertions true/16particles/complete diagnostics/empty
+validation log. Basic showcase rendered1GPUframe, not60GPUframes.
+GBV4stopped at120s afterinitialize with no capture/result/final diagnostics; not
+PASS and no teardown-stage diagnosis. No gate suppressed. No144FPS/GPUgain proof.
+Remaining:full stateless/active indirect dispatch, terrainLOD decline and exact
+contact-vsmesh error, GI energy, graph liveness, cones and full temporal/failure
+corpus remain explicitly scoped; no unmeasured quality cuts. Decorative collision
+uses capped64sweep samples and1impact per tick, not fullCCD. Source uncommitted;
+backupa5e2183a unchanged. Evidence:Build/20261018-zip-followup/; report:
+Docs/Verification/20261018-zip-followup/REPORT.md.
 
 ### Current meadow art and hosts (2026-10-18)
 
-Current content Generation `e7e754cc192ec7e2b5a996ff0612950c94f510f8693b707b162e7186e8cf6312` (3,646 products) is
-exported and verified in validation/Debug/Release. All hosts include GBV disk-cache
-isolation and current light/shadow/particle/ribbon logic. Prior art receipts refer
-to the exact older Generation recorded in those receipts.
+Earlier meadow art Generation `e7e754cc192ec7e2b5a996ff0612950c94f510f8693b707b162e7186e8cf6312` (3,646 products)
+remains in Debug/Release. Validation host now uses the newer coherent Generation
+listed above, with unchanged meadow source art and updated shaders. Prior art
+receipts refer to their exact older Generation and are not current GPU gain proof.
 Terrain uses shared mild macro relief, banks/spill-limited water and baked UV wet/dry
 controls; generated terrain remains world mapped. Ground triangles119110/117926/117466
 and100micrometre discrete oracle preserved. Analytic contact/triangle-centroid difference

@@ -1268,6 +1268,8 @@ hs_add_asset_action(
         "${HS_SHADER_SOURCE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment_wind.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/grass_deformation.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
@@ -1360,6 +1362,8 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/project_hs.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment_wind.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/grass_deformation.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/particle_collision.hlsli"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_capture.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_draw.hlsli"
             ${material_library_inputs}
@@ -2022,6 +2026,12 @@ if(HS_BUILD_TESTS)
                 COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_group.py")
             add_test(NAME rendering.ground-annulus-contracts
                 COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ground_annulus.py")
+            add_test(NAME rendering.grass-deformation-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_grass_deformation.py")
+            add_test(NAME rendering.particle-terrain-collision-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_particle_terrain_collision.py")
+            add_test(NAME rendering.sparse-effect-bypass-contracts
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_sparse_effect_bypass.py")
             add_test(NAME rendering.ssr-spatial-composition-contracts
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_spatial_composition.py")

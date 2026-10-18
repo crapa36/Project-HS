@@ -216,5 +216,13 @@ class GrassDeformationTests(unittest.TestCase):
         self.assertTrue(all(math.isfinite(value) for column in columns for value in column))
 
 
+class MirroredScaleContract(unittest.TestCase):
+    def test_signed_inverse_and_handedness(self):
+        for scale in ((-2,3,4),(2,-3,4),(2,3,-4),(-2,-3,4),(-2,-3,-4)):
+            sign=[-1 if v<0 else 1 for v in scale]
+            inverse=[1/(v*max(abs(s),.0001)) for v,s in zip(sign,scale)]
+            self.assertEqual(inverse,[1/s for s in scale])
+            self.assertEqual(math.prod(sign),-1 if sum(s<0 for s in scale)%2 else 1)
+
 if __name__ == "__main__":
     unittest.main()

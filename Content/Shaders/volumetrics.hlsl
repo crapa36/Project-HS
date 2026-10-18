@@ -265,6 +265,13 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
 {
     if(any(p.xy>=uint2(VmFroxelSize.xy))||p.z>=VmCounts.y) return;
     const float4 medium=VmMedium.Load(int4(p,0));
+    const float3 emission=VmHeroInfo.x!=0u?VmRawOutput[p].xyz:0.0;
+    // Zero scattering still carries absorption and independent hero emission.
+    [branch] if(all(medium.xyz==0.0))
+    {
+        VmRawOutput[p]=float4(emission,medium.w);
+        return;
+    }
     const float2 uv=(float2(p.xy)+0.5)*VmFroxelSize.zw;
     const float3 world=VmFroxelWorld(p);
     const float3 view=normalize(VmRelativeAtDepth(uv,VmOriginNear.w)-VmRelativeAtDepth(uv,VmDepthRange.x));
@@ -297,7 +304,6 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
             lighting+=incident*VmPhaseFunction(dot(-direction,view),g)*visibility;
         }
     }
-    const float3 emission=VmHeroInfo.x!=0u?VmRawOutput[p].xyz:0.0;
     VmRawOutput[p]=float4(medium.xyz*lighting+emission,medium.w);
 }
 float4 VmPreviousSample(float3 coordinate)

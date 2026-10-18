@@ -632,13 +632,13 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn("EvaluateSceneVertex(input0, context, indices.x)", resolve)
 
     def test_grass_outer_guard_skips_only_zero_contributions(self):
-        scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")
-        self.assertIn("if (max(abs(delta.x), abs(delta.y)) > 2.0 * radius) continue", scene)
+        scene = (SHADERS / "grass_deformation.hlsli").read_text(encoding="utf-8-sig")
+        self.assertIn("if (max(abs(delta.x), abs(delta.y)) > radius) continue", scene)
         for radius in (0.1, 1.0, 1.25, 100.0):
             for x in (-100.0, -2.001, -2.0, -1.0, 0.0, 1.0, 2.0, 2.001, 100.0):
                 for y in (-3.0, -1.0, 0.0, 1.0, 3.0):
                     dx, dy = x * radius, y * radius
-                    if max(abs(dx), abs(dy)) > 2.0 * radius:
+                    if max(abs(dx), abs(dy)) > radius:
                         self.assertEqual(max(0.0, 1.0 - math.hypot(dx, dy) / radius), 0.0)
     def test_entity_surface_shares_primary_depth_world_across_frontends(self):
         surface = (SHADERS / "entity_surface.hlsli").read_text(encoding="utf-8-sig")
@@ -898,7 +898,12 @@ class ShaderContracts(unittest.TestCase):
         self.assertEqual(offsets["PreviousGrassState"], 12240)
         self.assertEqual(offsets["PreviousGrassOriginDelta"], 12256)
         self.assertEqual(offsets["SceneTableBounds"], 12272)
-        self.assertEqual(offset, 12288)
+        self.assertEqual(offsets["GrassBenderGrid"], 12288)
+        self.assertEqual(offsets["GrassBenderMasks"], 12304)
+        self.assertEqual(offsets["PreviousGrassBenderGrid"], 12560)
+        self.assertEqual(offsets["PreviousGrassBenderMasks"], 12576)
+        self.assertEqual(offsets["ParticleTerrain"], 12832)
+        self.assertEqual(offset, 12848)
 
 
 if __name__ == "__main__":

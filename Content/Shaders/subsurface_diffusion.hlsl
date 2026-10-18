@@ -104,7 +104,9 @@ float3 SssDiffuse(int2 pixel,SssGuide center,HsSurfaceClosure profile,bool verti
         {
             const int offset=int(round(float(index)*float(reach)/float(steps)));
             const int2 neighbor_pixel=pixel+axis*offset;
-            const SssGuide neighbor=SssLoadGuide(neighbor_pixel);
+            // The center guide is identical across the channel kernels.
+            SssGuide neighbor=center;
+            if(offset!=0) neighbor=SssLoadGuide(neighbor_pixel);
             // Same material means the same uniform radius/weight/thickness
             // profile and selected parameter base. Never cross another profile.
             if(!neighbor.valid || neighbor.material!=center.material) continue;

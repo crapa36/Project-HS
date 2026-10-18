@@ -3410,6 +3410,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
                                    total_particles_to_spawn,
                                    impl_->archer_material_count};
+    const bool meadow_collision = !static_environment_buckets[render_data::kMeadowGeometryBegin * 3u].empty() ||
+        std::ranges::any_of(render_instances, [](const RenderInstance &instance) {
+            return instance.mesh == RenderMesh::MeadowSurface && (instance.environment_variant % 2u) == 0u;
+        });
+    constants->particle_terrain = {static_cast<float>(view_input.scene_origin.x),
+        static_cast<float>(view_input.scene_origin.y), static_cast<float>(view_input.scene_origin.z),
+        meadow_collision ? 1.0f : 0.0f};
     const auto grass_benders = SelectGrassBenders(render_instances);
     constants->grass_bender_count = {grass_benders.count, 0, 0, 0};
     for (std::size_t index = 0; index < grass_benders.count; ++index)
@@ -3428,6 +3435,21 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         static_cast<float>(view_input.scene_origin.x - impl_->previous_scene_origin.x),
         static_cast<float>(view_input.scene_origin.y - impl_->previous_scene_origin.y),
         static_cast<float>(view_input.scene_origin.z - impl_->previous_scene_origin.z), 0.0f};
+    const auto current_grass_grid = BuildGrassBenderGrid(
+        std::span{constants->grass_benders}.first(grass_benders.count));
+    const auto previous_grass_count = constants->previous_grass_state.z > 0.5f
+        ? std::min(32u, static_cast<std::uint32_t>(constants->previous_grass_state.y)) : 0u;
+    const auto previous_grass_grid = BuildGrassBenderGrid(
+        std::span{constants->previous_grass_benders}.first(previous_grass_count));
+    const auto store_grass_grid = [](const GrassBenderGrid &grid,
+        DirectX::XMFLOAT4 &descriptor, std::array<DirectX::XMUINT4, 16> &masks) {
+        descriptor = {grid.world_to_cell.x, grid.world_to_cell.y,
+            grid.world_to_cell.z, grid.world_to_cell.w};
+        for (std::size_t i = 0; i != masks.size(); ++i)
+            masks[i] = {grid.masks[i][0], grid.masks[i][1], grid.masks[i][2], grid.masks[i][3]};
+    };
+    store_grass_grid(current_grass_grid, constants->grass_bender_grid, constants->grass_bender_masks);
+    store_grass_grid(previous_grass_grid, constants->previous_grass_bender_grid, constants->previous_grass_bender_masks);
     // BendGrass adds wind plus delta * (1 - |delta| / radius) * 0.42.
     // Each bender's maximum displacement is 0.42 * radius / 4, and its
     // height weight is at most one. Keep this per-frame allowance separate

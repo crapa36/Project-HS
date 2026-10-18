@@ -266,6 +266,36 @@ int main()
         aborted_scene.EndFrame();
         aborted_scene.Commit();
 
+        hs::PersistentGpuSceneSlots staged_scene;
+        staged_scene.BeginFrame();
+        for (std::uint64_t id = 1; id <= 96; ++id)
+            static_cast<void>(staged_scene.Upsert({id, 0}, Instance(float(id))));
+        staged_scene.EndFrame();
+        staged_scene.Commit();
+        staged_scene.BeginFrame(true);
+        static_cast<void>(staged_scene.Upsert({5000, 0}, Instance(5000.0f)));
+        staged_scene.MarkAllActiveDirty();
+        Check(staged_scene.DirtyRanges().size() == 1 &&
+                  staged_scene.DirtyRanges()[0].begin == 0 &&
+                  staged_scene.DirtyRanges()[0].count == 1,
+              "reset staging must not publish untouched high-water slots");
+        staged_scene.Abort();
+        staged_scene.BeginFrame();
+        const auto staged_retained = staged_scene.Upsert({96, 0}, Instance(96.0f));
+        const auto staged_duplicate = staged_scene.Upsert({96, 0}, Instance(96.0f));
+        const auto staged_conflict = staged_scene.Upsert({96, 0}, Instance(960.0f));
+        Check(staged_retained.index == 95 && !staged_duplicate.conflict && staged_conflict.conflict &&
+                  staged_scene.DirtyRanges().empty(),
+              "aborted reset cannot expose stale staged payloads or duplicate revisions");
+        staged_scene.EndFrame();
+        staged_scene.Commit();
+        staged_scene.BeginFrame();
+        const auto staged_reuse = staged_scene.Upsert({6000, 0}, Instance(6000.0f));
+        Check(staged_reuse.index == 94 && staged_reuse.generation == 2,
+              "slot staging preserves committed free-slot reuse and generation");
+        staged_scene.EndFrame();
+        staged_scene.Commit();
+
         std::puts("Persistent GPU scene slot tests passed.");
         return 0;
     }

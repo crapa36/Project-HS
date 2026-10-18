@@ -192,8 +192,9 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
     next.key = key;
     next.revisions = revisions;
     next.active = true;
+    if (pending_entries_.size() <= slot) pending_entries_.resize(std::size_t(slot) + 1);
+    pending_entries_[slot] = next;
     pending_slots_.emplace(key, slot);
-    pending_entries_.emplace(slot, next);
     ++active_count_;
     if (key.stable_id == 0) ++anonymous_count_;
     return {slot, next.generation, false};
@@ -227,10 +228,13 @@ void PersistentGpuSceneSlots::Commit()
         }
     }
     entries_.resize(instances_.size());
-    for (const auto &[slot, entry] : pending_entries_) entries_[slot] = entry;
+    for (const auto &[key, slot] : pending_slots_)
+    {
+        static_cast<void>(key);
+        entries_[slot] = pending_entries_[slot];
+    }
     for (const auto &[key, slot] : pending_slots_) slots_.insert_or_assign(key, slot);
     pending_slots_.clear();
-    pending_entries_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -247,7 +251,6 @@ void PersistentGpuSceneSlots::Abort() noexcept
     instances_.resize(entries_.size());
     metadata_.resize(entries_.size());
     pending_slots_.clear();
-    pending_entries_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -258,9 +261,9 @@ void PersistentGpuSceneSlots::MarkAllActiveDirty()
 {
     if (preparing_)
     {
-        for (const auto &[slot, entry] : pending_entries_)
+        for (const auto &[key, slot] : pending_slots_)
         {
-            static_cast<void>(entry);
+            static_cast<void>(key);
             MarkDirty(slot);
         }
     }
@@ -282,6 +285,7 @@ void PersistentGpuSceneSlots::Clear() noexcept
     Abort();
     slots_.clear();
     entries_.clear();
+    pending_entries_.clear();
     instances_.clear();
     metadata_.clear();
     free_slots_.clear();

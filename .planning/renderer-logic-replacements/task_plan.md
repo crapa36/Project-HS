@@ -1,17 +1,13 @@
-# Renderer logic replacement follow-up
-Goal: validate all12 pasted proposals against current dirty worktree; replace confirmed waste in shadow/light lookups, mesh particle padding, ribbon search and particle atomics only with preserved contracts. Preserve prior meadow/POM work and simulation60Hz. No new renderer backend/dependencies/quality loss/FPS claim without evidence.
-- [complete] Light/shadow direct checked index and complete128-bit masks (worker owns dedicated files; root shared integration).
-- [complete] Ribbon persistent lookup with existing generation/order/reset (worker).
-- [complete] Particle mesh bins and aggregated allocation correctness/overload policy (root).
-- [complete] Read-only items6-12 current-source audit (worker).
-- [complete] Integrate disjoint patches, narrow tests/build and short active-VFX/native comparison; adopt only evidenced safe changes.
-- [complete] Update current technical state/report; preserve all unrelated changes and stop owned test processes.
+# Renderer logic and ZIP omission follow-up
+Goal: preserve dirty cpu-gpu-utilization work, reconsider original ZIP proposals, implement warranted omissions and finish pending connected changes with minimal checks.60Hz/module/content boundaries preserved. No new RT/dependencies or unsupported FPS claims.
 
-Implementation/correctness batch complete. Performance adoption remains unproven for GPU candidates:single captured frame is not a controlled benchmark. Candidate4 and6-12 intentionally deferred under stated policy/workload/quality gates.
+- [complete] Recover exact2original ZIPs from user Recycle Bin; SHA matches;7files read/preserved.
+- [complete] Primary310 rows/non-table/HTML and40directive tasks individually reconsidered;21former gaps now have decisions;14couplings/12candidates classified.
+- [complete] New omissions:retained GPU Scene staging,immutable transparency descriptors,SSS center reuse,zero-scattering lighting skip,signed-scale frame fix.
+- [complete] Integrate grass grid/Jacobian,canonical decorative terrain contact,particle group/bin fusion+mutable stores,bounded annulus,SSR3mip/Gather/light bounds cache.
+- [complete] Fix compile-exposed HLSLreserved word and upload-prefix CBV overlap without weakening assertions.
+- [complete]69focused checks,4existing narrow tests,additional FHD4lockstep pass; actual survivor update covered.
+- [complete] Report andDEV_STATE updated; backup a5e2183a intact; changes uncommitted; all owned native processes finished/stopped.
 
-
-## Follow-up: include previously deferred candidates, minimal verification
-- [in progress] Root: fuse particle compaction/bins and group list reservations; bounded warning geometry.
-- [in progress] Workers: grouped SSR, exact high quality PCF Gather, grass candidate grid/Jacobian, canonical decorative particle contacts.
-- [pending] Integrate focused numeric checks once, one shader/content/host build, one short native validation batch; reuse prior unaffected evidence.
-- [pending] Record per-candidate disposition and actual limits without FPS claims.
+Unresolved:GBV4 did not complete120s afterinitialize and has no finaldiagnostics;notpassed. Full gameplay/performance A/B/temporal/failure corpus/ISA not run. Validation host current7a86b9c9; Debug/Release coherent olde7e754cc not re-exported. Explicit feature deferrals are recorded, not counted as implementations or universal validation.
+Evidence:Build/20261018-zip-followup/ and Docs/Verification/20261018-zip-followup/REPORT.md.

@@ -56,6 +56,11 @@ cbuffer FrameConstants : register(b0)
     float4 PreviousGrassState; // time, bender count, valid, reserved.
     float4 PreviousGrassOriginDelta; // current scene origin minus previous origin.
     uint4 SceneTableBounds; // Serialized dynamic scene byte length in x; reserved yzw.
+    float4 GrassBenderGrid;
+    uint4 GrassBenderMasks[16];
+    float4 PreviousGrassBenderGrid;
+    uint4 PreviousGrassBenderMasks[16];
+    float4 ParticleTerrain; // Scene origin, canonical meadow collision enabled.
 };
 
 cbuffer PassConstants : register(b1)
@@ -521,24 +526,7 @@ float3 ShapePlaceholder(float3 position, uint mesh)
     return position;
 }
 
-float3 BendGrass(float3 world, float3 local_position, float time,
-                 float4 benders[32], uint bender_count)
-{
-    if (local_position.y <= -0.45) return world;
-    float3 bend = 0.0;
-    const uint count = min(bender_count, 32u);
-    for (uint index = 0; index < count; ++index)
-    {
-        const float2 delta = world.xz - benders[index].xz;
-        const float radius = max(benders[index].w, 0.1);
-        // A conservative outer box skips only exactly zero contributions.
-        if (max(abs(delta.x), abs(delta.y)) > 2.0 * radius) continue;
-        const float weight = saturate(1.0 - length(delta) / radius);
-        bend += float3(delta.x, 0.0, delta.y) * weight * 0.42 * saturate(local_position.y + 0.5);
-    }
-    const float wind = sin(time * 1.7 + world.x * 0.11 + world.z * 0.07) * 0.035;
-    return world + bend + float3(wind, 0.0, wind * 0.7) * saturate(local_position.y + 0.5);
-}
+#include "grass_deformation.hlsli"
 
 float3 InstanceWorldPosition(InstanceData instance, float3 position)
 {
@@ -616,9 +604,16 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0);
     float3 world = stable_world;
     const bool wind_deformed = HsEnvironmentWind(instance.Mesh);
+    HsGrassDeformation grass_deformation = (HsGrassDeformation)0;
     if (wind_deformed)
-        world = BendGrass(stable_world, grass_local,
-            CameraTime.w, GrassBenders, GrassBenderCount.x);
+    {
+        const float3 local_height_gradient = float3(0.0,
+            abs(instance.Scale.y) > 0.000001 ? rcp(instance.Scale.y) : 0.0, 0.0);
+        grass_deformation = HsDeformGrass(stable_world, grass_local,
+            local_height_gradient, CameraTime.w, GrassBenders, GrassBenderCount.x,
+            GrassBenderGrid, GrassBenderMasks, true);
+        world = grass_deformation.position;
+    }
     float3 previous_world = world;
     const bool previous_static_grass = context.geometryValid &&
         (context.geometry.Flags & 12u) == 12u;
@@ -633,9 +628,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
             ? InstanceWorldPosition(SkinPreviousInstances[draw.InstanceIndex], local_position) + PreviousGrassOriginDelta.xyz
             : stable_world;
         // The immutable static lease retains old scene coordinates; dynamic transforms were rebased on the CPU.
-        previous_world = BendGrass(previous_stable,
-            grass_local, PreviousGrassState.x, PreviousGrassBenders,
-            (uint)PreviousGrassState.y) - PreviousGrassOriginDelta.xyz;
+        previous_world = HsDeformGrass(previous_stable, grass_local,
+            float3(0, 0, 0), PreviousGrassState.x, PreviousGrassBenders,
+            (uint)PreviousGrassState.y, PreviousGrassBenderGrid,
+            PreviousGrassBenderMasks, false).position - PreviousGrassOriginDelta.xyz;
     }
     if (cached_skin_history)
     {
@@ -645,7 +641,9 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         previous_world = InstanceWorldPosition(
             SkinPreviousInstances[skin_slot], previous_local);
     }
-    local_normal /= max(instance.Scale.xyz, 0.0001);
+    const float3 scale_sign = float3(instance.Scale.x < 0.0 ? -1.0 : 1.0,
+        instance.Scale.y < 0.0 ? -1.0 : 1.0, instance.Scale.z < 0.0 ? -1.0 : 1.0);
+    local_normal /= scale_sign * max(abs(instance.Scale.xyz), 0.0001);
     local_tangent *= instance.Scale.xyz;
     float3 normal = normalize(float3(
         local_normal.x * cosine_yaw + local_normal.z * sine_yaw,
@@ -656,6 +654,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         local_tangent.y,
         -local_tangent.x * sine_yaw + local_tangent.z * cosine_yaw));
 
+    float tangent_handedness = input.Tangent.w * scale_sign.x * scale_sign.y * scale_sign.z;
+    if (wind_deformed)
+        HsGrassDeformFrame(grass_deformation, normal, tangent, tangent_handedness);
+
     SceneOutput output;
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = normal;
@@ -664,7 +666,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.Color = UnpackColor(instance.Color);
     output.Mesh = mesh;
     output.Uv = input.Uv;
-    output.WorldTangent = float4(tangent, input.Tangent.w);
+    output.WorldTangent = float4(tangent, tangent_handedness);
     output.Material = mesh==22u ? (input.Uv.y>=100.0?1u:0u) : (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
     const bool environment = mesh == 9 || mesh == 20 || ((mesh >= 16 && mesh <= 19) || mesh == 21 || mesh == 22);
     const uint model = environment ? HsSurfaceModelEnvironment :
@@ -1576,7 +1578,7 @@ float3 BallisticVelocity(float3 velocity, float drag, float gravity, float dt)
 {
     return velocity * exp(-drag * dt) + float3(0, gravity * dt, 0);
 }
-void IntegrateBallisticStep(inout ParticleData particle, float dt)
+void IntegrateFlatBallisticStep(inout ParticleData particle, float dt)
 {
     const float floor_y = particle.CollisionMaterial.y + particle.CollisionMaterial.z;
     float3 position = particle.PositionLife.xyz;
@@ -1620,6 +1622,8 @@ void IntegrateBallisticStep(inout ParticleData particle, float dt)
     particle.PositionLife.xyz = next_position;
     particle.CurrentVelocityDrag.xyz = next_velocity;
 }
+#include "particle_collision.hlsli"
+
 void CatchUpBallistic(inout ParticleData particle, uint now)
 {
     const uint steps = now - particle.Authored.y;
@@ -1800,9 +1804,10 @@ bool SpawnParticle(uint index, out uint particle_index, out uint bin)
         {
             particle.InitialPositionSpawnTime = float4(command.PositionLifetimeMin.xyz, asfloat(command.Authored.y));
             particle.PositionLife.xyz = command.PositionLifetimeMin.xyz;
-            particle.PositionLife.y = max(particle.PositionLife.y, command.CollisionMaterial.y + command.CollisionMaterial.z);
             particle.CurrentVelocityDrag = command.CurrentVelocityDrag;
             particle.CollisionMaterial = command.CollisionMaterial;
+            particle.PositionLife.y = max(particle.PositionLife.y,
+                ParticleCollisionFloor(particle, particle.PositionLife.xz));
             particle.Authored = uint4(1, command.Authored.z, command.Authored.z, command.Authored.w);
             CatchUpBallistic(particle, AuthoredParticleClock.x);
         }
@@ -2104,9 +2109,9 @@ ParticleOutput GroundRingVS(uint vertex_id : SV_VertexID, uint instance_id : SV_
     if (bounded_annulus)
     {
         const uint segment = vertex_id / 6u;
-        const uint point = vertex_id % 6u;
-        const bool next = point == 2u || point == 4u || point == 5u;
-        const bool outer_vertex = point == 1u || point == 2u || point == 4u;
+        const uint segment_vertex = vertex_id % 6u;
+        const bool next = segment_vertex == 2u || segment_vertex == 4u || segment_vertex == 5u;
+        const bool outer_vertex = segment_vertex == 1u || segment_vertex == 2u || segment_vertex == 4u;
         const float angle = float(segment + (next ? 1u : 0u)) * (-6.28318530718 / 32.0);
         const float radius = outer_vertex ? command.ShapeExtentSpeedMin.y / 0.99518472667 + 0.0001
                                          : max(0.0, command.ShapeExtentSpeedMin.x - 0.0001);

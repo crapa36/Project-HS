@@ -231,7 +231,8 @@ class PersistentGpuSceneSlots
     // Only touched payloads need an undo record. Retained slot identity is
     // unchanged until Commit, while Instances exposes the prepared upload.
     std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> pending_slots_;
-    std::unordered_map<std::uint32_t, Entry> pending_entries_;
+    // Reused by slot; only keys present in pending_slots_ may read this staging.
+    std::vector<Entry> pending_entries_;
     struct PreviousPayload
     {
         std::uint32_t slot{};
