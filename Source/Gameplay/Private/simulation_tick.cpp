@@ -32,6 +32,8 @@ GameSimulation::SimulationWorld::SimulationWorld()
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
     combat_state->collision_candidates.reserve(128);
+    combat_state->collision_hit_times.reserve(1'024);
+    combat_state->live_area_ids.reserve(256);
 }
 
 void GameSimulation::SimulationWorld::InitializePlayerState()
@@ -338,6 +340,8 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->boss_actions.clear();
     combat_state->cast_hits.clear();
     combat_state->area_hits.clear();
+    combat_state->cast_hit_index.clear();
+    combat_state->area_hit_index.clear();
     combat_state->cast_runtimes.clear();
     combat_state->domain_signals.clear();
     combat_state->visual_links.clear();
@@ -566,9 +570,17 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
     actors->pending_projectile_spawns.clear();
     std::erase_if(actors->areas, [](const AreaActor &area) { return area.dead; });
     std::erase_if(actors->pickups, [](const PickupActor &pickup) { return pickup.dead; });
-    std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
+    if (std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
         return record.cast_id + 256 < next_cast_id;
-    });
+    }))
+    {
+        combat_state->cast_hit_index.clear();
+        for (std::size_t i = 0; i < combat_state->cast_hits.size(); ++i)
+        {
+            const auto &record = combat_state->cast_hits[i];
+            combat_state->cast_hit_index.emplace(std::pair{record.cast_id, record.target}, i);
+        }
+    }
     std::erase_if(combat_state->cast_runtimes, [this](const CastRuntime &runtime) {
         if (runtime.cast_id + 256 >= next_cast_id) return false;
         if (runtime.cooldown_ticks_saved == 0) return true;
@@ -576,11 +588,24 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
             return projectile.cast_id == runtime.cast_id;
         });
     });
-    std::erase_if(combat_state->area_hits, [this](const AreaHitRecord &record) {
-        return std::ranges::none_of(actors->areas, [&](const AreaActor &area) {
-            return area.id.value == record.area_id;
-        });
-    });
+    auto &live_areas = combat_state->live_area_ids;
+    live_areas.clear();
+    if (!combat_state->area_hits.empty())
+    {
+        for (const auto &area : actors->areas) live_areas.push_back(area.id.value);
+        std::ranges::sort(live_areas);
+    }
+    if (std::erase_if(combat_state->area_hits, [&](const AreaHitRecord &record) {
+        return !std::ranges::binary_search(live_areas, record.area_id);
+    }))
+    {
+        combat_state->area_hit_index.clear();
+        for (std::size_t i = 0; i < combat_state->area_hits.size(); ++i)
+        {
+            const auto &record = combat_state->area_hits[i];
+            combat_state->area_hit_index.emplace(std::pair{record.area_id, record.target}, i);
+        }
+    }
 }
 
 GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const

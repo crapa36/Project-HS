@@ -36,6 +36,8 @@ struct PostSubgraphInputs
     // Native lowering hooks run during graph construction. Temporal ownership
     // remains unchanged; only subsequent HDR reads consume their replacements.
     PostHdrHook pre_bloom, pre_tone_map;
+    // Encoded ImGui reuses post_a after its tone-map/FXAA consumers finish.
+    PostHdrHook devtools_ui;
     ResourceVersion screen_overlay_alpha, screen_overlay_upload, screen_overlay_gradient;
     // Optional concrete provider declaration carried from the lighting/provider
     // composition boundary. Its metadata and exact version must match below.

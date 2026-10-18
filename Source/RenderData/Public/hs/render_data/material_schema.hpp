@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/render_data/render_asset_format.hpp>
+#include <hs/core/render_snapshot.hpp>
 
 #include <array>
 #include <cstddef>
@@ -75,12 +76,45 @@ void ValidateMaterialParameterLayout(
 [[nodiscard]] std::vector<MaterialParameterDefinition> ReadMaterialParameterPackage(
     std::span<const std::byte> bytes, AssetId expected_asset_id);
 
-inline constexpr std::array<std::string_view, 14> kEnvironmentMaterialNames{
+// Geometry catalog order; the appended detail geometries share one authored material.
+inline constexpr std::array<std::string_view, 30> kEnvironmentMaterialNames{
     "trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1", "leaf_2",
-    "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3"};
-inline constexpr std::array<std::string_view, 15> kAuthoredMaterialNames{
+    "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3",
+    "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
+    "ground_leaves", "twig_cluster", "fence_short",
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
+inline constexpr std::array<std::string_view, 16> kAuthoredMaterialNames{
     "trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1", "leaf_2",
-    "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3", "terrain"};
+    "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1", "grass_2", "grass_3", "terrain", "ground_detail"};
+inline constexpr std::uint32_t kEnvironmentGeometryLodCount = 3;
+inline constexpr std::uint32_t kTerrainMaterialOrdinal = 14;
+inline constexpr std::uint32_t kGroundDetailMaterialOrdinal = 15;
+inline constexpr std::uint32_t kGroundDetailGeometryBegin = 14;
+inline constexpr std::uint32_t kMeadowGeometryBegin = 28;
+inline constexpr std::uint32_t kMeadowWaterGeometry = 29;
+[[nodiscard]] constexpr bool IsEnvironmentMesh(RenderMesh mesh) noexcept
+{ return (mesh >= RenderMesh::TreeTrunk && mesh <= RenderMesh::Grass) || mesh == RenderMesh::GroundDetail || mesh == RenderMesh::MeadowSurface; }
+[[nodiscard]] constexpr std::uint32_t EnvironmentGeometryOrdinal(RenderMesh mesh, std::uint32_t variant) noexcept
+{
+    switch (mesh)
+    {
+    case RenderMesh::TreeTrunk: return variant % 3u;
+    case RenderMesh::TreeCanopy: return 3u + variant % 3u;
+    case RenderMesh::Rock: return 6u + variant % 4u;
+    case RenderMesh::Grass: return 10u + variant % 4u;
+    case RenderMesh::GroundDetail: return kGroundDetailGeometryBegin + variant % kGroundDetailVariantCount;
+    case RenderMesh::MeadowSurface: return kMeadowGeometryBegin + variant % 2u;
+    default: return UINT32_MAX;
+    }
+}
+[[nodiscard]] constexpr RenderMesh EnvironmentMeshForOrdinal(std::uint32_t ordinal) noexcept
+{
+    return ordinal < 3u ? RenderMesh::TreeTrunk : ordinal < 6u ? RenderMesh::TreeCanopy :
+        ordinal < 10u ? RenderMesh::Rock : ordinal < kGroundDetailGeometryBegin ? RenderMesh::Grass : ordinal < kMeadowGeometryBegin ? RenderMesh::GroundDetail : RenderMesh::MeadowSurface;
+}
+[[nodiscard]] constexpr std::uint32_t EnvironmentGeometryMaterialOrdinal(std::size_t ordinal) noexcept
+{ return ordinal < kGroundDetailGeometryBegin ? static_cast<std::uint32_t>(ordinal) : ordinal == kMeadowGeometryBegin ? kTerrainMaterialOrdinal : kGroundDetailMaterialOrdinal; }
+
 // Separate namespace/ordinals; the environment/terrain ABI above remains fixed.
 inline constexpr std::array<std::string_view, 7> kHeroMaterialNames{
     "archer_skin", "archer_cloth", "archer_cutout", "archer_equipment",
@@ -89,7 +123,6 @@ inline constexpr std::uint32_t kHeroMaterialIdBase = 0x20000000u;
 inline constexpr std::array<std::string_view, 2> kDecalMaterialNames{
     "decal_fracture", "decal_organic"};
 inline constexpr std::uint32_t kDecalShaderBindingAbi = 1;
-enum class DecalRayPolicy : std::uint32_t { RasterOnly = 1 };
 enum class DecalReceiverNormalFilter : std::uint32_t { Any = 0, GroundFacing = 1 };
 struct DecalReceiverPolicy
 {
@@ -236,7 +269,6 @@ struct DecalMaterialPackageData
     std::uint16_t texture_dependency_index{};
     std::string parameter_layout_hash;
     DecalReceiverPolicy receivers;
-    DecalRayPolicy ray_policy{DecalRayPolicy::RasterOnly};
 };
 [[nodiscard]] std::vector<std::byte> BuildDecalMaterialPackage(std::string_view name,
     std::span<const MaterialParameterDefinition> parameters, std::string_view texture_id,

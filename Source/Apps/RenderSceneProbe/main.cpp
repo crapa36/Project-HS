@@ -3,6 +3,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/lighting_probe.hpp>
 #include <hs/render_data/scene_probe.hpp>
+#include <hs/render_data/material_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -24,9 +25,7 @@ namespace fs=std::filesystem;
 constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
 constexpr std::string_view kNamespace="render/lighting/local-probes";
 constexpr std::string_view kArenaLayout="game-data/arena-layout";
-constexpr std::array<std::string_view,14> kEnvironmentMaterials{
-    "rock_0","rock_1","rock_2","rock_3","trunk_0","trunk_1","trunk_2",
-    "leaf_0","leaf_1","leaf_2","grass_0","grass_1","grass_2","grass_3"};
+constexpr auto &kEnvironmentMaterials=rd::kEnvironmentMaterialNames;
 void Require(bool valid,std::string_view message)
 { if(!valid) throw std::runtime_error("hs_render_scene_probe: "+std::string(message)); }
 std::span<const std::byte> Bytes(std::string_view text)
@@ -218,6 +217,11 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
     for(const auto name:kEnvironmentMaterials)
     {
         read("render/"+std::string(name)+".rpkg","render/"+std::string(name),materials);
+    }
+    read("render/material/ground_detail.rpkg","render/ground_detail",materials);
+    for(const auto name:rd::kAuthoredMaterialNames)
+    {
+        if(name=="terrain") continue;
         const auto parameters="render/material/"+std::string(name)+"/parameters";
         read(parameters+".rpkg",parameters,materials);
     }

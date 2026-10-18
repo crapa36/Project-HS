@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 #include <vector>
 
 namespace
@@ -132,6 +133,42 @@ void TestFailedPreparationAndEpochWrap()
     Check(history.previous.at(1).caster == Values(30) && history.previous.contains(2),
         "epoch wrap must preserve submitted history until commit");
     Commit(history, wrapped);
+}
+
+void TestRetainedIndependentKeyOracle()
+{
+    using namespace hs::renderer_detail;
+    std::unordered_map<int, std::uint64_t> oracle, other_view;
+    bool prepared{}, other_prepared{};
+    const auto prepare = [&](std::uint64_t epoch, std::initializer_list<int> keys, bool finish) {
+        BeginShadowCasterKeyOracle(oracle, epoch, prepared);
+        std::unordered_set<int> fresh;
+        for (const auto key : keys)
+            Check(MarkShadowCasterKeyOracle(oracle, key, epoch) == fresh.insert(key).second,
+                "retained oracle must match independent fresh first-key membership");
+        if (finish)
+        {
+            PruneShadowCasterKeyOracle(oracle, epoch, fresh.size(), prepared);
+            Check(oracle.size() == fresh.size(), "oracle must release stale keys after preparation");
+        }
+    };
+    prepare(1, {1, 2, 1}, true);
+    prepare(2, {2, 3, 2}, false); // A rejected preparation leaves partial marks.
+    prepare(3, {3, 4, 3}, true);
+    Check(!oracle.contains(1) && !oracle.contains(2), "failed-attempt stale keys must not accumulate");
+    const auto *retained = &oracle.at(3);
+    prepare(4, {3, 4, 3}, true);
+    Check(&oracle.at(3) == retained, "steady oracle membership must reuse its allocated nodes");
+    BeginShadowCasterKeyOracle(other_view, 1, other_prepared);
+    Check(MarkShadowCasterKeyOracle(other_view, 3, 1) && oracle.at(3) == 4,
+        "oracle epochs must remain isolated between views");
+    prepare(std::numeric_limits<std::uint64_t>::max(), {3, 3}, true);
+    oracle.at(3) = 1; // Simulate an ancient first-epoch mark before wrap.
+    prepare(1, {3, 3}, true);
+    Check(oracle.size() == 1 && oracle.at(3) == 1,
+        "wrapped oracle must clear ancient epoch stamps before first-key checks");
+    prepare(2, {}, true);
+    Check(oracle.empty(), "empty or reset scene must release retained oracle keys");
 }
 
 void TestFrameLocalGroups()
@@ -407,6 +444,7 @@ int main()
         TestFailedPreparationAndEpochWrap();
         TestIndependentViews();
         TestFrameLocalGroups();
+        TestRetainedIndependentKeyOracle();
         TestStaticNodeCache();
         std::cout << "caster storage: reuse, duplicates, replacement, removal, retry, wrap, views and node cache passed\n";
         return 0;

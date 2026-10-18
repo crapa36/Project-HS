@@ -54,8 +54,8 @@ struct BrixelizerGeometryKeyHash
 class BrixelizerGeometryLookup
 {
 public:
-    [[nodiscard]] std::uint32_t FindOrAdd(const RaySceneGeometry &geometry,
-        std::vector<RaySceneGeometry> &geometries)
+    [[nodiscard]] std::uint32_t FindOrAdd(const SoftwareSceneGeometry &geometry,
+        std::vector<SoftwareSceneGeometry> &geometries)
     {
         const BrixelizerGeometryKey key{
             geometry.stable_key, geometry.vertices, geometry.indices,
@@ -84,7 +84,7 @@ private:
 // Preserve actual submesh ranges when a page mixes opaque and translucent
 // character slots. The vectors are CPU registration inputs for this frame.
 [[nodiscard]] Result AppendBrixelizerLeaf(
-    const RaySceneGeometry &, const RaySceneInstance &,
+    const SoftwareSceneGeometry &, const SoftwareSceneInstance &,
     std::span<const render_data::GeometrySubmesh>,
     std::span<const render_data::CharacterMaterialBinding>,
     std::span<const render_data::MaterialSurfaceLayout> hero_layouts,
@@ -92,5 +92,5 @@ private:
     DirectX::XMFLOAT3 bounds_min, DirectX::XMFLOAT3 bounds_max,
     std::uint64_t material_revision,
     BrixelizerGeometryLookup &,
-    std::vector<RaySceneGeometry> &, std::vector<BrixelizerSceneInstance> &);
+    std::vector<SoftwareSceneGeometry> &, std::vector<BrixelizerSceneInstance> &);
 } // namespace hs

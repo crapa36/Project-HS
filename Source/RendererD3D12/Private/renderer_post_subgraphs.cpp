@@ -49,6 +49,15 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
             for (auto &read : pass.reads)
                 if (same(read.version, source)) read.version = graded;
         }
+        if (pass.id == 17 && inputs.devtools_ui)
+        {
+            ResourceVersion encoded;
+            if (auto drawn = inputs.devtools_ui(graph, plan.outputs.post_a, encoded); !drawn) return drawn;
+            if (!encoded.resource || encoded.resource.kind != ResourceKind::Texture)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features", "DevTools UI returned an invalid texture.");
+            pass.reads.push_back({encoded, Access::ShaderRead});
+            plan.outputs.post_a = encoded;
+        }
         auto builder = graph.AddPass(pass.id, pass.name, QueueHint::Direct);
         if (pass.id == 9 && inputs.screen_overlay_alpha.resource)
             builder.Read(inputs.screen_overlay_alpha, Access::ShaderRead);

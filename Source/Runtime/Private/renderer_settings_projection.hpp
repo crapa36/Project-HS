@@ -1,13 +1,30 @@
 #pragma once
 
 #include <hs/runtime/settings_projection.hpp>
+#include <hs/game_domain/game_types.hpp>
 #include <hs/renderer/renderer.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace hs
 {
+
+[[nodiscard]] inline bool AllowGameplayFrameGeneration(SessionPhase phase) noexcept
+{
+    return phase == SessionPhase::Playing;
+}
+
+// A GetState delta is telemetry, not a newly selected generation multiplier.
+// Keep option receipts/config revisions stable when SDK counts vary per Present.
+[[nodiscard]] inline std::string FrameGenerationMultiplierPolicyToken(const RendererPresentationStatus &status)
+{
+    if (status.active_mode == GraphicsFrameGenerationMode::Off) return "0";
+    if (status.effective_provider.value == "fsr") return "native";
+    if (status.active_mode == GraphicsFrameGenerationMode::Dynamic) return "dynamic";
+    return std::to_string(status.requested.multiplier);
+}
 
 [[nodiscard]] inline RendererConfig ProjectRendererConfig(const SettingsData &legacy,
                                                          const GraphicsSettings &graphics)
@@ -52,8 +69,6 @@ namespace hs
     config.transparency_quality = graphics.transparency_quality;
     config.refraction_quality = graphics.refraction_quality;
     config.volumetric_quality = graphics.volumetric_quality;
-    config.ray_tracing_enabled = graphics.ray_tracing_enabled;
-    config.rt_trace_distance_m = graphics.rt_trace_distance_m;
     config.gi_mode = graphics.gi_mode;
     config.gi_quality = graphics.gi_quality;
     config.shadow_mode = graphics.shadow_mode;
@@ -67,8 +82,6 @@ namespace hs
     config.presentation_request = {graphics.frame_generation_provider,
         graphics.frame_generation_mode, graphics.frame_generation_multiplier,
         graphics.low_latency, graphics.frame_limit_fps};
-    config.ray_reconstruction_provider = graphics.ray_reconstruction_provider;
-    config.neural_ray_reconstruction = graphics.neural_ray_reconstruction;
     config.sharpening = graphics.sharpening;
     config.hdr_mode = graphics.hdr_mode;
     config.hdr_paper_white_nits = graphics.hdr_paper_white_nits;

@@ -22,7 +22,7 @@ bool ValidMetadata(const SignalMetadata &metadata)
 {
     return (metadata.kind == ResourceKind::Texture || metadata.kind == ResourceKind::Buffer) &&
            metadata.extent.width != 0 && metadata.extent.height != 0 && metadata.layers != 0 &&
-           static_cast<unsigned>(metadata.encoding) <= static_cast<unsigned>(SignalEncoding::AccelerationStructure) &&
+           static_cast<unsigned>(metadata.encoding) <= static_cast<unsigned>(SignalEncoding::RawBytes) &&
            static_cast<unsigned>(metadata.filtering) <= static_cast<unsigned>(SignalFiltering::Resolved) &&
            static_cast<unsigned>(metadata.radiometric) <= static_cast<unsigned>(RadiometricMeaning::DisplayEncoded);
 }

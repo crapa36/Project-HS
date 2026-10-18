@@ -2,21 +2,23 @@
 // context. Common IBL explicitly selects the global baseline under this define.
 #define HS_LOCAL_PROBE_CAPTURE 1
 #include "project_hs.hlsl"
+#include "local_probe_draw.hlsli"
 
-SceneOutput LocalProbeCaptureVS(SceneInput input,uint instance_id : SV_InstanceID,uint vertex_id : SV_VertexID)
+SceneOutput LocalProbeCaptureSourceBaseVS(SceneInput input,uint instance_id : SV_InstanceID,uint vertex_id : SV_VertexID)
 {
+    const uint source_slot=HsLocalProbeSourceSlot(PassValue,instance_id);
     HsSceneVertexContext context=(HsSceneVertexContext)0;
     context.skinSlot=0xffffffffu; context.rasterRecordId=0xffffffffu;
-    context.instanceKey=uint2(instance_id+1u,SkinCacheOptions.w);
+    context.instanceKey=uint2(source_slot+1u,SkinCacheOptions.w);
     uint4 h0,h1,h2,h3;
-    const bool valid=HsGpuSceneSlotValid(instance_id,h0,h1,h2,h3);
+    const bool valid=HsGpuSceneSlotValid(source_slot,h0,h1,h2,h3);
     // A capture draw is the exact source slot, not a main-view visible-ref index.
-    const uint generation=valid ? HsGpuSceneTables.Load(h1.x+instance_id*h2.z+20u) : 0u;
-    context.instance=HsLoadGpuSceneInstance(instance_id);
-    context.draw.InstanceIndex=instance_id; context.draw.InstanceGeneration=generation;
+    const uint generation=valid ? HsGpuSceneTables.Load(h1.x+source_slot*h2.z+20u) : 0u;
+    context.instance=HsLoadGpuSceneInstance(source_slot);
+    context.draw.InstanceIndex=source_slot; context.draw.InstanceGeneration=generation;
     context.instance.Scale.w=1.0;
     SceneOutput output=EvaluateSceneVertex(input,context,vertex_id,false);
-    output.MaterialId=0x10000000u+PassValue;
+    output.MaterialId=0x10000000u+HsLocalProbeMaterialOrdinal(PassValue);
     output.EnvironmentFade=1.0; output.EnvironmentFlags&=~0x20000u;
     output.HistoryConfidence=0.0; output.ShadowClipDistance=1.0;
     if(!valid || generation!=SkinCacheOptions.w)
@@ -62,6 +64,7 @@ LocalProbeCaptureOutput HsCaptureStaticSurface(SceneOutput input,bool front,bool
     if(!HsSceneCovered(input,front,opaque,gradients,SceneDrawMaterial)) discard;
     const HsMaterialContext context=EnvironmentMaterialContext(input,front,gradients,SceneDrawMaterial);
     HsSurfaceClosure surface=HsMaterialEvaluateSurface(context);
+    if(input.Mesh==19u)surface.base_color*=MeadowDryGrassGain(input.EnvironmentStableWorld.xz);
     if(!surface.normal_is_world)
     {
         const float3 n=context.shading_normal;

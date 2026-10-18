@@ -1017,6 +1017,20 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         light_resources.allocated_bytes, light_resources.upload_allocated_bytes,
         light_resources.capacity.width, light_resources.capacity.height,
         light_resources.frame_slot_count, light_resources.frame_slot);
+    metadata_output << "  \"terrain_texture_mips\": [";
+    bool first_texture = true;
+    for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+    {
+        const auto id = impl_->material_texture_stream_ids[kTerrainMaterialOrdinal * render_data::kMaterialTextureSlots + slot];
+        if (!id) continue;
+        const auto view = impl_->texture_streaming.View(id);
+        metadata_output << std::format(
+            "{}{{\"slot\":{},\"width\":{},\"height\":{},\"mip_count\":{},\"physical_first_mip\":{},\"resident_min_mip\":{}}}",
+            first_texture ? "" : ",", slot, view.logical_description.width, view.logical_description.height,
+            view.logical_description.mip_count, view.first_mip, view.resident_min_mip);
+        first_texture = false;
+    }
+    metadata_output << "],\n";
     constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular", "indirect_diffuse"};
     const auto &captured_constants = *reinterpret_cast<const FrameConstants *>(
         impl_->frames[impl_->last_presented_index].mapped);

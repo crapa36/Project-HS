@@ -25,7 +25,6 @@
 #include <ffx_api.h>
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_upscale.h>
-#include <ffx_denoiser.h>
 #include <ffx_framegeneration.h>
 #include <dx12/ffx_api_framegeneration_dx12.h>
 #endif
@@ -218,23 +217,20 @@ Result WaitFence(ID3D12Fence *fence, std::uint64_t value)
 
 struct FsrSession::Impl
 {
-    std::array<ReconstructionAvailability, 4> availability{
+    std::array<ReconstructionAvailability, 3> availability{
         ReconstructionAvailability::Unavailable, ReconstructionAvailability::Unavailable,
-        ReconstructionAvailability::Unavailable, ReconstructionAvailability::Unavailable};
-    std::array<std::string, 4> failure;
-    std::array<std::string, 4> selected;
+        ReconstructionAvailability::Unavailable};
+    std::array<std::string, 3> failure;
+    std::array<std::string, 3> selected;
     FsrUpscaleRequirements requirements;
 #if HS_WITH_FSR
     ComPtr<ID3D12Device> device;
     DWORD owner_thread{};
     std::filesystem::path directory;
-    NativeApi upscale_api, denoiser_api, generation_api;
-    ffxContext denoiser{}, generation{}, presentation{};
-    std::array<std::vector<FsrVariant>, 4> variants;
-    ViewExtent denoiser_maximum{}, generation_maximum{}, display{};
-    std::uint64_t denoiser_id{};
-    bool reset_denoiser{true};
-    std::uint32_t private_rr_contexts{};
+    NativeApi upscale_api, generation_api;
+    ffxContext generation{}, presentation{};
+    std::array<std::vector<FsrVariant>, 3> variants;
+    ViewExtent generation_maximum{}, display{};
     std::recursive_mutex api_mutex;
     std::mutex lease_mutex;
     ComPtr<ID3D12CommandQueue> queue;
@@ -275,8 +271,6 @@ struct FsrSession::Impl
         if (!view) view = std::make_unique<UpscaleView>();
         return *view;
     }
-    ffxCreateContextDescDenoiser denoiser_desc{};
-    ffxOverrideVersion denoiser_override{};
     ffxCreateContextDescFrameGeneration generation_desc{};
     ffxCreateContextDescFrameGenerationVersion generation_version{};
     ffxOverrideVersion generation_override{};
@@ -304,7 +298,6 @@ struct FsrSession::Impl
     NativeApi &Api(FsrEffect effect)
     {
         if (effect == FsrEffect::SuperResolution) return upscale_api;
-        if (effect == FsrEffect::RayRegeneration) return denoiser_api;
         return generation_api;
     }
     Result Fail(FsrEffect effect, const char *operation, ffxReturnCode_t code)
@@ -317,7 +310,7 @@ struct FsrSession::Impl
     Result Load(FsrEffect effect)
     {
         const wchar_t *file = effect == FsrEffect::SuperResolution ? L"amd_fidelityfx_upscaler_dx12.dll" :
-            effect == FsrEffect::RayRegeneration ? L"amd_fidelityfx_denoiser_dx12.dll" : L"amd_fidelityfx_framegeneration_dx12.dll";
+            L"amd_fidelityfx_framegeneration_dx12.dll";
         auto result = Api(effect).Load(directory / file);
         if (!result) failure[EffectIndex(effect)] = result.Message();
         return result;
@@ -327,7 +320,6 @@ struct FsrSession::Impl
         switch (effect)
         {
         case FsrEffect::SuperResolution: return FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
-        case FsrEffect::RayRegeneration: return FFX_API_CREATE_CONTEXT_DESC_TYPE_DENOISER;
         case FsrEffect::FrameGeneration: return FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATION;
         case FsrEffect::Presentation: return FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_FOR_HWND_DX12;
         }
@@ -453,85 +445,6 @@ struct FsrSession::Impl
     }
 #endif
 };
-
-struct FsrRayRegenerationContext::Impl
-{
-    FsrRaySignal signal{FsrRaySignal::Diffuse};
-    ReconstructionAvailability availability{ReconstructionAvailability::Unavailable};
-    std::string failure, selected;
-    std::uint64_t allocated_bytes{};
-#if HS_WITH_FSR
-    NativeApi *api{};
-    std::recursive_mutex *mutex{};
-    std::uint32_t *session_context_count{};
-    DWORD owner_thread{};
-    ComPtr<ID3D12Device> device;
-    ffxContext context{};
-    ffxCreateBackendDX12Desc backend{};
-    ffxCreateContextDescDenoiser description{};
-    ffxOverrideVersion override_version{};
-    ViewExtent maximum;
-    bool executed{}, reset{true};
-    Result Fail(const char *operation, ffxReturnCode_t code)
-    {
-        failure=std::string(operation)+" failed with native FSR return code "+std::to_string(code)+".";
-        availability=code==FFX_API_RETURN_NO_PROVIDER?ReconstructionAvailability::Unsupported:ReconstructionAvailability::Unavailable;
-        return FsrFailure(ErrorCode::TaskFailed,failure);
-    }
-#endif
-};
-FsrRayRegenerationContext::FsrRayRegenerationContext() = default;
-FsrRayRegenerationContext::~FsrRayRegenerationContext()
-{
-#if HS_WITH_FSR
-    if(impl_&&impl_->context)
-    {
-        if(!impl_->executed&&impl_->owner_thread==GetCurrentThreadId())
-            static_cast<void>(ReleaseAfterCompletion(true));
-        if(impl_&&impl_->context)
-        {
-            std::fprintf(stderr,"hs.fsr.rr error=private context was not released after completion; retaining native owners.\n");
-            static_cast<void>(impl_.release());
-        }
-    }
-#endif
-}
-Result FsrRayRegenerationContext::ReleaseAfterCompletion(bool gpu_idle_acknowledged)
-{
-#if !HS_WITH_FSR
-    static_cast<void>(gpu_idle_acknowledged);impl_.reset();return Result::Success();
-#else
-    if(!impl_||!impl_->context){impl_.reset();return Result::Success();}
-    if(impl_->owner_thread!=GetCurrentThreadId())return FsrFailure(ErrorCode::InvalidState,"Private FSR RR release requires its owner thread.");
-    if(impl_->executed&&!gpu_idle_acknowledged)return FsrFailure(ErrorCode::InvalidState,"Private FSR RR release requires all submitted graph work completed and unsubmitted lists reset.");
-    std::lock_guard lock(*impl_->mutex);
-    const auto code=impl_->api->destroy(&impl_->context,nullptr);
-    if(code!=FFX_API_RETURN_OK)return impl_->Fail("ffxDestroyContext(private denoiser)",code);
-    impl_->context = {};
-    --*impl_->session_context_count;
-    impl_.reset();return Result::Success();
-#endif
-}
-ReconstructionAvailability FsrRayRegenerationContext::Availability() const noexcept
-{
-#if HS_WITH_FSR
-    return impl_?impl_->availability:ReconstructionAvailability::Unavailable;
-#else
-    return ReconstructionAvailability::CompiledOut;
-#endif
-}
-std::string_view FsrRayRegenerationContext::FailureReason() const noexcept
-{
-#if HS_WITH_FSR
-    return impl_?std::string_view(impl_->failure):std::string_view(UninitializedReason);
-#else
-    return CompiledOutReason;
-#endif
-}
-FsrRaySignal FsrRayRegenerationContext::Signal() const noexcept
-{return impl_?impl_->signal:FsrRaySignal::Diffuse;}
-std::uint64_t FsrRayRegenerationContext::AllocatedBytes() const noexcept
-{return impl_?impl_->allocated_bytes:0;}
 
 FsrSession::FsrSession() = default;
 FsrSession::~FsrSession()
@@ -824,225 +737,6 @@ const FsrUpscaleRequirements &FsrSession::UpscaleRequirements() const noexcept
 #endif
 }
 
-Result FsrSession::CreateRayRegenerationContext(ViewExtent maximum_render,FsrRaySignal signal,
-    std::unique_ptr<FsrRayRegenerationContext> &output,std::uint64_t variant_id)
-{
-#if !HS_WITH_FSR
-    static_cast<void>(maximum_render);static_cast<void>(signal);static_cast<void>(output);static_cast<void>(variant_id);
-    return FsrFailure(ErrorCode::InvalidState,CompiledOutReason);
-#else
-    if(!impl_)return FsrFailure(ErrorCode::InvalidState,UninitializedReason);
-    if(auto r=impl_->RequireOwner();!r)return r;
-    if(output||!ValidExtent(maximum_render))return FsrFailure(ErrorCode::InvalidArgument,"Create private FSR RR into an empty handle with a nonempty capacity.");
-    std::lock_guard lock(impl_->api_mutex);
-    if(auto r=impl_->Load(FsrEffect::RayRegeneration);!r)return r;
-    if(auto r=impl_->ValidateVariant(FsrEffect::RayRegeneration,variant_id);!r)return r;
-    auto candidate=std::make_unique<FsrRayRegenerationContext>();
-    candidate->impl_=std::make_unique<FsrRayRegenerationContext::Impl>();
-    auto &c=*candidate->impl_;
-    c.signal=signal;c.api=&impl_->denoiser_api;c.mutex=&impl_->api_mutex;
-    c.session_context_count=&impl_->private_rr_contexts;c.owner_thread=impl_->owner_thread;
-    c.device=impl_->device;c.maximum=maximum_render;c.backend=impl_->backend;
-    c.description.header.type=FFX_API_CREATE_CONTEXT_DESC_TYPE_DENOISER;
-    c.description.version=FFX_DENOISER_VERSION;
-    c.description.maxRenderSize={maximum_render.width,maximum_render.height};
-    c.description.signalFlags=signal==FsrRaySignal::Diffuse?FFX_DENOISER_SIGNAL_INDIRECT_DIFFUSE:FFX_DENOISER_SIGNAL_INDIRECT_SPECULAR;
-    c.description.flags=FFX_DENOISER_ENABLE_VALIDATION;
-    c.override_version.header.type=FFX_API_DESC_TYPE_OVERRIDE_VERSION;c.override_version.versionId=variant_id;
-    c.description.header.pNext=variant_id?&c.override_version.header:&c.backend.header;
-    c.override_version.header.pNext=&c.backend.header;
-    const auto code=c.api->create(&c.context,&c.description.header,nullptr);
-    if(c.context)++impl_->private_rr_contexts;
-    // Candidate creation diagnostics belong to the candidate, not a live SR/RR
-    // capability. In particular a failed allocation cannot poison rollback.
-    if(code!=FFX_API_RETURN_OK)return c.Fail("ffxCreateContext(private single-signal denoiser)",code);
-    if(!c.context)return FsrFailure(ErrorCode::TaskFailed,"Native FSR create returned success without a private denoiser context.");
-    ffxQueryGetProviderVersion query{};query.header.type=FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
-    const auto queried=c.api->query(&c.context,&query.header);
-    if(queried!=FFX_API_RETURN_OK)return c.Fail("ffxQuery(private denoiser provider)",queried);
-    if(!query.versionId||!query.versionName)return FsrFailure(ErrorCode::TaskFailed,"Private FSR RR returned no selected native provider identity.");
-    FfxApiEffectMemoryUsage usage{};
-    ffxQueryDescDenoiserGetGPUMemoryUsage memory{};
-    memory.header.type=FFX_API_QUERY_DESC_TYPE_DENOISER_GPU_MEMORY_USAGE;
-    memory.device=c.device.Get();memory.maxRenderSize=c.description.maxRenderSize;
-    memory.signalFlags=c.description.signalFlags;memory.flags=c.description.flags;
-    memory.gpuMemoryUsage=&usage;
-    const auto memoryCode=c.api->query(&c.context,&memory.header);
-    if(memoryCode!=FFX_API_RETURN_OK)return c.Fail("ffxQuery(private denoiser actual GPU memory)",memoryCode);
-    if(!usage.totalUsageInBytes)return FsrFailure(ErrorCode::TaskFailed,"Private FSR RR returned no positive native GPU memory accounting.");
-    c.allocated_bytes=usage.totalUsageInBytes;
-    c.selected=query.versionName;c.availability=ReconstructionAvailability::Available;
-    output=std::move(candidate);return Result::Success();
-#endif
-}
-
-Result FsrSession::ExecuteRayRegeneration(FsrRayRegenerationContext &context,ID3D12GraphicsCommandList *commands,
-    const SdkRayReconstructionFrame &frame)
-{
-#if !HS_WITH_FSR
-    static_cast<void>(context);static_cast<void>(commands);static_cast<void>(frame);
-    return FsrFailure(ErrorCode::InvalidState,CompiledOutReason);
-#else
-    if(!impl_||!context.impl_||!context.impl_->context)return FsrFailure(ErrorCode::InvalidState,"Private FSR RR context is not prepared.");
-    if(auto r=impl_->RequireOwner();!r)return r;
-    auto &c=*context.impl_;
-    if(c.api!=&impl_->denoiser_api||c.availability!=ReconstructionAvailability::Available)
-        return FsrFailure(ErrorCode::InvalidState,"Private FSR RR context belongs to another session or has faulted.");
-    std::lock_guard lock(impl_->api_mutex);
-    const auto &base=frame.reconstruction;const auto &camera=base.camera;
-    if(!commands||base.active.x||base.active.y||!base.active.width||!base.active.height||
-       base.active.width>c.maximum.width||base.active.height>c.maximum.height||!CameraValid(camera))
-        return FsrFailure(ErrorCode::InvalidArgument,"Invalid private FSR RR rectangle or camera.");
-    const bool specular=c.signal==FsrRaySignal::Specular;
-    auto *radiance=specular?frame.specular_radiance:frame.diffuse_radiance;
-    auto *output=specular?frame.specular_output:frame.diffuse_output;
-    auto radianceState=specular?frame.specular_radiance_state:frame.diffuse_radiance_state;
-    auto outputState=specular?frame.specular_output_state:frame.diffuse_output_state;
-    if(auto r=impl_->Texture(frame.signed_view_z,base.active,DXGI_FORMAT_R32_FLOAT,frame.signed_view_z_state,false,"RR signed view Z");!r)return r;
-    if(auto r=impl_->Texture(frame.packed_motion,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,frame.packed_motion_state,false,"RR signed XYZ motion");!r)return r;
-    if(auto r=impl_->Texture(frame.normal_roughness,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,frame.normal_roughness_state,false,"RR oct normal/roughness/material");!r)return r;
-    if(auto r=impl_->Texture(frame.diffuse_albedo,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,frame.diffuse_albedo_state,false,"RR diffuse directional albedo");!r)return r;
-    if(auto r=impl_->Texture(frame.specular_albedo,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,frame.specular_albedo_state,false,"RR specular directional albedo");!r)return r;
-    if(auto r=impl_->Texture(radiance,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,radianceState,false,"RR demodulated radiance/metre hit distance");!r)return r;
-    if(auto r=impl_->Texture(output,base.active,DXGI_FORMAT_R16G16B16A16_FLOAT,outputState,true,"RR single-signal native output");!r)return r;
-    for(auto *input:{frame.signed_view_z,frame.packed_motion,frame.normal_roughness,frame.diffuse_albedo,frame.specular_albedo,radiance})
-        if(output==input)return FsrFailure(ErrorCode::InvalidArgument,"Private FSR RR requires separate input and output allocations.");
-    ffxDispatchDescDenoiser dispatch{};dispatch.header.type=FFX_API_DISPATCH_DESC_TYPE_DENOISER;
-    dispatch.commandList=commands;dispatch.linearDepth=NativeResource(frame.signed_view_z,frame.signed_view_z_state);
-    dispatch.motionVectors=NativeResource(frame.packed_motion,frame.packed_motion_state);
-    dispatch.normals=NativeResource(frame.normal_roughness,frame.normal_roughness_state);
-    dispatch.diffuseAlbedo=NativeResource(frame.diffuse_albedo,frame.diffuse_albedo_state);
-    dispatch.specularAlbedo=NativeResource(frame.specular_albedo,frame.specular_albedo_state);
-    dispatch.motionVectorScale={1,1,1};dispatch.jitterOffsets={camera.jitter_pixels[0],camera.jitter_pixels[1]};
-    dispatch.cameraPositionDelta={camera.previous_position.x-camera.position.x,camera.previous_position.y-camera.position.y,camera.previous_position.z-camera.position.z};
-    // The pinned ABI explicitly expects untransposed DX row-vector matrices.
-    // Element assignment states this conversion rather than relying on layout.
-    for(unsigned row=0;row<4;++row)
-    {
-        dispatch.view.rows[row]={camera.view.m[row][0],camera.view.m[row][1],camera.view.m[row][2],camera.view.m[row][3]};
-        dispatch.projection.rows[row]={camera.projection.m[row][0],camera.projection.m[row][1],camera.projection.m[row][2],camera.projection.m[row][3]};
-    }
-    dispatch.linearDepthBounds={camera.near_plane,camera.far_plane};dispatch.renderSize={base.active.width,base.active.height};
-    dispatch.frameIndex=static_cast<uint32_t>(base.identity.render_id);dispatch.flags=FFX_DENOISER_DISPATCH_NON_GAMMA_ALBEDO;
-    if(c.reset||camera.reset_history)dispatch.flags|=FFX_DENOISER_DISPATCH_RESET;
-    ffxDispatchDescDenoiserIndirectDiffuse diffuse{};diffuse.header.type=FFX_API_DISPATCH_DESC_TYPE_DENOISER_INDIRECT_DIFFUSE;
-    ffxDispatchDescDenoiserIndirectSpecular reflection{};reflection.header.type=FFX_API_DISPATCH_DESC_TYPE_DENOISER_INDIRECT_SPECULAR;
-    if(specular){reflection.signal.input=NativeResource(radiance,radianceState);reflection.signal.output=NativeResource(output,outputState);dispatch.header.pNext=&reflection.header;}
-    else{diffuse.signal.input=NativeResource(radiance,radianceState);diffuse.signal.output=NativeResource(output,outputState);dispatch.header.pNext=&diffuse.header;}
-    // Even an error may have recorded GPU work. Release still requires drain.
-    c.executed=true;
-    const auto code=c.api->dispatch(&c.context,&dispatch.header);
-    if(code!=FFX_API_RETURN_OK)return c.Fail("ffxDispatch(private single-signal denoiser)",code);
-    c.reset=false;return Result::Success();
-#endif
-}
-
-Result FsrSession::ConfigureRayRegeneration(ViewExtent maximum_render, std::uint64_t variant_id)
-{
-#if !HS_WITH_FSR
-    static_cast<void>(maximum_render); static_cast<void>(variant_id);
-    return FsrFailure(ErrorCode::InvalidState, CompiledOutReason);
-#else
-    if (!impl_) return FsrFailure(ErrorCode::InvalidState, UninitializedReason);
-    if (auto result = impl_->RequireOwner(); !result) return result;
-    std::lock_guard lock(impl_->api_mutex);
-    if (impl_->denoiser) return FsrFailure(ErrorCode::InvalidState, "Release the completed FSR RR context before reconfiguration.");
-    if (!ValidExtent(maximum_render)) return FsrFailure(ErrorCode::InvalidArgument, "FSR RR requires a nonempty maximum render extent.");
-    if (auto result = impl_->Load(FsrEffect::RayRegeneration); !result) return result;
-    if (auto result = impl_->ValidateVariant(FsrEffect::RayRegeneration, variant_id); !result) return result;
-    impl_->denoiser_desc = {};
-    impl_->denoiser_desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_DENOISER;
-    impl_->denoiser_desc.version = FFX_DENOISER_VERSION;
-    impl_->denoiser_desc.maxRenderSize = {maximum_render.width, maximum_render.height};
-    impl_->denoiser_desc.signalFlags = FFX_DENOISER_SIGNAL_INDIRECT_DIFFUSE | FFX_DENOISER_SIGNAL_INDIRECT_SPECULAR;
-    impl_->denoiser_desc.flags = FFX_DENOISER_ENABLE_VALIDATION;
-    impl_->denoiser_override = {};
-    impl_->denoiser_override.header.type = FFX_API_DESC_TYPE_OVERRIDE_VERSION;
-    impl_->denoiser_override.versionId = variant_id;
-    impl_->denoiser_desc.header.pNext = variant_id ? &impl_->denoiser_override.header : &impl_->backend.header;
-    impl_->denoiser_override.header.pNext = &impl_->backend.header;
-    const auto code = impl_->denoiser_api.create(&impl_->denoiser, &impl_->denoiser_desc.header, nullptr);
-    if (code != FFX_API_RETURN_OK) return impl_->Fail(FsrEffect::RayRegeneration, "ffxCreateContext(Denoiser)", code);
-    impl_->denoiser_maximum = maximum_render;
-    impl_->denoiser_id = variant_id;
-    impl_->reset_denoiser = true;
-    return impl_->Selected(FsrEffect::RayRegeneration, impl_->denoiser);
-#endif
-}
-
-Result FsrSession::ExecuteRayRegeneration(ID3D12GraphicsCommandList *commands, const SdkRayReconstructionFrame &frame)
-{
-#if !HS_WITH_FSR
-    static_cast<void>(commands); static_cast<void>(frame);
-    return FsrFailure(ErrorCode::InvalidState, CompiledOutReason);
-#else
-    if (!impl_ || !impl_->denoiser) return FsrFailure(ErrorCode::InvalidState, "FSR RR context is not configured.");
-    if (auto result = impl_->RequireOwner(); !result) return result;
-    std::lock_guard lock(impl_->api_mutex);
-    const auto &base = frame.reconstruction;
-    const auto &camera = base.camera;
-    if (!commands || base.active.x || base.active.y || !base.active.width || !base.active.height ||
-        base.active.width > impl_->denoiser_maximum.width || base.active.height > impl_->denoiser_maximum.height ||
-        !CameraValid(camera))
-        return FsrFailure(ErrorCode::InvalidArgument, "Invalid FSR RR render rectangle or camera.");
-    // All fields below are provider-native converted images. In particular,
-    // passing the renderer's raw XY MV or XYZ normal GBuffer is invalid.
-    if (auto result = impl_->Texture(frame.signed_view_z, base.active, DXGI_FORMAT_R32_FLOAT, frame.signed_view_z_state, false, "signed view Z"); !result) return result;
-    if (auto result = impl_->Texture(frame.packed_motion, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.packed_motion_state, false, "RR UV/signed Z motion"); !result) return result;
-    if (auto result = impl_->Texture(frame.normal_roughness, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.normal_roughness_state, false, "RR oct normal/linear roughness/material"); !result) return result;
-    if (auto result = impl_->Texture(frame.diffuse_albedo, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.diffuse_albedo_state, false, "linear diffuse albedo"); !result) return result;
-    if (auto result = impl_->Texture(frame.specular_albedo, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.specular_albedo_state, false, "linear specular albedo"); !result) return result;
-    if (auto result = impl_->Texture(frame.diffuse_radiance, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.diffuse_radiance_state, false, "indirect diffuse radiance/hit distance"); !result) return result;
-    if (auto result = impl_->Texture(frame.specular_radiance, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.specular_radiance_state, false, "indirect specular radiance/hit distance"); !result) return result;
-    if (auto result = impl_->Texture(frame.diffuse_output, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.diffuse_output_state, true, "denoised diffuse output"); !result) return result;
-    if (auto result = impl_->Texture(frame.specular_output, base.active, DXGI_FORMAT_R16G16B16A16_FLOAT, frame.specular_output_state, true, "denoised specular output"); !result) return result;
-    const std::array inputs{frame.signed_view_z, frame.packed_motion, frame.normal_roughness, frame.diffuse_albedo,
-                            frame.specular_albedo, frame.diffuse_radiance, frame.specular_radiance};
-    if (frame.diffuse_output == frame.specular_output ||
-        std::find(inputs.begin(), inputs.end(), frame.diffuse_output) != inputs.end() ||
-        std::find(inputs.begin(), inputs.end(), frame.specular_output) != inputs.end())
-        return FsrFailure(ErrorCode::InvalidArgument, "FSR RR requires distinct converted input and diffuse/specular output allocations.");
-    // The ABI uses DirectX row-vector, row-major matrices. Copy the unjittered
-    // matrices exactly; SDK computes previous history internally. The renderer
-    // conversion computes motionZ from previous/current object positions in their
-    // exact respective view matrices, including object/skinning motion.
-    ffxDispatchDescDenoiser dispatch{};
-    dispatch.header.type = FFX_API_DISPATCH_DESC_TYPE_DENOISER;
-    dispatch.commandList = commands;
-    dispatch.linearDepth = NativeResource(frame.signed_view_z, frame.signed_view_z_state);
-    dispatch.motionVectors = NativeResource(frame.packed_motion, frame.packed_motion_state);
-    dispatch.normals = NativeResource(frame.normal_roughness, frame.normal_roughness_state);
-    dispatch.diffuseAlbedo = NativeResource(frame.diffuse_albedo, frame.diffuse_albedo_state);
-    dispatch.specularAlbedo = NativeResource(frame.specular_albedo, frame.specular_albedo_state);
-    dispatch.motionVectorScale = {1.0f, 1.0f, 1.0f};
-    dispatch.jitterOffsets = {camera.jitter_pixels[0], camera.jitter_pixels[1]};
-    dispatch.cameraPositionDelta = {camera.previous_position.x - camera.position.x,
-        camera.previous_position.y - camera.position.y, camera.previous_position.z - camera.position.z};
-    static_assert(sizeof(dispatch.view) == sizeof(camera.view));
-    std::memcpy(&dispatch.view, &camera.view, sizeof(dispatch.view));
-    std::memcpy(&dispatch.projection, &camera.projection, sizeof(dispatch.projection));
-    dispatch.linearDepthBounds = {camera.near_plane, camera.far_plane};
-    dispatch.renderSize = {base.active.width, base.active.height};
-    dispatch.frameIndex = static_cast<uint32_t>(base.identity.render_id);
-    dispatch.flags = FFX_DENOISER_DISPATCH_NON_GAMMA_ALBEDO;
-    if (impl_->reset_denoiser || camera.reset_history) dispatch.flags |= FFX_DENOISER_DISPATCH_RESET;
-    ffxDispatchDescDenoiserIndirectDiffuse diffuse{};
-    diffuse.header.type = FFX_API_DISPATCH_DESC_TYPE_DENOISER_INDIRECT_DIFFUSE;
-    diffuse.signal.input = NativeResource(frame.diffuse_radiance, frame.diffuse_radiance_state);
-    diffuse.signal.output = NativeResource(frame.diffuse_output, frame.diffuse_output_state);
-    ffxDispatchDescDenoiserIndirectSpecular specular{};
-    specular.header.type = FFX_API_DISPATCH_DESC_TYPE_DENOISER_INDIRECT_SPECULAR;
-    specular.signal.input = NativeResource(frame.specular_radiance, frame.specular_radiance_state);
-    specular.signal.output = NativeResource(frame.specular_output, frame.specular_output_state);
-    dispatch.header.pNext = &diffuse.header;
-    diffuse.header.pNext = &specular.header;
-    const auto code = impl_->denoiser_api.dispatch(&impl_->denoiser, &dispatch.header);
-    if (code != FFX_API_RETURN_OK) return impl_->Fail(FsrEffect::RayRegeneration, "ffxDispatch(Denoiser indirect diffuse/specular)", code);
-    impl_->reset_denoiser = false;
-    return Result::Success();
-#endif
-}
-
 Result FsrSession::ReleaseReconstructionAfterCompletion(bool gpu_idle_acknowledged)
 {
 #if !HS_WITH_FSR
@@ -1052,24 +746,17 @@ Result FsrSession::ReleaseReconstructionAfterCompletion(bool gpu_idle_acknowledg
     if (!impl_) return Result::Success();
     if (auto result = impl_->RequireOwner(); !result) return result;
     std::lock_guard lock(impl_->api_mutex);
-    if ((impl_->Upscale().upscale || impl_->denoiser) && !gpu_idle_acknowledged)
-        return FsrFailure(ErrorCode::InvalidState, "FSR SR/RR destruction requires completed graph work and reset unsubmitted lists.");
+    if (impl_->Upscale().upscale && !gpu_idle_acknowledged)
+        return FsrFailure(ErrorCode::InvalidState, "FSR SR destruction requires completed graph work and reset unsubmitted lists.");
     if (impl_->Upscale().upscale)
     {
         const auto code = impl_->upscale_api.destroy(&impl_->Upscale().upscale, nullptr);
         if (code != FFX_API_RETURN_OK) return impl_->Fail(FsrEffect::SuperResolution, "ffxDestroyContext(Upscale)", code);
         impl_->Upscale().upscale = {};
     }
-    if (impl_->denoiser)
-    {
-        const auto code = impl_->denoiser_api.destroy(&impl_->denoiser, nullptr);
-        if (code != FFX_API_RETURN_OK) return impl_->Fail(FsrEffect::RayRegeneration, "ffxDestroyContext(Denoiser)", code);
-        impl_->denoiser = {};
-    }
     impl_->Upscale().requirements = {};
-    impl_->Upscale().maximum_render = impl_->Upscale().upscale_output = impl_->denoiser_maximum = {};
+    impl_->Upscale().maximum_render = impl_->Upscale().upscale_output = {};
     impl_->selected[EffectIndex(FsrEffect::SuperResolution)].clear();
-    impl_->selected[EffectIndex(FsrEffect::RayRegeneration)].clear();
     return Result::Success();
 #endif
 }
@@ -1460,7 +1147,6 @@ Result FsrSession::ShutdownAfterCompletion(bool gpu_idle_acknowledged)
 #else
     if (!impl_) return Result::Success();
     if (auto result = impl_->RequireOwner(); !result) return result;
-    if(impl_->private_rr_contexts)return FsrFailure(ErrorCode::InvalidState,"Release all candidate/live private RR contexts before unloading the shared FSR session.");
     if (auto result = DestroyPresentationAfterCompletion(gpu_idle_acknowledged); !result) return result;
     std::vector<std::uint32_t> viewports;
     for (const auto &[viewport, _] : impl_->upscale_views) viewports.push_back(viewport);
@@ -1473,7 +1159,6 @@ Result FsrSession::ShutdownAfterCompletion(bool gpu_idle_acknowledged)
     if (auto result = ReleaseReconstructionAfterCompletion(gpu_idle_acknowledged); !result) return result;
     impl_->upscale_views.clear();
     impl_->upscale_api.Unload();
-    impl_->denoiser_api.Unload();
     impl_->generation_api.Unload();
     impl_.reset();
     return Result::Success();

@@ -13,7 +13,4 @@ meshoptimizer 1.3 - MIT; Cook-only, pinned 9e1f07b159d3cb777f1c67ed31fc11fd11798
 Intel XeSS 3.0.2 (XeSS, XeFG and XeLL) - Intel Simplified Software License, October 2022; optional Runtime
 NVIDIA Streamline 2.14.1 - MIT framework plus separate NVIDIA DLSS/DLSS-G plugin licenses; optional Runtime, shipped license files apply to their respective components
 AMD FidelityFX SDK 2.3.0 - AMD FidelityFX SDK license (including the binary SDK terms); optional Runtime
-NVIDIA NRD 4.17.3 - NVIDIA RTX SDK license; optional Runtime, pinned 792eff196afdd350fd9c3f862119017ccb438a0e
-NRD ShaderMake - MIT, pinned 18f5a344e7ca8fa65daaf079d07bc8ce38453e05; prerequisite tool and embedded shader blob library
-NRD MathLib v11 - MIT, pinned e3eee9362880b708a315b9946df51dae332bb46f; prerequisite headers and shader helpers
 Microsoft DirectSR / DirectX Agility SDK 1.715.1-preview - Microsoft prerelease DirectX license; optional local Windows development only, excluded from Runtime install redistribution

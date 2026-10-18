@@ -24,6 +24,34 @@ void Check(bool condition, std::string_view message)
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
+void TestFrameGenerationPresentationPolicy()
+{
+    for (unsigned phase = 0; phase <= static_cast<unsigned>(hs::SessionPhase::QuitRequested); ++phase)
+        Check(hs::AllowGameplayFrameGeneration(static_cast<hs::SessionPhase>(phase)) ==
+                  (phase == static_cast<unsigned>(hs::SessionPhase::Playing)),
+              "only active gameplay admits frame generation; menus/pause/loading remain Off");
+    Check(!hs::AllowGameplayFrameGeneration(static_cast<hs::SessionPhase>(255)), "unknown phase cannot admit FG");
+    hs::RendererPresentationStatus status;
+    status.requested.multiplier = 2;
+    status.effective_provider.value = "dlss";
+    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "0", "Off has no generation multiplier");
+    for (const auto mode : {hs::GraphicsFrameGenerationMode::Fixed, hs::GraphicsFrameGenerationMode::Auto})
+    {
+        status.active_mode = mode;
+        for (const auto observed : {0u, 1u, 2u, 3u})
+        {
+            status.observed_multiplier = observed;
+            Check(hs::FrameGenerationMultiplierPolicyToken(status) == "2",
+                  "actual-present deltas do not change selected multiplier or config identity");
+        }
+    }
+    status.active_mode = hs::GraphicsFrameGenerationMode::Dynamic;
+    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "dynamic", "Dynamic reports a policy, not a measured count");
+    status.active_mode = hs::GraphicsFrameGenerationMode::Auto;
+    status.effective_provider.value = "fsr";
+    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "native", "FSR callback count is not a configurable multiplier");
+}
+
 std::filesystem::path NewRoot(std::string_view name)
 {
     const auto root = std::filesystem::temp_directory_path() /
@@ -98,13 +126,13 @@ void TestLoadSourceAndProjection()
 void TestRequestedEditPreservesUnimplementedFields()
 {
     hs::SettingsDocument document;
-    document.graphics.preset = hs::GraphicsPreset::UltraRT;
+    document.graphics.preset = hs::GraphicsPreset::Ultra;
     document.graphics.hdr_mode = hs::GraphicsHdrMode::On;
     document.graphics.reconstruction_provider.value = "future_provider";
     document.opaque_optional_json = R"({"graphics":{"future_key":"keep"}})";
     hs::ApplySettingsEdit(document, {hs::UiCommandKind::SetMasterVolumePercent, 50});
     Check(document.master_volume == 0.5f &&
-              document.graphics.preset == hs::GraphicsPreset::UltraRT,
+              document.graphics.preset == hs::GraphicsPreset::Ultra,
           "audio edit preserves requested graphics preset");
     hs::ApplySettingsEdit(document, {hs::UiCommandKind::SetBloom, 0});
     Check(!document.graphics.bloom &&
@@ -487,6 +515,48 @@ void TestMigration()
     std::filesystem::remove_all(root);
 }
 
+void TestRemovedGraphicsReadMigration()
+{
+    const auto root = NewRoot("removed-graphics-migration");
+    hs::SaveStore store(root);
+    for (const auto gi_token : {"ray_traced", "raytraced"})
+    {
+        const auto legacy = std::string(R"({"schema_version":2,"graphics":{"preset":"ultra_rt","ao_mode":"rtao","gi_mode":")") +
+            gi_token + R"(","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
+        Write(root / "settings.json", legacy);
+        hs::SettingsDocument loaded;
+        bool stored{};
+        Check(store.LoadSettingsV2(loaded, &stored) && stored &&
+                  loaded.graphics.preset == hs::GraphicsPreset::Ultra &&
+                  loaded.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
+                  loaded.graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid &&
+                  loaded.graphics.reflection_mode == hs::GraphicsReflectionMode::ScreenSpace &&
+                  loaded.graphics.shadow_mode == hs::GraphicsShadowMode::Raster,
+              "removed graphics modes migrate to supported non-RT modes");
+        Check(loaded.graphics.output_extent == hs::GraphicsExtent{1920, 1080} &&
+                  loaded.graphics.frame_limit_fps == 144 &&
+                  loaded.graphics.reconstruction_provider.value == "dlss" &&
+                  loaded.graphics.frame_generation_provider.value == "dlss" &&
+                  loaded.graphics.frame_generation_mode == hs::GraphicsFrameGenerationMode::Fixed &&
+                  loaded.graphics.bloom_strength == 1.25f && loaded.master_volume == 0.6f &&
+                  loaded.bgm_volume == 0.25f && loaded.skill_virtual_keys[0] == 'R' &&
+                  loaded.opaque_optional_json.contains("future_quality") &&
+                  loaded.opaque_optional_json.contains("future_field") &&
+                  CorruptCount(root) == 0 && Read(root / "settings.json") == legacy,
+              "read migration preserves other graphics/audio/keys/unknown data without rewriting source");
+        Check(store.SaveSettingsV2(loaded).Succeeded(), "save migrated settings");
+        const auto saved = Read(root / "settings.json");
+        for (const auto obsolete : {"ultra_rt", "rtao", "ray_traced", "raytraced", "hybrid_rt", "dlss_rr",
+                                   "ray_tracing_enabled", "rt_trace_distance_m",
+                                   "neural_ray_reconstruction", "ray_reconstruction_provider"})
+            Check(!saved.contains(obsolete), "removed controls and modes do not return on serialization");
+        Check(saved.contains("future_quality") && saved.contains("future_field") &&
+                  store.LoadSettingsV2(loaded) && CorruptCount(root) == 0,
+              "migrated settings round-trip with optional extensions preserved");
+    }
+    std::filesystem::remove_all(root);
+}
+
 void TestV2RoundTrip()
 {
     const auto root = NewRoot("roundtrip");
@@ -499,7 +569,7 @@ void TestV2RoundTrip()
     settings.graphics.reconstruction_quality.value = "future_quality_mode";
     settings.graphics.frame_generation_provider.value = "future_fg";
     settings.graphics.frame_generation_mode = hs::GraphicsFrameGenerationMode::Dynamic;
-    settings.graphics.ao_mode = hs::GraphicsAoMode::RTAO;
+    settings.graphics.ao_mode = hs::GraphicsAoMode::GTAO;
     settings.graphics.dynamic_resolution = true;
     settings.graphics.dynamic_min_percent = 40.0f;
     settings.graphics.dynamic_max_percent = 90.0f;
@@ -524,7 +594,7 @@ void TestV2RoundTrip()
               loaded.graphics.reconstruction_quality.value == "future_quality_mode" &&
               loaded.graphics.frame_generation_mode ==
                   hs::GraphicsFrameGenerationMode::Dynamic &&
-              loaded.graphics.ao_mode == hs::GraphicsAoMode::RTAO &&
+              loaded.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
               loaded.graphics.dynamic_resolution &&
               loaded.graphics.dynamic_min_percent == 40.0f &&
               loaded.graphics.dynamic_max_percent == 90.0f &&
@@ -543,7 +613,7 @@ void TestV2RoundTrip()
               edited.graphics.frame_generation_mode ==
                   hs::GraphicsFrameGenerationMode::Dynamic &&
               edited.graphics.reconstruction_provider.value == "future_provider" &&
-              edited.graphics.ao_mode == hs::GraphicsAoMode::RTAO &&
+              edited.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
               edited.opaque_optional_json.find("future_quality") != std::string::npos,
           "UI edit preserves unsupported requests and unknown fields across restart");
     edited.opaque_optional_json = R"({"graphics":{"future_quality":"latest"}})";
@@ -573,10 +643,10 @@ void TestFullGraphicsTransactions()
     original.graphics.display_output.value = "saved_monitor";
     original.graphics.frame_limit_fps = 120;
     hs::GraphicsSettingsCommit controller(original, hs::ProjectSettingsDocument(original), false);
-    Check(controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "ultra_rt")) &&
-              controller.Requested().graphics.preset == hs::GraphicsPreset::UltraRT &&
-              controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::RayTraced &&
-              controller.Requested().graphics.shadow_mode == hs::GraphicsShadowMode::HybridRT &&
+    Check(controller.EditGraphics(GraphicsCommand(hs::SettingId::Preset, "ultra")) &&
+              controller.Requested().graphics.preset == hs::GraphicsPreset::Ultra &&
+              controller.Requested().graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid &&
+              controller.Requested().graphics.shadow_mode == hs::GraphicsShadowMode::Raster &&
               controller.Requested().graphics.pom_quality == hs::GraphicsOptionalQuality::Ultra &&
               controller.Requested().graphics.frame_limit_fps == 120 &&
               controller.Requested().graphics.display_output.value == "saved_monitor" &&
@@ -736,12 +806,14 @@ int main()
         TestLoadSourceAndProjection();
         TestRequestedEditPreservesUnimplementedFields();
         TestStartupGraphicsRendererProjection();
+        TestFrameGenerationPresentationPolicy();
         TestGraphicsApplyAcknowledgments();
         TestFailedApplyReplaysOnlyLaterEdits();
         TestClickPreviewWithinOnePump();
         TestDisplayIntentWaitsForConfirmation();
         TestDeferredDisplaySaveBoundary();
         TestMigration();
+        TestRemovedGraphicsReadMigration();
         TestV2RoundTrip();
         TestFullGraphicsTransactions();
         TestOptionalAccessibilitySchema();

@@ -79,7 +79,7 @@ enum class MaterialOp
     // Projected decal functions return the modified receiver closure. Signature:
     // texture, sampler, uv, layer, dx, dy, receiver base/normal/roughness,
     // tint_hdr, projector(axis.xy, radius, alpha), shape(age, glow, cells), seed,
-    // target roughness, roughness blend. Sampling is explicit and RasterOnly.
+    // target roughness, roughness blend. Sampling uses explicit gradients.
     DecalFracture,
     DecalOrganic,
 };

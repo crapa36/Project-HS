@@ -37,6 +37,7 @@ struct ResourceInfo
     std::uint64_t allocation_size{};
     std::uint64_t allocation_alignment{};
     std::uint32_t heap_class{};
+    std::string_view name;
 };
 
 struct PassInfo

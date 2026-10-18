@@ -1,8 +1,10 @@
 #include <hs/runtime/application.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/presentation/projector.hpp>
+#include <hs/presentation/meadow_surface.hpp>
 
 #include "runtime_channels.hpp"
+#include "native_input_frame.hpp"
 #include "ui_command_admission.hpp"
 #include "runtime_diagnostics.hpp"
 #include "session_music.hpp"
@@ -332,19 +334,16 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
         }
         model->resolved.push_back({id, std::move(effective), std::move(reason)});
     };
-    constexpr std::array<std::pair<std::string_view, SettingId>, 15> capability_settings{{
+    constexpr std::array<std::pair<std::string_view, SettingId>, 12> capability_settings{{
         std::pair<std::string_view, SettingId>{"sr_provider", SettingId::ReconstructionProvider},
         {"reconstruction", SettingId::ReconstructionQuality},
         {"fg_provider", SettingId::FrameGenerationProvider},
         {"frame_generation", SettingId::FrameGenerationMode},
         {"frame_generation_multiplier", SettingId::FrameGenerationMultiplier},
-        {"rr_provider", SettingId::RayReconstructionProvider},
         {"hdr", SettingId::HdrMode}, {"latency", SettingId::LowLatency},
         {"ao", SettingId::AoMode}, {"gi", SettingId::GiMode},
         {"reflection", SettingId::ReflectionMode}, {"shadow", SettingId::ShadowMode},
-        {"adaptive_shading", SettingId::AdaptiveShading},
-        {"neural_rr", SettingId::NeuralRayReconstruction},
-        {"ray_tracing", SettingId::RayTracingEnabled}}};
+        {"adaptive_shading", SettingId::AdaptiveShading}}};
     const auto support_reason = [](GraphicsCapabilityReason reason) -> std::string {
         switch (reason)
         {
@@ -434,20 +433,15 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
     status(SettingId::OutputExtent, std::format("{}x{}", reconstruction.output_extent.width, reconstruction.output_extent.height), "실제로 출력하는 해상도입니다");
     status(SettingId::FrameGenerationProvider, presentation.effective_provider.value, presentation.availability + ": " + presentation.fallback_reason);
     status(SettingId::FrameGenerationMode, std::string(GraphicsEnumToken(presentation.active_mode)), presentation.fallback_reason);
-    status(SettingId::FrameGenerationMultiplier, std::to_string(presentation.observed_multiplier), presentation.maximum_multiplier
+    status(SettingId::FrameGenerationMultiplier, FrameGenerationMultiplierPolicyToken(presentation), presentation.maximum_multiplier
         ? std::format("지원하는 프레임 생성 배수: 2~{}배", presentation.maximum_multiplier)
         : presentation.requested.provider.value == "fsr" ? "이 방식은 배수를 직접 설정할 수 없습니다"
         : "프레임 생성을 켜면 지원하는 배수를 확인합니다");
     status(SettingId::LowLatency, presentation.low_latency_active ? "on" : "off", presentation.fallback_reason);
-    status(SettingId::RayTracingEnabled, lighting.active.ray_tracing_enabled ? "true" : "false", lighting.ray_scene_supported ? "현재 장치에서 레이 트레이싱을 지원합니다" : "현재 장치에서 레이 트레이싱을 사용할 수 없습니다");
     status(SettingId::AoMode, std::string(GraphicsEnumToken(lighting.active.ao_mode)), lighting.ao_fallback_reason);
     status(SettingId::GiMode, std::string(GraphicsEnumToken(lighting.active.gi_mode)), lighting.gi_fallback_reason.empty() ? lighting.software_gi.reason : lighting.gi_fallback_reason);
     status(SettingId::ReflectionMode, std::string(GraphicsEnumToken(lighting.active.reflection_mode)), lighting.reflection_fallback_reason);
-    status(SettingId::ShadowMode, std::string(GraphicsEnumToken(lighting.active.shadow_mode)), lighting.shadow_fallback_reason + "; " + lighting.local_shadows.reason + "; " + lighting.ray_shadows.reason);
-    status(SettingId::RayReconstructionProvider, canonical.actual_applied_available
-        ? canonical.actual_applied.ray_reconstruction_provider.value : std::string{},
-        lighting.radiance_denoiser.availability + ": " + lighting.radiance_denoiser.reason +
-            (lighting.ray_shadows.enabled && lighting.ray_shadows.native_sigma ? "; Native NRD SIGMA shadows active" : ""));
+    status(SettingId::ShadowMode, std::string(GraphicsEnumToken(lighting.active.shadow_mode)), lighting.shadow_fallback_reason + "; " + lighting.local_shadows.reason);
     const auto &adaptive = lighting.adaptive_shading;
     status(SettingId::AdaptiveShading,
         std::format("래스터 {} · 연산 {}", adaptive.raster_applied ? "켜짐" : "꺼짐", adaptive.compute_applied ? "켜짐" : "꺼짐"),
@@ -504,85 +498,6 @@ void WriteText(const std::filesystem::path &path, std::string_view text)
     stream << text;
 }
 
-// Only native latency uses this handoff. The render SDK owner sleeps first;
-// the window owner then pumps actual input, and simulation advances its normal
-// 60 Hz clock before acknowledging the same token. No renderer SDK is called
-// from the window or simulation thread.
-class NativeInputFrame
-{
-    std::mutex mutex_;
-    std::condition_variable changed_;
-    bool enabled_{}, cancelled_{}, input_parked_{}, simulation_parked_{};
-    std::uint64_t input_request_{}, input_sampled_{}, simulation_request_{}, simulation_completed_{};
-  public:
-    void SetEnabled(bool enabled)
-    {
-        std::unique_lock lock(mutex_); enabled_ = enabled; changed_.notify_all();
-        if (enabled)
-            changed_.wait(lock, [&] { return cancelled_ || (input_parked_ && simulation_parked_); });
-        else input_parked_ = simulation_parked_ = false;
-    }
-    void Cancel()
-    {
-        std::lock_guard lock(mutex_); cancelled_ = true; changed_.notify_all();
-    }
-    bool RequestInput(std::uint64_t token)
-    {
-        std::lock_guard lock(mutex_);
-        if (!enabled_ || cancelled_ || !token || input_request_ != input_sampled_ ||
-            simulation_request_ != simulation_completed_) return false;
-        input_request_ = token; changed_.notify_all(); return true;
-    }
-    bool WaitInput(std::uint64_t token)
-    {
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock, [&] { return cancelled_ || !enabled_ || input_sampled_ == token; });
-        return !cancelled_ && enabled_ && input_sampled_ == token;
-    }
-    bool ShouldPump(std::uint64_t &token)
-    {
-        std::lock_guard lock(mutex_); token = 0;
-        if (cancelled_) return false;
-        if (!enabled_) return true;
-        if (input_request_ == input_sampled_)
-        { input_parked_ = true; changed_.notify_all(); return false; }
-        input_parked_ = false;
-        token = input_request_; return true;
-    }
-    void Sampled(std::uint64_t token)
-    {
-        std::lock_guard lock(mutex_);
-        if (!cancelled_ && token == input_request_) input_sampled_ = token;
-        changed_.notify_all();
-    }
-    bool RequestSimulation(std::uint64_t token)
-    {
-        std::lock_guard lock(mutex_);
-        if (cancelled_ || !enabled_ || input_sampled_ != token) return false;
-        simulation_request_ = token; changed_.notify_all(); return true;
-    }
-    std::uint64_t AwaitSimulation()
-    {
-        std::unique_lock lock(mutex_);
-        simulation_parked_ = enabled_;
-        changed_.notify_all();
-        changed_.wait(lock, [&] { return cancelled_ || !enabled_ || simulation_request_ != simulation_completed_; });
-        simulation_parked_ = false;
-        return !cancelled_ && enabled_ ? simulation_request_ : 0;
-    }
-    void Simulated(std::uint64_t token)
-    {
-        std::lock_guard lock(mutex_);
-        if (!cancelled_ && token == simulation_request_) simulation_completed_ = token;
-        changed_.notify_all();
-    }
-    bool WaitSimulation(std::uint64_t token)
-    {
-        std::unique_lock lock(mutex_);
-        changed_.wait(lock, [&] { return cancelled_ || !enabled_ || simulation_completed_ == token; });
-        return !cancelled_ && enabled_ && simulation_completed_ == token;
-    }
-};
 
 PresentationEvent MakeAudioEvent(std::string_view cue, Sequence sequence) noexcept
 {
@@ -952,6 +867,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.warp = config.warp;
         renderer_config.validation = config.validation;
         renderer_config.gpu_validation = config.gpu_validation;
+        renderer_config.capture_timing_stream = config.capture_diagnostics;
+        renderer_config.frame_generation_allowed = false; // Startup/loading/menu are not gameplay frames.
         renderer_config.interpolate = !config.smoke;
         renderer_config.character_preview = config.character_preview;
         renderer_config.monster_preview_asset = config.monster_preview_asset;
@@ -1013,36 +930,86 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 return Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Graphics recovery allocation failed.");
             }
         };
+        std::ofstream graphics_settings_file;
+        std::optional<runtime_detail::DiagnosticLog> graphics_settings_lines;
+        std::uint64_t graphics_config_revision{};
+        std::string graphics_config_signature;
+        bool graphics_capture_complete{true};
+        if (config.capture_diagnostics)
+        {
+            graphics_settings_file.open(config.artifact_directory / "graphics_settings.csv", std::ios::binary);
+            if (!graphics_settings_file)
+                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    "Could not initialize graphics settings capture."));
+            graphics_settings_lines.emplace(graphics_settings_file, true,
+                "config_revision,settings_generation,pipeline_revision,setting_id,key,requested,effective,requested_available,native_effective,native_reason\n");
+        }
         bool execution_receipt_pending{true};
         const auto record_renderer_features = [&](std::uint64_t settings_generation) {
             execution_receipt_pending = true;
             try
             {
-                channels.renderer_graphics_ui.store(RendererGraphicsReceipt(renderer, active_graphics, active_settings_generation,
-                    static_cast<HWND>(window.Handle()), config.validation || config.gpu_validation), std::memory_order_release);
+                const auto receipt = RendererGraphicsReceipt(renderer, active_graphics, active_settings_generation,
+                    static_cast<HWND>(window.Handle()), config.validation || config.gpu_validation);
+                channels.renderer_graphics_ui.store(receipt, std::memory_order_release);
+                if (graphics_settings_lines)
+                {
+                    const auto canonical = renderer.GetGraphicsSettingsStatus();
+                    std::vector<std::string> rows;
+                    std::string signature = std::format("{},{}\n", active_settings_generation, renderer.PipelineRevision());
+                    for (const auto &descriptor : GraphicsSettingDescriptors())
+                    {
+                        const auto requested = GraphicsSettingToken(active_graphics, descriptor.id);
+                        const auto effective = canonical.actual_applied_available
+                            ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{};
+                        const auto choice = std::ranges::find_if(receipt->choices, [&](const auto &entry) {
+                            return entry.setting == descriptor.id && entry.token == requested;
+                        });
+                        // UI display/extent choices are suggestions, not native capability admissions.
+                        constexpr std::array capability_settings{SettingId::ReconstructionProvider,
+                            SettingId::ReconstructionQuality, SettingId::FrameGenerationProvider,
+                            SettingId::FrameGenerationMode, SettingId::FrameGenerationMultiplier,
+                            SettingId::HdrMode, SettingId::LowLatency,
+                            SettingId::AoMode, SettingId::GiMode, SettingId::ReflectionMode, SettingId::ShadowMode,
+                            SettingId::AdaptiveShading};
+                        const bool capability_reported = std::ranges::find(capability_settings, descriptor.id) != capability_settings.end();
+                        const auto native = std::ranges::find(receipt->resolved, descriptor.id, &GraphicsUiStatus::setting);
+                        rows.push_back(std::format("{},{},{},{},{},{},{}\n",
+                            static_cast<unsigned>(descriptor.id), runtime_detail::CsvField(descriptor.key),
+                            runtime_detail::CsvField(requested), runtime_detail::CsvField(effective),
+                            !capability_reported || choice == receipt->choices.end() ? -1 : choice->available ? 1 : 0,
+                            runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->effective),
+                            runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->reason)));
+                        signature += rows.back();
+                    }
+                    if (signature != graphics_config_signature)
+                    {
+                        ++graphics_config_revision;
+                        graphics_config_signature = std::move(signature);
+                        for (const auto &row : rows)
+                            graphics_settings_lines->Append(std::format("{},{},{},{}", graphics_config_revision,
+                                active_settings_generation, renderer.PipelineRevision(), row));
+                    }
+                }
                 const auto lighting = renderer.GetLightingStatus();
                 const auto reconstruction = renderer.GetReconstructionStatus();
                 const auto cache = renderer.GetPipelineCacheStats();
                 std::ofstream log(config.artifact_directory / "renderer_features.jsonl", std::ios::app);
                 log << std::format(
                     "{{\"settings_generation\":{},\"pipeline_revision\":{},"
-                    "\"requested\":{{\"ray_master\":{},\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"active\":{{\"ray_scene\":{},\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                    "\"requested\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                    "\"active\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
                     "\"fallback\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"hardware\":{{\"ray_scene\":{},\"inline_queries\":{}}},\"ray_scene_bytes\":{},"
                     "\"reconstruction\":{{\"requested\":\"{}\",\"active\":\"{}\",\"availability\":\"{}\"}},"
                     "\"pso_cache\":{{\"library\":{},\"mesh_library\":{},\"hits\":{},\"misses\":{},\"native_creates\":{},"
                     "\"store_failures\":{},\"load_failures\":{},\"io_failures\":{},\"discarded_files\":{}}}}}\n",
                     settings_generation, renderer.PipelineRevision(),
-                    lighting.requested.ray_tracing_enabled, GraphicsEnumToken(lighting.requested.ao_mode),
-                    GraphicsEnumToken(lighting.requested.gi_mode), GraphicsEnumToken(lighting.requested.reflection_mode),
-                    GraphicsEnumToken(lighting.requested.shadow_mode),
-                    lighting.active.ray_tracing_enabled, GraphicsEnumToken(lighting.active.ao_mode),
-                    GraphicsEnumToken(lighting.active.gi_mode), GraphicsEnumToken(lighting.active.reflection_mode),
-                    GraphicsEnumToken(lighting.active.shadow_mode),
+                    GraphicsEnumToken(lighting.requested.ao_mode), GraphicsEnumToken(lighting.requested.gi_mode),
+                    GraphicsEnumToken(lighting.requested.reflection_mode), GraphicsEnumToken(lighting.requested.shadow_mode),
+                    GraphicsEnumToken(lighting.active.ao_mode), GraphicsEnumToken(lighting.active.gi_mode),
+                    GraphicsEnumToken(lighting.active.reflection_mode), GraphicsEnumToken(lighting.active.shadow_mode),
                     lighting.ao_fallback_reason, lighting.gi_fallback_reason, lighting.reflection_fallback_reason,
-                    lighting.shadow_fallback_reason, lighting.ray_scene_supported, lighting.inline_ray_queries_supported,
-                    lighting.ray_scene_allocated_bytes, reconstruction.requested_provider.value,
+                    lighting.shadow_fallback_reason, reconstruction.requested_provider.value,
                     reconstruction.effective_provider.value, reconstruction.requested_availability,
                     cache.library_supported, cache.mesh_library_supported, cache.hits, cache.misses, cache.native_creates,
                     cache.store_failures, cache.load_failures, cache.io_failures, cache.discarded_files);
@@ -1050,6 +1017,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             catch (const std::bad_alloc &)
             {
                 OutputDebugStringA("Graphics status receipt allocation failed; previous immutable receipt retained.\n");
+                if (graphics_settings_lines)
+                {
+                    graphics_capture_complete = false;
+                    record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime",
+                        "Graphics settings capture allocation failed."));
+                }
             }
         };
         record_renderer_features(0);
@@ -1107,6 +1080,99 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             "frame,tick,cpu_us,memory_bytes,ecs_count,queue_depth\n");
         runtime_detail::DiagnosticLog gpu_lines(gpu_file, capture_diagnostics,
             "frame,tick,pass,gpu_ns,queue,measured\n");
+        std::ofstream performance_file, gpu_live_file;
+        std::optional<runtime_detail::DiagnosticLog> performance_lines, gpu_live_lines;
+        runtime_detail::PerformanceLogState performance_state;
+        std::uint64_t performance_frequency{};
+        if (config.capture_diagnostics)
+        {
+            LARGE_INTEGER frequency{};
+            if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    "Could not calibrate performance capture clock."));
+            else
+                performance_frequency = static_cast<std::uint64_t>(frequency.QuadPart);
+            performance_file.open(config.artifact_directory / "performance.csv", std::ios::binary);
+            gpu_live_file.open(config.artifact_directory / "gpu_live.csv", std::ios::binary);
+            if (!performance_file || !gpu_live_file)
+                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    "Could not initialize performance capture files."));
+            performance_lines.emplace(performance_file, true,
+                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency\n");
+            gpu_live_lines.emplace(gpu_live_file, true,
+                "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid\n");
+        }
+        bool gpu_drain_succeeded{true};
+        std::uint64_t invalid_gpu_frames{};
+        const auto append_gpu_capture = [&](const GpuPassTimings &gpu, std::uint64_t observed_frame, bool drained) {
+            if (!gpu_live_lines) return;
+            if (!performance_state.AcceptGpuFrame(gpu.completed_frame_id, !gpu.passes.empty(), gpu.fence_completed)) return;
+            if (!gpu.valid) ++invalid_gpu_frames;
+            for (const auto &pass : gpu.passes)
+                gpu_live_lines->Append(std::format(
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    observed_frame,
+                    gpu.completed_frame_id,
+                    gpu.view_id,
+                    gpu.critical_path_ms,
+                    static_cast<unsigned>(gpu.critical_path_valid),
+                    gpu.cpu_recording_ms,
+                    static_cast<unsigned>(gpu.cpu_recording_valid),
+                    static_cast<unsigned>(gpu.gpu_limited),
+                    static_cast<unsigned>(gpu.fence_completed),
+                    pass.pass_id,
+                    static_cast<unsigned>(pass.queue),
+                    pass.nanoseconds,
+                    static_cast<unsigned>(pass.measured),
+                    pass.begin_ticks,
+                    pass.end_ticks,
+                    pass.timestamp_frequency,
+                    pass.begin_qpc,
+                    pass.end_qpc,
+                    pass.qpc_frequency,
+                    static_cast<unsigned>(pass.clock_calibrated),
+                    runtime_detail::CsvField(pass.name),
+                    static_cast<unsigned>(gpu.valid),
+                    static_cast<unsigned>(drained),
+                    gpu.cpu_qpc_frequency,
+                    pass.cpu_record_begin_qpc,
+                    pass.cpu_record_end_qpc,
+                    static_cast<unsigned>(pass.cpu_record_valid),
+                    pass.cpu_provider_submit_begin_qpc,
+                    pass.cpu_provider_submit_end_qpc,
+                    static_cast<unsigned>(pass.cpu_provider_submit_valid)));
+        };
+        const auto collect_gpu_capture = [&](std::uint64_t observed_frame, bool drain) -> Result {
+            if (!gpu_live_lines) return Result::Success();
+            std::vector<GpuPassTimings> completed;
+            const auto collected = drain ? renderer.DrainGpuPassTimings(completed)
+                                         : renderer.ConsumeCompletedGpuPassTimings(completed);
+            if (!collected)
+            {
+                gpu_drain_succeeded = false;
+                return collected;
+            }
+            for (const auto &gpu : completed) append_gpu_capture(gpu, observed_frame, drain);
+            return Result::Success();
+        };
+        const auto drain_gpu_capture = [&]() -> Result {
+            return collect_gpu_capture(channels.rendered_frames.load(std::memory_order_acquire), true);
+        };
+        bool frame_generation_allowed{};
+        const auto set_frame_generation_allowed = [&](bool allowed) -> Result {
+            if (frame_generation_allowed == allowed) return Result::Success();
+            if (renderer.GetPresentationStatus().requested.mode != GraphicsFrameGenerationMode::Off)
+                if (auto drained = drain_gpu_capture(); !drained) return drained;
+            if (auto changed = renderer.SetFrameGenerationAllowed(allowed); !changed) return changed;
+            frame_generation_allowed = allowed;
+            record_renderer_features(0);
+            return Result::Success();
+        };
+        const auto read_performance_qpc = [] {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            return static_cast<std::uint64_t>(qpc.QuadPart);
+        };
         float previous_foot_phase = -1.0f;
         Tick previous_foot_tick{};
         pending_particle_spawns.reserve(256);
@@ -1143,6 +1209,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto next_frame = std::chrono::steady_clock::now();
         for (;;)
         {
+            const auto loop_start_qpc = performance_lines ? read_performance_qpc() : 0;
 #if defined(HS_DEVELOPMENT_TOOLS)
             const auto generation_now = std::chrono::steady_clock::now();
             const auto generation_ready = generation_preparation.valid() &&
@@ -1303,9 +1370,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 if (current)
                                 {
                                     if (!scene_compatible) stage = "scene_closure";
-                                    reloaded = renderer.ReloadContentGeneration(candidate.id, candidate.product_paths,
-                                        candidate.product_digests, next_generation, catalog_changed ? &sprite_bindings : nullptr,
-                                        &resident_replaced, scene_compatible);
+                                    reloaded = drain_gpu_capture();
+                                    if (!reloaded) record_thread_failure(reloaded);
+                                    if (reloaded)
+                                        reloaded = renderer.ReloadContentGeneration(candidate.id, candidate.product_paths,
+                                            candidate.product_digests, next_generation, catalog_changed ? &sprite_bindings : nullptr,
+                                            &resident_replaced, scene_compatible);
                                 }
                                 if (current && reloaded)
                                 {
@@ -1395,6 +1465,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 resize_width = resize_command.width;
                 resize_height = resize_command.height;
             }
+            if (apply_renderer_settings || (resize_width && resize_height))
+                if (auto drained = drain_gpu_capture(); !drained)
+                {
+                    record_thread_failure(drained);
+                    break;
+                }
             auto resize_error = ErrorCode::None;
             if (resize_width && resize_height)
             {
@@ -1517,12 +1593,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
             }
 
+            const bool active_gameplay = AllowGameplayFrameGeneration(static_cast<SessionPhase>(
+                channels.session_phase.load(std::memory_order_acquire)));
+            if (auto policy = set_frame_generation_allowed(active_gameplay); !policy)
+            { record_thread_failure(policy); break; }
+            const bool has_current_snapshot = !renderer_settings_suspended && snapshot_consumer.AcquireLatest().has_current;
+            std::uint64_t input_token{};
+            // Evaluate Auto cadence even while its native latency/FG owner is Off,
+            // so a recovered base cadence can re-enable the existing request.
+            if (has_current_snapshot)
+                if (auto begun = renderer.BeginInputFrame(input_token); !begun)
+                { record_thread_failure(begun); break; }
             auto current_presentation = renderer.GetPresentationStatus();
             const bool native_latency = current_presentation.low_latency_active;
             if (current_presentation.effective_provider != previous_ui_presentation.effective_provider ||
                 current_presentation.active_mode != previous_ui_presentation.active_mode ||
                 current_presentation.maximum_multiplier != previous_ui_presentation.maximum_multiplier ||
-                current_presentation.observed_multiplier != previous_ui_presentation.observed_multiplier ||
                 current_presentation.low_latency_active != previous_ui_presentation.low_latency_active ||
                 current_presentation.availability != previous_ui_presentation.availability ||
                 current_presentation.fallback_reason != previous_ui_presentation.fallback_reason)
@@ -1530,7 +1616,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 previous_ui_presentation = std::move(current_presentation);
                 record_renderer_features(0);
             }
-            const bool has_native_snapshot = native_latency && snapshot_consumer.AcquireLatest().has_current;
+            const bool has_native_snapshot = native_latency && has_current_snapshot;
             if (native_latency && has_native_snapshot && config.smoke)
             {
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -1540,8 +1626,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             native_input_frame.SetEnabled(native_latency && has_native_snapshot);
             if (native_latency && has_native_snapshot)
             {
-                std::uint64_t token{};
-                if (auto begun = renderer.BeginInputFrame(token); !begun) { record_thread_failure(begun); break; }
+                const auto token = input_token;
                 if (!native_input_frame.RequestInput(token))
                 {
                     if (!channels.stop_requested.load(std::memory_order_acquire))
@@ -1733,6 +1818,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (config.resize_test && !resized &&
                     snapshots.current.header.tick >= config.maximum_ticks / 2)
                 {
+                    if (auto drained = drain_gpu_capture(); !drained)
+                    {
+                        record_thread_failure(drained);
+                        break;
+                    }
                     if (auto resize_result =
                             renderer.Resize(config.width + 64, config.height + 36);
                         !resize_result)
@@ -2187,6 +2277,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     continue;
                 }
                 const auto frame_start = std::chrono::steady_clock::now();
+                const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
                 const std::array views{renderer.MainViewInput(snapshots.current.camera)};
                 const RenderFrameInput render_input{
                     .views = views,
@@ -2225,11 +2316,112 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
                     .wait_for_streaming = config.smoke_render_lockstep,
                 };
+                // GPU completion is delayed; offline attribution joins this revision through its own frame ID.
+                // Simulation/input can enter Pause or a menu after this loop's
+                // input boundary. Disable before that first non-gameplay Present.
+                if (!AllowGameplayFrameGeneration(static_cast<SessionPhase>(channels.session_phase.load(std::memory_order_acquire))))
+                    if (auto policy = set_frame_generation_allowed(false); !policy)
+                    { record_thread_failure(policy); break; }
+                const auto frame_config_revision = graphics_config_revision;
+                const auto frame_settings_generation = active_settings_generation;
+                const auto frame_pipeline_revision = renderer.PipelineRevision();
                 if (auto rendered = renderer.Render(render_input, frame);
                     !rendered)
                 {
                     record_thread_failure(rendered);
                     break;
+                }
+                if (performance_lines)
+                {
+                    const auto render_end_qpc = read_performance_qpc();
+                    const auto qpc_microseconds = performance_frequency
+                        ? 1'000'000.0 / static_cast<double>(performance_frequency) : 0.0;
+                    const auto &cpu = frame.cpu_timings;
+                    const auto &gpu = renderer.LastCompletedGpuPassTimings();
+                    const auto &diagnostic = renderer.LastRenderedFrameDiagnostics();
+                    const auto &memory = diagnostic.memory;
+                    const auto &queues = diagnostic.queues;
+                    performance_lines->Append(std::format(
+                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                        frame.frame,
+                        frame.rendered_tick,
+                        render_start_qpc,
+                        performance_frequency,
+                        performance_state.FrameInterval(render_start_qpc) * qpc_microseconds,
+                        runtime_detail::PerformanceLogState::ElapsedTicks(loop_start_qpc, render_start_qpc) * qpc_microseconds,
+                        runtime_detail::PerformanceLogState::ElapsedTicks(render_start_qpc, render_end_qpc) * qpc_microseconds,
+                        cpu.wait_us,
+                        cpu.streaming_us,
+                        cpu.scene_prepare_us,
+                        cpu.ui_us,
+                        cpu.constants_upload_us,
+                        cpu.graph_build_us,
+                        cpu.graph_prepare_us,
+                        cpu.descriptors_us,
+                        cpu.graph_plan_us,
+                        cpu.graph_record_us,
+                        cpu.graph_submit_us,
+                        cpu.post_submit_us,
+                        cpu.present_us,
+                        cpu.diagnostics_us,
+                        cpu.wrapper_us,
+                        gpu.completed_frame_id,
+                        static_cast<unsigned>(gpu.valid && gpu.fence_completed),
+                        gpu.critical_path_ms,
+                        static_cast<unsigned>(gpu.critical_path_valid),
+                        static_cast<unsigned>(GetForegroundWindow() == window.Handle()),
+                        snapshots.current.instances.size(),
+                        snapshots.current.static_scene ? snapshots.current.static_scene->instances.size() : 0,
+                        static_cast<unsigned>(channels.session_phase.load(std::memory_order_acquire)),
+                        active_frame_cap,
+                        frame_config_revision,
+                        frame_settings_generation,
+                        frame_pipeline_revision,
+                        frame.rendered_view.id.value,
+                        frame.rendered_view.output_extent.width,
+                        frame.rendered_view.output_extent.height,
+                        frame.rendered_view.render_active.width,
+                        frame.rendered_view.render_active.height,
+                        frame.rendered_view.render_capacity.width,
+                        frame.rendered_view.render_capacity.height,
+                        diagnostic.rendered_frame_id,
+                        static_cast<unsigned>(diagnostic.rendered_frame_id == frame.frame && diagnostic.view_id == frame.rendered_view.id.value),
+                        diagnostic.submit_qpc,
+                        diagnostic.present_begin_qpc,
+                        diagnostic.present_end_qpc,
+                        diagnostic.qpc_frequency,
+                        static_cast<unsigned>(memory.budget_available),
+                        memory.local_usage_bytes,
+                        memory.local_budget_bytes,
+                        memory.tracked_live_bytes,
+                        memory.tracked_retiring_bytes,
+                        memory.texture_physical_bytes,
+                        memory.host_staging_bytes,
+                        queues.direct_batches,
+                        queues.compute_batches,
+                        queues.copy_batches,
+                        queues.cross_queue_waits,
+                        queues.record_jobs,
+                        queues.transient_bytes_without_aliasing,
+                        queues.transient_backing_bytes,
+                        static_cast<unsigned>(diagnostic.validation_enabled),
+                        static_cast<unsigned>(diagnostic.gpu_validation_enabled),
+                        cpu.frame_slot_wait_begin_qpc,
+                        cpu.frame_slot_wait_end_qpc,
+                        cpu.graph_prepare_validation_us,
+                        cpu.graph_prepare_info_key_us,
+                        cpu.graph_prepare_compile_us,
+                        cpu.graph_prepare_transient_us,
+                        frame.streamline_present.frames,
+                        static_cast<unsigned>(frame.streamline_present.valid),
+                        frame.streamline_present.begin_qpc,
+                        frame.streamline_present.end_qpc,
+                        frame.streamline_present.qpc_frequency));
+                    if (auto collected = collect_gpu_capture(frame.frame, false); !collected)
+                    {
+                        record_thread_failure(collected);
+                        break;
+                    }
                 }
 #if defined(HS_DEVELOPMENT_TOOLS)
                 if (generation_awaiting_frame)
@@ -2406,6 +2598,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
         native_input_frame.Cancel();
         const auto enhanced = renderer.UsesEnhancedBarriers();
+        // Shutdown releases query readbacks; retain the last in-flight frames first.
+        if (auto drained = drain_gpu_capture(); !drained) record_thread_failure(drained);
         if (auto shutdown = renderer.Shutdown(); !shutdown)
         {
             record_thread_failure(shutdown);
@@ -2430,21 +2624,45 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         const bool events_written = event_lines.Finish();
         const bool timeline_written = timeline_lines.Finish();
         const bool gpu_written = gpu_lines.Finish();
+        const bool performance_written = !performance_lines || performance_lines->Finish();
+        const bool gpu_live_written = !gpu_live_lines || gpu_live_lines->Finish();
+        const bool graphics_settings_written = !graphics_settings_lines || graphics_settings_lines->Finish();
         event_file.close(); timeline_file.close(); gpu_file.close();
+        if (performance_lines) { performance_file.close(); gpu_live_file.close(); }
+        if (graphics_settings_lines) graphics_settings_file.close();
         const bool io_ok = events_written && timeline_written && gpu_written &&
-            !event_file.fail() && !timeline_file.fail() && !gpu_file.fail();
-        const bool complete = io_ok && event_lines.Complete() &&
-            timeline_lines.Complete() && gpu_lines.Complete();
+            performance_written && gpu_live_written && graphics_settings_written &&
+            !event_file.fail() && !timeline_file.fail() && !gpu_file.fail() &&
+            (!performance_lines || (!performance_file.fail() && !gpu_live_file.fail())) &&
+            (!graphics_settings_lines || !graphics_settings_file.fail());
+        const auto expected_gpu_frames = performance_lines ? performance_lines->Records() : 0;
+        const bool gpu_frame_coverage_complete = !performance_lines ||
+            performance_state.GpuFrameCoverageComplete(expected_gpu_frames);
+        const bool complete = io_ok && gpu_drain_succeeded && gpu_frame_coverage_complete &&
+            graphics_capture_complete && event_lines.Complete() &&
+            timeline_lines.Complete() && gpu_lines.Complete() &&
+            (!performance_lines || (performance_lines->Complete() && gpu_live_lines->Complete())) &&
+            (!graphics_settings_lines || graphics_settings_lines->Complete());
         const bool status_written = write_diagnostics_status(std::format(
             "{{\"schema\":1,\"mode\":\"{}\",\"complete\":{},\"io_failed\":{},"
             "\"event_records\":{},\"event_dropped\":{},\"timeline_records\":{},"
-            "\"timeline_dropped\":{},\"gpu_records\":{},\"gpu_dropped\":{}}}\n",
+            "\"timeline_dropped\":{},\"gpu_records\":{},\"gpu_dropped\":{},"
+            "\"performance_records\":{},\"gpu_live_records\":{},\"graphics_settings_records\":{},"
+            "\"gpu_frames_written\":{},\"gpu_expected_frames\":{},\"gpu_last_frame\":{},"
+            "\"gpu_frame_coverage_complete\":{},\"gpu_drain_succeeded\":{},\"gpu_invalid_frames\":{},"
+            "\"graphics_capture_complete\":{}}}\n",
             capture_diagnostics ? "capture" : "recent", complete ? "true" : "false",
             io_ok ? "false" : "true", event_lines.Records(), event_lines.Dropped(),
-            timeline_lines.Records(), timeline_lines.Dropped(), gpu_lines.Records(), gpu_lines.Dropped()));
+            timeline_lines.Records(), timeline_lines.Dropped(), gpu_lines.Records(), gpu_lines.Dropped(),
+            performance_lines ? performance_lines->Records() : 0,
+            gpu_live_lines ? gpu_live_lines->Records() : 0,
+            graphics_settings_lines ? graphics_settings_lines->Records() : 0,
+            performance_state.GpuFrames(), expected_gpu_frames, performance_state.LastGpuFrame(),
+            gpu_frame_coverage_complete ? "true" : "false", gpu_drain_succeeded ? "true" : "false", invalid_gpu_frames,
+            graphics_capture_complete ? "true" : "false"));
         if (!status_started || !status_written || !io_ok || (capture_diagnostics && !complete))
             record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                "Diagnostic output incomplete: write, flush or close failed."));
+                "Diagnostic output incomplete: GPU frame coverage, metadata, write, flush or close failed."));
         WriteText(config.artifact_directory / "render.json",
                   std::format("{{\"enhanced_barriers\":{},\"validation_errors\":{},"
                               "\"last_tick\":{},\"typed_vfx_events_received\":{},"
@@ -2478,11 +2696,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.render_ready.wait(false, std::memory_order_acquire);
     {
         std::lock_guard lock(result_mutex);
-        if (!thread_result)
-        {
-            render_thread.join();
-            return {thread_result};
-        }
+        result = thread_result;
+    }
+    if (!result)
+    {
+        // Simulation was never started; let Render finish its normal drain.
+        channels.simulation_done.store(true, std::memory_order_release);
+        // Teardown can publish another failure through result_mutex.
+        render_thread.join();
+        return {result};
     }
 
     auto simulation_ports = channels.ForSimulation();
@@ -2602,10 +2824,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             const auto native_token = native_input_frame.AwaitSimulation();
             if (channels.stop_requested.load(std::memory_order_acquire)) break;
             std::uint32_t tick_count = 1;
+            FixedStepClock::Duration simulation_debt{};
             if (!config.smoke)
             {
                 now = FixedStepClock::Clock::now();
-                tick_count = clock.Advance(now).tick_count;
+                const auto advanced = clock.Advance(now);
+                tick_count = advanced.tick_count;
+                simulation_debt = advanced.debt;
                 if (tick_count == 0)
                 {
                     if (native_token) { native_input_frame.Simulated(native_token); continue; }
@@ -2785,7 +3010,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 for (const auto &signal : simulation.PendingDomainSignals())
                                 {
                                     std::array<PresentationEvent, 3> projected{};
-                                    const auto count = ProjectDomainSignal(signal, projected);
+                                    const auto count = ProjectDomainSignal(
+                                        signal, projected, read_model.View().arena_half_extent);
                                     events.insert(events.end(), projected.begin(),
                                                   projected.begin() + count);
                                 }
@@ -2826,7 +3052,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 for (const auto &signal : simulation.PendingDomainSignals())
                 {
                     std::array<PresentationEvent, 3> projected{};
-                    const auto count = ProjectDomainSignal(signal, projected);
+                    const auto count = ProjectDomainSignal(
+                                        signal, projected, read_model.View().arena_half_extent);
                     for (const auto &presentation :
                          std::span(projected).first(count))
                         if (!channels.presentation_events.TryPush(presentation))
@@ -2917,7 +3144,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             (void)slot->storage->AddUi(SettingsStatusText(
                                 "입력을 처리하지 못했습니다. 잠시 후 다시 눌러 주세요.",
                                 {500, 1000}, 0xFF80C0FFu));
-                        slot->storage->camera.target.y = pose.target_height_m;
+                        slot->storage->camera.target.y = pose.target_height_m +
+                            (read_model.View().arena_half_extent >= 14.0f
+                                ? MeadowGroundHeight({slot->storage->camera.target.x,
+                                                      slot->storage->camera.target.z}) : 0.0f);
                         channels.snapshots.Publish(*slot, ++publish_sequence);
                         scene_projection.Commit();
                     }
@@ -2968,7 +3198,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
             }
 
-            if (native_token) native_input_frame.Simulated(native_token);
+            if (native_token) native_input_frame.Simulated(native_token, simulation_debt);
             if (smoke_finished)
             {
                 break;
@@ -3669,7 +3899,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     const auto rendered_frames = channels.rendered_frames.load(std::memory_order_acquire);
     const auto rendered_particles =
         channels.rendered_particles.load(std::memory_order_acquire);
-    const auto valid =
+    auto valid =
         result && final_tick >= (config.smoke ? config.maximum_ticks : 0) && rendered_frames > 0 &&
         rendered_particles <= 10'000u &&
         channels.dropped_input_edges.load() == 0 &&
@@ -3679,6 +3909,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         if (auto finished = playtest_recorder.Finish(valid); !finished)
         {
             result = finished;
+            valid = false;
         }
     }
 

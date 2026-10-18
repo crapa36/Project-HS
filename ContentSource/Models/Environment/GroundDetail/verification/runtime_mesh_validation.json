@@ -1,0 +1,683 @@
+{
+  "complete": true,
+  "baseline_mesh_count": 42,
+  "baseline_mesh_values_sha256": "ee4c4551cbc8fc42611263e5e37d1d51d185c9432d4eb9ca07d8ac69fa8a7500",
+  "baseline_42_values_preserved": true,
+  "total_meshes": 63,
+  "new_meshes": [
+    {
+      "name": "flower_daisy",
+      "triangles": 11144,
+      "bounds_engine_m": [
+        [
+          -0.3491431772708893,
+          -5.810892253066413e-05,
+          -0.27892351150512695
+        ],
+        [
+          0.3037002384662628,
+          0.3460000157356262,
+          0.23228217661380768
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.2223272799908957e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_daisy_lod1",
+      "triangles": 4260,
+      "bounds_engine_m": [
+        [
+          -0.34768664836883545,
+          -7.778630970278755e-05,
+          -0.2801312506198883
+        ],
+        [
+          0.28347837924957275,
+          0.3460000157356262,
+          0.23497377336025238
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.597032786263862e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_daisy_lod2",
+      "triangles": 1050,
+      "bounds_engine_m": [
+        [
+          -0.34326544404029846,
+          -9.58081436692737e-05,
+          -0.28040966391563416
+        ],
+        [
+          0.28347837924957275,
+          0.3460000157356262,
+          0.19069822132587433
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.2586864040347598e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup",
+      "triangles": 7168,
+      "bounds_engine_m": [
+        [
+          -0.3358701765537262,
+          -6.889694486744702e-05,
+          -0.264567494392395
+        ],
+        [
+          0.31036537885665894,
+          0.35976433753967285,
+          0.2578471601009369
+        ]
+      ],
+      "minimum_triangle_area_m2": 7.825107287205426e-08,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup_lod1",
+      "triangles": 2880,
+      "bounds_engine_m": [
+        [
+          -0.3018713891506195,
+          -9.569075336912647e-05,
+          -0.23560532927513123
+        ],
+        [
+          0.31036537885665894,
+          0.35976433753967285,
+          0.2578471601009369
+        ]
+      ],
+      "minimum_triangle_area_m2": 9.198996611740838e-08,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup_lod2",
+      "triangles": 738,
+      "bounds_engine_m": [
+        [
+          -0.2991616427898407,
+          -0.00014096561062615365,
+          -0.23560532927513123
+        ],
+        [
+          0.31036537885665894,
+          0.35976433753967285,
+          0.2249639630317688
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.355457865500147e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet",
+      "triangles": 7308,
+      "bounds_engine_m": [
+        [
+          -0.36165904998779297,
+          -0.0007752529345452785,
+          -0.27782970666885376
+        ],
+        [
+          0.3104146420955658,
+          0.24837633967399597,
+          0.2833349108695984
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.2626811078654585e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.014678895473480225
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet_lod1",
+      "triangles": 3360,
+      "bounds_engine_m": [
+        [
+          -0.3427967131137848,
+          -0.0007616886286996305,
+          -0.26775240898132324
+        ],
+        [
+          0.3104146420955658,
+          0.24837633967399597,
+          0.28311607241630554
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.7712398159860287e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.014678895473480225
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet_lod2",
+      "triangles": 936,
+      "bounds_engine_m": [
+        [
+          -0.3427967131137848,
+          -0.000707819068338722,
+          -0.25609472393989563
+        ],
+        [
+          0.3104146420955658,
+          0.24837633967399597,
+          0.22762660682201385
+        ]
+      ],
+      "minimum_triangle_area_m2": 3.0432971566862716e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.024111807346343994
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch",
+      "triangles": 5112,
+      "bounds_engine_m": [
+        [
+          -0.33842477202415466,
+          0.0,
+          -0.28787392377853394
+        ],
+        [
+          0.2991110384464264,
+          0.11112648248672485,
+          0.23517552018165588
+        ]
+      ],
+      "minimum_triangle_area_m2": 3.1663660746636124e-07,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.013132750988006592
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch_lod1",
+      "triangles": 2160,
+      "bounds_engine_m": [
+        [
+          -0.2868131697177887,
+          0.0,
+          -0.2804826498031616
+        ],
+        [
+          0.2988654375076294,
+          0.111015684902668,
+          0.23521530628204346
+        ]
+      ],
+      "minimum_triangle_area_m2": 3.8517148349305055e-07,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.01240682601928711
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch_lod2",
+      "triangles": 672,
+      "bounds_engine_m": [
+        [
+          -0.28720226883888245,
+          0.0,
+          -0.2802062928676605
+        ],
+        [
+          0.2992706596851349,
+          0.11037757247686386,
+          0.22818173468112946
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.0499714166292625e-07,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.015511691570281982
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "ground_leaves",
+      "triangles": 2040,
+      "bounds_engine_m": [
+        [
+          -0.3205852210521698,
+          0.0,
+          -0.37324947118759155
+        ],
+        [
+          0.28317323327064514,
+          0.019999999552965164,
+          0.3539242744445801
+        ]
+      ],
+      "minimum_triangle_area_m2": 7.451572732742542e-08,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.5116055011749268
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "ground_leaves_lod1",
+      "triangles": 748,
+      "bounds_engine_m": [
+        [
+          -0.3205852210521698,
+          0.0,
+          -0.37324947118759155
+        ],
+        [
+          0.28317323327064514,
+          0.019999999552965164,
+          0.3304849863052368
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.746517491224939e-06,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.5116055011749268
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "ground_leaves_lod2",
+      "triangles": 264,
+      "bounds_engine_m": [
+        [
+          -0.3205852210521698,
+          0.0,
+          -0.37324947118759155
+        ],
+        [
+          0.28317323327064514,
+          0.019999999552965164,
+          0.22143562138080597
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.516727162440569e-06,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.5116055011749268
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "twig_cluster",
+      "triangles": 1510,
+      "bounds_engine_m": [
+        [
+          -0.32353416085243225,
+          0.0009464537724852562,
+          -0.16350212693214417
+        ],
+        [
+          0.28320619463920593,
+          0.05348110944032669,
+          0.23152196407318115
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.7999926220045272e-07,
+      "uv0_range": [
+        [
+          0.26625001430511475,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "twig_cluster_lod1",
+      "triangles": 520,
+      "bounds_engine_m": [
+        [
+          -0.32329943776130676,
+          0.0018826648592948914,
+          -0.2240062952041626
+        ],
+        [
+          0.28309252858161926,
+          0.04921979084610939,
+          0.11787092685699463
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.5407099418040855e-06,
+      "uv0_range": [
+        [
+          0.2770196497440338,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "twig_cluster_lod2",
+      "triangles": 162,
+      "bounds_engine_m": [
+        [
+          -0.32300812005996704,
+          0.0028135403990745544,
+          -0.21641846001148224
+        ],
+        [
+          0.2831847667694092,
+          0.0393449068069458,
+          0.11793100088834763
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.6199986787723012e-06,
+      "uv0_range": [
+        [
+          0.26625001430511475,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "fence_short",
+      "triangles": 1248,
+      "bounds_engine_m": [
+        [
+          -0.8999999761581421,
+          0.0,
+          -0.06384254992008209
+        ],
+        [
+          0.8999999761581421,
+          0.75,
+          0.10499999672174454
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.0216294934825152e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.7616055011749268
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "fence_short_lod1",
+      "triangles": 336,
+      "bounds_engine_m": [
+        [
+          -0.8999999761581421,
+          0.0,
+          -0.06000509113073349
+        ],
+        [
+          0.8999999761581421,
+          0.75,
+          0.10499999672174454
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.234636430823791e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "fence_short_lod2",
+      "triangles": 128,
+      "bounds_engine_m": [
+        [
+          -0.8999999761581421,
+          0.0,
+          -0.055736616253852844
+        ],
+        [
+          0.8999999761581421,
+          0.75,
+          0.09745077788829803
+        ]
+      ],
+      "minimum_triangle_area_m2": 0.00011704029577085155,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48374998569488525,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    }
+  ],
+  "coordinate_transform": "Blender Z-up -> engine Y-up: (x,z,-y), proper rotation determinant +1",
+  "uv_tangent_contract": "Flip V into PNG coordinates before calc_tangents; rotate tangent with position/normal and preserve recalculated bitangent sign"
+}

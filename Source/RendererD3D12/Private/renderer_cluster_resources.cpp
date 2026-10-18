@@ -195,7 +195,7 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
             range.page_base = static_cast<std::uint32_t>(next->cpu.pages.size());
             ClusterGpuTables tables;
             if (auto result = catalog.PrepareGpu(ordinal, generation_tag, range.group_base,
-                range.child_base, range.cluster_base, range.page_base, ordinal, tables); !result) return result;
+                range.child_base, range.cluster_base, range.page_base, render_data::EnvironmentGeometryMaterialOrdinal(ordinal), tables); !result) return result;
             range.group_count = static_cast<std::uint32_t>(tables.groups.size());
             range.first_root = range.group_base + catalog.Hierarchy().root_groups.front();
             range.child_count = static_cast<std::uint32_t>(tables.children.size());
@@ -229,7 +229,9 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
     const auto pinned = std::count_if(next->streams.begin(), next->streams.end(),
         [](const auto &stream) { return stream.pinned; });
     if (pinned > kGeometryPageCapacity - next->first_physical_slot)
-        return ClusterFailure("Pinned hierarchy root pages exceed the existing128-page descriptor capacity.");
+        return ClusterFailure("Pinned hierarchy roots require " + std::to_string(pinned) +
+            " pages after " + std::to_string(next->first_physical_slot) +
+            " reserved slots; descriptor capacity is " + std::to_string(kGeometryPageCapacity) + ".");
     cluster_runtime = std::move(next);
     auto &runtime = *cluster_runtime;
     if (auto result = UpdateResidencyBudget(); !result) return result;
@@ -503,7 +505,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
                     return ClusterFailure("Cluster catalog raster intervals overlap.");
             }
         }
-        if (input.constants.material_word != ((material_parameter_bases[ordinal] << 1u) | 1u))
+        if (input.constants.material_word != ((material_parameter_bases[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] << 1u) | 1u))
             return ClusterFailure("Cluster material word disagrees with its authored environment surface.");
         for (const auto &candidate : input.candidates)
         {

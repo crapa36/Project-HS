@@ -86,6 +86,20 @@ def sibling_fixture(generation, root):
     manifest_bytes = manifest_path.read_bytes()
     manifest = json.loads(manifest_bytes)
     snapshot = root / manifest['products'][0]['locator']
+    # A valid Windows destination must not overflow MAX_PATH only for its temporary copy.
+    with tempfile.TemporaryDirectory(prefix='hse-') as export_temp:
+        relative = manifest['products'][0]['locator']
+        padding = 248 - len(str(Path(export_temp))) - len(relative) - 2
+        assert padding > 0
+        destination = Path(export_temp) / ('e' * padding)
+        destination.mkdir()
+        assert len(str(destination / relative)) == 248
+        for _ in range(2):
+            run(generation, '--export-snapshot', '--build-root', root,
+                '--scope', 'test-sibling', '--destination', destination)
+        run(generation, '--verify', '--build-root', destination, '--scope', 'test-sibling')
+        assert (destination / relative).read_bytes() == snapshot.read_bytes()
+        assert not list(destination.rglob('*.tmp-*'))
     snapshot_stamp = snapshot.stat().st_mtime_ns
     pointer_stamp = pointer_path.stat().st_mtime_ns
     assert manifest['schema_version'] == 3 and 'product_set_id' not in manifest['products'][0]
@@ -244,6 +258,37 @@ def retired_action_fixture(generation, root):
     run(generation, '--gc', '--build-root', root, '--grace-seconds', 0)
     assert not (root / 'Generations' / generation_id).exists()
     assert not product.parent.exists(), 'retired action ProductSet leaked after Generation GC'
+
+
+def deep_dependency_fixture(generation, root):
+    action = root / 'Actions/chain/result.json'
+    action.parent.mkdir(parents=True)
+    count = 20000
+    ids = [f'chain-{100000 + index}' for index in range(count)]
+    set_id = '0' * 64
+    products = [dict(logical_id=logical_id, locator=f'Products/chain/{set_id}/missing.bin',
+                     digest='sha256:' + hashlib.sha256(b'x').hexdigest(), size=1,
+                     dependencies=[ids[(index + 1) % count]])
+                for index, logical_id in enumerate(ids)]
+    receipt = dict(schema_version=1, action_id='chain', namespace_path='chain',
+                   action_key='sha256:' + set_id, product_set_id=set_id,
+                   products=products, upstream_product_dependencies=[])
+    command = [generation, '--compose', '--build-root', root,
+               '--scope', 'test-chain', '--result', action]
+    action.write_text(json.dumps(receipt))
+    output = run(*command, success=False)
+    assert_generation_diagnostic(output, 'cyclic-product-dependency', 'chain', ids[0])
+    # With no closing cycle, the complete graph must reach payload validation.
+    # The missing payload keeps this test bounded without copying 20k snapshot files.
+    products[-1]['dependencies'] = []
+    action.write_text(json.dumps(receipt))
+    output = json.loads(run(*command, success=False))
+    assert output['error_code'] == 'missing-product' and output['reason'].startswith(ids[0] + ': ')
+    products[-1]['dependencies'] = ['absent']
+    action.write_text(json.dumps(receipt))
+    assert_generation_diagnostic(run(*command, success=False), 'missing-product-dependency',
+                                 'chain', ids[-1] + ' -> absent')
+    assert not (root / 'GenerationState/test-chain.json').exists()
 
 
 def main():
@@ -448,6 +493,7 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         upstream_fixture(args.generation, root / 'upstream')
         legacy_fixture(args.generation, root / 'legacy')
         retired_action_fixture(args.generation, root / 'retired')
+        deep_dependency_fixture(args.generation, root / 'deep-chain')
     print('PASS: native Audio, depfiles/restat, generation, integrity/repair, symlinks, worktrees and concurrency')
 
 

@@ -1,0 +1,107 @@
+[
+  {
+    "name": "shrub_low",
+    "planar_radius_m": 0.7166769540186465,
+    "triangles": 11130
+  },
+  {
+    "name": "shrub_low_lod1",
+    "planar_radius_m": 0.7166769540186465,
+    "triangles": 5544
+  },
+  {
+    "name": "shrub_low_lod2",
+    "planar_radius_m": 0.6087673097556705,
+    "triangles": 2016
+  },
+  {
+    "name": "stump_roots",
+    "planar_radius_m": 1.16411081711006,
+    "triangles": 784
+  },
+  {
+    "name": "stump_roots_lod1",
+    "planar_radius_m": 1.0942888114300793,
+    "triangles": 360
+  },
+  {
+    "name": "stump_roots_lod2",
+    "planar_radius_m": 1.1686815625044702,
+    "triangles": 176
+  },
+  {
+    "name": "crate_intact",
+    "planar_radius_m": 0.6128605375357076,
+    "triangles": 7560
+  },
+  {
+    "name": "crate_intact_lod1",
+    "planar_radius_m": 0.6128605375357076,
+    "triangles": 1728
+  },
+  {
+    "name": "crate_intact_lod2",
+    "planar_radius_m": 0.6049347491980538,
+    "triangles": 864
+  },
+  {
+    "name": "crate_broken",
+    "planar_radius_m": 0.6314123838636144,
+    "triangles": 7000
+  },
+  {
+    "name": "crate_broken_lod1",
+    "planar_radius_m": 0.6314123838636144,
+    "triangles": 1600
+  },
+  {
+    "name": "crate_broken_lod2",
+    "planar_radius_m": 0.6311805146035212,
+    "triangles": 800
+  },
+  {
+    "name": "barrel_intact",
+    "planar_radius_m": 0.3753437748887396,
+    "triangles": 4760
+  },
+  {
+    "name": "barrel_intact_lod1",
+    "planar_radius_m": 0.37534376978874207,
+    "triangles": 1784
+  },
+  {
+    "name": "barrel_intact_lod2",
+    "planar_radius_m": 0.37534376978874207,
+    "triangles": 904
+  },
+  {
+    "name": "barrel_broken",
+    "planar_radius_m": 0.595617703788245,
+    "triangles": 3324
+  },
+  {
+    "name": "barrel_broken_lod1",
+    "planar_radius_m": 0.595617703788245,
+    "triangles": 1344
+  },
+  {
+    "name": "barrel_broken_lod2",
+    "planar_radius_m": 0.593899357647944,
+    "triangles": 692
+  },
+  {
+    "name": "cart_broken",
+    "planar_radius_m": 1.7234157016159302,
+    "triangles": 12356
+  },
+  {
+    "name": "cart_broken_lod1",
+    "planar_radius_m": 1.7234157016159302,
+    "triangles": 3068
+  },
+  {
+    "name": "cart_broken_lod2",
+    "planar_radius_m": 1.7210137972587782,
+    "triangles": 1580
+  }
+]

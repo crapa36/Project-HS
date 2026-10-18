@@ -8,10 +8,11 @@
 
 namespace hs
 {
-enum class StreamlineFeature : std::uint8_t { SuperResolution, RayReconstruction, FrameGeneration, Reflex };
+struct RendererStreamlinePresentCount;
+enum class StreamlineFeature : std::uint8_t { SuperResolution, FrameGeneration, Reflex };
 struct StreamlineFeatures
 {
-    bool super_resolution{}, ray_reconstruction{}, frame_generation{}, reflex{};
+    bool super_resolution{}, frame_generation{}, reflex{};
 };
 struct StreamlineInputExtent { ViewExtent optimal, minimum, maximum; };
 struct StreamlineFrameGenerationCapabilities
@@ -47,7 +48,7 @@ class StreamlineSession
     // swapchain proxy for all hooks listed by sl_hooks.h, including Present,
     // GetBuffer, GetCurrentBackBufferIndex, ResizeBuffers and fullscreen state.
     [[nodiscard]] Result UpgradeDevice(void **device);
-    // A failed optional device/queue proxy bootstrap rejects FG only. SR/RR and
+    // A failed optional device/queue proxy bootstrap rejects FG only. SR and
     // native/other-provider presentation can still use the native device/queue.
     void ReportPresentationBootstrapFailure(std::string_view reason);
     [[nodiscard]] Result UpgradeFactory(void **factory);
@@ -60,33 +61,17 @@ class StreamlineSession
     [[nodiscard]] Result AttachPresentation(IDXGISwapChain4 *proxy, ID3D12CommandQueue *presenting_queue);
 
     [[nodiscard]] Result QueryInputExtent(const GraphicsModeId &quality, ViewExtent output,
-                                         bool ray_reconstruction, StreamlineInputExtent &range);
+                                         StreamlineInputExtent &range);
     // Drain graph evaluation uses and call ReleaseReconstructionAfterCompletion
-    // before changing this configuration. RR replaces SR and covered denoisers.
+    // before changing this configuration.
     [[nodiscard]] Result ConfigureReconstruction(const GraphicsModeId &quality, ViewExtent output,
-                                                bool ray_reconstruction, std::uint32_t viewport_id = 0);
+                                                std::uint32_t viewport_id = 0);
     // Inputs enter NON_PIXEL_SHADER_RESOURCE, output UNORDERED_ACCESS. Graph
     // completion retains their owners. Subsequent passes rebind all CL state.
     [[nodiscard]] Result ExecuteSuperResolution(ID3D12GraphicsCommandList *commands,
                                                const SdkReconstructionFrame &frame);
-    // Explicit RR allocation records native initialization on the supplied
-    // Direct command list. The caller must submit and drain that list before
-    // calling CompleteRayReconstructionAllocationAfterCompletion; this method
-    // never submits a queue. created is true only when a new native allocation
-    // was entered (matching owned viewports reuse the existing allocation).
-    [[nodiscard]] Result AllocateRayReconstructionResources(ID3D12GraphicsCommandList *commands,
-                                                            const SdkReconstructionFrame &metadata,
-                                                            bool &created);
-    // Clears the frame-0 allocation tags after the caller has drained the
-    // command list. It does not submit or wait for GPU work.
-    [[nodiscard]] Result CompleteRayReconstructionAllocationAfterCompletion();
-    [[nodiscard]] Result ExecuteRayReconstruction(ID3D12GraphicsCommandList *commands,
-                                                 const SdkRayReconstructionFrame &frame);
     [[nodiscard]] Result SelectReconstructionViewAfterCompletion(std::uint32_t viewport_id);
     [[nodiscard]] Result ReleaseReconstructionAfterCompletion();
-    // Native planned resident memory for the currently configured RR viewport.
-    [[nodiscard]] Result QueryRayReconstructionMemory(std::uint64_t &bytes);
-
     [[nodiscard]] Result BeginFrame(SdkFrameIdentity identity);
     [[nodiscard]] std::optional<std::uint64_t> NativeFrameToken(SdkFrameIdentity identity) const noexcept;
     [[nodiscard]] Result InputSleep(SdkFrameIdentity identity);
@@ -111,7 +96,8 @@ class StreamlineSession
     // retains both COM resources and owners. The optional output captures the
     // post-Present SDK frame count without consuming it a second time.
     [[nodiscard]] Result PresentCompleted(SdkFrameIdentity identity,
-                                         std::uint32_t *frames_actually_presented = nullptr);
+                                         std::uint32_t *frames_actually_presented = nullptr,
+                                         RendererStreamlinePresentCount *observation = nullptr);
     // Call before any queue can overwrite/reuse a previously tagged input.
     [[nodiscard]] Result WaitForPresentationInputs(ID3D12CommandQueue *queue);
     // Waits on the presenting-queue fences, keeps the in-flight lease count bounded.

@@ -59,9 +59,11 @@ std::vector<Group> Groups(const Json& j)
     groups.push_back(std::move(terrain));
     for (const auto& material : j.at("opaque_mesh").at("materials")) {
         const auto id = material.at("id").get<std::string>();
-        if (id != "mesh_rock" && id != "mesh_bark") throw std::runtime_error("Unknown environment material " + id);
+        if (id != "mesh_rock" && id != "mesh_bark" && id != "mesh_ground_detail") throw std::runtime_error("Unknown environment material " + id);
         Group group{id.substr(5)};
         for (const auto &page : j.at("baked_materials").at(group.name)) group.pages.push_back(page);
+        if (group.name == "ground_detail" && group.pages.size() != 1)
+            throw std::runtime_error("Expected one shared ground-detail atlas");
         groups.push_back(std::move(group));
     }
     for (const auto* name : {"grass", "leaf"}) {
@@ -199,6 +201,7 @@ float RoughnessAA(float roughness,float r)
 std::vector<std::string> Roles(const Group& g)
 {
     if(g.foliage) return {"base_color","normal","roughness"};
+    if(g.name=="ground_detail") return {"base_color","surface_ra","normal"};
     if(g.name=="terrain") return {"base_color","surface_ra","normal","detail_normal","height"};
     return {"base_color","surface_ra","normal","detail_normal"};
 }
@@ -304,7 +307,7 @@ void ValidateEnvironmentTextures(const std::filesystem::path& source)
         for (const auto &page : manifest.at("foliage").at(group).at("pages"))
             (void)Load(TexturePath(source, page, "normal"), "normal");
     for (const auto &material : manifest.at("opaque_mesh").at("materials"))
-        for (const auto *role : {"base_color", "normal", "detail_normal", "surface_ra"})
+        for (const auto &role : Roles(Group{material.at("id").get<std::string>().substr(5)}))
             (void)Load(TexturePath(source, material.at("textures"), role), role);
 }
 std::vector<std::filesystem::path> EnvironmentTextureInputs(const std::filesystem::path& source)
@@ -326,7 +329,7 @@ std::vector<std::string> EnvironmentTextureProducts(const std::filesystem::path&
     std::vector<std::string> names;
     for (const auto& group : Groups(manifest)) for (const auto& role : Roles(group))
         names.push_back(OutputPath({}, group, role).filename().string());
-    if (names.size() != 19) throw std::runtime_error("Expected 19 environment texture products");
+    if (names.size() != 22) throw std::runtime_error("Expected 22 environment texture products");
     return names;
 }
 std::vector<std::filesystem::path> EnvironmentTextureRoleInputs(
@@ -334,7 +337,7 @@ std::vector<std::filesystem::path> EnvironmentTextureRoleInputs(
 {
     const auto group=FindRoleGroup(Read(source),group_name,role);
     std::set<std::filesystem::path> paths{source/"project_hs_environment_materials_v9_LEAN.json"};
-    if (group_name=="rock" || group_name=="bark" ||
+    if (group_name=="rock" || group_name=="bark" || group_name=="ground_detail" ||
         (group.foliage && role!="base_color"))
         paths.insert(source/"baked_materials.json");
     for(const auto& page:group.pages) {

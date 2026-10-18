@@ -49,6 +49,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
             const std::string material_id = hero ? "render/material/" + std::string(name) + "/material.rpkg"
                 : ordinal == kTerrainMaterialOrdinal
                 ? "render/material/terrain.rpkg"
+                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg"
                 : "render/" + std::string(kAuthoredMaterialNames[ordinal]) + ".rpkg";
             if (auto resolved = candidate.ResolveProduct(material_id, path); !resolved) return resolved;
             std::vector<std::byte> material_bytes;

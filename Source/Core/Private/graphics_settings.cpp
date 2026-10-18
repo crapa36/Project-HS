@@ -191,17 +191,17 @@ void ValidateValue(const T &value, SettingId id, double minimum, double maximum,
         return index < tokens.size() ? tokens[index] : std::string_view{};            \
     }
 
-HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsPreset, "low", "medium", "high", "ultra", "ultra_rt", "custom")
+HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsPreset, "low", "medium", "high", "ultra", "custom")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsDisplayMode, "windowed", "borderless_fullscreen")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsHdrMode, "off", "on", "auto")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsResolutionMode, "manual", "provider_quality")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsFrameGenerationMode, "off", "auto", "fixed", "dynamic")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsQuality, "low", "medium", "high", "ultra")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsOptionalQuality, "off", "low", "medium", "high", "ultra")
-HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsShadowMode, "raster", "hybrid_rt")
-HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsAoMode, "off", "auto", "gtao", "rtao")
-HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsGiMode, "off", "probe", "software_hybrid", "ray_traced")
-HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsReflectionMode, "off", "probe", "screen_space", "hybrid_rt")
+HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsShadowMode, "raster")
+HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsAoMode, "off", "auto", "gtao")
+HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsGiMode, "off", "probe", "software_hybrid")
+HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsReflectionMode, "off", "probe", "screen_space")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsAutoToggle, "off", "auto", "on")
 HS_DEFINE_GRAPHICS_ENUM_TOKEN(GraphicsMotionBlur, "off", "low", "high")
 

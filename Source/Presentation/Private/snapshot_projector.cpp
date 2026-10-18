@@ -1,4 +1,5 @@
 #include <hs/presentation/projector.hpp>
+#include <hs/presentation/meadow_surface.hpp>
 #include "environment_projector.hpp"
 #include <algorithm>
 #include <array>
@@ -367,6 +368,39 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     snapshot.header.session_id = model.session_id;
     snapshot.camera.target = {model.player.position.x, 0.0f, model.player.position.y};
 
+    const auto grounded = [&](Float3 position) {
+        if (model.arena_half_extent >= 14.0f)
+            position.y += MeadowGroundHeight({position.x, position.z});
+        return position;
+    };
+    // Project simulation-relative heights exactly once, including independent trail endpoints.
+    const auto add_instance = [&](RenderInstance instance) {
+        instance.position = grounded(instance.position);
+        return snapshot.AddInstance(instance);
+    };
+    const auto add_visual = [&](PersistentVfxVisual visual) {
+        visual.position = grounded(visual.position);
+        if (visual.projectile_hitbox_radius > 0.0f) {
+            visual.projectile_current_position = grounded(visual.projectile_current_position);
+            visual.projectile_previous_position = grounded(visual.projectile_previous_position);
+        }
+        switch (visual.kind) {
+        case PersistentVfxKind::RicochetLink:
+        case PersistentVfxKind::RicochetReturnLink:
+        case PersistentVfxKind::BurnTransferLink:
+        case PersistentVfxKind::RelicChainLink:
+        case PersistentVfxKind::PickupXpMagnetTrail:
+            visual.link_target_position = grounded(visual.link_target_position);
+            break;
+        default: break;
+        }
+        if (visual.kind == PersistentVfxKind::BasicArrowReturn ||
+            visual.kind == PersistentVfxKind::RicochetReturnLink)
+            visual.return_start_position = grounded(visual.return_start_position);
+        return snapshot.AddPersistentVfx(visual);
+    };
+    snapshot.camera.target = grounded(snapshot.camera.target);
+
     bool complete = true;
     if (model.player.revive_invulnerable_until > model.tick)
     {
@@ -379,7 +413,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         invulnerable.radius = 1.0f;
         invulnerable.entity_render_id = kPlayerRenderId;
         invulnerable.effect_asset = MakeAssetId("particle.player.invulnerable_loop");
-        complete &= snapshot.AddPersistentVfx(invulnerable);
+        complete &= add_visual(invulnerable);
     }
     if (model.player.max_health > 0 &&
         static_cast<float>(std::max(model.player.health, 0)) /
@@ -395,7 +429,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             static_cast<float>(std::max(model.player.health, 0)) /
                 static_cast<float>(model.player.max_health), 0.0f, 1.0f);
         vignette.entity_render_id = kPlayerRenderId;
-        complete &= snapshot.AddPersistentVfx(vignette);
+        complete &= add_visual(vignette);
     }
     const auto add_player_attachment = [&](PersistentVfxKind kind,
                                            std::string_view asset,
@@ -428,7 +462,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         visual.charge_ratio = charge_ratio;
         visual.entity_render_id = kPlayerRenderId;
         visual.effect_asset = MakeAssetId(asset);
-        complete &= snapshot.AddPersistentVfx(visual);
+        complete &= add_visual(visual);
     };
     if (model.player.basic_attack_cast_id != 0 &&
         model.player.basic_attack_animation_start <= model.tick &&
@@ -514,7 +548,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         // The authenticated non-looping clip clamps at its authored final pose;
         // there is no guessed duration or render-clock state transition here.
     }
-    complete &= snapshot.AddInstance(player_instance);
+    complete &= add_instance(player_instance);
     AnimationPoseRef pose;
     pose.instance_index = 0;
     pose.clip = CharacterAnimationClip::Idle;
@@ -599,7 +633,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         const auto guide_length = range;
         const auto center = Add(model.player.position,
                                 Multiply(model.player.aim, guide_length * 0.5f));
-        complete &= snapshot.AddPersistentVfx(
+        complete &= add_visual(
             {{center.x, 0.025f, center.y},
              std::atan2(model.player.aim.x, model.player.aim.y),
              model.charge_radius, guide_length,
@@ -616,7 +650,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         const auto projected = ProjectEnemy(enemy, model.tick, model.boss_actions, enemy_animations);
         const auto facing = projected.facing;
         const auto instance_index = snapshot.InstanceCount();
-        complete &= snapshot.AddInstance(projected.instance);
+        complete &= add_instance(projected.instance);
         constexpr std::array status_kinds{PersistentVfxKind::EnemyBleedStatus, PersistentVfxKind::EnemyBurnStatus,
             PersistentVfxKind::EnemySlowStatus, PersistentVfxKind::EnemyMarkStatus};
         constexpr std::array status_names{"persistent.status.bleed", "persistent.status.burn", "persistent.status.slow", "persistent.status.mark"};
@@ -635,7 +669,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             status.entity_health_fraction=enemy.max_health>0?std::clamp(static_cast<float>(enemy.health)/enemy.max_health,0.0f,1.0f):0.0f;
             status.entity_state_flags=1u<<i;
             status.entity_render_id=kEnemyRenderId | enemy.id.value;
-            complete &= snapshot.AddPersistentVfx(status);
+            complete &= add_visual(status);
         }
         if (enemy.boss && enemy.footprint_radius > 0.0f)
         {
@@ -669,7 +703,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     wake.expires = enemy.dash_until;
                     wake.stable_id = identity(0xD451u, enemy.dash_started);
                     wake.effect_asset = MakeAssetId("persistent.boss.dash_wake");
-                    complete &= snapshot.AddPersistentVfx(wake);
+                    complete &= add_visual(wake);
                 }
             }
             if (enemy.boss == BossKind::Final && enemy.final_phase == 2 &&
@@ -689,7 +723,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                  0.0f, 1.0f) : 0.0f;
                 aura.entity_state_flags = 2;
                 aura.entity_render_id = kEnemyRenderId | enemy.id.value;
-                complete &= snapshot.AddPersistentVfx(aura);
+                complete &= add_visual(aura);
                 if (model.tick < enemy.invulnerable_until)
                 {
                     auto transition = aura;
@@ -698,7 +732,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     transition.stable_id = identity(0xA3u, enemy.phase2_started);
                     transition.effect_asset = MakeAssetId("persistent.boss.phase_transition_invulnerable");
                     transition.entity_state_flags = 3;
-                    complete &= snapshot.AddPersistentVfx(transition);
+                    complete &= add_visual(transition);
                 }
             }
         }
@@ -711,7 +745,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             const auto range = enemy.warning_extent;
             const auto center = Add(enemy.position,
                                     Multiply(enemy.locked_aim, range * 0.5f));
-            complete &= snapshot.AddInstance(
+            complete &= add_instance(
                 {{center.x, 0.025f, center.y},
                  std::atan2(enemy.locked_aim.x, enemy.locked_aim.y),
                  {enemy.warning_half_width * 2.0f, 0.03f, range}, 0xA03030FFu,
@@ -727,13 +761,13 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 warning.stable_id = enemy.warning_sequence;
                 warning.active_tick = enemy.attack_started;
                 warning.expires = enemy.attack_resolve;
-                complete &= snapshot.AddPersistentVfx(warning);
+                complete &= add_visual(warning);
             }
         }
         if (!enemy.boss && enemy.kind == EnemyKind::Suicide && enemy.attacking)
         {
             const auto radius = enemy.warning_extent;
-            complete &= snapshot.AddInstance(
+            complete &= add_instance(
                 {{enemy.position.x, 0.025f, enemy.position.y}, 0.0f,
                  {radius, 0.03f, radius}, 0x803030FFu, RenderMesh::Area, 0, 0, 0, 0, enemy.warning_sequence});
             if (enemy.warning_sequence != 0 && model.tick < enemy.attack_resolve)
@@ -745,7 +779,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 warning.stable_id = enemy.warning_sequence;
                 warning.active_tick = enemy.attack_started;
                 warning.expires = enemy.attack_resolve;
-                complete &= snapshot.AddPersistentVfx(warning);
+                complete &= add_visual(warning);
                 PersistentVfxVisual countdown{};
                 countdown.kind = PersistentVfxKind::SuicideCountdownLoop;
                 countdown.effect_asset = MakeAssetId("particle.enemy.suicide.countdown_loop");
@@ -764,7 +798,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 countdown.active_tick = enemy.attack_started;
                 countdown.expires = enemy.attack_resolve;
                 countdown.entity_render_id = kEnemyRenderId | enemy.id.value;
-                complete &= snapshot.AddPersistentVfx(countdown);
+                complete &= add_visual(countdown);
             }
         }
     }
@@ -773,7 +807,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         if (!death.enemy.boss || death.sequence == 0 || death.tick > model.tick) continue;
         const auto actions = death.has_action ? std::span(&death.action, 1) : std::span<const BossActionView>{};
         // Same mesh, transform and pose path even without a prior live snapshot.
-        const auto projected = ProjectEnemy(death.enemy, death.tick, actions, nullptr);
+        auto projected = ProjectEnemy(death.enemy, death.tick, actions, nullptr);
+        projected.instance.position = grounded(projected.instance.position);
         complete &= snapshot.AddCapturedInstance({model.session_id, death.enemy.id.value,
             death.sequence, death.tick, projected.instance, projected.pose});
     }
@@ -789,7 +824,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             const auto scale_value = death.kind == EnemyKind::Ranged ? 1.40625f :
                                       death.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
             const auto index = snapshot.InstanceCount();
-            complete &= snapshot.AddInstance(
+            complete &= add_instance(
                 {death.position, std::atan2(death.direction.x, death.direction.z),
                  {scale_value, scale_value, scale_value}, 0xFF5D66E8u, mesh,
                  kEnemyRenderId | death.id});
@@ -830,7 +865,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         visual.source_upgrade = delivery.source_upgrade;
         visual.projectile_owner_id = delivery.owner_id;
         visual.effect_asset = MakeAssetId("particle.upgrade.arrow_rain.incoming_arrow");
-        complete &= snapshot.AddPersistentVfx(visual);
+        complete &= add_visual(visual);
     }
     for (const auto &projectile : model.projectiles)
     {
@@ -873,7 +908,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             }
         }
         const auto render_position = projectile.position;
-        complete &= snapshot.AddInstance(
+        complete &= add_instance(
             {{render_position.x,
               projectile.player_owned ? 1.05f : 0.45f,
               render_position.y},
@@ -907,7 +942,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         head.projectile_owner_id = owner_id;
         head.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                       (projectile.homing ? 2u : 0u);
-        complete &= snapshot.AddPersistentVfx(head);
+        complete &= add_visual(head);
         const auto projectile_effect_id = [&](std::uint64_t effect_tag,
                                               std::uint64_t episode) {
             std::uint64_t identity = 14695981039346656037ull;
@@ -935,7 +970,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             retarget.skill = static_cast<std::uint8_t>(SkillKind::MultiShot);
             retarget.source_upgrade = 7;
             retarget.effect_asset = MakeAssetId("particle.upgrade.retarget");
-            complete &= snapshot.AddPersistentVfx(retarget);
+            complete &= add_visual(retarget);
         }
         if (projectile.skill == SkillKind::BasicAttack && projectile.returning &&
             projectile.source_upgrade == 6 &&
@@ -953,7 +988,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             returning.return_start_position =
                 {projectile.return_start_position.x, render_height,
                  projectile.return_start_position.y};
-            complete &= snapshot.AddPersistentVfx(returning);
+            complete &= add_visual(returning);
         }
         if (projectile.skill == SkillKind::RicochetArrow)
         {
@@ -981,7 +1016,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 extend.projectile_owner_id = owner_id;
                 extend.projectile_state_flags = head.projectile_state_flags;
                 extend.entity_render_id = kProjectileRenderId | owner_id;
-                complete &= snapshot.AddPersistentVfx(extend);
+                complete &= add_visual(extend);
             }
         }
         if (projectile.player_owned)
@@ -1025,7 +1060,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             trail.projectile_owner_id = owner_id;
             trail.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                             (projectile.homing ? 2u : 0u);
-            complete &= snapshot.AddPersistentVfx(trail);
+            complete &= add_visual(trail);
             if (projectile.skill == SkillKind::RicochetArrow && projectile.returning &&
                 (projectile.upgrade_mask & std::uint8_t{1}) != 0)
             {
@@ -1052,7 +1087,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     {projectile.return_start_position.x, render_height,
                      projectile.return_start_position.y};
                 returning_link.link_width = std::max(0.01f, projectile.radius);
-                complete &= snapshot.AddPersistentVfx(returning_link);
+                complete &= add_visual(returning_link);
             }
             if (projectile.skill == SkillKind::ChargedShot)
             {
@@ -1069,7 +1104,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 outer.projectile_spawned_tick = projectile.spawned_tick;
                 outer.projectile_owner_id = owner_id;
                 outer.projectile_state_flags = trail.projectile_state_flags;
-                complete &= snapshot.AddPersistentVfx(outer);
+                complete &= add_visual(outer);
             }
         }
     }
@@ -1094,7 +1129,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             visual.gap_count = area.safe_gap_count;
             visual.gap_half_angle_degrees = area.safe_gap_degrees * 0.5f;
             visual.gap_offset_degrees = static_cast<float>(area.cast_id % 360);
-            return snapshot.AddPersistentVfx(visual);
+            return add_visual(visual);
         };
         if (area.kind == AreaViewKind::Trap)
         {
@@ -1187,7 +1222,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 wavefront.gap_count = area.safe_gap_count;
                 wavefront.gap_half_angle_degrees = area.safe_gap_degrees * 0.5f;
                 wavefront.gap_offset_degrees = static_cast<float>(area.cast_id % 360);
-                complete &= snapshot.AddPersistentVfx(wavefront);
+                complete &= add_visual(wavefront);
             }
             constexpr std::uint32_t kSegments = 64;
             for (std::uint32_t index = 0; index < kSegments; ++index)
@@ -1206,7 +1241,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 }
                 const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(area.position, Multiply(direction, radius));
-                complete &= snapshot.AddInstance(
+                complete &= add_instance(
                     {{position.x, 0.03f, position.y}, -degrees * kPi / 180.0f,
                      {0.24f, 0.04f, std::max(0.35f, radius * 0.05f)},
                      0xB04040FFu, RenderMesh::Area, 0, 0, 0, 0,
@@ -1216,7 +1251,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         else
         {
             const auto trail = area.half_length > 0.0f;
-            complete &= snapshot.AddInstance(
+            complete &= add_instance(
                 {{area.position.x, 0.01f, area.position.y},
                  trail ? std::atan2(area.direction.x, area.direction.y) : 0.0f,
                  trail ? Float3{area.radius * 2.0f, 0.04f,
@@ -1237,7 +1272,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         warning.stable_id = spawn.owner_id;
         warning.active_tick = spawn.started;
         warning.expires = spawn.expires;
-        complete &= snapshot.AddPersistentVfx(warning);
+        complete &= add_visual(warning);
     }
     for (const auto &bomb : model.mini_bombs)
     {
@@ -1248,7 +1283,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         warning.position = {bomb.position.x, .025f, bomb.position.y};
         warning.radius = bomb.radius; warning.active_tick = bomb.started; warning.expires = bomb.expires;
         warning.skill = static_cast<std::uint8_t>(SkillKind::ExplosiveArrow); warning.source_upgrade = 1;
-        complete &= snapshot.AddPersistentVfx(warning);
+        complete &= add_visual(warning);
     }
     for (const auto &link : model.visual_links)
     {
@@ -1269,7 +1304,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         visual.cast_id = link.cast_id;
         visual.skill = static_cast<std::uint8_t>(link.skill);
         visual.source_upgrade = link.source_upgrade;
-        complete &= snapshot.AddPersistentVfx(visual);
+        complete &= add_visual(visual);
     }
     for (const auto &action : model.boss_actions)
     {
@@ -1302,7 +1337,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             warning.active_tick = action.warning_started;
             warning.expires = action.execute_tick;
             warning.cone_half_angle_degrees = action.arc_degrees * 0.5f;
-            complete &= snapshot.AddPersistentVfx(warning);
+            complete &= add_visual(warning);
         }
         if (action.kind == BossActionViewKind::Area && action.warning_sequence != 0 &&
             model.tick < action.execute_tick)
@@ -1314,7 +1349,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             warning.stable_id = action.warning_sequence;
             warning.active_tick = action.warning_started;
             warning.expires = action.execute_tick;
-            complete &= snapshot.AddPersistentVfx(warning);
+            complete &= add_visual(warning);
         }
         if (action.kind == BossActionViewKind::Shockwave && action.warning_sequence != 0 &&
             model.tick < action.execute_tick)
@@ -1331,7 +1366,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             warning.gap_count = action.safe_gap_count;
             warning.gap_half_angle_degrees = action.safe_gap_degrees * 0.5f;
             warning.gap_offset_degrees = static_cast<float>(action.cast_id % 360);
-            complete &= snapshot.AddPersistentVfx(warning);
+            complete &= add_visual(warning);
         }
         const auto warning_color = 0xA03030FFu;
         if (action.kind == BossActionViewKind::Dash)
@@ -1346,7 +1381,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                     boss->position,
                     Multiply(direction, action.distance * static_cast<float>(index) /
                                             static_cast<float>(kMarkers)));
-                complete &= snapshot.AddInstance(
+                complete &= add_instance(
                     {{position.x, 0.025f, position.y}, 0.0f,
                      {0.28f, 0.03f, 0.28f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
             }
@@ -1367,7 +1402,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 {
                     const auto position = Add(boss->position,
                         Multiply(edge, range * static_cast<float>(index) / 12.0f));
-                    complete &= snapshot.AddInstance(
+                    complete &= add_instance(
                         {{position.x, 0.025f, position.y}, 0.0f,
                          {0.22f, 0.03f, 0.22f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
                 }
@@ -1397,7 +1432,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                 }
                 const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(center, Multiply(direction, radius));
-                complete &= snapshot.AddInstance(
+                complete &= add_instance(
                     {{position.x, 0.025f, position.y}, 0.0f,
                      {0.24f, 0.03f, 0.24f}, warning_color, RenderMesh::Area, 0, 0, 0, 0,
                      action.warning_sequence});
@@ -1418,7 +1453,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              pickup.kind == PickupKind::Heal ? 0xFF40E060u :
              pickup.kind == PickupKind::Magnet ? 0xFFFF3030u : 0xFFE080FFu,
              RenderMesh::Pickup, kPickupRenderId | pickup.id.value};
-        complete &= snapshot.AddInstance(instance);
+        complete &= add_instance(instance);
         constexpr std::array idle_kinds{
             PersistentVfxKind::PickupXpIdle, PersistentVfxKind::PickupHealIdle,
             PersistentVfxKind::PickupMagnetIdle, PersistentVfxKind::PickupRelicIdle};
@@ -1444,7 +1479,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         idle.expires = 0;
         idle.effect_asset = MakeAssetId(idle_assets[kind_index]);
         idle.entity_render_id = instance.stable_id;
-        complete &= snapshot.AddPersistentVfx(idle);
+        complete &= add_visual(idle);
         if (pickup.kind == PickupKind::Experience && pickup.moving_to_player &&
             pickup.motion_started <= model.tick)
         {
@@ -1463,7 +1498,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             trail.active_tick = pickup.motion_started;
             trail.expires = model.tick + 1; // Only actually moving owners survive.
             trail.effect_asset = MakeAssetId("particle.pickup.xp.magnet_trail");
-            complete &= snapshot.AddPersistentVfx(trail);
+            complete &= add_visual(trail);
         }
     }
     if (model.session.phase == SessionPhase::Playing && !model.session.final_boss_spawned)
@@ -1479,7 +1514,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             timer.active_tick = model.tick;
             timer.source_horizon_tick = model.tick + wave.start - model.session.growth_ticks;
             timer.effect_asset = MakeAssetId("particle.session.wave_warning");
-            complete &= snapshot.AddPersistentVfx(timer);
+            complete &= add_visual(timer);
         }
     LightView sun{};
     sun.direction = {-0.45f, -0.82f, 0.35f};

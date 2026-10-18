@@ -12,7 +12,7 @@
 
 namespace hs
 {
-inline constexpr std::uint32_t kEnvironmentLayoutAbi = 1;
+inline constexpr std::uint32_t kEnvironmentLayoutAbi = 2;
 
 struct EnvironmentStaticMember
 {
@@ -25,9 +25,10 @@ struct EnvironmentLayout
     std::uint32_t abi{kEnvironmentLayoutAbi};
     std::array<std::byte, 32> eligible_digest{};
     std::vector<RenderInstance> instances;
-    // Only obstacle and border objects participate. Tree trunk/canopy share
+    // Obstacle, border and static ground-detail objects participate. Tree trunk/canopy share
     // object_id and must be replaced together. Ground and deformed grass stay
     // on their existing paths. Digest excludes session and grass seed.
+    // Canonical stable-ID order; instance_index still points into original placement order.
     std::vector<EnvironmentStaticMember> eligible_static_members;
 };
 

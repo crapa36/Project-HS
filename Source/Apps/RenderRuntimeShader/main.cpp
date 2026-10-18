@@ -3,6 +3,7 @@
 #endif
 
 #include "../AssetPipeline/action.hpp"
+#include "../AssetPipeline/render_shader_binding_inputs.hpp"
 
 #include <hs/core/windows_command_line.hpp>
 
@@ -55,13 +56,10 @@ bool ValidDxil(const fs::path &path)
 constexpr std::array kProjectPrograms{
     ProgramOutput{"scene_vs.dxil", L"SceneVS", L"vs_6_0"},
     ProgramOutput{"scene_ps.dxil", L"ScenePS", L"ps_6_0"},
-    ProgramOutput{"environment_opaque_ps.dxil", L"EnvironmentOpaquePS", L"ps_6_0"},
-    ProgramOutput{"environment_masked_ps.dxil", L"EnvironmentMaskedPS", L"ps_6_0"},
     ProgramOutput{"slime_ps.dxil", L"SlimePS", L"ps_6_6"},
     ProgramOutput{"shadow_vs.dxil", L"ShadowVS", L"vs_6_0"},
     ProgramOutput{"shadow_ps.dxil", L"ShadowPS", L"ps_6_0"},
     ProgramOutput{"environment_opaque_shadow_ps.dxil", L"EnvironmentOpaqueShadowPS", L"ps_6_0"},
-    ProgramOutput{"environment_masked_shadow_ps.dxil", L"EnvironmentMaskedShadowPS", L"ps_6_0"},
     ProgramOutput{"particle_vs.dxil", L"ParticleVS", L"vs_6_0"},
     ProgramOutput{"ground_ring_vs.dxil", L"GroundRingVS", L"vs_6_0"},
     ProgramOutput{"ground_add_ps.dxil", L"GroundAddPS", L"ps_6_0"},
@@ -156,15 +154,14 @@ std::span<const ShaderFamily> ShaderFamilies()
     static constexpr std::array hdr_post_programs{
         ProgramOutput{"hdr_post_guides_cs.dxil", L"HdrPostGuidesCS", L"cs_6_0"},
         ProgramOutput{"hdr_post_motion_blur_cs.dxil", L"HdrPostMotionBlurCS", L"cs_6_0"},
-        ProgramOutput{"hdr_post_coc_cs.dxil", L"HdrPostCoCCS", L"cs_6_0"},
         ProgramOutput{"hdr_post_dilate_cs.dxil", L"HdrPostDilateCS", L"cs_6_0"},
         ProgramOutput{"hdr_post_dof_cs.dxil", L"HdrPostDoFCS", L"cs_6_0"},
         ProgramOutput{"hdr_post_lut_init_cs.dxil", L"HdrPostLutInitCS", L"cs_6_0"},
         ProgramOutput{"hdr_post_grade_cs.dxil", L"HdrPostGradeCS", L"cs_6_0"}};
     static constexpr std::array light_list_programs{
         ProgramOutput{"light_list_cs.dxil", L"BuildLightLists", L"cs_6_0"}};
-    static constexpr std::array ray_geometry_programs{
-        ProgramOutput{"ray_geometry_cs.dxil", L"RayGeometryCS", L"cs_6_0"}};
+    static constexpr std::array scene_geometry_programs{
+        ProgramOutput{"scene_geometry_cs.dxil", L"SceneGeometryCS", L"cs_6_0"}};
     static constexpr std::array virtual_shadow_programs{
         ProgramOutput{"virtual_shadow_init_cs.dxil", L"InitCS", L"cs_6_0"},
         ProgramOutput{"virtual_shadow_feedback_cs.dxil", L"FeedbackCS", L"cs_6_0"},
@@ -204,7 +201,7 @@ std::span<const ShaderFamily> ShaderFamilies()
         ShaderFamily{"sdk-presentation", "Content/Shaders/sdk_presentation.hlsl", presentation_programs},
         ShaderFamily{"hdr-post", "Content/Shaders/hdr_post.hlsl", hdr_post_programs},
         ShaderFamily{"light-list", "Content/Shaders/light_list.hlsl", light_list_programs},
-        ShaderFamily{"ray-geometry", "Content/Shaders/ray_geometry.hlsl", ray_geometry_programs},
+        ShaderFamily{"scene-geometry", "Content/Shaders/scene_geometry.hlsl", scene_geometry_programs},
         ShaderFamily{"virtual-shadow", "Content/Shaders/virtual_shadow.hlsl", virtual_shadow_programs},
         ShaderFamily{"volumetrics", "Content/Shaders/volumetrics.hlsl", volumetric_programs},
         ShaderFamily{"scene-hlod", "Content/Shaders/scene_hlod.hlsl", hlod_programs},
@@ -237,6 +234,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root, const fs::path &st
         L"-E", std::wstring(entry), L"-T", std::wstring(profile),
         L"-I", L"Content/Shaders", L"-Fo", output.wstring(),
         L"-Fe", fs::path(diagnostics).wstring(), source.wstring()};
+    hs::shader_content::AppendRenderBindingArguments(args);
     std::wstring command = Quote(dxc);
     for (const auto &arg : args)
     {
@@ -284,6 +282,7 @@ void RunDependencyScan(const fs::path &dxc, const fs::path &source_root,
         L"-E", std::wstring(entry), L"-T", std::wstring(profile),
         L"-M", L"-MF", dependency_file.wstring(),
         L"-I", L"Content/Shaders", L"-Fe", diagnostics.wstring(), source.wstring()};
+    hs::shader_content::AppendRenderBindingArguments(args);
     std::wstring command = Quote(dxc);
     for (const auto &arg : args)
     {
@@ -435,7 +434,6 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
     if (uses_shadow_closure)
     {
         logical_paths.insert("Content/Shaders/local_shadow.hlsli");
-        logical_paths.insert("Content/Shaders/ray_shadow_data.hlsli");
     }
     std::vector<ap::Input> inputs;
     inputs.reserve(logical_paths.size() + 3);
@@ -445,6 +443,7 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
         ap::RequireRegularFile(path);
         inputs.push_back(ap::HashInput(logical, path));
     }
+    hs::shader_content::AddRenderBindingInputs(inputs, source_root);
     inputs.push_back(ap::HashInput("tool/dxc.exe", dxc));
     for (const auto *library : {"dxcompiler.dll", "dxil.dll"})
         inputs.push_back(ap::HashInput(std::string("tool/") + library,

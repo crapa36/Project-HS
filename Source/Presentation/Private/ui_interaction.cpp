@@ -59,35 +59,34 @@ std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &descrip
         "텍스처 메모리 한도", "이방성 필터링", "모델 품질", "식생 품질", "재질 품질",
         "표면 입체감 품질", "조명 품질", "그림자 방식", "그림자 품질", "그림자 표시 거리",
         "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식", "간접 조명 품질",
-        "반사 방식", "반사 품질", "레이 트레이싱", "레이 트레이싱 거리", "신경망 광선 복원",
-        "광선 복원 방식", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
+        "반사 방식", "반사 품질", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
         "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도", "외곽선", "외곽선 두께",
         "색 보정", "적응형 셰이딩"};
-    const auto index = static_cast<std::size_t>(descriptor.id);
-    return index > 0 && index <= labels.size() ? std::string(labels[index - 1]) : std::string(descriptor.key);
+    const auto definitions = GraphicsSettingDescriptors();
+    const auto found = std::ranges::find(definitions, descriptor.id, &GraphicsSettingDescriptor::id);
+    const auto index = static_cast<std::size_t>(found - definitions.begin());
+    return index < labels.size() ? std::string(labels[index]) : std::string(descriptor.key);
 }
 std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
 {
     if (token == "0" && id == SettingId::FrameLimitFps) return "제한 없음";
     if (token == "0" && id == SettingId::TextureBudgetMib) return "자동";
-    if (token == "internal" && id == SettingId::RayReconstructionProvider) return "기본 광선 노이즈 제거";
     static constexpr std::pair<std::string_view, std::string_view> values[]{
         {"true", "켜짐"}, {"false", "꺼짐"}, {"on", "켜짐"}, {"off", "꺼짐"}, {"auto", "자동"},
         {"low", "낮음"}, {"medium", "보통"}, {"high", "높음"}, {"ultra", "최고"},
-        {"ultra_rt", "최고 + 레이 트레이싱"}, {"custom", "사용자 설정"}, {"windowed", "창 모드"},
+        {"custom", "사용자 설정"}, {"windowed", "창 모드"},
         {"borderless_fullscreen", "테두리 없는 전체 화면"}, {"manual", "직접 설정"},
         {"provider_quality", "업스케일링 품질에 맞춤"}, {"quality", "품질 우선"},
         {"balanced", "균형"}, {"performance", "성능 우선"}, {"ultra_performance", "최대 성능"},
         {"native", "기본 해상도"}, {"internal", "기본 TAA"}, {"native_taa", "기본 해상도 TAA"},
         {"internal_taau", "기본 TAA 업스케일링"}, {"dlss", "NVIDIA DLSS"}, {"dlss_sr", "NVIDIA DLSS"},
-        {"dlss_rr", "NVIDIA DLSS 광선 복원"}, {"fsr", "AMD FSR"}, {"xess", "Intel XeSS"},
-        {"fsr_sr", "AMD FSR"}, {"fsr_rr", "AMD FSR 광선 복원"}, {"xess_sr", "Intel XeSS"},
-        {"nrd_reblur", "NRD REBLUR 광선 노이즈 제거"}, {"nrd_relax", "NRD RELAX 광선 노이즈 제거"},
-        {"directsr", "DirectSR"}, {"nrd", "NRD 광선 노이즈 제거"}, {"fixed", "고정 배수"},
-        {"dynamic", "동적 배수"}, {"raster", "기본 그림자"}, {"hybrid_rt", "레이 트레이싱 혼합"},
-        {"gtao", "화면 기반 음영 (GTAO)"}, {"rtao", "레이 트레이싱 음영"},
+        {"fsr", "AMD FSR"}, {"xess", "Intel XeSS"},
+        {"fsr_sr", "AMD FSR"}, {"xess_sr", "Intel XeSS"},
+        {"directsr", "DirectSR"}, {"fixed", "고정 배수"},
+        {"dynamic", "동적 배수"}, {"raster", "기본 그림자"},
+        {"gtao", "화면 기반 음영 (GTAO)"},
         {"probe", "미리 계산한 조명"}, {"software_hybrid", "소프트웨어 혼합"},
-        {"ray_traced", "레이 트레이싱"}, {"screen_space", "화면 기반 반사"}};
+        {"screen_space", "화면 기반 반사"}};
     for (const auto &[value, label] : values) if (token == value) return std::string(label);
     std::string display_number;
     const auto descriptors = GraphicsSettingDescriptors();
@@ -118,7 +117,7 @@ std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
     case SettingId::DynamicMaxPercent: return std::string(token) + "%";
     case SettingId::FrameLimitFps: case SettingId::TargetRenderFps: return std::string(token) + " FPS";
     case SettingId::TextureBudgetMib: return std::string(token) + " MiB";
-    case SettingId::ShadowDistanceM: case SettingId::RtTraceDistanceM: return std::string(token) + " m";
+    case SettingId::ShadowDistanceM: return std::string(token) + " m";
     case SettingId::HdrPaperWhiteNits: case SettingId::HdrPeakNits: return std::string(token) + " nit";
     case SettingId::OutlineWidthPx: return std::string(token) + " px";
     case SettingId::FrameGenerationMultiplier: case SettingId::AnisotropicFiltering: return std::string(token) + "배";
@@ -155,8 +154,7 @@ double NumericStep(SettingId id)
     case SettingId::HdrPaperWhiteNits: return 10;
     case SettingId::HdrPeakNits: return 50;
     case SettingId::ManualScalePercent: case SettingId::DynamicMinPercent:
-    case SettingId::DynamicMaxPercent: case SettingId::ShadowDistanceM:
-    case SettingId::RtTraceDistanceM: return 5;
+    case SettingId::DynamicMaxPercent: case SettingId::ShadowDistanceM: return 5;
     case SettingId::Sharpening: case SettingId::BloomStrength:
     case SettingId::OutlineWidthPx: return .1;
     default: return 1;
@@ -165,12 +163,6 @@ double NumericStep(SettingId id)
 }
 bool GraphicsSettingTokenAvailable(SettingId id, std::string_view token, const GraphicsSettingsUiModel *model)
 {
-    if (id == SettingId::Preset && token == "ultra_rt")
-        return GraphicsSettingTokenAvailable(SettingId::RayTracingEnabled, "true", model) &&
-            GraphicsSettingTokenAvailable(SettingId::AoMode, "auto", model) &&
-            GraphicsSettingTokenAvailable(SettingId::GiMode, "ray_traced", model) &&
-            GraphicsSettingTokenAvailable(SettingId::ReflectionMode, "hybrid_rt", model) &&
-            GraphicsSettingTokenAvailable(SettingId::ShadowMode, "hybrid_rt", model);
     if (model)
     {
         const auto choice = std::ranges::find_if(model->choices, [&](const auto &entry) {
@@ -184,8 +176,7 @@ bool GraphicsSettingTokenAvailable(SettingId id, std::string_view token, const G
     case SettingId::HdrMode: case SettingId::ReconstructionProvider: case SettingId::ReconstructionQuality:
     case SettingId::FrameGenerationProvider: case SettingId::FrameGenerationMode: case SettingId::FrameGenerationMultiplier:
     case SettingId::LowLatency: case SettingId::AoMode: case SettingId::GiMode: case SettingId::ReflectionMode:
-    case SettingId::ShadowMode: case SettingId::RayTracingEnabled: case SettingId::NeuralRayReconstruction:
-    case SettingId::RayReconstructionProvider: case SettingId::AdaptiveShading:
+    case SettingId::ShadowMode: case SettingId::AdaptiveShading:
         return token == "off" || token == "auto" || token == "false";
     default: return true;
     }

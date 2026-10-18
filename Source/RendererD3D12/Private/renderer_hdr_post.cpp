@@ -16,13 +16,13 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSrvCount = 14, kUavCount = 6, kTableSize = kSrvCount + kUavCount;
-constexpr std::uint32_t kPhaseCount = 7, kConstantStride = 512;
+constexpr std::uint32_t kPhaseCount = 6, kConstantStride = 512;
 constexpr std::uint32_t kLutEdge = 33;
 constexpr DXGI_FORMAT kColor = DXGI_FORMAT_R16G16B16A16_FLOAT, kGuide = DXGI_FORMAT_R32G32B32A32_FLOAT;
 enum Target : std::uint32_t { Guide, Motion, CoC, Dilated, DoF, Grade, Lut, Normal, TargetCount };
 constexpr std::array<std::string_view, kPhaseCount> kProducts{
     "render/shader/hdr_post_guides_cs.dxil", "render/shader/hdr_post_motion_blur_cs.dxil",
-    "render/shader/hdr_post_coc_cs.dxil", "render/shader/hdr_post_dilate_cs.dxil",
+    "render/shader/hdr_post_dilate_cs.dxil",
     "render/shader/hdr_post_dof_cs.dxil", "render/shader/hdr_post_lut_init_cs.dxil",
     "render/shader/hdr_post_grade_cs.dxil"};
 constexpr std::array<DXGI_FORMAT, TargetCount> kFormats{
@@ -120,7 +120,7 @@ void PopulateConstants(HdrPostConstants &constants, const HdrPostSettings &setti
     constants.effect_parameters = {settings.max_coc_pixels, std::log2(65505.0f), 1.0f / 60.0f, 180.0f};
     constants.options = {settings.motion_blur == GraphicsMotionBlur::Off ? 0u :
         (settings.motion_blur == GraphicsMotionBlur::High ? 16u : 8u),
-        inputs.transparent_guides_enabled ? 1u : 0u, kLutEdge, 0};
+        inputs.transparent_guides_enabled ? 1u : 0u, kLutEdge, settings.depth_of_field ? 1u : 0u};
 }
 } // namespace
 
@@ -203,7 +203,7 @@ struct HdrPostTargets
                 UINT64(slot * kPhaseCount + phase) * kConstantStride);
             commands->SetComputeRootDescriptorTable(1, lease->Gpu(slot, phase, 0));
             commands->SetComputeRootDescriptorTable(2, lease->Gpu(slot, phase, kSrvCount));
-            if (phase == 5) commands->Dispatch((kLutEdge + 3) / 4, (kLutEdge + 3) / 4, (kLutEdge + 3) / 4);
+            if (phase == 4) commands->Dispatch((kLutEdge + 3) / 4, (kLutEdge + 3) / 4, (kLutEdge + 3) / 4);
             else commands->Dispatch((active.width + 7) / 8, (active.height + 7) / 8, 1);
         };
     }
@@ -301,7 +301,7 @@ Result HdrPostSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocato
     native = device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&next->root));
     if (FAILED(native)) return NativeFailure("Create HDR post root", native);
     const std::array<bool, kPhaseCount> phases{GeometryEffects(settings), settings.motion_blur != GraphicsMotionBlur::Off,
-        settings.depth_of_field, settings.depth_of_field, settings.depth_of_field, settings.color_grading, settings.color_grading};
+        settings.depth_of_field, settings.depth_of_field, settings.color_grading, settings.color_grading};
     for (std::uint32_t index = 0; index < kPhaseCount; ++index)
         if (phases[index])
         {
@@ -391,6 +391,8 @@ Result HdrPostSystem::RegisterMotionAndDoF(RenderGraphBuilder &graph, const HdrP
     pending.versions[Guide] = guide.Write(pending.versions[Guide], Access::UnorderedWrite);
     if (storage->settings.motion_blur != GraphicsMotionBlur::Off)
         pending.versions[Normal] = guide.Write(pending.versions[Normal], Access::UnorderedWrite);
+    if (storage->settings.depth_of_field)
+        pending.versions[CoC] = guide.Write(pending.versions[CoC], Access::UnorderedWrite);
     guide.SetExecute(storage->Execute(inputs.frame_slot, 0, inputs.output_active, storage));
     auto source = inputs.hdr.version; auto *sourceNative = inputs.hdr.resource;
     if (storage->settings.motion_blur != GraphicsMotionBlur::Off)
@@ -407,18 +409,14 @@ Result HdrPostSystem::RegisterMotionAndDoF(RenderGraphBuilder &graph, const HdrP
     if (storage->settings.depth_of_field)
     {
         storage->Table(inputs, constants, 2, sourceNative, nullptr);
-        auto coc = graph.AddPass(112, "HdrPostSignedCoC", QueueHint::Direct); coc.Read(pending.versions[Guide], Access::ComputeRead);
-        pending.versions[CoC] = coc.Write(pending.versions[CoC], Access::UnorderedWrite);
-        coc.SetExecute(storage->Execute(inputs.frame_slot, 2, inputs.output_active, storage));
-        storage->Table(inputs, constants, 3, sourceNative, nullptr);
         auto dilate = graph.AddPass(113, "HdrPostForegroundDilation", QueueHint::Direct); dilate.Read(pending.versions[CoC], Access::ComputeRead);
         pending.versions[Dilated] = dilate.Write(pending.versions[Dilated], Access::UnorderedWrite);
-        dilate.SetExecute(storage->Execute(inputs.frame_slot, 3, inputs.output_active, storage));
-        storage->Table(inputs, constants, 4, sourceNative, storage->textures[DoF].resource.Get());
+        dilate.SetExecute(storage->Execute(inputs.frame_slot, 2, inputs.output_active, storage));
+        storage->Table(inputs, constants, 3, sourceNative, storage->textures[DoF].resource.Get());
         auto pass = graph.AddPass(114, "HdrPostDepthOfField", QueueHint::Direct);
         for (const auto version : {source, pending.versions[Guide], pending.versions[CoC], pending.versions[Dilated]}) pass.Read(version, Access::ComputeRead);
         pending.versions[DoF] = pass.Write(pending.versions[DoF], Access::UnorderedWrite);
-        pass.SetExecute(storage->Execute(inputs.frame_slot, 4, inputs.output_active, storage));
+        pass.SetExecute(storage->Execute(inputs.frame_slot, 3, inputs.output_active, storage));
         outputs = {pending.versions[DoF], storage->textures[DoF].resource.Get(), storage->Export(1)};
     }
     return Result::Success();
@@ -437,16 +435,16 @@ Result HdrPostSystem::RegisterGrade(RenderGraphBuilder &graph, const HdrPostInpu
     PopulateConstants(constants, storage->settings, inputs);
     if (!storage->lut_initialized)
     {
-        storage->Table(inputs, constants, 5, inputs.hdr.resource, nullptr);
+        storage->Table(inputs, constants, 4, inputs.hdr.resource, nullptr);
         auto init = graph.AddPass(115, "HdrPostLutInitialize", QueueHint::Direct);
         pending.versions[Lut] = init.Write(pending.versions[Lut], Access::UnorderedWrite);
-        init.SetExecute(storage->Execute(inputs.frame_slot, 5, inputs.output_active, storage)); pending.initializing_lut = true;
+        init.SetExecute(storage->Execute(inputs.frame_slot, 4, inputs.output_active, storage)); pending.initializing_lut = true;
     }
-    storage->Table(inputs, constants, 6, inputs.hdr.resource, storage->textures[Grade].resource.Get());
+    storage->Table(inputs, constants, 5, inputs.hdr.resource, storage->textures[Grade].resource.Get());
     auto grade = graph.AddPass(116, "HdrPostColorGrade", QueueHint::Direct);
     grade.Read(inputs.hdr.version, Access::ComputeRead); grade.Read(pending.versions[Lut], Access::ComputeRead);
     pending.versions[Grade] = grade.Write(pending.versions[Grade], Access::UnorderedWrite);
-    grade.SetExecute(storage->Execute(inputs.frame_slot, 6, inputs.output_active, storage));
+    grade.SetExecute(storage->Execute(inputs.frame_slot, 5, inputs.output_active, storage));
     outputs = {pending.versions[Grade], storage->textures[Grade].resource.Get(), storage->Export(2)};
     return Result::Success();
 }

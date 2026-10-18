@@ -1,10 +1,8 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('xess', 'streamline', 'fsr', 'nrd', 'directsr', 'brixelizer', 'directstorage', 'dxc69')][string]$Sdk = 'xess',
+    [ValidateSet('xess', 'streamline', 'fsr', 'directsr', 'brixelizer', 'directstorage')][string]$Sdk = 'xess',
     [switch]$Offline,
-    [switch]$PrintPath,
-    [switch]$BuildNative,
-    [string]$Dxc
+    [switch]$PrintPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,11 +19,7 @@ $directStoragePin = $entry.distribution_kind -eq 'nuget_archive' -and
     $entry.archive_uri -ceq 'https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.directstorage/1.3.0/microsoft.direct3d.directstorage.1.3.0.nupkg' -and
     $entry.archive_sha256 -ceq '8ab6c1082537565388b79050d94fdd7f5f437cd0f1d909e7b19f786042b97177'
 $nugetPin = $directSrPin -or $directStoragePin
-$dxc69Pin = $Sdk -ceq 'dxc69' -and $entry.distribution_kind -ceq 'release_archive' -and
-    $entry.release -ceq '1.9.2602.24' -and
-    $entry.archive_uri -ceq 'https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/dxc_2026_05_27.zip' -and
-    $entry.archive_sha256 -ceq 'cf658aacf070d3045e31b8f1f8a696c2945f37c1095019481ef7c513368db3b4'
-if (!$entry -or (!$nugetPin -and !$dxc69Pin -and $entry.commit -notmatch '^[0-9a-f]{40}$') -or
+if (!$entry -or (!$nugetPin -and $entry.commit -notmatch '^[0-9a-f]{40}$') -or
     ($entry.distribution_kind -ne 'git_components' -and $entry.archive_sha256 -notmatch '^[0-9a-f]{64}$')) {
     throw "Renderer SDK $Sdk is not pinned by an exact source commit or NuGet package version and SHA-256."
 }
@@ -66,27 +60,6 @@ if ($entry.archive_filename) {
 $archivePath = Assert-SdkPath (Join-Path $sdkRoot $archiveFilename)
 $required = @($entry.headers) + @($entry.libraries) + @($entry.runtime) +
     @($entry.notices) + @($entry.documents)
-if ($dxc69Pin) {
-    $required += @($entry.tools)
-    $expectedDxc69 = [ordered]@{
-        'bin/x64/dxc.exe' = '1367fd29d0ebba5bf10d1041a9deff85396d30090b3651d872ec65d11a476ea4'
-        'bin/x64/dxcompiler.dll' = '9b5e10ed756c461b4ec2c83a99f1d6ace20e97826e9c0b0e966b7b1cd6f2aec6'
-        'bin/x64/dxil.dll' = 'cbcfe883a09fd0ca1f98abdf3a9553b560895e3283a136da82a8381253a169df'
-        'bin/x64/dxv.exe' = 'f26242efb0197ffefa51eb5cb14603207d1d81fa547394020a5767bf65979f61'
-        'LICENSE-LLVM.txt' = '729615317e28dd03907e46f0fc3b5e88f7853cee61d1a1471d2749335516b46f'
-        'LICENSE-MIT.txt' = '903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c'
-        'LICENSE-MS.txt' = '734f72f239fe7b07b4c7203f294c1a7ce27095687278bab7e56d630d7c672963'
-        'inc/hlsl/LICENSE.txt' = 'f47b94fc51b04f4354a6c6f41fb84b0bd22a8ebfcde9f93c1b4d9abd7f6d14c2'
-    }
-    if (@($required).Count -ne $expectedDxc69.Count -or
-        @($required | Select-Object -Unique).Count -ne $expectedDxc69.Count -or
-        @($entry.components).Count -ne $expectedDxc69.Count) { throw 'Incomplete retail DXC 6.9 tool/notice pin.' }
-    foreach ($component in $entry.components) {
-        if (!$expectedDxc69.Contains([string]$component.path) -or
-            $component.sha256 -cne $expectedDxc69[[string]$component.path] -or
-            [string]$component.path -cnotin $required) { throw 'Retail DXC 6.9 component differs from approved pin.' }
-    }
-}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Invoke-GitComponentsBootstrap {
@@ -189,7 +162,7 @@ function Invoke-SdkBootstrap {
     try {
         # The release may wrap files in a top directory. Locate exactly one SDK
         # prefix, then require every locked component from that same prefix.
-        $anchor = if ($dxc69Pin) { 'bin/x64/dxc.exe' } else { [string]$entry.headers[0] }
+        $anchor = [string]$entry.headers[0]
         $anchors = @($archive.Entries | Where-Object {
             $name = $_.FullName.Replace('\', '/')
             $name -eq $anchor -or $name.EndsWith('/' + $anchor, [StringComparison]::Ordinal)
@@ -205,9 +178,6 @@ function Invoke-SdkBootstrap {
             if ($matches.Count -ne 1 -or $matches[0].Length -le 0) { throw "Missing or duplicate SDK component: $relative" }
             $stream = $matches[0].Open()
             try { $digest = Get-StreamSha256 $stream } finally { $stream.Dispose() }
-            if ($dxc69Pin -and $digest -cne $expectedDxc69[[string]$relative]) {
-                throw "Retail DXC 6.9 archive component SHA-256 mismatch: $relative"
-            }
             $components += [pscustomobject]@{ path = [string]$relative; sha256 = $digest; zip_entry = $matches[0] }
         }
 
@@ -298,12 +268,7 @@ try {
     try { $mutexHeld = $bootstrapMutex.WaitOne([TimeSpan]::FromMinutes(10)) }
     catch [System.Threading.AbandonedMutexException] { $mutexHeld = $true }
     if (!$mutexHeld) { throw 'Timed out waiting for renderer SDK bootstrap.' }
-    if ($Sdk -eq 'nrd') {
-        . (Join-Path $PSScriptRoot 'bootstrap_nrd.ps1')
-        $resolved = Invoke-NrdBootstrap
-    }
-    elseif ($Sdk -eq 'brixelizer') {
-        if ($BuildNative -or $Dxc) { throw '-BuildNative and -Dxc apply only to the NRD source package.' }
+    if ($Sdk -eq 'brixelizer') {
         if ($entry.release -cne '1.1.4' -or
             $entry.commit -cne 'c6efa6bf7f2027b3ec94f28578bb5965eabb9e55' -or
             $entry.archive_sha256 -cne 'b5bba71656e18f4c813fda4eb364dcb5e9b8491efd6abb66fdc8a2b530bfcedd' -or
@@ -316,7 +281,6 @@ try {
         }
     }
     else {
-        if ($BuildNative -or $Dxc) { throw '-BuildNative and -Dxc apply only to the NRD source package.' }
         $resolved = Invoke-SdkBootstrap
     }
     if ($nugetPin) {
@@ -326,7 +290,6 @@ try {
         }
     }
     if ($PrintPath) { Write-Output $resolved }
-    elseif ($Sdk -eq 'nrd') { Write-Host "Pinned NRD source and derived native build verified at $resolved." }
     else { Write-Host "Pinned $Sdk SDK bytes verified at $resolved; SDK code has not been executed." }
 }
 finally {

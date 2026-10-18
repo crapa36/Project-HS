@@ -152,13 +152,15 @@ constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::AutoFgCad
 bool Known(std::uint32_t type)
 {
     return type >= static_cast<std::uint32_t>(ChunkType::ExpandedVertices) &&
-           type <= kLastKnownChunk;
+           type <= kLastKnownChunk && (type < 37 || type > 42);
 }
 
 void ValidateKnown(std::uint32_t type, std::uint16_t version,
                    std::uint64_t size, std::uint64_t count, std::uint32_t stride)
 {
-    Require(version == 1, "unsupported known chunk version");
+    Require(version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
+                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1),
+            "unsupported known chunk version");
     if (type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices))
         Require(stride == kExpandedVertexStride && count > 0 && count <= 3'000'000 &&
                 count % 3 == 0 && size == CheckedMul(count, stride), "invalid vertex chunk");
@@ -220,7 +222,7 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
         Require(stride == kMaterialSurfaceLayoutStride && count == 1 && size == stride,
                 "invalid material surface layout chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata))
-        Require(stride == 32 && count == 1 && size == stride,
+        Require(stride == 28 && count == 1 && size == stride,
                 "invalid decal material metadata chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
         Require(stride == kGeometryHierarchyReferenceStride && count == 1 && size == stride,
@@ -243,26 +245,9 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
     else if (type == static_cast<std::uint32_t>(ChunkType::VolumetricVolumes))
         Require(stride == 112 && count <= 256 && size == count * stride, "invalid volumetric medium chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles))
-        Require(stride == 176 && count == 4 && size == count * stride, "invalid quality profiles chunk");
+        Require(stride == 140 && count == 4 && size == count * stride, "invalid quality profiles chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::AutoFgCadence))
         Require(stride == 12 && count == 1 && size == stride, "invalid Auto FG cadence chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapMetadata))
-        Require(stride == 192 && count == 1 && size == 192, "invalid OMM metadata chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapRecipe))
-        Require(stride == 1 && count > 0 && count <= 16u * 1024u * 1024u && size == count,
-                "invalid OMM immutable recipe chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapStates))
-        Require(stride == 1 && count > 0 && count <= 256u * 1024u * 1024u && size == count,
-                "invalid OMM four-state chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapDescriptors))
-        Require(stride == 8 && count > 0 && count <= 0x1000000u && size == CheckedMul(count, stride),
-                "invalid OMM native descriptor chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapIndices))
-        Require(stride == 4 && count > 0 && count <= 0x1000000u && size == CheckedMul(count, stride),
-                "invalid OMM native index chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::OpacityMicromapHistogram))
-        Require(stride == 12 && count > 0 && count <= 4 && size == CheckedMul(count, stride),
-                "invalid OMM native histogram chunk");
     else if (type == 13)
         Require(stride == kGeometryMetadataStride && count == 1 && size == stride,
                 "invalid geometry metadata chunk");
@@ -479,9 +464,10 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
         const auto chunk_hash = Sha256(chunk_bytes);
         Require(std::equal(chunk_hash.begin(), chunk_hash.end(), bytes.begin() + entry + 48),
                 "chunk hash mismatch");
-        if (!Known(type) || version != 1)
+        if (!Known(type) || version != (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
+                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1))
         {
-            Require(flags == 0, "unknown required chunk");
+            Require(flags == 0, Known(type) ? "unsupported required chunk version" : "unknown required chunk");
             continue;
         }
         Require(stored_size == raw_size, "compressed known chunk is unsupported");

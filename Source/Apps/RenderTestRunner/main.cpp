@@ -63,7 +63,6 @@ const char *GridAaModeName(GridAaMode mode)
 Json LightingModesReceipt(const hs::RendererLightingModes &modes)
 {
     return {
-        {"ray_tracing_enabled", modes.ray_tracing_enabled},
         {"ao_mode", std::string(hs::GraphicsEnumToken(modes.ao_mode))},
         {"gi_mode", std::string(hs::GraphicsEnumToken(modes.gi_mode))},
         {"reflection_mode", std::string(hs::GraphicsEnumToken(modes.reflection_mode))},
@@ -73,10 +72,6 @@ Json LightingModesReceipt(const hs::RendererLightingModes &modes)
 
 Json LightingStatusReceipt(const hs::RendererLightingStatus &status)
 {
-    const auto denoiser = [](const hs::RendererDenoiserStatus &value) {
-        return Json{{"requested_provider", value.requested_provider.value}, {"active_method", value.active_method},
-                    {"availability", value.availability}, {"reason", value.reason}};
-    };
     return {
         {"requested", LightingModesReceipt(status.requested)},
         {"active", LightingModesReceipt(status.active)},
@@ -86,11 +81,6 @@ Json LightingStatusReceipt(const hs::RendererLightingStatus &status)
             {"reflection", status.reflection_fallback_reason},
             {"shadow", status.shadow_fallback_reason},
         }},
-        {"hardware", {
-            {"ray_scene_supported", status.ray_scene_supported},
-            {"inline_ray_queries_supported", status.inline_ray_queries_supported},
-        }},
-        {"ray_scene_allocated_bytes", status.ray_scene_allocated_bytes},
         {"software_gi", {{"compiled", status.software_gi.compiled}, {"supported", status.software_gi.supported},
             {"enabled", status.software_gi.enabled}, {"native_ready", status.software_gi.native_ready},
             {"faulted", status.software_gi.faulted}, {"static_instances", status.software_gi.static_instances},
@@ -101,17 +91,11 @@ Json LightingStatusReceipt(const hs::RendererLightingStatus &status)
             {"physical_cascades", status.software_gi.physical_cascades},
             {"allocated_bytes", status.software_gi.allocated_bytes}, {"scratch_bytes", status.software_gi.scratch_bytes},
             {"reason", status.software_gi.reason}}},
-        {"denoisers", {{"ao", denoiser(status.ao_denoiser)}, {"radiance", denoiser(status.radiance_denoiser)}}},
         {"local_shadows", {{"enabled", status.local_shadows.enabled},
             {"requested_lights", status.local_shadows.requested_lights}, {"selected_lights", status.local_shadows.selected_lights},
             {"unsupported_lights", status.local_shadows.unsupported_lights}, {"budget_lights", status.local_shadows.budget_lights},
             {"overflow_lights", status.local_shadows.overflow_lights}, {"allocated_bytes", status.local_shadows.allocated_bytes},
             {"reason", status.local_shadows.reason}}},
-        {"ray_shadows", {{"enabled", status.ray_shadows.enabled}, {"native_sigma", status.ray_shadows.native_sigma},
-            {"requested_lights", status.ray_shadows.requested_lights}, {"selected_lights", status.ray_shadows.selected_lights},
-            {"unsupported_lights", status.ray_shadows.unsupported_lights}, {"budget_lights", status.ray_shadows.budget_lights},
-            {"rays_per_pixel", status.ray_shadows.rays_per_pixel}, {"allocated_bytes", status.ray_shadows.allocated_bytes},
-            {"reason", status.ray_shadows.reason}}},
     };
 }
 
@@ -317,7 +301,7 @@ Json DiagnosticsCadenceReceipt(const hs::RendererDiagnosticsCadence &cadence)
 
 Json DiagnosticsMemoryReceipt(const hs::RendererDiagnosticsMemory &memory)
 {
-    constexpr std::array names{"texture", "geometry", "skin", "ray_tracing", "shadow", "gi",
+    constexpr std::array names{"texture", "geometry", "skin", "shadow", "gi",
         "history", "transient", "sdk", "staging"};
     Json categories = Json::object();
     for (std::size_t index = 0; index < names.size(); ++index)
@@ -338,10 +322,8 @@ Json DiagnosticsMemoryReceipt(const hs::RendererDiagnosticsMemory &memory)
             {"host_staging_bytes", memory.host_staging_bytes}, {"host_reserved_bytes", memory.host_reserved_bytes},
             {"host_staging_budget_bytes", memory.host_budget_available ? Json(memory.host_staging_budget_bytes) : Json(nullptr)}}},
         {"texture_physical_bytes", memory.texture_physical_bytes},
-        {"acceleration_structure_bytes", memory.acceleration_structure_bytes},
         {"known_provider_allocations", {{"presentation_bytes", memory.presentation_provider_bytes},
             {"reconstruction_guide_bytes", memory.reconstruction_guide_bytes},
-            {"ray_reconstruction_bytes", memory.ray_reconstruction_bytes},
             {"renderer_view_bytes", memory.renderer_view_bytes},
             {"shared_deformation_bytes", memory.shared_deformation_bytes}}}};
 }
@@ -381,7 +363,7 @@ Json DiagnosticsReceipt(const hs::RendererDiagnosticsSnapshot &diagnostics)
         passes.push_back({{"pass_id", pass.pass_id}, {"name", pass.name},
             {"queue", static_cast<unsigned>(pass.queue)}, {"measured", pass.measured},
             {"clock_domain", pass.clock_domain}, {"clock_calibrated", pass.clock_calibrated},
-            {"name_truncated", pass.name_truncated}, {"acceleration_structure_work", pass.acceleration_structure_work},
+            {"name_truncated", pass.name_truncated},
             {"nanoseconds", pass.measured ? Json(pass.nanoseconds) : Json(nullptr)},
             {"begin_ticks", pass.measured ? Json(pass.begin_ticks) : Json(nullptr)},
             {"end_ticks", pass.measured ? Json(pass.end_ticks) : Json(nullptr)},
@@ -977,7 +959,7 @@ int main(int argc, char **argv)
         bool surface_motion_resize_probe{};
         std::string grass_history_probe;
         std::uint32_t grass_cadence = 60;
-        bool lighting_transport_probe{};
+        bool timing_stream_probe{};
         bool world_transport_probe{};
         bool gameplay_scene{};
         bool local_probe_revision_probe{};
@@ -988,7 +970,6 @@ int main(int argc, char **argv)
         bool light_list_probe{};
         bool lighting_auxiliary_probe{};
         bool software_gi_probe{};
-        std::string ray_reconstruction_probe;
         bool require_multi_queue{};
         bool require_transient_aliasing{};
         bool grid_floor_probe{};
@@ -1044,7 +1025,11 @@ int main(int argc, char **argv)
                 grass_history_probe = arg.substr(22);
             else if (arg.starts_with("--grass-cadence="))
                 grass_cadence = Number(arg.substr(16), 30, 240);
-            else if (arg == "--lighting-transport-probe") lighting_transport_probe = true;
+            else if (arg == "--timing-stream-probe")
+            {
+                timing_stream_probe = config.capture_timing_stream = true;
+                config.width = 320; config.height = 180;
+            }
             else if (arg == "--world-transport-probe") world_transport_probe = true;
             else if (arg == "--gameplay-scene") gameplay_scene = true;
             else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
@@ -1055,13 +1040,6 @@ int main(int argc, char **argv)
             else if (arg == "--light-list-probe") light_list_probe = true;
             else if (arg == "--lighting-auxiliary-probe") lighting_auxiliary_probe = true;
             else if (arg == "--software-gi-probe") software_gi_probe = world_transport_probe = true;
-            else if (arg.starts_with("--ray-reconstruction="))
-            {
-                ray_reconstruction_probe = arg.substr(21);
-                if (ray_reconstruction_probe != "fsr_rr" && ray_reconstruction_probe != "dlss_rr")
-                    throw std::runtime_error("ray reconstruction must be fsr_rr or dlss_rr");
-                lighting_transport_probe = true;
-            }
             else if (arg == "--grid-floor-probe") grid_floor_probe = true;
             else if (arg == "--owned-view-probe") owned_view_probe = true;
             else if (arg == "--provider-switch-probe") provider_switch_probe = true;
@@ -1113,7 +1091,7 @@ int main(int argc, char **argv)
         const bool material_reload_probe = !material_reload_pointer.empty() ||
                                            !material_reload_invalid_pointer.empty();
         const bool surface_motion_resize_fixture =
-            surface_motion_resize_probe || (lighting_transport_probe && ray_reconstruction_probe.empty());
+            surface_motion_resize_probe;
         if (entity_surface_probe)
         {
             if ((frames_explicit && frames != 8) || !vfx_composition_probe.empty() || !grass_history_probe.empty())
@@ -1121,7 +1099,7 @@ int main(int argc, char **argv)
             frames = 8;
             config.interpolate = config.dynamic_resolution = config.temporal_reconstruction = false;
             config.grid_floor_probe = config.grid_floor_disable_aa = true;
-            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.bloom = config.outline = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1140,7 +1118,6 @@ int main(int argc, char **argv)
             config.temporal_reconstruction = true;
             config.sharpening = 0;
             config.bloom = config.outline = false;
-            config.ray_tracing_enabled = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1156,7 +1133,7 @@ int main(int argc, char **argv)
             if (frames != required_frames) throw std::runtime_error("lighting probe frame count is fixed");
             config.lighting_quality = hs::GraphicsQuality::Ultra;
             config.dynamic_resolution = config.temporal_reconstruction = false;
-            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.bloom = config.outline = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1182,7 +1159,7 @@ int main(int argc, char **argv)
             config.dynamic_resolution = false;
             config.temporal_reconstruction = true;
             config.sharpening = 0;
-            config.bloom = config.outline = config.ray_tracing_enabled = false;
+            config.bloom = config.outline = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1207,7 +1184,6 @@ int main(int argc, char **argv)
                 initial.ao_mode = config.ao_mode;
                 initial.gi_mode = config.gi_mode;
                 initial.reflection_mode = config.reflection_mode;
-                initial.ray_tracing_enabled = config.ray_tracing_enabled;
                 initial.volumetric_quality = config.volumetric_quality;
                 initial.particle_quality = config.vfx_quality == hs::VfxQuality::Low
                     ? hs::GraphicsQuality::Low : config.vfx_quality == hs::VfxQuality::Medium
@@ -1225,7 +1201,6 @@ int main(int argc, char **argv)
                 throw std::runtime_error("OIT/camera-basis probes require their own four/six ordinary render frames");
             config.temporal_reconstruction = false;
             config.bloom = config.outline = false;
-            config.ray_tracing_enabled = false;
             config.ao_mode = hs::GraphicsAoMode::Off;
             config.gi_mode = hs::GraphicsGiMode::Off;
             config.reflection_mode = hs::GraphicsReflectionMode::Off;
@@ -1237,23 +1212,10 @@ int main(int argc, char **argv)
             else receipt["camera_basis"] = {{"cameras", {"front", "roll90", "vertical_down"}},
                 {"writers", {"RadialEnergy", "Smoke6Way"}}, {"frames", Json::array()}};
         }
-        if (lighting_transport_probe)
-        {
-            config.ray_tracing_enabled = true;
-            config.ao_mode = hs::GraphicsAoMode::RTAO;
-            config.gi_mode = hs::GraphicsGiMode::RayTraced;
-            config.reflection_mode = hs::GraphicsReflectionMode::HybridRT;
-            config.ao_quality = hs::GraphicsQuality::Low;
-            config.gi_quality = hs::GraphicsQuality::Low;
-            config.reflection_quality = hs::GraphicsQuality::Low;
-            config.shadow_quality = hs::GraphicsQuality::Low;
-            config.shadow_mode = hs::GraphicsShadowMode::HybridRT;
-        }
         if (world_transport_probe)
         {
             if (!frames_explicit) frames = 7;
             if (frames < 7) throw std::runtime_error("--world-transport-probe requires at least 7 frames");
-            config.ray_tracing_enabled = false;
             config.ao_mode = hs::GraphicsAoMode::GTAO;
             config.gi_mode = hs::GraphicsGiMode::Probe;
             config.reflection_mode = hs::GraphicsReflectionMode::ScreenSpace;
@@ -1264,17 +1226,6 @@ int main(int argc, char **argv)
             config.gi_mode = hs::GraphicsGiMode::SoftwareHybrid;
             config.gi_quality = hs::GraphicsQuality::Low;
             config.dynamic_resolution = false;
-        }
-        if (!ray_reconstruction_probe.empty())
-        {
-            config.ray_reconstruction_provider.value = ray_reconstruction_probe;
-            config.neural_ray_reconstruction = hs::GraphicsAutoToggle::On;
-            if (ray_reconstruction_probe == "dlss_rr")
-            {
-                config.temporal_reconstruction = true;
-                config.reconstruction_request = hs::RendererReconstructionRequest{};
-                config.reconstruction_request->provider.value = "dlss_rr";
-            }
         }
         if ((camera_motion || capture_grid_frames || aa_mode_explicit) && !grid_floor_probe)
             throw std::runtime_error(
@@ -1293,6 +1244,8 @@ int main(int argc, char **argv)
             throw std::runtime_error("material reload probe requires at least 6 frames");
         if (grid_floor_probe && frames < 25)
             throw std::runtime_error("grid floor probe requires at least 25 frames");
+        if (timing_stream_probe && (frames < 8 || owned_view_probe))
+            throw std::runtime_error("--timing-stream-probe requires at least 8 single-view frames");
         if (provider_switch_probe && frames < 7)
             throw std::runtime_error("provider switch probe requires at least seven frames");
         if (all_providers_probe && !provider_switch_probe)
@@ -1314,8 +1267,7 @@ int main(int argc, char **argv)
         if (gpu_lod_probe && frames < 10)
             throw std::runtime_error("--gpu-lod-probe requires at least 10 frames");
         if (surface_motion_resize_fixture && frames < 7)
-            throw std::runtime_error(
-                "--surface-motion-resize-probe/--lighting-transport-probe require at least 7 frames");
+            throw std::runtime_error("--surface-motion-resize-probe requires at least 7 frames");
         if (static_cast<unsigned>(persistent_scene_probe) +
                 static_cast<unsigned>(skin_cache_monster_probe) +
                 static_cast<unsigned>(dynamic_lod_skin_growth_probe) +
@@ -1378,7 +1330,6 @@ int main(int argc, char **argv)
             : dynamic_lod_skin_growth_probe ? "dynamic-lod-skin-growth-v1"
             : gpu_lod_probe ? "gpu-lod-probe-v1"
              : residency_streaming_probe ? "residency-streaming-v3"
-              : lighting_transport_probe ? "lighting-transport-v1"
               : software_gi_probe ? "software-gi-world-v1"
             : world_transport_probe ? "world-transport-v1"
             : gameplay_scene ? "gameplay-arena-v1"
@@ -1736,7 +1687,7 @@ int main(int argc, char **argv)
         pair.current.camera.distance = dynamic_lod_skin_growth_probe ? 28.0f : 22.0f;
         std::array<hs::LightView, 3> world_lights{};
         std::vector<hs::LightView> light_list_lights;
-        if (world_transport_probe || lighting_transport_probe || local_probe_revision_probe)
+        if (world_transport_probe || local_probe_revision_probe)
         {
             auto &sun = world_lights[0];
             sun.stable_id = 0x57544c0000000001ull;
@@ -1764,6 +1715,30 @@ int main(int argc, char **argv)
             pair.current.lights = world_lights;
         }
         hs::RendererFrameResult frame_result;
+        std::map<std::uint64_t, hs::GpuPassTimings> timing_stream_history;
+        std::uint32_t timing_stream_live{}, timing_stream_drained{};
+        const auto collect_timing_stream = [&](bool drain) {
+            std::vector<hs::GpuPassTimings> completed;
+            Require(drain ? renderer.DrainGpuPassTimings(completed)
+                          : renderer.ConsumeCompletedGpuPassTimings(completed));
+            if (drain) timing_stream_drained += static_cast<std::uint32_t>(completed.size());
+            else timing_stream_live += static_cast<std::uint32_t>(completed.size());
+            std::uint64_t previous{};
+            for (auto &sample : completed)
+            {
+                if (!sample.valid || !sample.fence_completed || !sample.cpu_qpc_frequency ||
+                    sample.view_id != hs::kMainRenderViewId.value || !sample.completed_frame_id ||
+                    sample.completed_frame_id <= previous)
+                    throw std::runtime_error("Timing stream emitted incomplete or unsorted frame identities");
+                previous = sample.completed_frame_id;
+                for (const auto &pass : sample.passes)
+                    if (!pass.cpu_record_valid || pass.cpu_record_begin_qpc == 0 ||
+                        pass.cpu_record_end_qpc < pass.cpu_record_begin_qpc)
+                        throw std::runtime_error("Timing stream lost per-pass CPU recording interval");
+                if (!timing_stream_history.emplace(sample.completed_frame_id, std::move(sample)).second)
+                    throw std::runtime_error("Timing stream emitted a duplicate completed frame");
+            }
+        };
         failure_code = "HS_RENDER_FRAME_FAILED";
         hs::RendererQueueStats queue_totals;
         std::map<std::uint64_t, hs::GpuPassTimings> world_gpu_history;
@@ -2278,6 +2253,7 @@ int main(int argc, char **argv)
                     .views = std::span(&main_view, 1), .snapshots = pair,
                     .vfx = {.flashes = oit_flashes, .entity_surfaces = entity_surfaces},
                     .delta_seconds = entity_surface_probe ? std::optional<float>{0.0f}
+                        : local_probe_revision_probe ? std::optional<float>{1.0f / 60.0f}
                         : !vfx_composition_probe.empty()
                         ? std::optional<float>{vfx_composition_probe == "auto" || vfx_composition_probe == "switch"
                             ? 1.0f / 60.0f : 0.0f}
@@ -2299,6 +2275,27 @@ int main(int argc, char **argv)
                         Require(renderer.Render(render_input, frame_result));
                     });
                 else Require(renderer.Render(render_input, frame_result));
+                if (timing_stream_probe)
+                {
+                    collect_timing_stream(false);
+                    const auto &cached = renderer.LastRenderedFrameDiagnostics();
+                    if (frame_result.views.size() != 1 ||
+                        cached.rendered_frame_id != frame_result.views.front().submission_id ||
+                        cached.view_id != hs::kMainRenderViewId.value || !cached.submit_qpc ||
+                        frame_result.cpu_timings.frame_slot_wait_begin_qpc == 0 ||
+                        frame_result.cpu_timings.frame_slot_wait_end_qpc <
+                            frame_result.cpu_timings.frame_slot_wait_begin_qpc)
+                        throw std::runtime_error("Cached rendered frame/wait metadata has wrong identity");
+                    if (frame == 4)
+                    {
+                        collect_timing_stream(true);
+                        const auto before_duplicate_read = timing_stream_history.size();
+                        static_cast<void>(renderer.LastGpuPassTimings());
+                        collect_timing_stream(false);
+                        if (timing_stream_history.size() != before_duplicate_read)
+                            throw std::runtime_error("Repeated timing read republished a completed frame");
+                    }
+                }
                 if (vfx_composition_probe == "switch")
                 {
                     const auto status = renderer.GetGraphicsSettingsStatus();
@@ -2709,8 +2706,6 @@ int main(int argc, char **argv)
                     graphics.contact_shadows = config.contact_shadows;
                     graphics.reflection_mode = config.reflection_mode;
                     graphics.reflection_quality = config.reflection_quality;
-                    graphics.ray_tracing_enabled = config.ray_tracing_enabled;
-                    graphics.rt_trace_distance_m = config.rt_trace_distance_m;
                     graphics.gi_mode = config.gi_mode;
                     graphics.gi_quality = config.gi_quality;
                     graphics.shadow_mode = config.shadow_mode;
@@ -2719,8 +2714,6 @@ int main(int argc, char **argv)
                         ? config.reconstruction_request->provider : hs::GraphicsProviderId{"auto"};
                     graphics.reconstruction_quality = config.reconstruction_request
                         ? config.reconstruction_request->quality : hs::GraphicsModeId{"quality"};
-                    graphics.ray_reconstruction_provider = config.ray_reconstruction_provider;
-                    graphics.neural_ray_reconstruction = config.neural_ray_reconstruction;
                     graphics.sharpening = config.sharpening;
                     graphics.hdr_mode = config.hdr_mode;
                     graphics.hdr_paper_white_nits = config.hdr_paper_white_nits;
@@ -2751,6 +2744,21 @@ int main(int argc, char **argv)
                 pair.current.camera.target.y,
                 pair.current.camera.target.z,
             };
+        }
+        if (timing_stream_probe)
+        {
+            collect_timing_stream(true);
+            if (!timing_stream_live || timing_stream_drained < 2 || timing_stream_history.size() != frames)
+                throw std::runtime_error("Timing stream did not cover live slot reuse and every drained tail frame");
+            for (std::uint64_t frame = 1; frame <= frames; ++frame)
+                if (!timing_stream_history.contains(frame))
+                    throw std::runtime_error("Timing stream omitted an intermediate completed frame");
+            std::vector<hs::GpuPassTimings> empty;
+            Require(renderer.ConsumeCompletedGpuPassTimings(empty));
+            if (!empty.empty()) throw std::runtime_error("Timing stream consume repeated drained frames");
+            receipt["timing_stream"] = {{"completed_frames", timing_stream_history.size()},
+                {"live_frames", timing_stream_live}, {"drained_frames", timing_stream_drained},
+                {"all_frames_covered", true}, {"slot_wrap_and_duplicate_read", true}};
         }
         failure_code = "HS_RENDER_CAPTURE_FAILED";
         if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
@@ -2866,6 +2874,7 @@ int main(int argc, char **argv)
         {
             observe_probe_revisions();
             receipt["local_probe_revisions"] = {{"capture_frames", probe_capture_frames},
+                {"exposure_delta_seconds", 1.0f / 60.0f},
                 {"settled_frames_before_change", settled_probe_frames},
                 {"authored_owner_legacy_particles", renderer.LastParticleCount()},
                 {"shadow_history", {{"anonymous_static_casters", 2}, {"anonymous_dynamic_casters", 1},
@@ -2914,72 +2923,6 @@ int main(int argc, char **argv)
                  !status.software_gi.allocated_bytes ||
                  !(status.software_gi.static_instances + status.software_gi.dynamic_instances) || !executed))
                 throw std::runtime_error("supported software GI did not register real SDF geometry and execute native cache/GI/material passes");
-        }
-        if (lighting_transport_probe)
-        {
-            const auto lighting_status = renderer.GetLightingStatus();
-            receipt["lighting_status"] = LightingStatusReceipt(lighting_status);
-            if (!ray_reconstruction_probe.empty())
-            {
-                const auto &native = lighting_status.radiance_denoiser;
-                receipt["ray_reconstruction_probe"] = {{"requested", ray_reconstruction_probe},
-                    {"active", native.active_method}, {"availability", native.availability}, {"reason", native.reason}};
-                if (native.active_method == "dlss_rr" && gpu_timings.valid &&
-                    (!HasGpuPass(gpu_timings, 256, "DLSS RR Opaque Guides") ||
-                     !HasGpuPass(gpu_timings, 257, "DLSS RR Fused Native")))
-                    throw std::runtime_error("active DLSS RR did not execute its true guide and sole fused native passes");
-                if (native.active_method == "fsr_rr" && gpu_timings.valid &&
-                    (!HasGpuPass(gpu_timings, 252, "FSR RR Diffuse Remodulate") ||
-                     !HasGpuPass(gpu_timings, 255, "FSR RR Specular Remodulate")))
-                    throw std::runtime_error("active FSR RR did not execute both selected material remodulation paths");
-            }
-
-            const bool active_rtgi =
-                lighting_status.active.gi_mode == hs::GraphicsGiMode::RayTraced;
-            const bool active_hybrid_reflection =
-                lighting_status.active.reflection_mode == hs::GraphicsReflectionMode::HybridRT;
-            const bool active_native_ray_consumer = lighting_status.active.ray_tracing_enabled &&
-                lighting_status.ray_scene_supported;
-            const auto &active_denoiser = lighting_status.radiance_denoiser.active_method;
-            const bool native_rr = active_denoiser == "dlss_rr" || active_denoiser == "fsr_rr";
-            const char *rtgi_pass_name = native_rr ? "RRDiffuseTrace" : "RTGITrace";
-            const char *reflection_pass_name = native_rr ? "RRSpecularTrace" : "HybridReflectionTrace";
-            const bool rtgi_pass = HasGpuPass(gpu_timings, 156, rtgi_pass_name);
-            const bool hybrid_reflection_pass =
-                HasGpuPass(gpu_timings, 160, reflection_pass_name);
-            const bool ray_transport_compose_pass =
-                HasGpuPass(gpu_timings, 169, "RayTransportCompose");
-            if (active_native_ray_consumer && gpu_timings.valid)
-            {
-                if (active_rtgi && !rtgi_pass)
-                    throw std::runtime_error(std::string("active RTGI consumer did not emit ") + rtgi_pass_name + " pass");
-                if (active_hybrid_reflection && !hybrid_reflection_pass)
-                    throw std::runtime_error(
-                        std::string("active HybridRT reflection consumer did not emit ") + reflection_pass_name + " pass");
-            }
-            receipt["lighting_transport"] = {
-                {"native_ray_consumer_active", active_native_ray_consumer},
-                {"ray_transport_hardware", (lighting_status.ray_scene_supported &&
-                    lighting_status.inline_ray_queries_supported) ? "supported" : "unsupported"},
-                {"gpu_pass_timings_valid", gpu_timings.valid},
-                {"rtgi", {
-                    {"active", active_rtgi},
-                    {"pass_id", 156},
-                    {"pass_name", rtgi_pass_name},
-                    {"present", gpu_timings.valid ? Json(rtgi_pass) : Json(nullptr)},
-                }},
-                {"hybrid_reflection", {
-                    {"active", active_hybrid_reflection},
-                    {"pass_id", 160},
-                    {"pass_name", reflection_pass_name},
-                    {"present", gpu_timings.valid ? Json(hybrid_reflection_pass) : Json(nullptr)},
-                }},
-                {"compose", {
-                    {"pass_id", 169},
-                    {"pass_name", "RayTransportCompose"},
-                    {"present", gpu_timings.valid ? Json(ray_transport_compose_pass) : Json(nullptr)},
-                }},
-            };
         }
         receipt["gpu_passes"] = Json::array();
         for (const auto &pass : gpu_timings.passes)

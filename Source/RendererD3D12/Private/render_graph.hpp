@@ -94,20 +94,8 @@ enum class Access : std::uint8_t
     DepthShaderRead,
     // Material textures shared by raster and compute retain both read states.
     AllShaderRead,
-    // Append operation scopes without changing existing access ordinals.
-    ASBuildWrite,
-    ASRead,
-    ASBuildRead,
-    ASCopyRead,
-    ASCopyWrite,
-    // Ordinary AS builder input and scratch/postbuild buffers, not AS storage.
-    ASBuildInput,
-    ASBuildScratch,
     // Native VRS image consumed by rasterization on the direct queue.
     ShadingRateSource,
-    // Shader resource/UAV access by a native DispatchRays pass on Direct.
-    RayTracingRead,
-    RayTracingWrite,
 };
 
 enum class ResourceKind : std::uint8_t
@@ -176,8 +164,8 @@ struct BufferDesc
 
 // Opaque owners point to retained ID3D12CommandQueue/ID3D12Fence interfaces.
 // The optional lease owns provider command allocators/resources used in flight.
-// Each operation submits only on its declared queue; arbitrary SDK release tokens,
-// acceleration structures and ranged external state handoffs are not supported.
+// Each operation submits only on its declared queue; arbitrary SDK release tokens
+// and ranged external state handoffs are not supported.
 struct ExternalQueueCompletion
 {
     std::shared_ptr<void> native_fence_owner;
@@ -217,6 +205,7 @@ struct ExternalBuffer
 
 class RenderGraphBuilder;
 struct RenderTaskExecutor;
+struct GpuPassTiming;
 
 struct GraphExecutionOptions
 {
@@ -224,6 +213,9 @@ struct GraphExecutionOptions
     void *timestamp_readback{};
     std::uint32_t timestamp_base{};
     const RenderTaskExecutor *task_executor{};
+    // Optional capture output in compiled execution order; each recording task owns one element.
+    GpuPassTiming *cpu_pass_timings{};
+    std::size_t cpu_pass_timing_count{};
 };
 
 struct GraphExecutionStats
@@ -239,6 +231,13 @@ struct GraphExecutionStats
     std::uint32_t alias_activation_count{};
     std::uint64_t transient_bytes_without_aliasing{};
     std::uint64_t transient_backing_bytes{};
+    // Sequential wall time: planning/recorder admission, recording plus join,
+    // then retirement setup and native queue submission (including providers).
+    std::uint64_t cpu_plan_us{}, cpu_record_us{}, cpu_submit_us{};
+    // Optional Prepare output: native checks, exact inputs/key, compile/aliases,
+    // then first/last use and transient claims. Published only on success.
+    std::uint64_t cpu_prepare_validation_us{}, cpu_prepare_info_key_us{};
+    std::uint64_t cpu_prepare_compile_us{}, cpu_prepare_transient_us{};
 };
 
 // One pool per frame slot. ResetClaims/Clear require that slot's GPU work to be complete.
@@ -409,7 +408,9 @@ class RenderGraphBuilder
     [[nodiscard]] std::uint32_t DeclaredPassId(std::uint32_t index) const noexcept;
     void SetFinalAccess(ResourceVersion version, Access access);
 
-    [[nodiscard]] Result Prepare(TransientResourcePool &pool);
+    // Null output performs no detailed timing clock reads. Non-null output is
+    // cleared at entry, with completed stage durations published only on success.
+    [[nodiscard]] Result Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu = nullptr);
     [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
     [[nodiscard]] Result Execute(void *native_command_list, void *enhanced_command_list,
                                  BarrierMode barriers, void *timestamp_query_heap = nullptr,

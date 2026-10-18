@@ -1,0 +1,167 @@
+{
+  "size": [
+    2048,
+    2048
+  ],
+  "gutter_px": 24,
+  "opaque_alpha": 255,
+  "normal_convention": "Runtime UV V-down; XY=-height image gradients. Blender/FBX +Y copy flips green.",
+  "surface_channels": {
+    "R": "roughness",
+    "G": "ambient occlusion",
+    "B": "unused zero",
+    "A": "opaque 255"
+  },
+  "source_reuse": [
+    {
+      "source": "textures/mesh_bark_basecolor.png",
+      "sha256": "0b83bf19f803808759151d17c6361045c5e086a5b860018de2f5c29a5533754b"
+    }
+  ],
+  "tiles": [
+    {
+      "name": "leaf_green",
+      "rect_px": [
+        24,
+        24,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "clover",
+      "rect_px": [
+        536,
+        24,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "daisy",
+      "rect_px": [
+        1048,
+        24,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "buttercup",
+      "rect_px": [
+        1560,
+        24,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "violet_upper",
+      "rect_px": [
+        24,
+        536,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "violet_lower",
+      "rect_px": [
+        536,
+        536,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "pollen",
+      "rect_px": [
+        1048,
+        536,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "stem",
+      "rect_px": [
+        1560,
+        536,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "leaf_ochre",
+      "rect_px": [
+        24,
+        1048,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "leaf_brown",
+      "rect_px": [
+        536,
+        1048,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "leaf_red",
+      "rect_px": [
+        1048,
+        1048,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "twig_bark",
+      "rect_px": [
+        1560,
+        1048,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "fence_wood",
+      "rect_px": [
+        24,
+        1560,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "fence_end",
+      "rect_px": [
+        536,
+        1560,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "lichen_bark",
+      "rect_px": [
+        1048,
+        1560,
+        464,
+        464
+      ]
+    },
+    {
+      "name": "leaf_under",
+      "rect_px": [
+        1560,
+        1560,
+        464,
+        464
+      ]
+    }
+  ]
+}

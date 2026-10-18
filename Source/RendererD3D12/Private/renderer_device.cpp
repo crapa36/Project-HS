@@ -156,10 +156,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
         texture_options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
     texture_streaming_capabilities.packed_mip_arrays = texture_streaming_capabilities.tiled_resources &&
         texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
-    feature_capabilities.rtao_consumer = true;
-    feature_capabilities.rtgi_consumer = true;
-    feature_capabilities.rt_reflection_consumer = true;
-    feature_capabilities.rt_shadow_consumer = true;
     feature_capabilities.software_gi_consumer = QueryBrixelizerNativeSupport(device.Get()).supported;
     // Concrete DeferredLight pixel and adaptive GTAO consumers are integrated;
     // selected-generation product and actual native admission remain separate.
@@ -172,9 +168,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
             ? &*config.reconstruction_request : nullptr, config.dynamic_resolution,
             config.dynamic_min_percent, config.dynamic_max_percent, {width, height},
             reconstruction_plan, capacity, reconstruction_provider, &config); !prepared) return prepared;
-    if (reconstruction_plan.effective_provider.value == "dlss_rr")
-        if (auto r = streamline_session->ConfigureReconstruction(reconstruction_plan.effective_quality,
-                {width, height}, true); !r) return r;
     if (reconstruction_provider)
         if (auto configured = reconstruction_provider->ConfigureAfterCompletion(capacity); !configured)
         {
@@ -422,6 +415,24 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         !frame.completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         return timings;
 
+    const auto publish = [&]() -> GpuPassTimings {
+        if (config.capture_timing_stream && timings.completed_frame_id &&
+            frame.timing_stream_published_frame_id != timings.completed_frame_id)
+        {
+            constexpr std::size_t frame_limit = 240, pass_limit = 262144;
+            if (gpu_timing_stream_overflowed || pending_gpu_timings.size() >= frame_limit ||
+                timings.passes.size() > pass_limit - pending_gpu_timing_passes)
+                gpu_timing_stream_overflowed = true;
+            else
+            {
+                pending_gpu_timings.push_back(timings);
+                pending_gpu_timing_passes += timings.passes.size();
+            }
+            frame.timing_stream_published_frame_id = timings.completed_frame_id;
+        }
+        return std::move(timings);
+    };
+    timings.cpu_qpc_frequency = frame.cpu_qpc_frequency;
     timings.fence_completed = true;
     timings.completed_frame_id = frame.submitted_frame_id;
     timings.view_id = frame.submitted_view_id;
@@ -433,7 +444,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         frame.timestamp_frequencies.size() != timings.passes.size())
     {
         for (auto &pass : timings.passes) pass.measured = false;
-        return timings;
+        return publish();
     }
 
     constexpr std::uint32_t critical_begin_pass = 37;
@@ -520,31 +531,31 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     timings.valid = pass_timings_valid;
     if (!timings.valid || duplicate_endpoint || begin_slot == timings.passes.size() ||
         end_slot == timings.passes.size())
-        return timings;
+        return publish();
 
     const auto &begin_pass = timings.passes[begin_slot];
     const auto &end_pass = timings.passes[end_slot];
     if (begin_pass.queue != RenderQueue::Direct || end_pass.queue != RenderQueue::Direct ||
         !begin_pass.measured || !end_pass.measured)
-        return timings;
+        return publish();
     UINT64 direct_frequency{};
     if (!queue || FAILED(queue->GetTimestampFrequency(&direct_frequency)) || direct_frequency == 0 ||
         frame.timestamp_frequencies[begin_slot] != direct_frequency ||
         frame.timestamp_frequencies[end_slot] != direct_frequency)
-        return timings;
+        return publish();
 
     // These endpoints share the Direct queue clock. Explicit graph edges bracket
     // every render queue, so this interval includes cross-queue overlap and waits.
     const auto begin = frame.mapped_timestamps[begin_slot * 2];
     const auto end = frame.mapped_timestamps[end_slot * 2 + 1];
-    if (end <= begin) return timings;
+    if (end <= begin) return publish();
     timings.critical_path_ms = static_cast<double>(
         static_cast<long double>(end - begin) * 1000.0L / direct_frequency);
     timings.critical_path_valid = std::isfinite(timings.critical_path_ms) &&
         timings.critical_path_ms > 0.0;
     timings.gpu_limited = timings.critical_path_valid && timings.cpu_recording_valid &&
         timings.critical_path_ms >= timings.cpu_recording_ms;
-    return timings;
+    return publish();
 }
 
 Result D3D12Renderer::Impl::WaitForFrame(FrameContext &frame)
@@ -581,20 +592,14 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     // the existing waited frame-bank leases and immutable pass suffixes.
     constexpr std::array cbv_offsets{
         kViewDescriptorOffset + 9,
-        kRayDescriptorOffset, kRayTransportDescriptorOffset,
-        kVolumetricDescriptorOffset, kRayShadowDescriptorOffset,
-        kRayReconstructionDescriptorOffset, kBrixelizerDescriptorOffset,
+        kSceneGeometryDescriptorOffset, kVolumetricDescriptorOffset, kBrixelizerDescriptorOffset,
         kDecalSurfaceDescriptorOffset + kDecalSurfaceCbvOffset};
     struct UavRange { UINT offset, count; };
     constexpr std::array uav_ranges{
         UavRange{kVisibilityUavDescriptorOffset, kVisibilityUavDescriptorCount},
         UavRange{kViewDescriptorOffset + 7, 2},
-        UavRange{kRayDescriptorOffset + 16, 5},
-        UavRange{kRayTransportDescriptorOffset + 27, 11},
-        UavRange{kRayTransportDescriptorOffset + 40, 5},
+        UavRange{kSceneGeometryDescriptorOffset + 3, 1},
         UavRange{kVolumetricDescriptorOffset + 15, 9},
-        UavRange{kRayShadowDescriptorOffset + 15, 9},
-        UavRange{kRayReconstructionDescriptorOffset + 8, 15},
         UavRange{kBrixelizerDescriptorOffset + 16, 9},
         UavRange{kTextureFeedbackDescriptorOffset + 1, kTextureFeedbackBindingCount},
         UavRange{kDecalSurfaceDescriptorOffset + kDecalSurfaceUavOffset, kDecalSurfaceUavCount}};
@@ -603,7 +608,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     empty_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     empty_uav.Buffer.NumElements = 1;
     const auto heap_start = heap->GetCPUDescriptorHandleForHeapStart();
-    static_assert((kTextureDescriptorCount - kRayGeometryTableOffset) % kRayFrameTableCount == 0);
+    static_assert((kTextureDescriptorCount - kSceneGeometryTableOffset) % kSceneFrameTableCount == 0);
     for (UINT frame = 0; frame < count / kTextureDescriptorCount; ++frame)
     {
         const auto frame_offset = static_cast<SIZE_T>(frame) * kTextureDescriptorCount;
@@ -622,12 +627,12 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
             for (UINT index = 0; index < range.count; ++index)
                 device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));
 
-        // Every private ray/GI/volume/RR bank uses the same root32 layout. Seed
+        // Every private geometry/GI/volume bank uses the same root32 layout. Seed
         // it from the typed canonical table; builders later copy current
         // canonical values and overwrite their active service suffix only.
-        for (UINT offset = kRayGeometryTableOffset; offset < kTextureDescriptorCount;
-             offset += kRayFrameTableCount)
-            device->CopyDescriptorsSimple(kRayFrameTableCount, cpu(offset),
+        for (UINT offset = kSceneGeometryTableOffset; offset < kTextureDescriptorCount;
+             offset += kSceneFrameTableCount)
+            device->CopyDescriptorsSimple(kSceneFrameTableCount, cpu(offset),
                 cpu(kTemporalTextureDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
         // Root table36 has an independent immutable CBV/SRV/UAV table per hero

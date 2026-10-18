@@ -65,8 +65,8 @@ uint HsRasterVariantForGeometry(GeometryDrawRecord geometry)
     // Geometry families keep their page ordinals; authored terrain uses variant 15.
     if ((geometry.Flags & 16u) != 0u && geometry.MeshId == 9u) return 15u;
     if ((geometry.Flags & 32u) != 0u) return 1u + (geometry.Lod & 0xffffu);
-    return (geometry.PageSlot < 42u && (geometry.Flags & 16u) == 0u)
-        ? 1u + geometry.PageSlot / 3u : 0u;
+    return (geometry.PageSlot < HsEnvironmentGeometryPageCount && (geometry.Flags & 16u) == 0u)
+        ? 1u + HsEnvironmentMaterialOrdinal(geometry.PageSlot / HsEnvironmentGeometryLodCount) : 0u;
 }
 
 [numthreads(64, 1, 1)]
@@ -157,7 +157,7 @@ HsVisibilityOutput HsVisibilityPSImpl(SceneOutput input, bool front,
 
     const GeometryDrawRecord geometry =
         LoadGeometryDrawRecord(PassValue >> 2u);
-    if (geometry.PageSlot >= 128u ||
+    if (geometry.PageSlot >= HsGeometryPageCapacity ||
         geometry.IndexCount == 0u)
         clip(-1.0);
     const bool meshPrimitive = (geometry.Flags & 2u) != 0u;
@@ -209,10 +209,10 @@ bool HsClassifiedVariant(uint2 visibility, HsRasterRecord record, out uint varia
     variant = HsRasterVariant(record);
     const GeometryDrawRecord geometry = LoadGeometryDrawRecord(record.geometryRecordId);
     if ((geometry.Flags & 16u) != 0u || HsHeroAssetIndex(geometry.MeshId) == HsHeroInvalidOrdinal)
-        return variant < 16u;
+        return variant < HsHeroVisibilityVariantBegin;
     // Archer's FBX slots share one draw. Classify each canonical primitive by
     // its provoking vertex instead of a draw-wide material/variant guess.
-    if (geometry.PageSlot >= 128u || geometry.IndexCount == 0u ||
+    if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||
         record.pageGeneration != geometry.GeometryGeneration ||
         visibility.y < geometry.FirstIndex / 3u ||
         visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u)
@@ -222,7 +222,7 @@ bool HsClassifiedVariant(uint2 visibility, HsRasterRecord record, out uint varia
     const uint slot = LoadGeometryVertex(descriptors, vertex).Material;
     const uint ordinal = HsHeroBindingOrdinals(geometry.MeshId, slot).x;
     if (!HsHeroOpaqueOrdinalValid(ordinal)) return false;
-    variant = 16u + ordinal;
+    variant = HsHeroVisibilityVariantBegin + ordinal;
     return true;
 }
 
@@ -344,7 +344,7 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
     vertex1 = (SceneOutput)0;
     vertex2 = (SceneOutput)0;
     sample = (HsTriangleSample)0;
-    if (geometry.PageSlot >= 128u || geometry.IndexCount == 0u ||
+    if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||
         visibility.y < geometry.FirstIndex / 3u ||
         visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u ||
         record.pageGeneration != geometry.GeometryGeneration ||
@@ -490,7 +490,7 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
         return;
     const GeometryDrawRecord geometry =
         LoadGeometryDrawRecord(record.geometryRecordId);
-    if (geometry.PageSlot >= 128u || visibility.y < geometry.FirstIndex / 3u ||
+    if (geometry.PageSlot >= HsGeometryPageCapacity || visibility.y < geometry.FirstIndex / 3u ||
         visibility.y - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u ||
         !HsRasterRefIndexValid(geometry, record))
         return;
@@ -510,11 +510,11 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
         vertex0, vertex1, vertex2, sample);
     const bool front = HsFrontFace[pixel] != 0u;
 #ifdef HS_GENERATED_HERO_MATERIAL
-    if (variant < 16u || !HsHeroOpaqueOrdinalValid(variant - 16u) ||
-        input.MaterialId != HsHeroMaterialIdBase + variant - 16u) return;
+    if (variant < HsHeroVisibilityVariantBegin || !HsHeroOpaqueOrdinalValid(variant - HsHeroVisibilityVariantBegin) ||
+        input.MaterialId != HsHeroMaterialIdBase + variant - HsHeroVisibilityVariantBegin) return;
     const GBufferOutput surface = HsHeroEvaluateSceneSurface(input, front, gradients);
 #else
-    if (variant >= 16u) return;
+    if (variant >= HsHeroVisibilityVariantBegin) return;
     const GBufferOutput surface = HsEvaluateSceneSurface(input, front, false, gradients, record.materialWord);
 #endif
     HsSurfaceBaseWrite[pixel] = surface.BaseColor;

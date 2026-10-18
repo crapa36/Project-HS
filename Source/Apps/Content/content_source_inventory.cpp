@@ -222,6 +222,8 @@ ContentSourceInventory LoadContentSourceInventoryInternal(bool include_presentat
 
     const auto environment_root = std::filesystem::path(paths::GameData()).parent_path() / "Textures/Environment";
     append_presentation_asset("environment/meshes", environment_root.parent_path().parent_path() / "Models/Environment/environment_meshes.json");
+    append_presentation_asset("environment/meadow-surface", environment_root.parent_path().parent_path() / "Models/Environment/meadow_surface.json");
+    append_presentation_asset("environment/meadow-meshes", environment_root.parent_path().parent_path() / "Models/Environment/meadow_surface_meshes.json");
     std::vector<std::filesystem::path> environment_files;
     for (const auto &entry : std::filesystem::recursive_directory_iterator(environment_root))
         if (entry.is_regular_file() && (entry.path().extension() == ".png" || entry.path().extension() == ".json"))

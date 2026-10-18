@@ -11,6 +11,34 @@ struct FailedSink : std::streambuf
 int main()
 {
     using hs::runtime_detail::DiagnosticLog;
+    Check(hs::runtime_detail::CsvField("") == "\"\"");
+    Check(hs::runtime_detail::CsvField("pass, \"native\"\nnext") == "\"pass, \"\"native\"\"\nnext\"");
+    hs::runtime_detail::PerformanceLogState performance;
+    Check(performance.FrameInterval(1000) == 0);
+    Check(performance.FrameInterval(2100) == 1100); // Includes work and pacing before the next frame.
+    Check(performance.FrameInterval(1500) == 0);
+    Check(performance.FrameInterval(1600) == 100);
+    Check(performance.ElapsedTicks(2100, 1500) == 0);
+    Check(!performance.AcceptGpuFrame(0, true, true));
+    Check(!performance.AcceptGpuFrame(7, false, true));
+    Check(!performance.AcceptGpuFrame(7, true, false));
+    Check(performance.AcceptGpuFrame(7, true, true));
+    Check(!performance.AcceptGpuFrame(7, true, true));
+    Check(!performance.AcceptGpuFrame(6, true, true));
+    Check(performance.AcceptGpuFrame(8, true, true));
+    Check(performance.GpuFrames() == 2 && performance.LastGpuFrame() == 8);
+    Check(!performance.GpuFrameCoverageComplete(8));
+    hs::runtime_detail::PerformanceLogState complete_tail;
+    Check(complete_tail.GpuFrameCoverageComplete(0));
+    Check(complete_tail.AcceptGpuFrame(1, true, true));
+    Check(!complete_tail.GpuFrameCoverageComplete(3));
+    // A drained tail is ordered after the previously emitted frame, with no duplicate records.
+    Check(!complete_tail.AcceptGpuFrame(1, true, true));
+    Check(complete_tail.AcceptGpuFrame(2, true, true));
+    Check(complete_tail.AcceptGpuFrame(3, true, true));
+    Check(complete_tail.GpuFrameCoverageComplete(3));
+    Check(complete_tail.AcceptGpuFrame(5, true, true));
+    Check(!complete_tail.GpuFrameCoverageComplete(5)); // A missing frame must not be declared complete.
     std::ostringstream output;
     DiagnosticLog recent(output,false,"header\n");
     const std::string line(2047,'x');

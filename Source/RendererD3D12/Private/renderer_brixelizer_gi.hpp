@@ -1,6 +1,6 @@
 #pragma once
 
-#include "renderer_ray_geometry.hpp"
+#include "renderer_scene_geometry.hpp"
 #include "renderer_ambient_occlusion.hpp"
 #include "renderer_sdk_frame.hpp"
 #include <array>
@@ -43,7 +43,7 @@ struct BrixelizerSceneInstance
 };
 struct BrixelizerSceneInputs
 {
-    std::span<const RaySceneGeometry> geometries; // original leaf / current SkinCache / procedural
+    std::span<const SoftwareSceneGeometry> geometries; // original leaf / current SkinCache / procedural
     std::span<const BrixelizerSceneInstance> instances; // all offscreen eligible instances too
     DirectX::XMFLOAT3 sdf_center{};
     std::uint32_t frame_slot{};
@@ -55,8 +55,8 @@ struct BrixelizerSceneInputs
 struct BrixelizerSceneOutputs { ResourceVersion sdf_atlas{}; std::uint32_t instance_count{}; };
 struct BrixelizerCacheInjectionInputs
 {
-    std::span<const RayShaderRead> reads; // one canonical set of deferred probe/shadow/light dependencies
-    RayShaderBinder bind_graphics; // actual deferred light/material/shadow tables
+    std::span<const SceneShaderRead> reads; // one canonical set of deferred probe/shadow/light dependencies
+    SceneShaderBinder bind_graphics; // actual deferred light/material/shadow tables
     ViewExtent render_active{};
     std::uint32_t frame_slot{};
     std::vector<std::shared_ptr<const void>> owners;
@@ -70,9 +70,9 @@ struct BrixelizerLightingInputs
     // Native environment cube; noise is an optional genuine128x128 override.
     // Otherwise selected Generation owns16 pinned-sampler RGBA16F textures.
     AmbientOcclusionGuide environment_cube,noise;
-    std::span<const RayShaderRead> reads; // actual common closure/frame/material/LUT backing
-    RayFrameTableBuilder make_bindings;
-    RayShaderBinder restore_bindings;
+    std::span<const SceneShaderRead> reads; // actual common closure/frame/material/LUT backing
+    SceneFrameTableBuilder make_bindings;
+    SceneShaderBinder restore_bindings;
     ViewExtent render_active{};
     SdkCamera camera{};
     std::uint32_t frame_slot{},sidecar_plane_count{};
@@ -98,7 +98,7 @@ struct BrixelizerLightingOutputs
 struct BrixelizerCompositeInputs
 {
     AmbientOcclusionGuide hdr;
-    RayFrameTableBuilder make_bindings;
+    SceneFrameTableBuilder make_bindings;
     ViewExtent render_active{};
     std::uint32_t frame_slot{};
     std::vector<std::shared_ptr<const void>> owners;
@@ -139,7 +139,7 @@ class BrixelizerGiSystem
     BrixelizerGiSystem &operator=(const BrixelizerGiSystem&)=delete;
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ID3D12RootSignature *,
         ViewExtent fixed_render_extent,std::uint32_t frame_slots,const BrixelizerSettings &,
-        const RayShaderReader &,BrixelizerCandidate &) const;
+        const SceneShaderReader &,BrixelizerCandidate &) const;
     [[nodiscard]] Result Commit(BrixelizerCandidate &&,const CompletionSet &);
     [[nodiscard]] Result RegisterScene(RenderGraphBuilder &,const BrixelizerSceneInputs &,BrixelizerSceneOutputs &);
     [[nodiscard]] Result RegisterCacheInjection(RenderGraphBuilder &,const BrixelizerCacheInjectionInputs &,AmbientOcclusionGuide &);

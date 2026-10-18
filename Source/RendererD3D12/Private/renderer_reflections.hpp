@@ -57,9 +57,9 @@ struct ScreenReflectionsInputs
 };
 struct ScreenReflectionsOutputs
 {
-    ResourceVersion reflections, composed;
-    ID3D12Resource *reflections_resource{}, *composed_resource{};
-    D3D12_CPU_DESCRIPTOR_HANDLE reflections_srv{}, composed_srv{};
+    ResourceVersion composed;
+    ID3D12Resource *composed_resource{};
+    D3D12_CPU_DESCRIPTOR_HANDLE composed_srv{};
 };
 struct ScreenReflectionsTargets;
 class ScreenReflectionsCandidate

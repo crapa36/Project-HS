@@ -25,7 +25,6 @@ static const uint HsLightMaskWords = 4u; // The CPU rejects more than128 authori
 #ifndef HS_LIGHT_LIST_BUILD
 #include "ltc_area.hlsli"
 #include "local_shadow.hlsli"
-#include "ray_shadow_data.hlsli"
 float HsLocalShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal)
 {
     float visibility=1.0;
@@ -35,16 +34,7 @@ float HsLocalShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal)
 }
 float HsLightShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal,bool world_query)
 {
-    const float raster=HsLocalShadowVisibility(light,world,normal);
-#if defined(HS_LOCAL_PROBE_CAPTURE)
-    return raster; // Capture queries static world depth, never main-view RT visibility.
-#else
-    if(world_query||(light.metadata.z&1u)==0u)return raster;
-    float ray,confidence;
-    if(HsRayShadowLookup(light.identity,light.metadata.xy,world,normal,ray,confidence))
-        return lerp(raster,ray,confidence); // Same light: one alternative/confidence blend.
-    return raster;
-#endif
+    return HsLocalShadowVisibility(light,world,normal);
 }
 // t1 starts with the immutable 256-byte LightListConstants header. Each cell
 // then owns uint4(inline count, spill count, exact world-query flag, total count).

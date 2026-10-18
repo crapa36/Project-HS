@@ -1,5 +1,6 @@
 #include "render_graph.hpp"
 #include "render_graph_validation.hpp"
+#include "render_graph_membership.hpp"
 #include "d3d12_resources.hpp"
 #include <hs/renderer/renderer.hpp>
 #include <limits>
@@ -12,10 +13,12 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <string>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace hs
@@ -110,10 +113,7 @@ void AppendPlanUse(PlanKey &key, const ResourceUse &use)
         return access == Access::Common || access == Access::ComputeRead ||
                access == Access::UnorderedRead || access == Access::UnorderedWrite ||
                access == Access::CopySource || access == Access::CopyDest ||
-               access == Access::IndirectArgs || access == Access::ASBuildWrite ||
-               access == Access::ASRead || access == Access::ASBuildRead ||
-               access == Access::ASCopyRead || access == Access::ASCopyWrite ||
-               access == Access::ASBuildInput || access == Access::ASBuildScratch;
+               access == Access::IndirectArgs;
     case QueueHint::Copy:
         return access == Access::Common || access == Access::CopySource ||
                access == Access::CopyDest;
@@ -219,21 +219,13 @@ struct LogicalResource
 
 [[nodiscard]] bool BufferDecays(const LogicalResource &resource) noexcept
 {
-    const bool acceleration_structure = resource.initial >= Access::ASBuildWrite &&
-        resource.initial <= Access::ASCopyWrite;
-    return resource.kind == ResourceKind::Buffer && !acceleration_structure &&
+    return resource.kind == ResourceKind::Buffer &&
         FixedBufferHeap(resource) == D3D12_HEAP_TYPE_DEFAULT;
-}
-
-[[nodiscard]] bool IsASAccess(Access access) noexcept
-{
-    return access >= Access::ASBuildWrite && access <= Access::ASCopyWrite;
 }
 
 [[nodiscard]] bool IsMemoryWrite(Access access) noexcept
 {
-    return access == Access::UnorderedWrite || access == Access::RayTracingWrite || access == Access::ASBuildScratch ||
-        access == Access::ASBuildWrite || access == Access::ASCopyWrite;
+    return access == Access::UnorderedWrite;
 }
 
 struct ExternalOperation
@@ -291,8 +283,6 @@ struct Pass
                                              : (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                                                 D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     case Access::ComputeRead:
-    case Access::RayTracingRead:
-    case Access::ASBuildInput:
         return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     case Access::AllShaderRead:
         return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
@@ -311,12 +301,7 @@ struct Pass
         return D3D12_RESOURCE_STATE_DEPTH_WRITE;
     case Access::UnorderedRead:
     case Access::UnorderedWrite:
-    case Access::RayTracingWrite:
-    case Access::ASBuildScratch:
         return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    case Access::ASBuildWrite: case Access::ASRead: case Access::ASBuildRead:
-    case Access::ASCopyRead: case Access::ASCopyWrite:
-        return D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
     case Access::CopySource:
         return D3D12_RESOURCE_STATE_COPY_SOURCE;
     case Access::CopyDest:
@@ -348,18 +333,6 @@ struct Pass
         return D3D12_BARRIER_SYNC_ALL_SHADING;
     case Access::ComputeRead:
         return D3D12_BARRIER_SYNC_COMPUTE_SHADING;
-    case Access::RayTracingRead:
-    case Access::RayTracingWrite:
-        return D3D12_BARRIER_SYNC_RAYTRACING;
-    case Access::ASBuildInput: case Access::ASBuildRead: case Access::ASBuildWrite:
-        return D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE;
-    case Access::ASBuildScratch:
-        return D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE |
-            D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
-    case Access::ASCopyRead: case Access::ASCopyWrite:
-        return D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
-    case Access::ASRead:
-        return D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_RAYTRACING;
     case Access::RenderTarget:
         return D3D12_BARRIER_SYNC_RENDER_TARGET;
     case Access::ShadingRateSource:
@@ -400,8 +373,6 @@ struct Pass
     case Access::ShaderRead:
     case Access::ComputeRead:
     case Access::AllShaderRead:
-    case Access::RayTracingRead:
-    case Access::ASBuildInput:
         return D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
     case Access::RenderTarget:
         return D3D12_BARRIER_ACCESS_RENDER_TARGET;
@@ -416,13 +387,7 @@ struct Pass
         return D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
     case Access::UnorderedRead:
     case Access::UnorderedWrite:
-    case Access::RayTracingWrite:
-    case Access::ASBuildScratch:
         return D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
-    case Access::ASBuildWrite: case Access::ASCopyWrite:
-        return D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
-    case Access::ASRead: case Access::ASBuildRead: case Access::ASCopyRead:
-        return D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
     case Access::CopySource:
         return D3D12_BARRIER_ACCESS_COPY_SOURCE;
     case Access::CopyDest:
@@ -451,7 +416,6 @@ struct Pass
     case Access::ShaderRead:
     case Access::ComputeRead:
     case Access::AllShaderRead:
-    case Access::RayTracingRead:
         return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
     case Access::RenderTarget:
         return D3D12_BARRIER_LAYOUT_RENDER_TARGET;
@@ -467,7 +431,6 @@ struct Pass
         return D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE;
     case Access::UnorderedRead:
     case Access::UnorderedWrite:
-    case Access::RayTracingWrite:
         return D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS;
     case Access::CopySource:
         return D3D12_BARRIER_LAYOUT_COPY_SOURCE;
@@ -486,31 +449,58 @@ struct Pass
 
 [[nodiscard]] bool IsUavAccess(Access access) noexcept
 {
-    return access == Access::UnorderedRead || access == Access::UnorderedWrite || access == Access::RayTracingWrite ||
-        access == Access::ASBuildScratch;
+    return access == Access::UnorderedRead || access == Access::UnorderedWrite;
 }
 
 [[nodiscard]] bool NeedsMemoryBarrier(Access before, Access after) noexcept
 {
-    return ((IsASAccess(before) && IsASAccess(after)) ||
-            (IsUavAccess(before) && IsUavAccess(after))) &&
+    return (IsUavAccess(before) && IsUavAccess(after)) &&
         (IsMemoryWrite(before) || IsMemoryWrite(after));
 }
 
 [[nodiscard]] D3D12_BARRIER_SYNC QueueBarrierSync(Access access, QueueHint queue) noexcept
 {
-    if (queue == QueueHint::Compute && access == Access::ASRead)
-        return D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING;
     if (queue == QueueHint::Compute &&
         (access == Access::UnorderedRead || access == Access::UnorderedWrite))
         return D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW;
     return BarrierSync(access);
 }
 
+struct BufferBarrierBatch
+{
+    ID3D12GraphicsCommandList7 *commands{};
+    std::array<D3D12_BUFFER_BARRIER, 64> barriers;
+    UINT count{};
+
+    void Flush()
+    {
+        if (!count) return;
+        D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_BUFFER, count};
+        group.pBufferBarriers = barriers.data();
+        commands->Barrier(1, &group);
+        count = 0;
+    }
+    void Append(const D3D12_BUFFER_BARRIER &barrier)
+    {
+        if (count == barriers.size()) Flush();
+        barriers[count++] = barrier;
+    }
+};
+
+void EmitBufferBarrier(ID3D12GraphicsCommandList7 *commands,
+                       const D3D12_BUFFER_BARRIER &barrier, BufferBarrierBatch *batch)
+{
+    if (batch) { batch->Append(barrier); return; }
+    D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_BUFFER, 1};
+    group.pBufferBarriers = &barrier;
+    commands->Barrier(1, &group);
+}
+
 void EmitUavBarrier(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandList7 *enhanced,
                     BarrierMode mode, const LogicalResource &resource,
                     QueueHint queue = QueueHint::Direct,
-                    Access before = Access::UnorderedWrite, Access after = Access::UnorderedWrite)
+                    Access before = Access::UnorderedWrite, Access after = Access::UnorderedWrite,
+                    BufferBarrierBatch *batch = nullptr)
 {
     if (!resource.native)
     {
@@ -518,15 +508,10 @@ void EmitUavBarrier(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandLi
     }
     if (mode == BarrierMode::Enhanced)
     {
-        // The explicit callback API has no before/after access argument. For an
-        // AS resource its generic UAV barrier covers build, copy and traversal.
-        const bool generic_as = IsASAccess(resource.initial) && !IsASAccess(before);
-        const auto sync_before = generic_as ? D3D12_BARRIER_SYNC_ALL : QueueBarrierSync(before, queue);
-        const auto sync_after = generic_as ? D3D12_BARRIER_SYNC_ALL : QueueBarrierSync(after, queue);
-        const auto access_before = generic_as ?
-            (D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ |
-             D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE) : BarrierAccess(before);
-        const auto access_after = generic_as ? access_before : BarrierAccess(after);
+        const auto sync_before = QueueBarrierSync(before, queue);
+        const auto sync_after = QueueBarrierSync(after, queue);
+        const auto access_before = BarrierAccess(before);
+        const auto access_after = BarrierAccess(after);
         if (resource.kind == ResourceKind::Texture)
         {
             D3D12_GLOBAL_BARRIER barrier{};
@@ -547,9 +532,7 @@ void EmitUavBarrier(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandLi
         barrier.pResource = static_cast<ID3D12Resource *>(resource.native);
         barrier.Offset = 0;
         barrier.Size = UINT64_MAX;
-        D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_BUFFER, 1};
-        group.pBufferBarriers = &barrier;
-        enhanced->Barrier(1, &group);
+        EmitBufferBarrier(enhanced, barrier, batch);
         return;
     }
 
@@ -561,32 +544,11 @@ void EmitUavBarrier(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandLi
 
 void Transition(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandList7 *enhanced,
                 BarrierMode mode, const LogicalResource &resource, Access before, Access after,
-                QueueHint queue = QueueHint::Direct, bool release = false, bool acquire = false)
+                QueueHint queue = QueueHint::Direct, bool release = false, bool acquire = false,
+                BufferBarrierBatch *batch = nullptr)
 {
     if (!resource.native || FixedBufferHeap(resource) != D3D12_HEAP_TYPE_DEFAULT)
     {
-        return;
-    }
-    if (IsASAccess(before) && IsASAccess(after))
-    {
-        // AS buffers never transition out of their immutable Legacy state.
-        if (mode == BarrierMode::Legacy)
-        {
-            if (release || acquire || (before != after && NeedsMemoryBarrier(before, after)))
-                EmitUavBarrier(commands, enhanced, mode, resource, queue, before, after);
-            return;
-        }
-        if (before == after && !release && !acquire) return;
-        D3D12_BUFFER_BARRIER barrier{};
-        barrier.SyncBefore = acquire ? D3D12_BARRIER_SYNC_NONE : QueueBarrierSync(before, queue);
-        barrier.SyncAfter = release ? D3D12_BARRIER_SYNC_NONE : QueueBarrierSync(after, queue);
-        barrier.AccessBefore = acquire ? D3D12_BARRIER_ACCESS_NO_ACCESS : BarrierAccess(before);
-        barrier.AccessAfter = release ? D3D12_BARRIER_ACCESS_NO_ACCESS : BarrierAccess(after);
-        barrier.pResource = static_cast<ID3D12Resource *>(resource.native);
-        barrier.Size = UINT64_MAX;
-        D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_BUFFER, 1};
-        group.pBufferBarriers = &barrier;
-        enhanced->Barrier(1, &group);
         return;
     }
     if (before == after) return;
@@ -643,9 +605,7 @@ void Transition(ID3D12GraphicsCommandList *commands, ID3D12GraphicsCommandList7 
             barrier.pResource = native;
             barrier.Offset = 0;
             barrier.Size = UINT64_MAX;
-            D3D12_BARRIER_GROUP group{D3D12_BARRIER_TYPE_BUFFER, 1};
-            group.pBufferBarriers = &barrier;
-            enhanced->Barrier(1, &group);
+            EmitBufferBarrier(enhanced, barrier, batch);
         }
         return;
     }
@@ -879,6 +839,7 @@ struct RenderGraphQueueExecutor::Impl
         Microsoft::WRL::ComPtr<ID3D12Fence> fence;
         std::uint64_t next_fence{1};
         std::uint64_t timestamp_frequency{};
+        CompletionSet joined;
     };
 
     struct FrameSlot
@@ -980,6 +941,7 @@ Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
         }
         state.next_fence = 1;
         state.timestamp_frequency = 0;
+        state.joined = {};
         if (queue_hint != QueueHint::Copy)
             static_cast<void>(state.queue->GetTimestampFrequency(&state.timestamp_frequency));
     }
@@ -1063,8 +1025,10 @@ Result RenderGraphQueueExecutor::Join(const CompletionSet &completion, QueueHint
         if (value >= state.next_fence)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "RenderGraph completion does not belong to this executor timeline.");
+        if (value <= consumer.joined.Required(producer)) continue;
         const auto result = consumer.queue->Wait(state.fence.Get(), value);
         if (FAILED(result)) return QueueFailure("RenderGraph queue join", result);
+        consumer.joined.Include(producer, value);
         ++impl_->stats.cross_queue_waits;
     }
     return Result::Success();
@@ -1146,6 +1110,7 @@ void RenderGraphQueueExecutor::Clear() noexcept
         state.fence.Reset();
         state.next_fence = 1;
         state.timestamp_frequency = 0;
+        state.joined = {};
     }
     impl_->device.Reset();
     impl_->reliable = true;
@@ -1165,6 +1130,13 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
 {
     completion = {};
     impl_->stats = {};
+    auto cpu_stage_start = std::chrono::steady_clock::now();
+    const auto measure_stage = [&] {
+        const auto end = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(end - cpu_stage_start).count();
+        cpu_stage_start = end;
+        return static_cast<std::uint64_t>(elapsed);
+    };
     const auto fail = [](std::string message) {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
@@ -1175,6 +1147,31 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     auto &g = *graph.impl_;
     if (g.state != Preparation::Ready || !g.pool)
         return fail("RenderGraph queued execution requires a prepared graph.");
+    if (options && options->cpu_pass_timing_count && !options->cpu_pass_timings)
+        return fail("CPU pass timing output count requires a non-null buffer.");
+    const auto cpu_passes = options
+        ? std::span<GpuPassTiming>(options->cpu_pass_timings, options->cpu_pass_timing_count)
+        : std::span<GpuPassTiming>{};
+    if (!cpu_passes.empty())
+    {
+        if (cpu_passes.size() != g.schedule.execution_order.size())
+            return fail("CPU pass timing output must match compiled execution order.");
+        for (std::size_t position = 0; position < cpu_passes.size(); ++position)
+        {
+            auto &timing = cpu_passes[position];
+            const auto &pass = g.passes[g.schedule.execution_order[position]];
+            if (timing.pass_id != pass.id || timing.queue != static_cast<RenderQueue>(pass.queue))
+                return fail("CPU pass timing identity must match compiled execution order.");
+            timing.cpu_record_begin_qpc = timing.cpu_record_end_qpc = 0;
+            timing.cpu_provider_submit_begin_qpc = timing.cpu_provider_submit_end_qpc = 0;
+            timing.cpu_record_valid = timing.cpu_provider_submit_valid = false;
+        }
+    }
+    const auto cpu_counter = []() -> std::uint64_t {
+        LARGE_INTEGER counter{};
+        return QueryPerformanceCounter(&counter) && counter.QuadPart > 0
+            ? static_cast<std::uint64_t>(counter.QuadPart) : 0;
+    };
     impl_->stats.transient_resource_count = 0;
     impl_->stats.transient_backing_bytes = 0;
     std::vector<std::size_t> counted_blocks;
@@ -1223,6 +1220,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         std::uint32_t position{};
         std::vector<PlannedBarrier> before, after;
         std::vector<std::uint32_t> dependencies, resources;
+        std::optional<std::unordered_set<std::uint32_t>> resource_membership;
         CompletionSet imported;
         std::vector<std::uint32_t> external_imports;
         std::size_t recorder{};
@@ -1270,8 +1268,8 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                           resource.initial_queue});
     }
     const auto include_resource = [&](std::uint32_t batch, std::uint32_t resource) {
-        auto &uses = batches[batch].resources;
-        if (std::find(uses.begin(), uses.end(), resource) == uses.end()) uses.push_back(resource);
+        auto &target = batches[batch];
+        render_graph::AppendUniqueBatchResource(target.resources, target.resource_membership, resource);
     };
     const auto depend = [&](std::uint32_t consumer, std::uint32_t producer) {
         if (producer == UINT32_MAX || consumer == producer) return;
@@ -1310,7 +1308,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             include_external_import(state.batch, resource);
             submission_order.push_back(state.batch);
         }
-        const auto released = IsASAccess(state.physical) ? state.physical : Access::Common;
+        const auto released = Access::Common;
         batches[state.batch].after.push_back(
             {resource, state.physical, released, BarrierOperation::Release});
         include_resource(state.batch, resource);
@@ -1372,8 +1370,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 include_external_import(index, resource);
             }
             if (handoff && !alias_activation) depend(index, state.batch);
-            if (!alias_activation && !handoff && NeedsMemoryBarrier(state.physical, incoming) &&
-                (!IsASAccess(incoming) || state.physical == incoming))
+            if (!alias_activation && !handoff && NeedsMemoryBarrier(state.physical, incoming))
                 batches[index].before.push_back({resource, state.physical, incoming, BarrierOperation::Uav});
             batches[index].before.push_back({resource, state.physical, incoming,
                 alias_activation ? BarrierOperation::Alias :
@@ -1514,6 +1511,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     const auto record = [&](std::uint32_t index) {
         const auto &batch = batches[index];
         auto &recorder = slot.recorders[QueueIndex(batch.queue)][batch.recorder];
+        auto *cpu_timing = batch.pass != UINT32_MAX && !cpu_passes.empty()
+            ? &cpu_passes[batch.position] : nullptr;
+        if (cpu_timing) cpu_timing->cpu_record_begin_qpc = cpu_counter();
         try
         {
             auto result = recorder.allocator->Reset();
@@ -1522,18 +1522,25 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (FAILED(result)) { record_results[index] = QueueFailure("Reset graph command list", result); return; }
             auto *commands = recorder.commands.Get();
             auto *enhanced = barriers == BarrierMode::Enhanced ? recorder.enhanced.Get() : nullptr;
+            BufferBarrierBatch buffer_barriers{enhanced};
             const auto emit = [&](const PlannedBarrier &barrier) {
                 const auto &resource = g.resources[barrier.resource];
+                const bool batch_buffer = enhanced && resource.kind == ResourceKind::Buffer &&
+                    barrier.operation != BarrierOperation::Alias;
+                // Do not move buffer barriers across texture/global/alias operations.
+                if (!batch_buffer) buffer_barriers.Flush();
+                auto *buffer_batch = batch_buffer ? &buffer_barriers : nullptr;
                 if (barrier.operation == BarrierOperation::Uav)
-                    EmitUavBarrier(commands, enhanced, barriers, resource, batch.queue, barrier.before, barrier.after);
+                    EmitUavBarrier(commands, enhanced, barriers, resource, batch.queue, barrier.before, barrier.after, buffer_batch);
                 else if (barrier.operation == BarrierOperation::Alias)
                     EmitAliasBarrier(commands, enhanced, barriers, resource, barrier.before,
                                      barrier.after, batch.queue);
                 else if (!(barriers == BarrierMode::Legacy && batch.queue == QueueHint::Copy))
                     Transition(commands, enhanced, barriers, resource, barrier.before, barrier.after, batch.queue,
-                               barrier.operation == BarrierOperation::Release, barrier.operation == BarrierOperation::Acquire);
+                               barrier.operation == BarrierOperation::Release, barrier.operation == BarrierOperation::Acquire, buffer_batch);
             };
             for (const auto &barrier : batch.before) emit(barrier);
+            buffer_barriers.Flush();
             if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries && batch.queue != QueueHint::Copy)
                 commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, options->timestamp_base + batch.position * 2);
             if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
@@ -1556,6 +1563,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 if (queries && batch.queue != QueueHint::Copy) commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             }
             for (const auto &barrier : batch.after) emit(barrier);
+            buffer_barriers.Flush();
             if (batch.external_finish != UINT32_MAX && queries && batch.queue != QueueHint::Copy)
                 commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, options->timestamp_base + batch.position * 2 + 1);
             if (batch.resolve_timestamps)
@@ -1579,7 +1587,14 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             static_cast<void>(recorder.commands->Close());
             record_results[index] = fail("RenderGraph recording callback failed.");
         }
+        if (cpu_timing)
+        {
+            cpu_timing->cpu_record_end_qpc = cpu_counter();
+            cpu_timing->cpu_record_valid = cpu_timing->cpu_record_begin_qpc != 0 &&
+                cpu_timing->cpu_record_end_qpc >= cpu_timing->cpu_record_begin_qpc;
+        }
     };
+    impl_->stats.cpu_plan_us = measure_stage();
     Result dispatch = Result::Success();
     if (tasks)
     {
@@ -1588,14 +1603,16 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             for (std::uint32_t index = 0; index < batches.size(); ++index)
             {
                 if (batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner)
-                {
-                    record(index);
                     continue;
-                }
                 dispatch = tasks->submit([&, index] { record(index); });
                 if (!dispatch) break;
                 ++impl_->stats.record_jobs;
             }
+            // Submit every worker list before owner-only SDK recording can block dispatch.
+            if (dispatch)
+                for (std::uint32_t index = 0; index < batches.size(); ++index)
+                    if (batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner)
+                        record(index);
         }
         catch (...) { dispatch = fail("RenderGraph recording task submission threw."); }
         // join is mandatory even after a rejected/throwing submit. All lambda
@@ -1608,6 +1625,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     }
     else
         for (std::uint32_t index = 0; index < batches.size(); ++index) record(index);
+    impl_->stats.cpu_record_us = measure_stage();
     for (const auto &result : record_results) if (!result) return result;
 
     // Allocate completion/ownership storage before any submission. Callback
@@ -1783,12 +1801,20 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (FAILED(incoming)) return external_failure("RenderGraph provider incoming Wait", incoming);
             ++impl_->stats.cross_queue_waits;
             RenderExternalPassContext context(retained.queue.Get(), &g);
+            auto *cpu_timing = !cpu_passes.empty() ? &cpu_passes[batch.position] : nullptr;
+            if (cpu_timing) cpu_timing->cpu_provider_submit_begin_qpc = cpu_counter();
             try { provider_result = retained.operation->execute(context, retained.provider); }
             catch (const std::exception &error)
             {
                 provider_result = fail(std::string("RenderGraph external callback failed: ") + error.what());
             }
             catch (...) { provider_result = fail("RenderGraph external callback failed."); }
+            if (cpu_timing)
+            {
+                cpu_timing->cpu_provider_submit_end_qpc = cpu_counter();
+                cpu_timing->cpu_provider_submit_valid = cpu_timing->cpu_provider_submit_begin_qpc != 0 &&
+                    cpu_timing->cpu_provider_submit_end_qpc >= cpu_timing->cpu_provider_submit_begin_qpc;
+            }
             const bool valid_provider = ValidExternalCompletion(retained.provider, impl_->device.Get());
             const auto retirement_value = retained.next_value++;
             const auto retirement = retained.queue->Signal(retained.retirement_fence.Get(), retirement_value);
@@ -1818,28 +1844,29 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         for (auto position = first; position < end; ++position)
         {
             const auto &submitted_batch = batches[submission_order[position]];
+            // Planning is complete; reuse its physical-state scratch for linear publication.
+            for (const auto resource_index : submitted_batch.resources)
+                states[resource_index].physical = g.resources[resource_index].current;
+            for (const auto &barrier : submitted_batch.before)
+                g.resources[barrier.resource].current = states[barrier.resource].physical = barrier.after;
+            if (submitted_batch.pass != UINT32_MAX)
+                for (const auto &use : g.passes[submitted_batch.pass].uses)
+                {
+                    const auto resource_index = use.predecessor.resource.value - 1;
+                    const auto *boundary = ExternalAccess(g.passes[submitted_batch.pass], use.predecessor.resource);
+                    g.resources[resource_index].current = states[resource_index].physical =
+                        boundary ? boundary->outgoing : use.access;
+                }
+            for (const auto &barrier : submitted_batch.after)
+            {
+                states[barrier.resource].physical = barrier.after;
+                if (barrier.operation != BarrierOperation::Release)
+                    g.resources[barrier.resource].current = barrier.after;
+            }
             for (const auto resource_index : submitted_batch.resources)
             {
                 auto &resource = g.resources[resource_index];
-                Access access = resource.current;
-                Access physical = access;
-                for (const auto &barrier : submitted_batch.before)
-                    if (barrier.resource == resource_index)
-                        access = physical = barrier.after;
-                if (submitted_batch.pass != UINT32_MAX)
-                    for (const auto &use : g.passes[submitted_batch.pass].uses)
-                        if (use.predecessor.resource.value == resource_index + 1)
-                        {
-                            const auto *boundary = ExternalAccess(g.passes[submitted_batch.pass], use.predecessor.resource);
-                            access = physical = boundary ? boundary->outgoing : use.access;
-                        }
-                for (const auto &barrier : submitted_batch.after)
-                    if (barrier.resource == resource_index)
-                    {
-                        physical = barrier.after;
-                        if (barrier.operation != BarrierOperation::Release) access = barrier.after;
-                    }
-                resource.current = access;
+                const auto physical = states[resource_index].physical;
                 resource.final_queue = batch.queue;
                 if (!resource.imported && resource.pool_index != SIZE_MAX)
                 {
@@ -1861,6 +1888,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         if (!provider_result) return provider_result;
         first = end;
     }
+    impl_->stats.cpu_submit_us = measure_stage();
     return Result::Success();
 }
 
@@ -2245,8 +2273,19 @@ void *RenderGraphBuilder::Resolve(ResourceHandle handle) const noexcept
     return nullptr;
 }
 
-Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
+Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu)
 {
+    if (capture_cpu) *capture_cpu = {};
+    GraphExecutionStats captured_cpu;
+    auto cpu_stage_start = capture_cpu ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
+    const auto capture_stage = [&](std::uint64_t &duration) {
+        if (!capture_cpu) return;
+        const auto end = std::chrono::steady_clock::now();
+        duration = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(end - cpu_stage_start).count());
+        cpu_stage_start = end;
+    };
     impl_->state = Preparation::Failed;
     auto fail = [](std::string message) { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message)); };
     if (impl_->invalid_final) return fail("RenderGraph final access names a nonexistent resource.");
@@ -2310,19 +2349,16 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
         else if (!resource.buffer.size || resource.buffer.flags & ~D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
             return fail("RenderGraph transient buffer descriptor is invalid.");
     }
+    capture_stage(captured_cpu.cpu_prepare_validation_us);
     const auto compatible = [](const LogicalResource &r, Access access) {
         const auto fixed_heap = FixedBufferHeap(r);
-        if (IsASAccess(r.initial) || IsASAccess(access))
-            return r.imported && r.kind == ResourceKind::Buffer &&
-                fixed_heap == D3D12_HEAP_TYPE_DEFAULT && IsASAccess(r.initial) && IsASAccess(access) &&
-                (r.native_description.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         if (fixed_heap == D3D12_HEAP_TYPE_READBACK) return access == Access::CopyDest;
         if (fixed_heap == D3D12_HEAP_TYPE_UPLOAD)
             return access == Access::ShaderRead || access == Access::ComputeRead ||
-                access == Access::AllShaderRead || access == Access::RayTracingRead || access == Access::CopySource ||
+                access == Access::AllShaderRead || access == Access::CopySource ||
                 access == Access::VertexBuffer || access == Access::IndexBuffer ||
-                access == Access::VertexShaderRead || access == Access::IndirectArgs || access == Access::ASBuildInput;
-        if (access == Access::Undefined || static_cast<unsigned>(access) > static_cast<unsigned>(Access::RayTracingWrite)) return false;
+                access == Access::VertexShaderRead || access == Access::IndirectArgs;
+        if (access == Access::Undefined || static_cast<unsigned>(access) > static_cast<unsigned>(Access::ShadingRateSource)) return false;
         const auto &desc = r.native_description;
         const auto flags = r.imported ? static_cast<unsigned>(desc.Flags) : (r.kind == ResourceKind::Texture ? r.texture.flags : r.buffer.flags);
         switch (access)
@@ -2336,13 +2372,9 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
             return r.kind == ResourceKind::Texture &&
                    (flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
                    !(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
-        case Access::UnorderedRead: case Access::UnorderedWrite: case Access::RayTracingWrite:
+        case Access::UnorderedRead: case Access::UnorderedWrite:
             return (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
-        case Access::ASBuildScratch:
-            return r.kind == ResourceKind::Buffer && (flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-        case Access::ASBuildInput:
-            return r.kind == ResourceKind::Buffer && !(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
-        case Access::ShaderRead: case Access::ComputeRead: case Access::AllShaderRead: case Access::RayTracingRead:
+        case Access::ShaderRead: case Access::ComputeRead: case Access::AllShaderRead:
             return !(flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
         case Access::VertexBuffer: case Access::IndexBuffer: case Access::IndirectArgs:
             return r.kind == ResourceKind::Buffer;
@@ -2367,9 +2399,12 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
     };
     std::vector<render_graph::ResourceInfo> resource_infos;
     resource_infos.reserve(impl_->resources.size());
+    std::unordered_set<std::uintptr_t> imported_identities;
+    imported_identities.reserve(impl_->resources.size());
     for (const auto &r : impl_->resources)
     {
         render_graph::ResourceInfo info;
+        info.name = r.name;
         info.kind = r.kind;
         info.initialized = r.imported;
         info.buffer_size = r.buffer.size;
@@ -2391,9 +2426,8 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
             info.imported_identity = reinterpret_cast<std::uintptr_t>(identity.Get());
             // Import identities can change with the frame slot while the plan
             // remains reusable. Validate duplicates every frame, outside its key.
-            for (const auto &previous : resource_infos)
-                if (previous.imported_identity == info.imported_identity)
-                    return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
+            if (!imported_identities.insert(info.imported_identity).second)
+                return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
             if (r.kind == ResourceKind::Buffer) info.buffer_size = desc.Width;
             else
             {
@@ -2522,6 +2556,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
                     static_cast<std::uint64_t>(boundary.outgoing)});
         }
     }
+    capture_stage(captured_cpu.cpu_prepare_info_key_us);
     if (impl_->cached_plan_key == plan_key)
         ++impl_->plan_reuses;
     else
@@ -2550,6 +2585,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
         impl_->cached_plan_key = plan_key;
         ++impl_->plan_compilations;
     }
+    capture_stage(captured_cpu.cpu_prepare_compile_us);
     const auto pass_count = static_cast<std::uint32_t>(impl_->passes.size());
     for (std::uint32_t position = 0; position < pass_count; ++position)
         for (const auto &use : impl_->passes[impl_->schedule.execution_order[position]].uses)
@@ -2694,6 +2730,8 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool)
         if (!reuse_views) found->active_view_descs = std::move(member_descs);
     }
     impl_->pool = pool.impl_.get(); impl_->state = Preparation::Ready;
+    capture_stage(captured_cpu.cpu_prepare_transient_us);
+    if (capture_cpu) *capture_cpu = captured_cpu;
     return Result::Success();
 }
 
@@ -2780,8 +2818,7 @@ Result RenderGraphBuilder::Execute(void *native_command_list, void *enhanced_com
                 EmitAliasBarrier(commands, enhanced, barriers, *resource, previous, use.access,
                                  pass.queue);
             }
-            else if (NeedsMemoryBarrier(resource->current, use.access) &&
-                (!IsASAccess(use.access) || resource->current == use.access))
+            else if (NeedsMemoryBarrier(resource->current, use.access))
             {
                 EmitUavBarrier(commands, enhanced, barriers, *resource, pass.queue, resource->current, use.access);
                 Transition(commands, enhanced, barriers, *resource, resource->current, use.access);

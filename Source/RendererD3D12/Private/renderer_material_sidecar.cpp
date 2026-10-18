@@ -19,7 +19,8 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(const RendererConfig &can
             const std::string name(hero ? kHeroMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                         : kAuthoredMaterialNames[ordinal]);
             const std::string id = hero ? "render/material/" + name + "/material.rpkg"
-                : ordinal == kTerrainMaterialOrdinal ? "render/material/terrain.rpkg" : "render/" + name + ".rpkg";
+                : ordinal == kTerrainMaterialOrdinal ? "render/material/terrain.rpkg"
+                : ordinal == render_data::kGroundDetailMaterialOrdinal ? "render/material/ground_detail.rpkg" : "render/" + name + ".rpkg";
             std::filesystem::path path;
             if (auto resolved = candidate.ResolveProduct(id, path); !resolved) return resolved;
             auto &header = headers[ordinal];

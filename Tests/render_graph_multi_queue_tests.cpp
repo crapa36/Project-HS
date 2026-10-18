@@ -1,4 +1,7 @@
 #include "render_graph.hpp"
+#include "render_graph_validation.hpp"
+#include "renderer_local_probe_draws.hpp"
+#include <hs/renderer/renderer.hpp>
 
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
@@ -10,11 +13,18 @@
 
 #include <array>
 #include <atomic>
+#include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <cstdio>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <memory>
@@ -244,6 +254,222 @@ void RunRemovedFenceSentinel(Fixture &fixture)
     Check(!waited && waited.Message().find(std::to_string(static_cast<std::int64_t>(DXGI_ERROR_DEVICE_REMOVED))) != std::string_view::npos,
           "removed fence wait reports device removal instead of completion");
     Check(!executor.Drain(), "drain cannot prove completion from the removed fence sentinel");
+}
+
+void RunQueueJoinReuse(Fixture &fixture)
+{
+    hs::RenderGraphQueueExecutor executor;
+    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "join executor initialize");
+    Check(executor.Drain().Succeeded(), "signal initial join timelines");
+    auto first = executor.Completed();
+    first.direct = 0;
+    Check(first.compute && first.copy, "join test has owned producer serials");
+    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "join both producer timelines");
+    Check(executor.LastExecutionStats().cross_queue_waits == 2, "first join waits for both producers");
+    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "repeat producer join");
+    Check(executor.LastExecutionStats().cross_queue_waits == 2, "repeated join does not enqueue duplicate waits");
+
+    Check(executor.Drain().Succeeded(), "advance join timelines");
+    auto next = executor.Completed();
+    next.direct = 0;
+    Check(next.compute > first.compute && next.copy > first.copy, "join serials advance");
+    Check(executor.Join(next, hs::QueueHint::Direct).Succeeded(), "join newer producer serials");
+    Check(executor.LastExecutionStats().cross_queue_waits == 4, "newer serials still enqueue waits");
+    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "join older producer serials");
+    Check(executor.LastExecutionStats().cross_queue_waits == 4, "newer waits cover older serials");
+    Check(executor.Join(next, hs::QueueHint::Copy).Succeeded(), "join from another destination");
+    Check(executor.LastExecutionStats().cross_queue_waits == 5, "wait reuse is destination-specific");
+    auto invalid = next;
+    invalid.compute = UINT64_MAX;
+    Check(!executor.Join(invalid, hs::QueueHint::Direct), "wait reuse still rejects unowned serials");
+    Check(executor.LastExecutionStats().cross_queue_waits == 5, "invalid serial adds no wait");
+
+    executor.Clear();
+    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "reinitialize join executor");
+    Check(executor.Drain().Succeeded(), "signal replacement join timelines");
+    auto replacement = executor.Completed();
+    replacement.direct = 0;
+    Check(executor.Join(replacement, hs::QueueHint::Direct).Succeeded(), "join replacement timelines");
+    Check(executor.LastExecutionStats().cross_queue_waits == 2, "new timelines do not inherit old waits");
+    Check(executor.Drain().Succeeded(), "complete join test");
+    fixture.CheckValidation();
+}
+void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
+{
+    for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
+    for (const bool timestamps_enabled : {false, true})
+    for (const bool fail_middle : {false, true})
+    {
+        hs::TransientResourcePool pool;
+        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "independent pool");
+        hs::RenderGraphQueueExecutor executor;
+        Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "independent executor");
+        hs::RenderGraphBuilder graph;
+        std::array<void *, 6> lists{};
+        for (std::uint32_t index = 0; index < lists.size(); ++index)
+            graph.AddPass(index + 1, "independent recording", queue).SetExecuteChecked(
+                [&, index](hs::RenderPassContext &context) {
+                    lists[index] = context.NativeCommandList();
+                    return fail_middle && index == 1
+                        ? hs::Result::Failure(hs::ErrorCode::TaskFailed, "independent-test", "injected failure")
+                        : hs::Result::Success();
+                });
+        Check(graph.Prepare(pool).Succeeded(), "prepare independent graph");
+        hs::RenderTaskExecutor tasks;
+        tasks.submit = [](std::function<void()> task) { task(); return hs::Result::Success(); };
+        tasks.join = [] { return hs::Result::Success(); };
+        std::vector<hs::GpuPassTiming> cpu_passes;
+        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
+            cpu_passes.push_back({graph.CompiledPassId(position),
+                std::string(graph.CompiledPassName(position)),
+                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
+        ComPtr<ID3D12QueryHeap> queries;
+        const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 12, 0};
+        Hr(fixture.device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(&queries)), "independent timestamp heap");
+        ComPtr<ID3D12Resource> timestamps;
+        const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+        const auto description = BufferDescription(12 * sizeof(std::uint64_t));
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamps)), "independent timestamp readback");
+        hs::GraphExecutionOptions options;
+        options.timestamp_query_heap = timestamps_enabled ? queries.Get() : nullptr;
+        options.timestamp_readback = timestamps_enabled ? timestamps.Get() : nullptr;
+        options.task_executor = &tasks;
+        options.cpu_pass_timings = cpu_passes.data();
+        options.cpu_pass_timing_count = cpu_passes.size();
+        hs::CompletionSet completion;
+        const auto result = executor.Execute(graph, 0, barriers, completion, &options);
+        Check(executor.LastExecutionStats().record_jobs ==
+                  6u + (timestamps_enabled ? 1u : 0u), "each pass retains its own recording job");
+        Check(result.Succeeded() != fail_middle, "independent callback failure preserved");
+        if (fail_middle)
+            Check(completion.direct == 0 && completion.compute == 0 &&
+                  executor.LastExecutionStats().direct_batches == 0 &&
+                  executor.LastExecutionStats().compute_batches == 0,
+                  "independent recording failure submits no GPU work");
+        else
+        {
+            for (std::size_t i = 0; i < lists.size(); ++i)
+                for (std::size_t j = i + 1; j < lists.size(); ++j)
+                    Check(lists[i] && lists[i] != lists[j], "pass command list state remains isolated");
+            for (const auto &timing : cpu_passes)
+                Check(timing.cpu_record_valid && timing.cpu_record_begin_qpc <= timing.cpu_record_end_qpc,
+                      "independent recording retains every pass timing");
+            Check(executor.Wait(completion).Succeeded(), "wait independent graph");
+            if (timestamps_enabled)
+            {
+            std::uint64_t *values{};
+            D3D12_RANGE range{0, 12 * sizeof(std::uint64_t)};
+            Hr(timestamps->Map(0, &range, reinterpret_cast<void **>(&values)),
+               "map independent timestamps");
+            for (std::size_t index = 0; index < 12; index += 2)
+                Check(values[index] != 0 && values[index + 1] >= values[index],
+                      "independent lists preserve every GPU timestamp pair");
+            D3D12_RANGE no_write{};
+            timestamps->Unmap(0, &no_write);
+            }
+        }
+    }
+    enum class Outcome { Success, Reject, Throw, JoinFailure, OwnerFailure };
+    for (const auto outcome : {Outcome::Success, Outcome::Reject, Outcome::Throw,
+                               Outcome::JoinFailure, Outcome::OwnerFailure})
+    {
+        hs::TransientResourcePool pool;
+        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(),
+              "recording dispatch pool initialize");
+        hs::RenderGraphBuilder graph;
+        std::vector<std::jthread> workers;
+        std::atomic<std::uint32_t> completed{};
+        std::uint32_t submitted{}, owner_calls{};
+        bool joined{};
+        const auto owner = std::this_thread::get_id();
+        const auto failed = [] {
+            return hs::Result::Failure(hs::ErrorCode::TaskFailed, "recording-test", "injected failure");
+        };
+        for (std::uint32_t index = 0; index < 4; ++index)
+        {
+            auto pass = graph.AddPass(301 + index, "recording dispatch", hs::QueueHint::Direct);
+            if (index % 2 == 0)
+                pass.SetExecute([&](hs::RenderPassContext &) {
+                    Check(std::this_thread::get_id() != owner, "worker callback ran on owner");
+                    completed.fetch_add(1);
+                });
+            else
+                pass.SetExecuteOnOwner([&, index](hs::RenderPassContext &) {
+                    Check(std::this_thread::get_id() == owner, "owner callback moved to a worker");
+                    Check(submitted == 2, "owner callback blocked later worker dispatch");
+                    Check(index == 1 + owner_calls * 2, "owner callback order changed");
+                    ++owner_calls;
+                    if (outcome == Outcome::Success && index == 1)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    return outcome == Outcome::OwnerFailure && index == 1
+                        ? failed() : hs::Result::Success();
+                });
+        }
+        Check(graph.Prepare(pool).Succeeded(), "prepare recording dispatch graph");
+        hs::RenderTaskExecutor tasks;
+        tasks.submit = [&](std::function<void()> task) {
+            if (submitted == 1)
+            {
+                if (outcome == Outcome::Reject) return failed();
+                if (outcome == Outcome::Throw) throw std::runtime_error("injected submit failure");
+            }
+            workers.emplace_back(std::move(task));
+            ++submitted;
+            return hs::Result::Success();
+        };
+        tasks.join = [&] {
+            for (auto &worker : workers) worker.join();
+            joined = true;
+            return outcome == Outcome::JoinFailure ? failed() : hs::Result::Success();
+        };
+        hs::GraphExecutionOptions options;
+        options.task_executor = &tasks;
+        std::vector<hs::GpuPassTiming> cpu_passes;
+        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
+            cpu_passes.push_back({graph.CompiledPassId(position),
+                std::string(graph.CompiledPassName(position)),
+                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
+        options.cpu_pass_timings = cpu_passes.data();
+        options.cpu_pass_timing_count = cpu_passes.size();
+        hs::CompletionSet completion;
+        const auto execute_start = std::chrono::steady_clock::now();
+        const auto result = fixture.executor.Execute(graph, 0, barriers, completion, &options);
+        const auto execute_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - execute_start).count();
+        const bool dispatch_failed = outcome == Outcome::Reject || outcome == Outcome::Throw;
+        Check(joined && completed == (dispatch_failed ? 1u : 2u),
+              "recording tasks escaped mandatory join");
+        Check(owner_calls == (dispatch_failed ? 0u : 2u),
+              "rejected dispatch ran owner callbacks or successful dispatch omitted them");
+        Check(fixture.executor.LastExecutionStats().record_jobs == submitted,
+              "recording job count includes rejected or owner work");
+        Check(result.Succeeded() == (outcome == Outcome::Success),
+              "recording dispatch failure was lost");
+        if (outcome == Outcome::Success)
+        {
+            const auto timings = fixture.executor.LastExecutionStats();
+            Check(timings.cpu_record_us >= 1000, "record timing omitted owner callback wall time");
+            LARGE_INTEGER frequency{};
+            Check(QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0, "CPU timing QPC frequency");
+            for (const auto &pass : cpu_passes)
+            {
+                Check(pass.cpu_record_valid && pass.cpu_record_end_qpc >= pass.cpu_record_begin_qpc,
+                    "recording interval missing or reversed");
+                Check(!pass.cpu_provider_submit_valid, "ordinary pass fabricated provider submission timing");
+                if (pass.pass_id == 302)
+                    Check(static_cast<long double>(pass.cpu_record_end_qpc - pass.cpu_record_begin_qpc) *
+                        1000 / frequency.QuadPart >= 1.0L, "per-pass timing omitted known owner callback delay");
+            }
+            Check(timings.cpu_plan_us + timings.cpu_record_us + timings.cpu_submit_us <=
+                    static_cast<std::uint64_t>(execute_us), "graph timing stages overlap or exceed execution wall time");
+            Check(fixture.executor.Wait(completion).Succeeded(), "wait recording dispatch graph");
+        }
+        else
+            Check(completion.direct == 0 && completion.compute == 0 && completion.copy == 0,
+                  "failed recording graph submitted GPU work");
+        fixture.CheckValidation();
+    }
 }
 
 void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
@@ -501,14 +727,39 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         ComPtr<ID3D12Resource> destination_native = static_cast<ID3D12Resource *>(graph.Resolve(destination));
         auto *source_native = graph.Resolve(source);
         hs::CompletionSet completion;
-        const auto result = fixture.executor.Execute(graph, slot, barriers, completion);
+        std::vector<hs::GpuPassTiming> cpu_passes;
+        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
+            cpu_passes.push_back({graph.CompiledPassId(position),
+                std::string(graph.CompiledPassName(position)),
+                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
+        hs::GraphExecutionOptions capture_options;
+        capture_options.cpu_pass_timings = cpu_passes.data();
+        capture_options.cpu_pass_timing_count = cpu_passes.size();
+        const auto result = fixture.executor.Execute(graph, slot, barriers, completion, &capture_options);
         Check(result.Succeeded() == (outcome == 0), "external callback outcome is reported");
+        for (const auto &pass : cpu_passes)
+        {
+            Check(pass.cpu_record_valid, "external graph prefix/ordinary recording interval missing");
+            Check(pass.cpu_provider_submit_valid == (pass.pass_id == 110),
+                "provider submission interval assigned to wrong pass");
+            if (pass.pass_id == 110)
+                Check(pass.cpu_provider_submit_end_qpc >= pass.cpu_provider_submit_begin_qpc,
+                    "provider callback interval reversed");
+        }
         Check(outcome != 2 || result.Message().find("invalid owned fence") != std::string_view::npos,
               "malformed completion is rejected explicitly");
         Check(completion.copy && !completion.IsSatisfiedBy(fixture.executor.Completed()),
               "external bridge remains incomplete behind real independent queue gate");
         Check(graph.ResourceCompletion(destination).copy == completion.copy,
               "resource retirement includes the provider bridge");
+        Check(graph.FinalAccess(source) == hs::Access::Common &&
+            graph.FinalQueue(source) == hs::QueueHint::Copy,
+            "provider outgoing state replaces declared source access");
+        Check(graph.FinalAccess(destination) == (outcome == 0 ? hs::Access::CopySource : hs::Access::Common) &&
+            graph.FinalQueue(destination) == (outcome == 0 ? hs::QueueHint::Direct : hs::QueueHint::Copy),
+            "partial submission publishes provider state without the unsubmitted consumer");
+        Check(outcome == 0 || graph.ResourceCompletion(destination).direct == 0,
+            "failed provider must not publish the future Direct consumer completion");
         graph.Reset();
         work.reset();
         Check(!lifetime.expired(), "external provider lease survives graph reset and caller release");
@@ -610,6 +861,7 @@ RWByteAddressBuffer Output : register(u1);
         parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     }
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[1].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
     parameters[2].Descriptor.ShaderRegister = 1;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
     root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -686,10 +938,28 @@ RWByteAddressBuffer Output : register(u1);
                 static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
             list->Dispatch(1, 1, 1);
         };
+        // A prior scope leaves a static SRV bound even when the next shader only uses UAVs.
+        auto primed = graph.Version(output);
+        if (!interpass)
+        {
+            auto prime = graph.AddPass(299, "Prime static SRV binding", queue);
+            prime.Read(poisoned, hs::Access::ComputeRead);
+            primed = prime.Write(primed, hs::Access::UnorderedWrite);
+            prime.SetExecute([&](hs::RenderPassContext &context) {
+                auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+                list->SetComputeRootSignature(root.Get());
+                list->SetPipelineState(pipelines[1].Get());
+                list->SetComputeRootShaderResourceView(1,
+                    static_cast<ID3D12Resource *>(context.Resolve(source))->GetGPUVirtualAddress());
+                list->SetComputeRootUnorderedAccessView(2,
+                    static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+                list->Dispatch(1, 1, 1);
+            });
+        }
         auto clear = graph.AddPass(301, "Clear oracle UAV clear", queue);
         const auto cleared = clear.Write(poisoned, hs::Access::UnorderedWrite);
         hs::ResourceVersion result;
-        if (!interpass) result = clear.Write(graph.Version(output), hs::Access::UnorderedWrite);
+        if (!interpass) result = clear.Write(primed, hs::Access::UnorderedWrite);
         clear.SetExecute([&](hs::RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             ID3D12DescriptorHeap *heaps[]{clear_gpu.Get()};
@@ -737,6 +1007,577 @@ RWByteAddressBuffer Output : register(u1);
             barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
             queue == hs::QueueHint::Compute ? "Compute" : "Direct", interpass ? "SRV interpass" : "UAV callback");
     }
+}
+
+void RunBatchedBufferBarriers(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    // Cross the 64-entry flush boundary twice and exercise a nonempty tail.
+    constexpr UINT count = 137, words = 64, bytes = words * sizeof(UINT);
+    const auto description = BufferDescription(count * bytes);
+    auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+    ComPtr<ID3D12Resource> upload, readback;
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create batched barrier upload");
+    heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create batched barrier readback");
+    const D3D12_RANGE no_read{0, 0};
+    void *mapped{};
+    Hr(upload->Map(0, &no_read, &mapped), "map batched barrier upload");
+    for (UINT index = 0; index < count * words; ++index)
+        static_cast<UINT *>(mapped)[index] = 0x13579bdfu ^ (index * 251u);
+    upload->Unmap(0, nullptr);
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "batched barrier pool");
+    hs::RenderGraphBuilder graph;
+    std::array<hs::ResourceHandle, count> sources, outputs;
+    std::array<hs::ResourceVersion, count> initialized, copied;
+    for (UINT index = 0; index < count; ++index)
+    {
+        sources[index] = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_NONE}, "batched source");
+        outputs[index] = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_NONE}, "batched output");
+    }
+    auto seed = graph.AddPass(360, "Batched barrier upload", hs::QueueHint::Direct);
+    for (UINT index = 0; index < count; ++index)
+        initialized[index] = seed.Write(graph.Version(sources[index]), hs::Access::CopyDest);
+    seed.SetExecute([&](hs::RenderPassContext &context) {
+        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (UINT index = 0; index < count; ++index)
+            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(sources[index])), 0,
+                upload.Get(), index * bytes, bytes);
+    });
+    auto transfer = graph.AddPass(361, "Batched barrier compute copy", hs::QueueHint::Compute);
+    for (UINT index = 0; index < count; ++index)
+    {
+        transfer.Read(initialized[index], hs::Access::CopySource);
+        copied[index] = transfer.Write(graph.Version(outputs[index]), hs::Access::CopyDest);
+    }
+    transfer.SetExecute([&](hs::RenderPassContext &context) {
+        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (UINT index = 0; index < count; ++index)
+            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(outputs[index])), 0,
+                static_cast<ID3D12Resource *>(context.Resolve(sources[index])), 0, bytes);
+    });
+    auto finish = graph.AddPass(362, "Batched barrier readback", hs::QueueHint::Copy);
+    for (const auto version : copied) finish.Read(version, hs::Access::CopySource);
+    finish.SetExecute([&](hs::RenderPassContext &context) {
+        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        for (UINT index = 0; index < count; ++index)
+            commands->CopyBufferRegion(readback.Get(), index * bytes,
+                static_cast<ID3D12Resource *>(context.Resolve(outputs[index])), 0, bytes);
+    });
+    Check(graph.Prepare(pool).Succeeded(), "prepare batched buffer barriers");
+    hs::CompletionSet completion;
+    fixture.Execute(graph, frame_slot, barriers, completion, "execute batched buffer barriers");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait batched buffer barriers");
+    const D3D12_RANGE read{0, count * bytes};
+    Hr(readback->Map(0, &read, &mapped), "map batched barrier result");
+    for (UINT index = 0; index < count * words; ++index)
+        Check(static_cast<const UINT *>(mapped)[index] == (0x13579bdfu ^ (index * 251u)),
+            "batched buffer barrier lost data or tail");
+    readback->Unmap(0, &no_read);
+    fixture.CheckValidation();
+    pool.ResetCompletedClaims(fixture.executor.Completed());
+    std::printf("Batched buffer barriers %s passed (137 buffers, three queues, all 8768 words).\n",
+        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
+}
+
+void RunVirtualShadowFeedbackOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    constexpr std::array<UINT, 9> order_counts{0, 1, 31, 32, 33, 65, 1152, 1153, 1152};
+    UINT random = 0x56534d31u;
+    const auto next_random = [&] { random = random * 1664525u + 1013904223u; return random; };
+    for (UINT test = 0; test < 309; ++test)
+    {
+        const UINT count = test < order_counts.size() ? order_counts[test] : next_random() % 1200u;
+        std::vector<UINT> masks((count + 31u) / 32u);
+        for (auto &mask : masks) mask = test == 0 ? 0u : test < 9 ? 0xffffffffu : next_random();
+        std::vector<UINT> reference, walked;
+        for (UINT entry = 0; entry < count; ++entry)
+            if ((masks[entry >> 5u] & (1u << (entry & 31u))) != 0) reference.push_back(entry);
+        for (UINT word = 0; word < masks.size(); ++word)
+        {
+            UINT mask = masks[word];
+            while (mask)
+            {
+                const UINT entry = word * 32u + std::countr_zero(mask);
+                mask &= mask - 1u;
+                if (entry < count) walked.push_back(entry);
+            }
+        }
+        Check(walked == reference, "VSM requested-entry order or tail-bit filtering changed");
+        // Dense/sparse masks, partial final words, and a partial caster group
+        // must enumerate every requested page/caster pair exactly once.
+        const UINT caster_count = test % 4u == 0u ? 0u : test % 4u == 1u ? 1u : test % 4u == 2u ? 64u : 65u;
+        std::vector<UINT> expected_counts(count), actual_counts(count);
+        const auto candidate = [](UINT entry, UINT caster) { return (entry * 17u + caster * 13u) % 7u < 3u; };
+        for (UINT entry : reference)
+            for (UINT caster = 0u; caster < caster_count; ++caster)
+                expected_counts[entry] += candidate(entry, caster);
+        for (UINT word = 0u; word < masks.size(); ++word)
+            for (UINT caster = 0u; caster < ((caster_count + 63u) / 64u) * 64u; ++caster)
+            {
+                if (caster >= caster_count) continue;
+                UINT mask = masks[word];
+                while (mask)
+                {
+                    const UINT entry = word * 32u + std::countr_zero(mask);
+                    mask &= mask - 1u;
+                    if (entry < count) actual_counts[entry] += candidate(entry, caster);
+                }
+            }
+        Check(actual_counts == expected_counts, "VSM word dispatch duplicated or lost page/caster candidates");
+        for (const UINT capacity : {0u, 1u, 31u, 4096u})
+        {
+            std::vector<UINT> expected_rejected(count), actual_rejected(count);
+            UINT expected_remaining = capacity, actual_remaining = capacity;
+            for (UINT entry = 0u; entry < count; ++entry)
+                if (expected_counts[entry] > expected_remaining) expected_rejected[entry] = 1u;
+                else expected_remaining -= expected_counts[entry];
+            for (UINT entry : walked)
+                if (actual_counts[entry] > actual_remaining) actual_rejected[entry] = 1u;
+                else actual_remaining -= actual_counts[entry];
+            Check(actual_rejected == expected_rejected && actual_remaining == expected_remaining,
+                "VSM requested-only admission changed ascending capacity decisions");
+        }
+
+    }
+    struct Compiler
+    {
+        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ~Compiler() { if (module) FreeLibrary(module); }
+    } compiler;
+    Check(compiler.module != nullptr, "load virtual shadow oracle compiler");
+    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
+    Check(compile != nullptr, "find virtual shadow oracle compiler");
+    const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "Content/Shaders/virtual_shadow.hlsl";
+    std::ifstream source(source_path, std::ios::binary);
+    Check(source.good(), "open actual virtual shadow shader");
+    std::string shader{std::istreambuf_iterator<char>(source), std::istreambuf_iterator<char>()};
+    // Compile the production helpers, not a CPU mirror of their shared-memory algorithm.
+    shader += R"(
+StructuredBuffer<uint> OracleEntries : register(t5, space21);
+cbuffer OracleConstants : register(b0, space22) { uint OracleCount, OracleWidth, OracleHeight, OracleBudget; };
+[numthreads(8,8,1)] void OptimizedOracle(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    BeginFeedbackRequests(lane);
+    const uint first = (group.x * 64u + lane) * 3u;
+    for (uint index = first; index < min(first + 3u, OracleCount); ++index) Request(OracleEntries[index]);
+    FlushFeedbackRequests(lane);
+}
+[numthreads(8,8,1)] void ReferenceOracle(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
+{
+    const uint first = (group.x * 64u + lane) * 3u;
+    for (uint index = first; index < min(first + 3u, OracleCount); ++index)
+    {
+        const uint entry = OracleEntries[index];
+        if (entry != 0xffffffffu)
+        {
+            uint ignored;
+            Requests.InterlockedOr((entry >> 5u) * 4u, 1u << (entry & 31u), ignored);
+        }
+    }
+}
+
+[numthreads(1,1,1)] void OptimizedOrderOracle(uint3 unused : SV_DispatchThreadID)
+{
+    uint count = 0u;
+    for (uint word = 0u; word < (OracleCount + 31u) / 32u; ++word)
+    {
+        uint mask = OracleEntries[word];
+        while (mask != 0u)
+        {
+            const uint entry = PopRequestedEntry(word, mask);
+            if (entry < OracleCount) Requests.Store((++count) * 4u, entry);
+        }
+    }
+    Requests.Store(0u, count);
+}
+[numthreads(1,1,1)] void ReferenceOrderOracle(uint3 unused : SV_DispatchThreadID)
+{
+    uint count = 0u;
+    for (uint entry = 0u; entry < OracleCount; ++entry)
+        if ((OracleEntries[entry >> 5u] & (1u << (entry & 31u))) != 0u)
+            Requests.Store((++count) * 4u, entry);
+    Requests.Store(0u, count);
+}
+)";
+    // Execute the production dilation body with buffer-backed Loads/Stores, comparing every output bit.
+    std::ifstream post_source(source_path.parent_path() / "hdr_post.hlsl", std::ios::binary);
+    const std::string post{std::istreambuf_iterator<char>(post_source), std::istreambuf_iterator<char>()};
+    const auto function = post.find("void HdrPostDilateCS");
+    const auto begin = post.rfind("[numthreads", function);
+    const auto end = post.find("[numthreads", function);
+    Check(begin != std::string::npos && end != std::string::npos, "find production DOF dilation");
+    std::string dilation = post.substr(begin, end - begin);
+    const auto replace = [&](std::string_view from, std::string_view to) {
+        std::size_t offset{}; bool found{};
+        while ((offset = dilation.find(from, offset)) != std::string::npos)
+        { dilation.replace(offset, from.size(), to); offset += to.size(); found = true; }
+        Check(found, "DOF oracle source binding changed");
+    };
+    replace("EffectParameters.x", "float(OracleBudget)");
+    replace("OutputSize.xy", "float2(OracleWidth, OracleHeight)");
+    replace("SignedCoC.Load(int3(pixel,0))", "asfloat(OracleEntries[uint(clamp(pixel.y, 0, int(OracleHeight)-1)) * OracleWidth + uint(clamp(pixel.x, 0, int(OracleWidth)-1))])");
+    replace("ForegroundOutput[dispatch.xy] = radius;", "Requests.Store((dispatch.y * OracleWidth + dispatch.x) * 4u, asuint(radius));");
+    shader += "\ngroupshared float CoCTile[72 * 72]; groupshared uint CoCTileMaximum;\n" + dilation;
+    std::array<D3D12_ROOT_PARAMETER1, 3> parameters{};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[0].Constants = {0, 22, 4};
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
+    parameters[1].Descriptor = {5, 21, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameters[2].Descriptor = {2, 21, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
+    root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    root_desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+    root_desc.Desc_1_1.pParameters = parameters.data();
+    ComPtr<ID3DBlob> serialized, errors;
+    Hr(D3D12SerializeVersionedRootSignature(&root_desc, &serialized, &errors), "serialize virtual shadow oracle root");
+    ComPtr<ID3D12RootSignature> root;
+    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+        IID_PPV_ARGS(&root)), "create virtual shadow oracle root");
+    std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
+    constexpr std::array entry_points{"ReferenceOracle", "OptimizedOracle",
+        "ReferenceOrderOracle", "OptimizedOrderOracle", "HdrPostDilateCS"};
+    for (std::size_t entry = 0; entry < pipelines.size(); ++entry)
+    {
+        ComPtr<ID3DBlob> code, diagnostics;
+        const auto result = compile(shader.data(), shader.size(), "VirtualShadowFeedbackOracle", nullptr, nullptr,
+            entry_points[entry], "cs_5_1", D3DCOMPILE_ENABLE_STRICTNESS |
+            D3DCOMPILE_WARNINGS_ARE_ERRORS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &diagnostics);
+        if (FAILED(result) && diagnostics)
+            std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
+                static_cast<const char *>(diagnostics->GetBufferPointer()));
+        Hr(result, "compile actual virtual shadow feedback oracle");
+        D3D12_COMPUTE_PIPELINE_STATE_DESC description{};
+        description.pRootSignature = root.Get();
+        description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
+        Hr(fixture.device->CreateComputePipelineState(&description, IID_PPV_ARGS(&pipelines[entry])),
+            "create virtual shadow feedback oracle pipeline");
+    }
+    constexpr UINT words = 2048, bytes = words * sizeof(UINT);
+    constexpr std::array<UINT, 6> counts{1, 191, 192, 193, 1541, 1541};
+    constexpr std::array<UINT, 12> boundary_entries{
+        0, 31, 32, 2047, 2048, 65534, 0xffffffffu, 0, 0, 31, 2047, 2048};
+    for (std::size_t test = 0; test < counts.size() + order_counts.size() + 6; ++test)
+    {
+        const bool dof_test = test >= counts.size() + order_counts.size();
+        const UINT dof_case = dof_test ? UINT(test - counts.size() - order_counts.size()) : 0;
+        constexpr UINT width = 37, height = 29;
+        const UINT budget = dof_case == 5 ? 32u : 12u;
+        const bool order_test = !dof_test && test >= counts.size();
+        const auto order_index = order_test ? test - counts.size() : 0;
+        const UINT count = dof_test ? width * height : order_test ? order_counts[order_index] : counts[test];
+        const UINT input_count = order_test ? std::max(1u, (count + 31u) / 32u) : count;
+        std::vector<UINT> entries(input_count);
+        for (UINT index = 0; index < input_count; ++index)
+            entries[index] = order_test ? (order_index == 0 ? 0u :
+                order_index < 5 || order_index == 8 ? 0xffffffffu : next_random()) :
+                index % 7 == 6 ? (index * 4051u) % 65535u : boundary_entries[index % boundary_entries.size()];
+        std::array<UINT, words> initial{}, expected{};
+        if (order_test) initial.fill(0xffffffffu);
+        else if (test == counts.size() - 1)
+            for (UINT word = 0; word < words; ++word) initial[word] = word * 0x01010101u;
+        expected = initial;
+        if (dof_test)
+        {
+            for (UINT i = 0; i < count; ++i)
+            {
+                const float radius = dof_case == 0 ? 0.0f : dof_case == 1 ? (i == 0 ? 12.0f : 0.0f) :
+                    dof_case == 2 ? (i == count / 2 ? 3.25f : 0.0f) :
+                    dof_case == 3 ? float(i % 9) * 0.125f :
+                    dof_case == 4 ? float(budget) : float(next_random() % 129u) * 0.25f;
+                const float coc = i % 7 == 6 ? radius : -radius;
+                std::memcpy(&entries[i], &coc, sizeof(coc));
+            }
+            for (int y = 0; y < int(height); ++y) for (int x = 0; x < int(width); ++x)
+            {
+                float maximum{};
+                for (int dy = -int(budget); dy <= int(budget); ++dy)
+                    for (int dx = -int(budget); dx <= int(budget); ++dx)
+                    {
+                        const int sx = x + dx, sy = y + dy;
+                        if (sx < 0 || sy < 0 || sx >= int(width) || sy >= int(height)) continue;
+                        float coc; std::memcpy(&coc, &entries[sy * width + sx], sizeof(coc));
+                        const float radius = std::max(-coc, 0.0f);
+                        if (float(dx * dx + dy * dy) <= radius * radius) maximum = std::max(maximum, radius);
+                    }
+                std::memcpy(&expected[y * width + x], &maximum, sizeof(maximum));
+            }
+        }
+        else if (order_test)
+        {
+            UINT output_count{};
+            for (UINT entry = 0; entry < count; ++entry)
+                if ((entries[entry >> 5u] & (1u << (entry & 31u))) != 0u)
+                    expected[++output_count] = entry;
+            expected[0] = output_count;
+        }
+        else for (const auto entry : entries)
+            if (entry != 0xffffffffu) expected[entry >> 5u] |= 1u << (entry & 31u);
+        const auto upload_desc = BufferDescription(bytes + input_count * sizeof(UINT));
+        const auto readback_desc = BufferDescription(bytes * 2u);
+        auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+        ComPtr<ID3D12Resource> upload, readback;
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create virtual shadow oracle upload");
+        heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create virtual shadow oracle readback");
+        void *mapped{};
+        const D3D12_RANGE no_read{0, 0};
+        Hr(upload->Map(0, &no_read, &mapped), "map virtual shadow oracle upload");
+        std::memcpy(mapped, initial.data(), bytes);
+        std::memcpy(static_cast<std::byte *>(mapped) + bytes, entries.data(), input_count * sizeof(UINT));
+        upload->Unmap(0, nullptr);
+        hs::TransientResourcePool pool;
+        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "virtual shadow oracle pool");
+        hs::RenderGraphBuilder graph;
+        const hs::BufferDesc description{bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
+        std::array<hs::ResourceHandle, 2> outputs;
+        std::array<hs::ResourceVersion, 2> initialized, results;
+        auto seed = graph.AddPass(320, "Virtual shadow oracle initialize", hs::QueueHint::Copy);
+        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
+        {
+            outputs[entry] = graph.CreateBuffer(description, "virtual shadow request bits");
+            initialized[entry] = seed.Write(graph.Version(outputs[entry]), hs::Access::CopyDest);
+        }
+        seed.SetExecute([&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            for (const auto output : outputs)
+                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(output)), 0, upload.Get(), 0, bytes);
+        });
+        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
+        {
+            auto pass = graph.AddPass(321 + static_cast<UINT>(entry), "Virtual shadow request OR", hs::QueueHint::Compute);
+            results[entry] = pass.ReadWrite(initialized[entry], hs::Access::UnorderedWrite);
+            pass.SetExecute([&, entry](hs::RenderPassContext &context) {
+                auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+                list->SetComputeRootSignature(root.Get());
+                list->SetPipelineState(pipelines[dof_test ? 4 : (order_test ? 2 : 0) + entry].Get());
+                const UINT constants[]{count, width, height, budget};
+                list->SetComputeRoot32BitConstants(0, 4, constants, 0);
+                list->SetComputeRootShaderResourceView(1, upload->GetGPUVirtualAddress() + bytes);
+                list->SetComputeRootUnorderedAccessView(2,
+                    static_cast<ID3D12Resource *>(context.Resolve(outputs[entry]))->GetGPUVirtualAddress());
+                list->Dispatch(dof_test ? (width + 7) / 8 : order_test ? 1u : (count + 191) / 192, dof_test ? (height + 7) / 8 : 1u, 1);
+            });
+        }
+        auto copy = graph.AddPass(323, "Virtual shadow oracle readback", hs::QueueHint::Copy);
+        for (const auto result : results) copy.Read(result, hs::Access::CopySource);
+        copy.SetExecute([&](hs::RenderPassContext &context) {
+            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            for (std::size_t entry = 0; entry < outputs.size(); ++entry)
+                list->CopyBufferRegion(readback.Get(), entry * bytes,
+                    static_cast<ID3D12Resource *>(context.Resolve(outputs[entry])), 0, bytes);
+        });
+        Check(graph.Prepare(pool).Succeeded(), "prepare virtual shadow feedback oracle");
+        hs::CompletionSet completion;
+        fixture.Execute(graph, frame_slot, barriers, completion, "execute virtual shadow feedback oracle");
+        Check(fixture.executor.Wait(completion).Succeeded(), "wait virtual shadow feedback oracle");
+        const D3D12_RANGE read{0, bytes * 2u};
+        const auto mapped_result = readback->Map(0, &read, &mapped);
+        if (FAILED(mapped_result))
+        {
+            std::fprintf(stderr, "Image oracle case %zu: Map HRESULT=%08lx, removed=%08lx\n",
+                test, static_cast<unsigned long>(mapped_result), static_cast<unsigned long>(fixture.device->GetDeviceRemovedReason()));
+            fixture.CheckValidation();
+        }
+        Hr(mapped_result, "map virtual shadow request bits");
+        const auto *actual = static_cast<const UINT *>(mapped);
+        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
+            for (UINT word = 0; word < words; ++word)
+                Check(actual[entry * words + word] == expected[word], "GPU VSM or production DOF dilation output mismatch");
+        readback->Unmap(0, &no_read);
+        fixture.CheckValidation();
+        pool.ResetCompletedClaims(fixture.executor.Completed());
+    }
+    std::printf("Virtual shadow feedback %s passed (6 GPU OR bitsets, 9 requested-entry lists, 6 DOF dilation patterns including partial groups and max radius).\n",
+        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
+}
+
+
+void RunInstanceIdOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
+{
+    struct Compiler
+    {
+        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ~Compiler() { if (module) FreeLibrary(module); }
+    } compiler;
+    Check(compiler.module != nullptr, "load instance ID oracle compiler");
+    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
+    Check(compile != nullptr, "find instance ID oracle compiler");
+    const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+        "Content/Shaders/local_probe_draw.hlsli";
+    std::ifstream source(source_path, std::ios::binary);
+    Check(source.good(), "open production local-probe source decoder");
+    std::string shader{std::istreambuf_iterator<char>(source), std::istreambuf_iterator<char>()};
+    shader += R"(
+RWByteAddressBuffer Output : register(u0);
+cbuffer Case : register(b0) { uint CaseIndex, PassValue, Mode; };
+float4 Main(uint instance : SV_InstanceID) : SV_Position
+{
+    if(Mode == 0u)
+    {
+        uint ignored;
+        Output.InterlockedOr(CaseIndex * 8u, 1u << instance, ignored);
+        Output.InterlockedOr(CaseIndex * 8u + 4u, 1u << (PassValue + instance), ignored);
+    }
+    else
+        Output.Store3(16u + (CaseIndex + instance) * 12u, uint3(instance,
+            HsLocalProbeSourceSlot(PassValue,instance), 0x10000000u + HsLocalProbeMaterialOrdinal(PassValue)));
+    return float4(0,0,0,1);
+}
+)";
+    ComPtr<ID3DBlob> code_blob, diagnostics, serialized, errors;
+    const auto compiled = compile(shader.data(), shader.size(), "NativeInstanceIdOracle", nullptr, nullptr,
+        "Main", "vs_5_1", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_WARNINGS_ARE_ERRORS |
+        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code_blob, &diagnostics);
+    if (FAILED(compiled) && diagnostics)
+        std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
+            static_cast<const char *>(diagnostics->GetBufferPointer()));
+    Hr(compiled, "compile instance ID oracle");
+    std::array<D3D12_ROOT_PARAMETER1, 2> parameters{};
+    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    parameters[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
+    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    parameters[1].Constants = {0, 0, 3};
+    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
+    root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    root_description.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
+    root_description.Desc_1_1.pParameters = parameters.data();
+    root_description.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    Hr(D3D12SerializeVersionedRootSignature(&root_description, &serialized, &errors),
+        "serialize instance ID root signature");
+    ComPtr<ID3D12RootSignature> root;
+    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
+        IID_PPV_ARGS(&root)), "create instance ID root signature");
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
+    description.pRootSignature = root.Get();
+    description.VS = {code_blob->GetBufferPointer(), code_blob->GetBufferSize()};
+    description.SampleMask = UINT_MAX;
+    description.SampleDesc.Count = 1;
+    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    description.RasterizerState.DepthClipEnable = TRUE;
+    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+    description.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
+    description.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    description.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
+        D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+    description.DepthStencilState.BackFace = description.DepthStencilState.FrontFace;
+    for (auto &blend : description.BlendState.RenderTarget)
+    {
+        blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+        blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    ComPtr<ID3D12PipelineState> pipeline;
+    Hr(fixture.device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&pipeline)),
+        "create instance ID graphics pipeline");
+    constexpr std::array<hs::LocalProbeDrawRun, 5> runs{{
+        {11,2,3}, {14,1,3}, {17,2,6}, {21,2,3}, {hs::kLocalProbeSourceCapacity-3u,3,14}}};
+    constexpr UINT record_count = 10;
+    constexpr UINT value_count = 4 + record_count * 3;
+    constexpr UINT bytes = value_count * sizeof(UINT);
+    auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+    const auto upload_description = BufferDescription(bytes + sizeof(UINT));
+    ComPtr<ID3D12Resource> upload, readback;
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_description,
+        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create instance ID upload");
+    heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
+    const auto readback_description = BufferDescription(bytes);
+    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_description,
+        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create instance ID readback");
+    void *mapped{};
+    const D3D12_RANGE no_read{0, 0};
+    Hr(upload->Map(0, &no_read, &mapped), "map instance ID initialization");
+    std::memset(mapped, 0, bytes + sizeof(UINT));
+    upload->Unmap(0, nullptr);
+    hs::TransientResourcePool pool;
+    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "instance ID pool");
+    hs::RenderGraphBuilder graph;
+    const auto output = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "native instance IDs");
+    auto seed = graph.AddPass(340, "Instance ID initialize", hs::QueueHint::Copy);
+    const auto initialized = seed.Write(graph.Version(output), hs::Access::CopyDest);
+    seed.SetExecute([&](hs::RenderPassContext &context) {
+        static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyBufferRegion(
+            static_cast<ID3D12Resource *>(context.Resolve(output)), 0, upload.Get(), 0, bytes);
+    });
+    auto draw = graph.AddPass(341, "Instance ID graphics oracle", hs::QueueHint::Direct);
+    const auto written = draw.ReadWrite(initialized, hs::Access::UnorderedWrite);
+    draw.SetExecute([&](hs::RenderPassContext &context) {
+        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+        list->SetGraphicsRootSignature(root.Get());
+        list->SetPipelineState(pipeline.Get());
+        list->SetGraphicsRootUnorderedAccessView(0,
+            static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
+        const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+        const D3D12_RECT scissor{0, 0, 1, 1};
+        list->RSSetViewports(1, &viewport);list->RSSetScissorRects(1, &scissor);
+        list->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+        const UINT first[]{0, 11, 0};
+        list->SetGraphicsRoot32BitConstants(1, 3, first, 0);
+        list->DrawInstanced(1, 3, 0, 5);
+        const UINT second[]{1, 14, 0};
+        list->SetGraphicsRoot32BitConstants(1, 3, second, 0);
+        const D3D12_INDEX_BUFFER_VIEW indices{upload->GetGPUVirtualAddress() + bytes, sizeof(UINT), DXGI_FORMAT_R32_UINT};
+        list->IASetIndexBuffer(&indices);
+        list->DrawIndexedInstanced(1, 3, 0, 0, 9);
+        UINT offset=0;
+        for(const auto &run:runs)
+        {
+            Check(hs::LocalProbeDrawRunValid(run,hs::kLocalProbeSourceCapacity),"native packed run bounds");
+            const UINT constants[]{offset,hs::LocalProbePassValue(run),1};
+            list->SetGraphicsRoot32BitConstants(1,3,constants,0);
+            list->DrawIndexedInstanced(1,run.instance_count,0,0,0);
+            offset+=run.instance_count;
+        }
+    });
+    auto copy = graph.AddPass(342, "Instance ID readback", hs::QueueHint::Copy);
+    copy.Read(written, hs::Access::CopySource);
+    copy.SetExecute([&](hs::RenderPassContext &context) {
+        static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyBufferRegion(readback.Get(), 0,
+            static_cast<ID3D12Resource *>(context.Resolve(output)), 0, bytes);
+    });
+    Check(graph.Prepare(pool).Succeeded(), "prepare instance ID oracle");
+    hs::CompletionSet completion;
+    fixture.Execute(graph, frame_slot, barriers, completion, "execute instance ID oracle");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait instance ID oracle");
+    const D3D12_RANGE read{0, bytes};
+    Hr(readback->Map(0, &read, &mapped), "map instance ID results");
+    std::array<UINT, value_count> values{};
+    std::memcpy(values.data(), mapped, bytes);
+    readback->Unmap(0, &no_read);
+    std::printf("Native SV_InstanceID %s: DrawInstanced(start=5) raw=%08x explicit11=%08x; "
+        "DrawIndexedInstanced(start=9) raw=%08x explicit14=%08x.\n",
+        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
+        values[0], values[1], values[2], values[3]);
+    Check(values[0] == 7u && values[2] == 7u, "SV_InstanceID draw-local native contract differs from expected IDs 0,1,2");
+    Check(values[1] == (7u << 11u) && values[3] == (7u << 14u),
+        "explicit base plus draw-local instance ID did not preserve source slots");
+    UINT offset=4;
+    for(const auto &run:runs)
+        for(UINT local=0;local<run.instance_count;++local)
+        {
+            Check(values[offset++]==local,"native packed source helper used a nonlocal instance ID");
+            Check(values[offset++]==run.first_instance+local,"native packed source helper lost a source gap or base");
+            Check(values[offset++]==0x10000000u+run.material_ordinal,"native packed source helper changed material ordinal");
+        }
+    Check(offset==value_count,"native packed source helper record count");
+    std::printf("Local probe production source decoder %s passed (10 exact source/material records, gaps, ordinal changes and maximum base).\n",
+        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
+    fixture.CheckValidation();
+    pool.ResetCompletedClaims(fixture.executor.Completed());
 }
 
 void RunSharedTextureReaders(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
@@ -1085,11 +1926,13 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
     for (const bool timing_boundaries : {false, true})
     {
         graph.Reset();
+        std::array<void *, 3> alias_lists{};
         const auto alias_first = graph.CreateBuffer(buffer_desc, "alias first");
         const auto alias_second = graph.CreateBuffer({kSize * 2, D3D12_RESOURCE_FLAG_NONE}, "alias second");
         auto alias_pass_first = graph.AddPass(60, "alias first write", hs::QueueHint::Direct);
         (void)alias_pass_first.Write(graph.Version(alias_first), hs::Access::CopyDest);
         alias_pass_first.SetExecute([&](hs::RenderPassContext &context) {
+            alias_lists[0] = context.NativeCommandList();
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_first)),
                                        0, upload.Get(), 0, kSize);
@@ -1098,6 +1941,7 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
         const auto alias_second_v1 = alias_pass_second.Write(graph.Version(alias_second),
                                                            hs::Access::CopyDest);
         alias_pass_second.SetExecute([&](hs::RenderPassContext &context) {
+            alias_lists[1] = context.NativeCommandList();
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(alias_second)),
                                        0, upload.Get(), 0, kSize);
@@ -1105,6 +1949,7 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
         auto alias_read = graph.AddPass(75, "alias readback", hs::QueueHint::Direct);
         alias_read.Read(alias_second_v1, hs::Access::CopySource, hs::BufferRange{0, kSize});
         alias_read.SetExecute([&](hs::RenderPassContext &context) {
+            alias_lists[2] = context.NativeCommandList();
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             commands->CopyBufferRegion(readback.Get(), 0,
                 static_cast<ID3D12Resource *>(context.Resolve(alias_second)), 0, kSize);
@@ -1125,6 +1970,15 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
               "serial aliases expose distinct native views");
         hs::CompletionSet alias_completion;
         fixture.Execute(graph, frame_slot, barriers, alias_completion, "execute serial alias graph");
+        Check(graph.FinalAccess(alias_first) == hs::Access::CopyDest &&
+            graph.FinalAccess(alias_second) == hs::Access::CopySource &&
+            graph.FinalQueue(alias_first) == hs::QueueHint::Direct &&
+            graph.FinalQueue(alias_second) == hs::QueueHint::Direct,
+            "alias release preserves logical access while physical views return to COMMON");
+        Check(alias_lists[0] && alias_lists[1] && alias_lists[2], "alias callbacks recorded");
+        Check(alias_lists[0] != alias_lists[1] && alias_lists[1] != alias_lists[2] &&
+                  alias_lists[0] != alias_lists[2],
+              "Direct scopes retain independent command lists in both barrier modes");
         const auto alias_stats = fixture.executor.LastExecutionStats();
         const auto expected_batches = (barriers == hs::BarrierMode::Enhanced ? 1u : 3u) +
             (timing_boundaries ? 2u : 0u);
@@ -1187,6 +2041,9 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
           "prepare copy-first texture activation");
     hs::CompletionSet texture_completion;
     fixture.Execute(graph, frame_slot, barriers, texture_completion, "execute copy-first texture activation");
+    Check(graph.FinalAccess(copied_texture) == (exported ? hs::Access::ShaderRead : hs::Access::CopySource) &&
+        graph.FinalQueue(copied_texture) == hs::QueueHint::Direct,
+        "after-pass export overrides the use access and preserves the consumer queue");
     Check(fixture.executor.Wait(texture_completion).Succeeded(),
           "wait copy-first texture activation");
     std::byte *texture_bytes{};
@@ -1216,10 +2073,15 @@ int main(int argc, char **argv)
         Fixture fixture(hardware);
         RunDeviceIdentity(fixture, hardware);
         RunRemovedFenceSentinel(fixture);
+        RunQueueJoinReuse(fixture);
+        RunRecordingDispatch(fixture, hs::BarrierMode::Legacy);
         Run(fixture, hs::BarrierMode::Legacy, 0);
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);
         RunPlanReuse(fixture, hs::BarrierMode::Legacy, 0);
         RunUavClear(fixture, hs::BarrierMode::Legacy, 0);
+        RunBatchedBufferBarriers(fixture, hs::BarrierMode::Legacy, 0);
+        RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Legacy, 0);
+        RunInstanceIdOracle(fixture, hs::BarrierMode::Legacy, 0);
         RunSharedTextureReaders(fixture, hs::BarrierMode::Legacy, 0);
         std::puts("Legacy Copy -> Compute -> Direct queue chain passed.");
 
@@ -1228,10 +2090,14 @@ int main(int argc, char **argv)
                 D3D12_FEATURE_D3D12_OPTIONS12, &options, sizeof(options))) &&
             options.EnhancedBarriersSupported)
         {
+            RunRecordingDispatch(fixture, hs::BarrierMode::Enhanced);
             Run(fixture, hs::BarrierMode::Enhanced, 1);
             RunExternal(fixture, hs::BarrierMode::Enhanced, 1);
             RunPlanReuse(fixture, hs::BarrierMode::Enhanced, 1);
             RunUavClear(fixture, hs::BarrierMode::Enhanced, 1);
+            RunBatchedBufferBarriers(fixture, hs::BarrierMode::Enhanced, 1);
+            RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Enhanced, 1);
+            RunInstanceIdOracle(fixture, hs::BarrierMode::Enhanced, 1);
             RunSharedTextureReaders(fixture, hs::BarrierMode::Enhanced, 1);
             std::puts("Enhanced Copy -> Compute -> Direct queue chain passed.");
         }

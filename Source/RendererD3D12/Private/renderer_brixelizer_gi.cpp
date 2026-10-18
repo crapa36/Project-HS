@@ -93,8 +93,8 @@ struct BrixelizerStorage
         CompletionSet completion;
         std::vector<std::shared_ptr<const void>> owners;
         std::vector<ComPtr<ID3D12Resource>> resources;
-        std::array<RayShaderBinder,kStages> binders;
-        RayShaderBinder restore;
+        std::array<SceneShaderBinder,kStages> binders;
+        SceneShaderBinder restore;
     };
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
@@ -115,7 +115,7 @@ struct BrixelizerStorage
     ViewExtent extent{};
     BrixelizerSettings settings{};
     BrixelizerStatus status{};
-    RayShaderReader shader_reader;
+    SceneShaderReader shader_reader;
     CompletionSet completion;
     std::uint64_t last_frame{},last_light{},last_scene{},successful_updates{};
     bool history_valid{},usable{true};
@@ -142,7 +142,7 @@ struct BrixelizerStorage
     {
         FfxBrixelizerInstanceID native_id{};
         BrixelizerSceneInstance instance{};
-        RaySceneGeometry geometry{};
+        SoftwareSceneGeometry geometry{};
     };
     std::map<InstanceKey,StaticInstance> static_instances;
     std::vector<std::uint32_t> static_invalidation_masks;
@@ -209,7 +209,7 @@ BrixelizerNativeSupport QueryBrixelizerNativeSupport(ID3D12Device *device) noexc
         if(FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support)))||
             !(support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)||!(support.Support2&D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD))
             return {true,false,"Brixelizer native atlas/GI format requires typed UAV loads and stores."};}
-    return {true,true,"Pinned CS6.6 compute Brixelizer supported independently of DXR."};
+    return {true,true,"Pinned CS6.6 compute Brixelizer is supported."};
 #endif
 }
 
@@ -264,7 +264,7 @@ Result CreateSdf(BrixelizerStorage &s)
     auto result=Sdk("ffxBrixelizerContextCreate",ffxBrixelizerContextCreate(&desc,s.sdf.get()));
     if(result)s.sdf_created=true;return result;
 }
-bool SameStatic(const BrixelizerStorage::StaticInstance &old,const BrixelizerSceneInstance &in,const RaySceneGeometry &g)
+bool SameStatic(const BrixelizerStorage::StaticInstance &old,const BrixelizerSceneInstance &in,const SoftwareSceneGeometry &g)
 {
     const auto &a=old.instance;const auto &b=old.geometry;
     return a.material_id==in.material_id&&a.material_revision==in.material_revision&&a.deformation_revision==in.deformation_revision&&
@@ -274,7 +274,7 @@ bool SameStatic(const BrixelizerStorage::StaticInstance &old,const BrixelizerSce
         b.vertex_byte_offset==g.vertex_byte_offset&&b.index_byte_offset==g.index_byte_offset&&b.vertex_stride==g.vertex_stride&&
         b.vertex_count==g.vertex_count&&b.index_count==g.index_count&&b.index_format==g.index_format;
 }
-Result ValidateGeometry(const RenderGraphBuilder &graph,const RaySceneGeometry &g)
+Result ValidateGeometry(const RenderGraphBuilder &graph,const SoftwareSceneGeometry &g)
 {
     const auto index_bytes=g.index_format==DXGI_FORMAT_R32_UINT?4u:g.index_format==DXGI_FORMAT_R16_UINT?2u:0u;
     if(!g.stable_key||!g.generation||g.vertex_count<3||g.index_count<3||g.index_count%3||g.vertex_stride<12||g.vertex_stride%4||
@@ -303,7 +303,7 @@ Result RegisterBuffer(BrixelizerStorage &s,ID3D12Resource *resource,std::uint64_
     if(auto result=Sdk("ffxBrixelizerRegisterBuffers",ffxBrixelizerRegisterBuffers(s.sdf.get(),&desc,1));!result)return result;
     id=registered.id;s.registered_buffers.emplace(key,std::move(registered));return Result::Success();
 }
-Result CreateInstance(BrixelizerStorage &s,const BrixelizerSceneInstance &in,const RaySceneGeometry &g,
+Result CreateInstance(BrixelizerStorage &s,const BrixelizerSceneInstance &in,const SoftwareSceneGeometry &g,
     const std::vector<std::shared_ptr<const void>> &owners,FfxBrixelizerInstanceID &id)
 {
     FfxBrixelizerInstanceDescription desc{};desc.maxCascade=s.settings.logical_cascades-1;
@@ -365,7 +365,7 @@ BrixelizerStatus BrixelizerGiSystem::Status()const
     BrixelizerStatus status{};status.compiled=HS_WITH_BRIXELIZER!=0;status.reason="Brixelizer SoftwareHybrid GI is Off.";return status;
 }
 Result BrixelizerGiSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
-    ViewExtent extent,std::uint32_t frame_slots,const BrixelizerSettings &settings,const RayShaderReader &reader,BrixelizerCandidate &candidate)const
+    ViewExtent extent,std::uint32_t frame_slots,const BrixelizerSettings &settings,const SceneShaderReader &reader,BrixelizerCandidate &candidate)const
 {
     candidate={};
     if(!settings.enabled)return Result::Success();

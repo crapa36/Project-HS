@@ -43,7 +43,9 @@ std::vector<std::string> MeshProductNames()
 {
     constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1",
         "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
-        "grass_2", "grass_3"};
+        "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
+    "ground_leaves", "twig_cluster", "fence_short",
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "meadow_ground", "meadow_water"};
     std::vector<std::string> products;
     for (const auto* name : names) for (const auto* lod : {"", "_lod1", "_lod2"})
         products.push_back("environment_" + std::string(name) + lod + ".meshbin");
@@ -168,7 +170,7 @@ void Produce(std::string_view mode, const fs::path& source_root,
         device = HardwareCompressor();
         spec.recipe_id += EncoderIdentity(device.Get());
     } else if (mode == "meshes") {
-        AddInputs(spec, source_root, {mesh_source});
+        AddInputs(spec, source_root, {mesh_source, mesh_source.parent_path() / "meadow_surface_meshes.json"});
         names = MeshProductNames();
     } else {
         throw std::runtime_error("hs_environment: unsupported action mode");

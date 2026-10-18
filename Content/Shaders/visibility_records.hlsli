@@ -1,9 +1,10 @@
 #ifndef HS_VISIBILITY_RECORDS_HLSLI
 #define HS_VISIBILITY_RECORDS_HLSLI
 
-// 0 is generic, 1..15 environment/terrain, 16..22 authored hero ordinals.
+#include "render_binding_contract.hlsli"
+
+// 0 is generic, then authored environment materials, then hero ordinals.
 // Ordinal5 is transparent and never writes opaque visibility.
-static const uint HsVisibilityVariantCount = 23u;
 static const uint HsVisibilityInvalid = 0xffffffffu;
 static const uint HsVisibilityOffsetBase = HsVisibilityVariantCount;
 static const uint HsVisibilityCursorBase = HsVisibilityVariantCount * 2u;

@@ -401,89 +401,11 @@ float HsBsdfPdf(HsSurfaceClosure surface, float3 wo, float3 wi)
         + probabilities.z * (0.5 * HsBsdfInvPi);
 }
 
-// NRD independent primary signals condition the existing proposal family on
-// the component being integrated. No diffuse/specular Bernoulli holes remain.
-// This does not change HsBsdfSample or any raster/secondary-path estimator.
-float2 HsBsdfNrdDiffuseProbabilities(HsSurfaceClosure surface,float3 view)
-{
-    float4 layers=HsBsdfLayerProbabilities(surface,view);
-    float2 weights=float2(layers.x*(1.0-HsBsdfSpecularProbability(surface)),layers.w);
-    float total=weights.x+weights.y;return total>0.0?weights/total:0.0;
-}
-float3 HsBsdfNrdSpecularProbabilities(HsSurfaceClosure surface,float3 view)
-{
-    float4 layers=HsBsdfLayerProbabilities(surface,view);
-    float3 weights=float3(layers.x*HsBsdfSpecularProbability(surface),layers.y,layers.z);
-    float total=weights.x+weights.y+weights.z;return total>0.0?weights/total:0.0;
-}
-float HsBsdfNrdAnisotropicSpecularPdf(HsSurfaceClosure surface,float3 wo,float3 wi)
-{
-    if(surface.anisotropy==0.0)return HsBsdfNrdBaseSpecularPdf(surface,wo,wi);
-    float3 normal=normalize(surface.normal),view=normalize(wo),light=normalize(wi),halfSum=view+light;
-    float halfLength=dot(halfSum,halfSum);
-    if(dot(normal,view)<=0.0||dot(normal,light)<=0.0||halfLength<=0.0)return 0.0;
-    float3 halfVector=halfSum*rsqrt(halfLength);
-    if(dot(normal,halfVector)<=0.0||dot(view,halfVector)<=0.0)return 0.0;
-    float3 tangent,bitangent;HsBsdfAnisotropicFrame(surface,normal,tangent,bitangent);
-    float2 alpha=HsBsdfAnisotropicAlpha(surface);
-    float denominator=HsBsdfAnisotropicSmithDenominator(HsBsdfToLocal(view,tangent,bitangent,normal),alpha);
-    return HsBsdfAnisotropicD(HsBsdfToLocal(halfVector,tangent,bitangent,normal),alpha)/(2.0*denominator);
-}
-float HsBsdfNrdComponentPdf(HsSurfaceClosure surface,float3 wo,float3 wi,bool specular)
-{
-    float3 view=normalize(wo),light=normalize(wi);surface=HsBsdfOrientThinSurface(surface,view);
-    float noL=dot(normalize(surface.normal),light);if(surface.unlit||dot(surface.normal,view)<=0.0||noL==0.0)return 0.0;
-    if(!specular)
-    {
-        float2 probabilities=HsBsdfNrdDiffuseProbabilities(surface,view);
-        return (noL>0.0?probabilities.x:probabilities.y)*abs(noL)*HsBsdfInvPi;
-    }
-    if(noL<=0.0)return 0.0;
-    float3 probabilities=HsBsdfNrdSpecularProbabilities(surface,view);
-    return probabilities.x*HsBsdfNrdAnisotropicSpecularPdf(surface,view,light)+
-        probabilities.y*HsBsdfNrdBaseSpecularPdf(HsBsdfCoatSurface(surface),view,light)+probabilities.z*(0.5*HsBsdfInvPi);
-}
-HsBsdfSampleResult HsBsdfNrdSampleComponent(HsSurfaceClosure surface,float3 wo,float uLobe,float2 uDirection,bool specular)
-{
-    HsBsdfSampleResult result=(HsBsdfSampleResult)0;float3 view=normalize(wo);
-    surface=HsBsdfOrientThinSurface(surface,view);float3 normal=normalize(surface.normal);
-    if(surface.unlit||dot(normal,view)<=0.0)return result;
-    float3 tangent=HsBsdfTangent(normal),bitangent=cross(normal,tangent);
-    if(!specular)
-    {
-        float2 probabilities=HsBsdfNrdDiffuseProbabilities(surface,view);
-        if(probabilities.x+probabilities.y==0.0)return result;
-        result.wi=HsBsdfSampleCosineHemisphere(uDirection,tangent,bitangent,uLobe<probabilities.x?normal:-normal);
-    }
-    else
-    {
-        float3 probabilities=HsBsdfNrdSpecularProbabilities(surface,view);
-        if(probabilities.x+probabilities.y+probabilities.z==0.0)return result;
-        if(uLobe<probabilities.x)
-        {
-            float3 halfVector;
-            if(surface.anisotropy==0.0)halfVector=HsBsdfSampleVisibleNormal(surface,view,uDirection,tangent,bitangent,normal);
-            else{HsBsdfAnisotropicFrame(surface,normal,tangent,bitangent);
-                halfVector=HsBsdfSampleAnisotropicVisibleNormal(view,uDirection,HsBsdfAnisotropicAlpha(surface),tangent,bitangent,normal);}
-            if(dot(view,halfVector)<=0.0)return result;result.wi=reflect(-view,halfVector);
-        }
-        else if(uLobe<probabilities.x+probabilities.y)
-        {
-            float3 halfVector=HsBsdfSampleVisibleNormal(HsBsdfCoatSurface(surface),view,uDirection,tangent,bitangent,normal);
-            if(dot(view,halfVector)<=0.0)return result;result.wi=reflect(-view,halfVector);
-        }
-        else
-        {
-            float cosine=uDirection.x,sine=sqrt(max(0.0,1.0-cosine*cosine)),phi=2.0*HsBsdfPi*uDirection.y;
-            result.wi=HsBsdfToWorld(float3(sine*cos(phi),sine*sin(phi),cosine),tangent,bitangent,normal);
-        }
-        // Rejected VNDF rays retain the fixed denominator; never retry them.
-        if(dot(normal,result.wi)<=0.0)return (HsBsdfSampleResult)0;
-    }
-    result.wi=normalize(result.wi);result.pdf=HsBsdfNrdComponentPdf(surface,view,result.wi,specular);
-    float3 diffuse,specularValue;HsBsdfEvaluateComponents(surface,view,result.wi,diffuse,specularValue);
-    result.f=specular?specularValue:diffuse;result.valid=result.pdf>0.0;return result;
-}
+
+
+
+
+
 
 HsBsdfSampleResult HsBsdfSample(HsSurfaceClosure surface, float3 wo, float u_lobe, float2 u_dir)
 {

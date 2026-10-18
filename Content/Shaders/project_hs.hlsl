@@ -1,3 +1,6 @@
+#include "render_binding_contract.hlsli"
+#include "environment_wind.hlsli"
+
 cbuffer FrameConstants : register(b0)
 {
     float4x4 ViewProjection;
@@ -42,7 +45,7 @@ cbuffer FrameConstants : register(b0)
     float4 OutputSize; // Output extent in xy, reciprocal extent in zw.
     float4 PostOptions; // Bloom strength, outline width in output pixels, grading, sharpening.
     float4 MaterialQualityOptions; // POM march/refinement, packed binary16 terrain fade range, screen refraction quality.
-    float4 DisplayOptions; // Native HDR enabled, paper white nits, peak nits, reserved.
+    float4 DisplayOptions; // Native HDR enabled, paper white nits, peak nits, encoded DevTools in PostA.
     row_major float4x4 InverseUnjitteredViewProjection;
     float4 LightingOptions;
     uint4 HeroMaterialParameterBases[2];
@@ -278,6 +281,7 @@ struct SceneOutput
 };
 
 #include "environment.hlsli"
+#include "meadow_surface.hlsli"
 #include "hero_material.hlsli"
 #include "entity_surface.hlsli"
 #ifdef HS_GENERATED_ENVIRONMENT_MATERIAL
@@ -349,7 +353,7 @@ HsMaterialContext EnvironmentMaterialContext(SceneOutput input, bool front,
     ctx.tangent = input.WorldTangent;
     ctx.normal = float3(0, 0, 1);
     ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
-    ctx.mesh = input.Mesh;
+    ctx.mesh = input.Mesh == 22u && input.Material == 0u ? 9u : input.Mesh;
     ctx.seed = input.EnvironmentSeed;
     ctx.view_direction = CameraTime.xyz - input.WorldPosition;
     ctx.parameter_base = materialWord >> 1;
@@ -528,6 +532,8 @@ float3 BendGrass(float3 world, float3 local_position, float time,
     {
         const float2 delta = world.xz - benders[index].xz;
         const float radius = max(benders[index].w, 0.1);
+        // A conservative outer box skips only exactly zero contributions.
+        if (max(abs(delta.x), abs(delta.y)) > 2.0 * radius) continue;
         const float weight = saturate(1.0 - length(delta) / radius);
         bend += float3(delta.x, 0.0, delta.y) * weight * 0.42 * saturate(local_position.y + 0.5);
     }
@@ -571,10 +577,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     const InstanceData instance = context.instance;
     const StaticDrawRef draw = context.draw;
     const bool cached_skin = context.cachedSkin;
-    const bool cached_skin_history = context.cachedSkinHistory;
+    const bool cached_skin_history = evaluate_history && context.cachedSkinHistory;
     const uint skin_slot = context.skinSlot;
     const uint mesh = instance.Mesh & 0xff;
-    uint environment_seed = (mesh == 9 || mesh == 20) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
+    uint environment_seed = (mesh == 9 || mesh == 20 || mesh == 22) ? asuint(instance.Padding) : EnvCell(floor(instance.Position.xz * 16), 71);
     uint environment_entry;
     EnvironmentVertex(input, instance, vertex_id, environment_seed, environment_entry);
     float3 local_position = input.Position;
@@ -609,14 +615,17 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     const float3 stable_world = InstanceWorldPosition(instance, local_position);
     const float3 grass_local = local_position -
         float3(0, (instance.Mesh & 0x10000) != 0 ? 0.5 : 0.0, 0);
-    float3 world = mesh == 19 ? BendGrass(stable_world, grass_local,
-        CameraTime.w, GrassBenders, GrassBenderCount.x) : stable_world;
+    float3 world = stable_world;
+    const bool wind_deformed = HsEnvironmentWind(instance.Mesh);
+    if (wind_deformed)
+        world = BendGrass(stable_world, grass_local,
+            CameraTime.w, GrassBenders, GrassBenderCount.x);
     float3 previous_world = world;
     const bool previous_static_grass = context.geometryValid &&
         (context.geometry.Flags & 12u) == 12u;
     const bool previous_dynamic_grass = context.gpuSceneRefs && context.geometryValid &&
         (context.geometry.Flags & 8u) != 0u && (draw.MeshFlags & 0x200000u) != 0u;
-    const bool grass_history = evaluate_history && mesh == 19 &&
+    const bool grass_history = evaluate_history && wind_deformed &&
         PreviousGrassState.z > 0.5 && SurfaceViewOrigin.w > 0.5 &&
         (previous_static_grass || previous_dynamic_grass);
     if (grass_history)
@@ -657,8 +666,8 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.Mesh = mesh;
     output.Uv = input.Uv;
     output.WorldTangent = float4(tangent, input.Tangent.w);
-    output.Material = (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
-    const bool environment = mesh == 9 || mesh == 20 || (mesh >= 16 && mesh <= 19);
+    output.Material = mesh==22u ? (input.Uv.y>=100.0?1u:0u) : (mesh == 17 || mesh == 19) ? environment_entry : input.Material;
+    const bool environment = mesh == 9 || mesh == 20 || ((mesh >= 16 && mesh <= 19) || mesh == 21 || mesh == 22);
     const uint model = environment ? HsSurfaceModelEnvironment :
         (mesh >= 10 && mesh <= 12 ? HsSurfaceModelJelly : HsSurfaceModelCel);
     const uint foliage = mesh == 17 ? HsSurfaceFoliageLeaf :
@@ -671,13 +680,13 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
         // Material binding identity is separate from a foliage atlas entry or
         // a character's vertex submaterial index.
         if ((context.geometry.Flags & 16u) == 0u)
-            output.MaterialId = environment ? 0x10000000u + context.geometry.PageSlot / 3u :
+            output.MaterialId = environment ? 0x10000000u + HsEnvironmentMaterialOrdinal(context.geometry.PageSlot / HsEnvironmentGeometryLodCount) :
                 (HsHeroAssetIndex(mesh) != HsHeroInvalidOrdinal
                     ? HsHeroOpaqueMaterialId(mesh, input.Material)
                     : 0x20000000u + (context.geometry.PageSlot << 16u) + input.Material);
         if ((context.geometry.Flags & 32u) != 0u)
             output.MaterialId = context.geometry.Lod;
-        if (environment && mesh != 19 && (context.geometry.Flags & 12u) == 12u)
+        if (environment && !wind_deformed && (context.geometry.Flags & 12u) == 12u)
             output.HistoryConfidence = 1.0;
     }
     // A resident previous page cannot establish the previous instance's LOD
@@ -702,7 +711,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
 }
 
 SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_id,
-                                bool gpu_scene_refs)
+                                bool gpu_scene_refs, bool evaluate_history = true)
 {
     HsSceneVertexContext context = (HsSceneVertexContext)0;
     context.skinSlot = 0xffffffffu;
@@ -717,7 +726,7 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
             // Shadow proxy coverage is complete, independently of camera LOD fades.
             context.draw.MeshFlags &= ~0x20000u;
             const uint mesh = HsLoadGpuSceneInstance(context.draw.InstanceIndex).Mesh & 0xffu;
-            if (mesh >= 16u && mesh <= 19u) context.draw.LodThreshold = 1.0;
+            if ((mesh >= 16u && mesh <= 19u) || mesh == 21u || mesh == 22u) context.draw.LodThreshold = 1.0;
         }
         context.instanceKey = uint2(context.draw.InstanceIndex + 1u, context.draw.InstanceGeneration);
         context.instance = HsLoadGpuSceneInstance(context.draw.InstanceIndex);
@@ -750,7 +759,8 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
         context.rasterRecordId = context.geometry.Reserved2 + instance_id -
             context.geometry.VisibleBase;
     }
-    return EvaluateSceneVertex(input, context, vertex_id, !HsShadowIsDraw(PassValue));
+    return EvaluateSceneVertex(input, context, vertex_id,
+        evaluate_history && !HsShadowIsDraw(PassValue));
 }
 
 SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
@@ -761,7 +771,9 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
 
 SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
-    SceneOutput output = SceneVS(input, instance_id, vertex_id);
+    // Shadows consume current coverage only; previous deformation is for motion vectors.
+    SceneOutput output = EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
+        (SceneDrawMaterial & 1u) != 0, false);
     // Record IDs start at 1; legacy procedural draws retain cascades 0..2.
     if (HsShadowIsDraw(PassValue))
         output.Position = HsShadowProject(output.WorldPosition, PassValue);
@@ -774,6 +786,7 @@ SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint ve
 }
 void EnvironmentShadowPS(SceneOutput input, bool masked, bool front)
 {
+    if(input.Mesh==22u && input.Material==1u) discard;
     HsShadowRasterClip(input.Position.xy, PassValue);
     const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
     EnvironmentLodClip(input);
@@ -782,6 +795,7 @@ void EnvironmentShadowPS(SceneOutput input, bool masked, bool front)
 
 void ShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
+    if(input.Mesh==22u && input.Material==1u) discard;
     HsShadowRasterClip(input.Position.xy, PassValue);
     const HsMaterialContext material_context = EnvironmentMaterialContext(input, front);
     EnvironmentLodClip(input);
@@ -936,7 +950,7 @@ HsMaterialContext HsHeroMaterialContext(SceneOutput input, bool front,
     ctx.stable_world_position = input.WorldPosition;
     ctx.d_stable_world_dx = gradients.worldDx;
     ctx.d_stable_world_dy = gradients.worldDy;
-    ctx.mesh = input.Mesh;
+    ctx.mesh = input.Mesh == 22u && input.Material == 0u ? 9u : input.Mesh;
     ctx.seed = input.EnvironmentSeed;
     ctx.eye_distance = length(CameraTime.xyz - input.WorldPosition);
     ctx.view_direction = normalize(CameraTime.xyz - input.WorldPosition);
@@ -1021,7 +1035,7 @@ HsSurfaceClosure HsHeroClosureToWorld(HsSurfaceClosure surface, HsMaterialContex
 
 bool HsEnvironmentLodCovered(SceneOutput input)
 {
-    if (input.Mesh < 16 || input.Mesh > 19 ||
+    if (((input.Mesh < 16 || input.Mesh > 19) && input.Mesh != 21) ||
         (input.EnvironmentFlags & 0x10000) == 0u)
         return true;
     const uint2 cell = (uint2)input.Position.xy;
@@ -1035,6 +1049,7 @@ bool HsEnvironmentLodCovered(SceneOutput input)
 bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
                     HsSceneGradients gradients, uint materialWord)
 {
+    if (input.Mesh==22u && input.Material==1u) return false;
     if (!HsEnvironmentLodCovered(input) ||
         (!front && input.Mesh != 17 && input.Mesh != 19) ||
         input.Mesh == 6)
@@ -1051,7 +1066,7 @@ bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
     }
 
     if (input.Mesh == 9 || input.Mesh == 20 ||
-        (input.Mesh >= 16 && input.Mesh <= 19))
+        ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
     {
         const HsMaterialContext material_context =
             EnvironmentMaterialContext(input, front, gradients, materialWord);
@@ -1164,10 +1179,12 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
         world_normal = float3(0.0, 1.0, 0.0);
         output.Material = float4(1.0, 0.0, 1.0, 0.0);
     }
-    else if (input.Mesh == 9 || input.Mesh == 20 || (input.Mesh >= 16 && input.Mesh <= 19))
+    else if (input.Mesh == 9 || input.Mesh == 20 || ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
     {
         EnvMaterial m = (EnvMaterial)0;
         HsSurfaceClosure surface = HsMaterialEvaluateSurface(material_context);
+        if (input.Mesh == 19u)
+            surface.base_color *= MeadowDryGrassGain(input.EnvironmentStableWorld.xz);
         {
             m.color = surface.base_color;
             m.roughness = surface.roughness;
@@ -1188,7 +1205,7 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
         output.Material=float4(m.roughness,saturate(surface.metallic),m.ao,0.0);
 #if HS_SURFACE_SIDECAR_PLANES > 0
         const uint ordinal = input.MaterialId - 0x10000000u;
-        const uint varying_mask = ordinal < 15u
+        const uint varying_mask = ordinal < HsAuthoredMaterialCount
             ? MaterialVaryingMasks[ordinal / 4u][ordinal % 4u] : 0u;
         if (varying_mask != 0u)
         {
@@ -1288,6 +1305,7 @@ GBufferOutput HeroScenePS(SceneOutput input, bool front : SV_IsFrontFace)
 
 void HeroShadowPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
+    if(input.Mesh==22u && input.Material==1u) discard;
     HsShadowRasterClip(input.Position.xy, PassValue);
     const HsSceneGradients gradients = RasterSceneGradients(input);
     if (!HsHeroSceneCovered(input, front, gradients)) discard;
@@ -2381,6 +2399,14 @@ float3 HsHeroTranslucentLighting(HsSurfaceClosure surface, float3 world, float2 
 
 HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGradients gradients)
 {
+    if(input.Mesh==22u && input.Material==1u)
+    {
+        const float thickness=max(0.001,input.Uv.x);
+        HsSurfaceClosure water=HsMaterialMakeSurfaceClosure(float3(.97,.985,.96),float3(0,1,0),.09,0,1,1);
+        water.solid_transmission_weight=1; water.ior=1.333;
+        water.absorption_per_m=float3(5.0,2.5,1.4);water.thickness_m=thickness;
+        water.normal_is_world=true;return water;
+    }
     const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;
     if(ordinal!=5u) discard;
     const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,ordinal);
@@ -2509,11 +2535,7 @@ float4 HeroLayerCompositePS(SceneOutput input,bool front:SV_IsFrontFace):SV_Targ
 OitOutput HeroTranslucentPS(SceneOutput input, bool front : SV_IsFrontFace)
 {
     const HsSceneGradients gradients = RasterSceneGradients(input);
-    const uint ordinal = HsHeroBindingOrdinals(input.Mesh, input.Material).y;
-    if (ordinal != 5u) discard;
-    const HsMaterialContext ctx = HsHeroMaterialContext(input, front, gradients, ordinal);
-    HsSurfaceClosure surface = HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx, ordinal), ctx);
-    clip(surface.opacity - 0.001);
+    HsSurfaceClosure surface = HsHeroTransportSurface(input, front, gradients);
     const float3 color = HsHeroTranslucentLighting(surface, input.WorldPosition, input.Position.xy, front);
     const float alpha = saturate(surface.opacity);
     const float z = saturate(length(input.WorldPosition - CameraTime.xyz) / 180.0);
@@ -4046,7 +4068,12 @@ float4 UiPS(FullScreenOutput input) : SV_Target0
 {
     // CPU rasterization already maps the authored logical canvas into an
     // output-sized bitmap, including its transparent letterbox margins.
-    const float4 ui = HsDisplayDecodePremultipliedUi(UiTexture.SampleLevel(LinearClamp, input.Uv, 0));
+    float4 ui = HsDisplayDecodePremultipliedUi(UiTexture.SampleLevel(LinearClamp, input.Uv, 0));
+    if (DisplayOptions.w > 0.5)
+    {
+        const float4 devtools = HsDisplayDecodePremultipliedUi(PostA.SampleLevel(LinearClamp, input.Uv, 0));
+        ui = ui * (1.0 - devtools.a) + devtools;
+    }
     const float3 scene = DisplayLinear.SampleLevel(LinearClamp, input.Uv, 0).rgb;
     const float3 display_linear = scene * (1.0 - ui.a) + ui.rgb;
     const float3 encoded = DisplayOptions.x > 0.5

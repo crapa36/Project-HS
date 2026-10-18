@@ -377,7 +377,29 @@ template <typename T>
     else if constexpr (std::is_enum_v<T>)
     {
         if (!json.is_string()) return false;
-        const auto parsed = ParseGraphicsEnumToken<T>(json.get<std::string>());
+        auto token = json.get<std::string>();
+        // Read compatibility only: removed modes never enter the current settings/UI domain.
+        if constexpr (std::is_same_v<T, GraphicsPreset>)
+        {
+            if (token == "ultra_rt") token = "ultra";
+        }
+        else if constexpr (std::is_same_v<T, GraphicsAoMode>)
+        {
+            if (token == "rtao") token = "gtao";
+        }
+        else if constexpr (std::is_same_v<T, GraphicsGiMode>)
+        {
+            if (token == "ray_traced" || token == "raytraced") token = "software_hybrid";
+        }
+        else if constexpr (std::is_same_v<T, GraphicsReflectionMode>)
+        {
+            if (token == "hybrid_rt") token = "screen_space";
+        }
+        else if constexpr (std::is_same_v<T, GraphicsShadowMode>)
+        {
+            if (token == "hybrid_rt") token = "raster";
+        }
+        const auto parsed = ParseGraphicsEnumToken<T>(token);
         if (!parsed) return false;
         value = *parsed;
     }
@@ -426,6 +448,12 @@ template <typename T>
            key == "skill_virtual_keys" || key == "screen_overlay_intensity";
 }
 
+[[nodiscard]] bool RemovedGraphicsSettingKey(std::string_view key) noexcept
+{
+    return key == "ray_tracing_enabled" || key == "rt_trace_distance_m" ||
+           key == "neural_ray_reconstruction" || key == "ray_reconstruction_provider";
+}
+
 [[nodiscard]] bool ParseExtensions(std::string_view text, Json &extensions)
 {
     if (text.size() > kMaximumSaveBytes || !ParseJsonNoDuplicates(text, extensions) ||
@@ -438,7 +466,7 @@ template <typename T>
         {
             if ((iterator.key() == "top" && KnownSettingsKey(field.key())) ||
                 (iterator.key() == "graphics" &&
-                 ParseGraphicsSettingKey(field.key()))) return false;
+                 (ParseGraphicsSettingKey(field.key()) || RemovedGraphicsSettingKey(field.key())))) return false;
         }
     }
     return true;
@@ -593,6 +621,10 @@ template <typename T>
 #include <hs/core/graphics_settings.def>
 #undef HS_GRAPHICS_SETTING
 
+    // DLSS RR was also offered as a fused SR choice; retain its SR provider only.
+    if (parsed.graphics.reconstruction_provider.value == "dlss_rr")
+        parsed.graphics.reconstruction_provider.value = "dlss";
+
     Json extensions = Json::object();
     for (auto iterator = json.begin(); iterator != json.end(); ++iterator)
     {
@@ -601,7 +633,7 @@ template <typename T>
     }
     for (auto iterator = graphics->begin(); iterator != graphics->end(); ++iterator)
     {
-        if (!ParseGraphicsSettingKey(iterator.key()))
+        if (!ParseGraphicsSettingKey(iterator.key()) && !RemovedGraphicsSettingKey(iterator.key()))
             extensions["graphics"][iterator.key()] = iterator.value();
     }
     parsed.opaque_optional_json = extensions.dump();

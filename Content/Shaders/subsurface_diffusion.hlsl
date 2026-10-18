@@ -52,7 +52,7 @@ HsSurfaceClosure SssLoadProfile(uint material)
     HsSurfaceClosure profile=HsMaterialMakeSurfaceClosure(0.0,float3(0,0,1),0.5,0.0,1.0,1.0);
     HsMaterialContext ctx=(HsMaterialContext)0;
     const uint environment=material-0x10000000u,hero=material-0x20000000u;
-    if(environment<15u)
+    if(environment<HsAuthoredMaterialCount)
     {
         ctx.parameter_base=SssMaterialParameterBases[environment/4u][environment%4u];
         profile=HsMaterialApplyDeferredLayers(profile,ctx,environment);

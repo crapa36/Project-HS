@@ -39,6 +39,8 @@ class RendererDiagnosticsRecorder
     // observed transaction boundaries, never an interpolated or reserved peak.
     void ObserveTransition(const RendererDiagnosticsMemory &) noexcept;
     [[nodiscard]] RendererDiagnosticsSnapshot Snapshot() const;
+    [[nodiscard]] const RendererDiagnosticsFrame &LastRenderedFrame() const noexcept
+    { return frames_[(next_frame_ + frames_.size() - 1) % frames_.size()]; }
   private:
     struct Pass
     {

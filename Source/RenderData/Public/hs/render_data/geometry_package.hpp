@@ -12,6 +12,10 @@
 namespace hs::render_data
 {
 inline constexpr std::uint32_t kGeometryAbi = 1;
+// Shared CPU/shader descriptor capacity; residency byte budgets remain independent.
+inline constexpr std::uint32_t kGeometryPageCapacity = 256;
+inline constexpr std::uint32_t kGeometryBuffersPerPage = 4;
+inline constexpr std::uint32_t kGeometryDescriptorCount = 1 + kGeometryPageCapacity * kGeometryBuffersPerPage;
 inline constexpr std::uint32_t kGeometryErrorMethodAbi = 1;
 inline constexpr std::uint32_t kGeometryMetadataStride = 96;
 inline constexpr std::uint32_t kGeometrySubmeshStride = 20;

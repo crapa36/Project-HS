@@ -12,9 +12,9 @@ inline constexpr std::size_t kInstanceArcherBucket = 0;
 inline constexpr std::size_t kInstanceMonsterBucketBegin = 1;
 inline constexpr std::size_t kInstanceProjectileBucket = 7;
 inline constexpr std::size_t kInstanceEnvironmentBucketBegin = 8;
-inline constexpr std::size_t kInstanceTerrainBucket = 22;
-inline constexpr std::size_t kInstanceOtherBucket = 23;
-inline constexpr std::size_t kInstanceBucketCount = 24;
+inline constexpr std::size_t kInstanceTerrainBucket = 24 + kGroundDetailVariantCount;
+inline constexpr std::size_t kInstanceOtherBucket = kInstanceTerrainBucket + 1;
+inline constexpr std::size_t kInstanceBucketCount = kInstanceOtherBucket + 1;
 
 // Only draw references are reordered. Canonical indices also identify anonymous
 // instances and foliage, so retain their original values and order within buckets.
@@ -28,6 +28,10 @@ inline constexpr std::size_t kInstanceBucketCount = 24;
             return kInstanceMonsterBucketBegin + static_cast<std::size_t>(source.mesh) -
                    static_cast<std::size_t>(RenderMesh::MonsterMelee);
         if (source.mesh == RenderMesh::EnemyProjectile) return kInstanceProjectileBucket;
+        if (source.mesh == RenderMesh::MeadowSurface)
+            return kInstanceEnvironmentBucketBegin + 14 + kGroundDetailVariantCount + source.environment_variant % 2;
+        if (source.mesh == RenderMesh::GroundDetail)
+            return kInstanceEnvironmentBucketBegin + 14 + source.environment_variant % kGroundDetailVariantCount;
         if (source.mesh >= RenderMesh::TreeTrunk && source.mesh <= RenderMesh::Grass)
         {
             constexpr std::array<std::size_t, 4> offsets{0, 3, 6, 10}, counts{3, 3, 4, 4};

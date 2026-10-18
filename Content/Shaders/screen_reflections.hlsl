@@ -87,7 +87,6 @@ Texture2D<float4> SsrEnvironmentSpecular : register(t8, space16);
 Texture2D<uint4> SurfaceSidecar0 : register(t10, space16);
 Texture2D<uint4> SurfaceSidecar1 : register(t11, space16);
 Texture2D<float> SsrAmbientVisibility : register(t12, space16);
-Texture2D<float4> SsrResolved : register(t13, space16);
 RWTexture2D<float4> SsrRawOutput : register(u0, space16);
 RWTexture2D<float4> SsrPreviousRadiance : register(u1, space16);
 RWTexture2D<float4> SsrCurrentRadiance : register(u2, space16);
@@ -442,16 +441,10 @@ void ScreenReflectionSpatialCS(uint3 dispatch : SV_DispatchThreadID)
             sum += SsrCurrentRadiance[p] * weight; weightSum += weight;
         }
     }
-    SsrRawOutput[dispatch.xy] = weightSum > 1e-5 ? sum / weightSum : float4(0, 0, 0, 0);
-}
-[numthreads(8, 8, 1)]
-void ScreenReflectionComposeCS(uint3 dispatch : SV_DispatchThreadID)
-{
-    if (any(dispatch.xy >= uint2(SsrRenderSize.xy))) return;
+    const float4 reflection = weightSum > 1e-5 ? sum / weightSum : float4(0, 0, 0, 0);
     int3 pixel = int3(dispatch.xy, 0);
     float4 opaque = SsrOpaqueHDR.Load(pixel);
     float3 environment = SsrEnvironmentSpecular.Load(pixel).rgb;
-    float4 reflection = SsrResolved.Load(pixel);
     float3 replaced = opaque.rgb - environment + lerp(environment, reflection.rgb, saturate(reflection.a));
     SsrComposed[dispatch.xy] = float4(clamp(replaced, 0.0, 65000.0), opaque.a);
 }

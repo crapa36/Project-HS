@@ -9,6 +9,52 @@
 
 namespace hs::runtime_detail
 {
+// RFC 4180 field quoting also keeps provider/display names and native reasons parseable.
+inline std::string CsvField(std::string_view value)
+{
+    std::string field;
+    field.reserve(value.size() + 2);
+    field += '"';
+    for (const auto ch : value)
+    {
+        if (ch == '"') field += '"';
+        field += ch;
+    }
+    field += '"';
+    return field;
+}
+
+// Runtime captures one main view; completed GPU frame IDs increase for its lifetime.
+class PerformanceLogState
+{
+  public:
+    static constexpr std::uint64_t ElapsedTicks(std::uint64_t begin, std::uint64_t end) noexcept
+    {
+        return end >= begin ? end - begin : 0;
+    }
+    std::uint64_t FrameInterval(std::uint64_t qpc) noexcept
+    {
+        const auto interval = previous_qpc_ ? ElapsedTicks(previous_qpc_, qpc) : 0;
+        previous_qpc_ = qpc;
+        return interval;
+    }
+    bool AcceptGpuFrame(std::uint64_t frame, bool available, bool completed) noexcept
+    {
+        if (!available || !completed || frame <= completed_gpu_frame_) return false;
+        completed_gpu_frame_ = frame;
+        ++gpu_frames_;
+        return true;
+    }
+    [[nodiscard]] std::uint64_t GpuFrames() const noexcept { return gpu_frames_; }
+    [[nodiscard]] std::uint64_t LastGpuFrame() const noexcept { return completed_gpu_frame_; }
+    [[nodiscard]] bool GpuFrameCoverageComplete(std::uint64_t rendered_frames) const noexcept
+    {
+        return gpu_frames_ == rendered_frames && completed_gpu_frame_ == rendered_frames;
+    }
+  private:
+    std::uint64_t previous_qpc_{}, completed_gpu_frame_{}, gpu_frames_{};
+};
+
 // Single render-thread owner. Capture writes fixed chunks synchronously; a slow
 // disk applies backpressure without a second unbounded queue or writer thread.
 class DiagnosticLog

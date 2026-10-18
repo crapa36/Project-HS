@@ -20,6 +20,7 @@
 #include "d3d12_resources.hpp"
 #include "persistent_gpu_scene.hpp"
 #include "render_scene_extractor.hpp"
+#include "render_instance_lookup.hpp"
 #include "renderer_diagnostics.hpp"
 #include "renderer_lod.hpp"
 #include "renderer_visibility.hpp"
@@ -51,15 +52,10 @@
 #include "renderer_ltc.hpp"
 #include "renderer_hdr_post.hpp"
 #include "renderer_screen_overlay.hpp"
-#include "renderer_ray_scene.hpp"
-#include "renderer_ray_geometry.hpp"
-#include "renderer_ray_ambient_occlusion.hpp"
-#include "renderer_ray_transport.hpp"
-#include "renderer_ray_reconstruction.hpp"
+#include "renderer_scene_geometry.hpp"
 #include "renderer_brixelizer_gi.hpp"
 #include "renderer_virtual_shadow.hpp"
 #include "renderer_local_shadow.hpp"
-#include "renderer_ray_shadow.hpp"
 #include "renderer_volumetrics.hpp"
 #include "renderer_hlod_runtime.hpp"
 #include "renderer_local_probe_runtime.hpp"
@@ -132,7 +128,7 @@ constexpr auto &kEnvironmentMaterialNames = render_data::kEnvironmentMaterialNam
 constexpr auto &kAuthoredMaterialNames = render_data::kAuthoredMaterialNames;
 constexpr auto &kHeroMaterialNames = render_data::kHeroMaterialNames;
 constexpr auto kResidentMaterialCount = kAuthoredMaterialNames.size() + kHeroMaterialNames.size();
-constexpr std::uint32_t kTerrainMaterialOrdinal = 14;
+constexpr auto kTerrainMaterialOrdinal = render_data::kTerrainMaterialOrdinal;
 constexpr std::uint32_t kVisibilityVariantCount = static_cast<std::uint32_t>(kResidentMaterialCount + 1);
 constexpr std::uint32_t kParticleCount = 10'000;
 constexpr std::uint32_t kUiWidth = 1'920;
@@ -156,8 +152,8 @@ constexpr std::uint32_t kMaterialTextureDescriptorOffset =
     kBaseTextureDescriptorCount + 2 * kPostTextureDescriptorCount;
 constexpr std::uint32_t kMaterialTextureDescriptorCount =
     static_cast<std::uint32_t>(kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots);
-constexpr std::uint32_t kGeometryPageCapacity = 128;
-constexpr std::uint32_t kGeometryBuffersPerPage = 4;
+constexpr std::uint32_t kGeometryPageCapacity = render_data::kGeometryPageCapacity;
+constexpr std::uint32_t kGeometryBuffersPerPage = render_data::kGeometryBuffersPerPage;
 constexpr std::uint32_t kGeometryDescriptorOffset =
     kMaterialTextureDescriptorOffset + kMaterialTextureDescriptorCount;
 constexpr std::uint32_t kGeometryDescriptorCount =
@@ -178,40 +174,30 @@ constexpr std::uint32_t kViewDescriptorCount = 13;
 constexpr std::uint32_t kHeroBindingDescriptorOffset = kViewDescriptorOffset + kViewDescriptorCount;
 constexpr std::uint32_t kProbeDescriptorOffset = kHeroBindingDescriptorOffset + 1;
 constexpr std::uint32_t kLightListDescriptorOffset = kProbeDescriptorOffset + 3;
-constexpr std::uint32_t kRayDescriptorOffset = kLightListDescriptorOffset + 6;
-constexpr std::uint32_t kVirtualShadowDescriptorOffset = kRayDescriptorOffset + kRayDescriptorCount;
-constexpr std::uint32_t kRayTransportDescriptorOffset = kVirtualShadowDescriptorOffset + kVirtualShadowDescriptorCount;
-constexpr std::uint32_t kLocalProbeDescriptorOffset = kRayTransportDescriptorOffset + kRayTransportDescriptorCount;
+constexpr std::uint32_t kSceneGeometryDescriptorOffset = kLightListDescriptorOffset + 6;
+constexpr std::uint32_t kVirtualShadowDescriptorOffset = kSceneGeometryDescriptorOffset + kSceneGeometryDescriptorCount;
+constexpr std::uint32_t kLocalProbeDescriptorOffset = kVirtualShadowDescriptorOffset + kVirtualShadowDescriptorCount;
 constexpr std::uint32_t kVolumetricDescriptorOffset = kLocalProbeDescriptorOffset + 5;
 constexpr std::uint32_t kHlodDescriptorOffset = kVolumetricDescriptorOffset + kVolumetricDescriptorCount;
 constexpr std::uint32_t kLocalShadowDescriptorOffset = kHlodDescriptorOffset + 2;
-constexpr std::uint32_t kRayShadowDescriptorOffset = kLocalShadowDescriptorOffset + kLocalShadowDescriptorCount;
-constexpr std::uint32_t kRayShadowExportDescriptorOffset = kRayShadowDescriptorOffset + kRayShadowOwnDescriptorCount;
-constexpr std::uint32_t kRayReconstructionDescriptorOffset = kRayShadowExportDescriptorOffset + kRayShadowExportCount;
-constexpr std::uint32_t kBrixelizerDescriptorOffset = kRayReconstructionDescriptorOffset + kRayReconstructionDescriptorCount;
+constexpr std::uint32_t kBrixelizerDescriptorOffset = kLocalShadowDescriptorOffset + kLocalShadowDescriptorCount;
 constexpr std::uint32_t kTextureFeedbackDescriptorOffset = kBrixelizerDescriptorOffset + kBrixelizerDescriptorCount;
 constexpr std::uint32_t kVfxScreenReadDescriptorOffset = kTextureFeedbackDescriptorOffset + kTextureFeedbackDescriptorCount;
 constexpr std::uint32_t kEntitySurfaceNoiseDescriptorOffset = kVfxScreenReadDescriptorOffset + 1;
 constexpr std::uint32_t kDecalSurfaceDescriptorOffset = kEntitySurfaceNoiseDescriptorOffset + 1;
 constexpr std::uint32_t kHeroTransparencyDescriptorOffset = kDecalSurfaceDescriptorOffset + kDecalSurfaceDescriptorCount;
-constexpr std::uint32_t kRayFrameTableCount = kHeroTransparencyDescriptorOffset - kTemporalTextureDescriptorOffset;
-constexpr std::uint32_t kRayGeometryTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
-constexpr std::uint32_t kRayAmbientTableOffset = kRayGeometryTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kRayGiTableOffset = kRayAmbientTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kRaySpecularTableOffset = kRayGiTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kRayCompositeTableOffset = kRaySpecularTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kVolumetricFrameTableOffset = kRayCompositeTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kRayShadowFrameTableOffset = kVolumetricFrameTableOffset + kRayFrameTableCount;
-constexpr std::uint32_t kRayReconstructionFrameTableOffset = kRayShadowFrameTableOffset + kRayFrameTableCount * kRayShadowMaximumLights;
-constexpr std::uint32_t kBrixelizerFrameTableOffset = kRayReconstructionFrameTableOffset + 2 * kRayFrameTableCount;
-constexpr std::uint32_t kTextureDescriptorCount = kBrixelizerFrameTableOffset + 4 * kRayFrameTableCount;
+constexpr std::uint32_t kSceneFrameTableCount = kHeroTransparencyDescriptorOffset - kTemporalTextureDescriptorOffset;
+constexpr std::uint32_t kSceneGeometryTableOffset = kHeroTransparencyDescriptorOffset + kHeroTransparencyDescriptorsPerFrame;
+constexpr std::uint32_t kVolumetricFrameTableOffset = kSceneGeometryTableOffset + kSceneFrameTableCount;
+constexpr std::uint32_t kBrixelizerFrameTableOffset = kVolumetricFrameTableOffset + kSceneFrameTableCount;
+constexpr std::uint32_t kTextureDescriptorCount = kBrixelizerFrameTableOffset + 4 * kSceneFrameTableCount;
 constexpr std::uint32_t kArcherGeometryPage =
-    static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * 3);
+    static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount);
 constexpr std::uint32_t kMonsterGeometryPage = kArcherGeometryPage + 1;
 constexpr std::uint32_t kProjectileGeometryPage = kMonsterGeometryPage + 6;
 constexpr std::uint32_t kProceduralGeometryPage = kProjectileGeometryPage + 1;
 static_assert(render_data::kMaterialTextureSlots == 6);
-static_assert(kVisibilityVariantCount == 23);
+static_assert(kVisibilityVariantCount == 24);
 constexpr std::uint32_t kVfxDistortionDescriptorOffset =
     kPostTextureDescriptorCount + kCharacterDescriptorCount +
     kMonsterPbrDescriptorCount + kEnvironmentDescriptorCount +
@@ -335,7 +321,7 @@ struct GeometryPageGpu
 {
     AssetId source_asset{};
     std::string source_product;
-    render_data::OpacityMicromapDigest source_digest{};
+    std::array<std::byte, 32> source_digest{};
     AllocationResource vertices;
     AllocationResource indices;
     AllocationResource meshlets;
@@ -657,7 +643,7 @@ struct D3D12Renderer::Impl
     };
     // Dormant views own their complete GPU/history state. All queues drain
     // before exchange because execution RTV/DSV banks are shared scratch.
-    // Scene/assets/canonical deformation/TLAS remain common owners.
+    // Scene/assets/canonical deformation remain common owners.
     struct OwnedView
     {
         RenderViewRole role{RenderViewRole::Main};
@@ -682,13 +668,9 @@ struct D3D12Renderer::Impl
         HeroTransparencySystem hero_transparency;
         HdrPostSystem hdr_post;
         ScreenOverlaySystem screen_overlay;
-        RayAmbientOcclusionSystem ray_ambient_occlusion;
-        RayTransportSystem ray_transport;
-        RayReconstructionSystem ray_reconstruction;
         BrixelizerGiSystem brixelizer_gi;
         VirtualShadowSystem virtual_shadows;
         LocalShadowSystem local_shadows;
-        RayShadowSystem ray_shadows;
         VolumetricSystem volumetrics;
         LightListSystem light_list;
         DecalSurfaceSystem decal_surface;
@@ -716,6 +698,10 @@ struct D3D12Renderer::Impl
         VolumetricCamera previous_volumetric_camera;
         ShadowCasterMap previous_shadow_casters;
         ShadowCasterMap scratch_shadow_casters;
+#ifndef NDEBUG
+        std::unordered_map<ShadowCasterMap::key_type, std::uint64_t, ShadowCasterKeyHash> shadow_caster_key_oracle;
+        bool shadow_caster_key_oracle_prepared{};
+#endif
         ShadowCasterNodes previous_shadow_caster_nodes, scratch_shadow_caster_nodes;
         std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
@@ -944,12 +930,11 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareReconstructionProvider(const RendererReconstructionRequest *,
         bool dynamic_resolution, float minimum_percent, float maximum_percent, ViewExtent output,
         ReconstructionPlan &, ViewExtent &capacity, std::unique_ptr<ReconstructionProvider> &candidate,
-        const RendererConfig *ray_config = nullptr);
+        const RendererConfig *candidate_config = nullptr);
     [[nodiscard]] Result InitializeReconstructionSessionsBeforeDevice();
     [[nodiscard]] Result BindReconstructionSessionsToDevice();
     [[nodiscard]] Result CommitReconstructionProvider(std::unique_ptr<ReconstructionProvider> &candidate,
-        ReconstructionGuidesCandidate &&guides, ViewExtent capacity, const ReconstructionPlan *next_plan = nullptr,
-        RayReconstructionCandidate *rr_candidate = nullptr);
+        ReconstructionGuidesCandidate &&guides, ViewExtent capacity);
     [[nodiscard]] Result PrepareReconstructionGuides(const RendererConfig &, ViewExtent capacity,
         ViewExtent output, ReconstructionGuidesCandidate &, bool composition = false) const;
     [[nodiscard]] Result PrepareDisplayPipeline(const RendererConfig &, DXGI_FORMAT,
@@ -1016,29 +1001,10 @@ struct D3D12Renderer::Impl
         ViewExtent output_extent, HdrPostCandidate &) const;
     [[nodiscard]] Result PrepareScreenOverlay(const RendererConfig &, ViewExtent,
         ScreenOverlayCandidate &) const;
-    [[nodiscard]] Result PrepareRayScene(const RendererConfig &, RaySceneCandidate &) const;
-    struct NativeRayPlan
-    {
-        RayNativeTraceSelection selection;
-        RendererLightingStatus::NativeRayStatus omm, ser;
-        std::uint64_t budget_bytes{};
-    };
-    [[nodiscard]] Result ResolveNativeRay(const RendererConfig &, NativeRayPlan &) const;
-    [[nodiscard]] Result NativeRayBudget(std::uint64_t &headroom) const;
-    [[nodiscard]] Result PrepareRayOmm(const RendererConfig &, RayOmmCandidate &) const;
-    [[nodiscard]] Result BuildRayOmmRequest(const GeometryPageGpu &, const RayHitGeometry &,
-        RayOmmGeometryRequest &, std::vector<std::uint32_t> &) const;
-    [[nodiscard]] Result PrepareRayEffects(const RendererConfig &, ViewExtent,
-        RayGeometryCandidate &, RayAmbientOcclusionCandidate &, RayTransportCandidate &,
-        RayReconstructionMode mode = RayReconstructionMode::Off) const;
-    [[nodiscard]] RayReconstructionMode RayReconstructionModeFor(const RendererConfig &) const noexcept;
-    [[nodiscard]] Result PrepareRayReconstruction(const RendererConfig &, ViewExtent, ViewExtent,
-        RayReconstructionCandidate &, StreamlineSession *shared_sl = nullptr, FsrSession *shared_fsr = nullptr) const;
-    [[nodiscard]] Result ValidateRayReconstructionBudget(RayReconstructionCandidate &);
-    [[nodiscard]] Result ValidateRayReconstructionBudget(RayReconstructionSystem &);
+    [[nodiscard]] Result PrepareSceneGeometry(const RendererConfig &, SceneGeometryCandidate &) const;
     [[nodiscard]] Result PrepareBrixelizerGi(const RendererConfig &, ViewExtent, BrixelizerCandidate &) const;
     [[nodiscard]] Result PrepareVirtualShadows(const RendererConfig &, ViewExtent, VirtualShadowCandidate &) const;
-    struct AdditionalShadowPrepared { LocalShadowCandidate local; RayShadowCandidate ray; };
+    struct AdditionalShadowPrepared { LocalShadowCandidate local; };
     [[nodiscard]] Result PrepareAdditionalShadows(const RendererConfig &, ViewExtent, AdditionalShadowPrepared &) const;
     [[nodiscard]] Result CommitAdditionalShadows(AdditionalShadowPrepared &&);
     [[nodiscard]] Result PrepareLocalProbes(const RendererConfig &, LocalProbeRuntimeCandidate &) const;
@@ -1078,7 +1044,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CommitClusterFrameGraph(std::uint32_t frame_slot,
         ClusterFrameGraph &, const CompletionSet &);
     [[nodiscard]] Result PrepareClusterFrame(std::uint32_t frame_slot,
-        const std::array<ClusterCutInput, 14> &inputs);
+        const std::array<ClusterCutInput, kEnvironmentMaterialNames.size()> &inputs);
     [[nodiscard]] Result CaptureClusterFrame(std::uint32_t frame_slot);
     [[nodiscard]] Result DemandClusterPage(std::uint32_t logical_slot,
         std::uint32_t generation_tag, std::uint32_t priority);
@@ -1232,7 +1198,7 @@ struct D3D12Renderer::Impl
     TextureStreamingCapabilities texture_streaming_capabilities;
     std::array<TextureStreamId, kEnvironmentTextureCount> environment_texture_stream_ids;
     std::vector<TextureStreamId> environment_material_texture_stream_ids;
-    std::array<TextureStreamId, 90> material_texture_stream_ids;
+    std::array<TextureStreamId, kTextureFeedbackBindingCount> material_texture_stream_ids;
     EnvironmentTextureStream environment_stream;
     std::array<EnvironmentGeometryStream, kEnvironmentMaterialNames.size()>
         environment_geometry_streams;
@@ -1242,9 +1208,10 @@ struct D3D12Renderer::Impl
     std::vector<std::shared_ptr<StaticGpuScene>> retired_static_gpu_scenes;
     bool static_scene_fence_unreliable{};
     std::uint64_t static_scene_upload_count{};
-    std::array<float, 14> environment_variant_radii{};
+    std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     AllocationResource dynamic_instances;
     RenderSceneExtractor dynamic_scene_extractor;
+    RenderInstanceLookup previous_instance_lookup;
     std::uint64_t dynamic_scene_generation{};
     PersistentGpuSceneSlots dynamic_scene_slots;
     SkinCache skin_cache;
@@ -1371,7 +1338,7 @@ struct D3D12Renderer::Impl
         std::string program_shader;
         std::string program_shadow_shader;
     };
-    std::array<EnvironmentMeshGpu, kEnvironmentMaterialNames.size() * 3> environment_meshes;
+    std::array<EnvironmentMeshGpu, kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount> environment_meshes;
     std::array<EnvironmentClusterCatalog, kEnvironmentMaterialNames.size()> environment_cluster_catalogs;
     std::unique_ptr<ClusterRuntimeState> cluster_runtime;
     AmbientOcclusionSystem ambient_occlusion;
@@ -1381,24 +1348,11 @@ struct D3D12Renderer::Impl
     LtcLutSystem ltc_lut;
     HdrPostSystem hdr_post;
     ScreenOverlaySystem screen_overlay;
-    RayTracingSceneSystem ray_scene;
-    RayOpacityMicromapSystem ray_omm;
-    GraphicsAutoToggle native_ray_requested_omm{GraphicsAutoToggle::Auto},native_ray_requested_ser{GraphicsAutoToggle::Auto};
-    std::string native_ray_omm_request_failure,native_ray_ser_request_failure;
-    struct RayOmmRequestCacheEntry {RayOmmGeometryRequest request;std::vector<std::uint32_t> words;};
-    mutable std::map<std::tuple<std::uint64_t,std::uint32_t,std::uint32_t>,RayOmmRequestCacheEntry> ray_omm_request_cache;
-    mutable std::uint64_t ray_omm_request_revision{};
-    mutable std::uint64_t ray_omm_request_pipeline_revision{};
-    mutable std::string ray_omm_request_generation;
-    RayGeometrySystem ray_geometry;
-    RayAmbientOcclusionSystem ray_ambient_occlusion;
-    RayTransportSystem ray_transport;
-    RayReconstructionSystem ray_reconstruction;
+    SceneGeometrySystem scene_geometry;
     BrixelizerGiSystem brixelizer_gi;
     bool brixelizer_history_valid{};
     VirtualShadowSystem virtual_shadows;
     LocalShadowSystem local_shadows;
-    RayShadowSystem ray_shadows;
     LocalProbeRuntime local_probes;
     std::unique_ptr<HlodRuntime> hlod_runtime;
     VolumetricSystem volumetrics;
@@ -1486,6 +1440,10 @@ struct D3D12Renderer::Impl
     DisplayState display_state;
     DynamicResolutionController dynamic_resolution_controller;
     GpuPassTimings completed_gpu_timings;
+    // Capture-only pending completion snapshots. Both frame count and pass count are bounded.
+    mutable std::vector<GpuPassTimings> pending_gpu_timings;
+    mutable std::size_t pending_gpu_timing_passes{};
+    mutable bool gpu_timing_stream_overflowed{};
     std::uint64_t dynamic_resolution_sample_id{};
     std::array<AllocationResource, 2> hzb_history;
     HzbLayout hzb_layout{};
@@ -1517,14 +1475,11 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12RootSignature> cluster_root_signature;
     ComPtr<ID3D12PipelineState> cluster_count_pipeline, cluster_prefix_pipeline, cluster_emit_pipeline;
     ComPtr<ID3D12PipelineState> cluster_occlusion_pipeline, cluster_retest_pipeline;
-    std::array<ComPtr<ID3D12PipelineState>, 14> cluster_scene_pipelines,
+    std::array<ComPtr<ID3D12PipelineState>, kAuthoredMaterialNames.size()> cluster_scene_pipelines,
         cluster_shadow_pipelines, cluster_visibility_pipelines;
     ComPtr<ID3D12PipelineState> scene_pipeline;
     ComPtr<ID3D12PipelineState> shadow_pipeline;
-    ComPtr<ID3D12PipelineState> environment_opaque_scene_pipeline;
-    ComPtr<ID3D12PipelineState> environment_masked_scene_pipeline;
     ComPtr<ID3D12PipelineState> environment_opaque_shadow_pipeline;
-    ComPtr<ID3D12PipelineState> environment_masked_shadow_pipeline;
     std::array<ComPtr<ID3D12PipelineState>, kAuthoredMaterialNames.size()>
         environment_material_scene_pipelines;
     std::array<ComPtr<ID3D12PipelineState>, kAuthoredMaterialNames.size()>

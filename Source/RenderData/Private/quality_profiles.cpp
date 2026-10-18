@@ -49,18 +49,14 @@ void ValidateQualityProfiles(const QualityProfiles &table)
             p.ao_spatial_radius >= 1 && p.ao_spatial_radius <= 8);
         Require(Ratio(p.ssr_axis_ratio) && p.ssr_samples >= 1 && p.ssr_samples <= 8 &&
             p.ssr_max_steps >= 1 && p.ssr_max_steps <= 128 && p.ssr_refine_steps >= 1 && p.ssr_refine_steps <= 8);
-        Require(Ratio(p.rt_axis_ratio) && p.rt_diffuse_samples >= 1 && p.rt_diffuse_samples <= 8 &&
-            p.rt_specular_samples >= 1 && p.rt_specular_samples <= 8 && p.rt_spatial_radius >= 1 && p.rt_spatial_radius <= 8 &&
-            p.rt_diffuse_bounces >= 1 && p.rt_diffuse_bounces <= 8);
         Require(p.froxel_stride >= 4 && p.froxel_stride <= 32 && p.froxel_slices >= 8 && p.froxel_slices <= 128 &&
             p.volumetric_area_samples >= 1 && p.volumetric_area_samples <= 16 && p.hero_refraction_layers <= 4 &&
             p.pom_max_steps >= 1 && p.pom_max_steps <= 64 && p.pom_refinement_steps >= 1 && p.pom_refinement_steps <= 8);
         Require(p.local_shadow_max_lights >= 1 && p.local_shadow_max_lights <= 64 &&
             p.local_shadow_resolution >= 64 && p.local_shadow_resolution <= 1024 &&
             (p.local_shadow_area_samples == 1 || p.local_shadow_area_samples == 2 || p.local_shadow_area_samples == 4) &&
-            p.local_shadow_budget_mib >= 1 && p.local_shadow_budget_mib <= 4096 && p.rtao_samples >= 1 && p.rtao_samples <= 16);
-        Require(p.ray_shadow_max_lights >= 1 && p.ray_shadow_max_lights <= 4 && p.ray_shadow_samples >= 1 && p.ray_shadow_samples <= 16 &&
-            p.ray_shadow_spatial_radius >= 1 && p.ray_shadow_spatial_radius <= 8 && p.lighting_cluster_capacity >= 1 && p.lighting_cluster_capacity <= 128);
+            p.local_shadow_budget_mib >= 1 && p.local_shadow_budget_mib <= 4096);
+        Require(p.lighting_cluster_capacity >= 1 && p.lighting_cluster_capacity <= 128);
         Require(p.gi_logical_cascades >= 1 && p.gi_logical_cascades <= 8 && (p.gi_internal_resolution_percent == 25 ||
             p.gi_internal_resolution_percent == 50 || p.gi_internal_resolution_percent == 75 || p.gi_internal_resolution_percent == 100));
         for (float f : {p.vfx_light_fraction, p.vfx_distortion_fraction, p.vfx_decal_fraction}) Require(std::isfinite(f) && f >= 0 && f <= 1);
@@ -84,10 +80,10 @@ std::vector<std::byte> EncodeQualityProfiles(const QualityProfiles &table)
         F(geometry_screen_error_px); F(foliage_density); U(texture_finest_mip); F(decorative_particle_fraction);
         U(shadow_cache_mib); U(shadow_filter_samples); U(shadow_resolution); F(ao_axis_ratio);
         U(ao_directions); U(ao_steps); U(contact_shadow_steps); U(ao_spatial_radius); F(ssr_axis_ratio);
-        U(ssr_samples); U(ssr_max_steps); U(ssr_refine_steps); F(rt_axis_ratio); U(rt_diffuse_samples);
-        U(rt_specular_samples); U(rt_spatial_radius); U(rt_diffuse_bounces); U(froxel_stride); U(froxel_slices);
+        U(ssr_samples); U(ssr_max_steps); U(ssr_refine_steps);
+        U(froxel_stride); U(froxel_slices);
         U(volumetric_area_samples); U(hero_refraction_layers); U(pom_max_steps); U(pom_refinement_steps);
-        U(local_shadow_max_lights); U(local_shadow_resolution); U(local_shadow_area_samples); U(local_shadow_budget_mib); U(rtao_samples); U(ray_shadow_max_lights); U(ray_shadow_samples); U(ray_shadow_spatial_radius); U(lighting_cluster_capacity); U(gi_logical_cascades); U(gi_internal_resolution_percent); F(vfx_light_fraction); F(vfx_distortion_fraction); F(vfx_decal_fraction); F(terrain_detail_fade_start_m); F(terrain_detail_fade_end_m); U(subsurface_half_samples);
+        U(local_shadow_max_lights); U(local_shadow_resolution); U(local_shadow_area_samples); U(local_shadow_budget_mib); U(lighting_cluster_capacity); U(gi_logical_cascades); U(gi_internal_resolution_percent); F(vfx_light_fraction); F(vfx_distortion_fraction); F(vfx_decal_fraction); F(terrain_detail_fade_start_m); F(terrain_detail_fade_end_m); U(subsurface_half_samples);
 #undef F
 #undef U
     }
@@ -95,7 +91,7 @@ std::vector<std::byte> EncodeQualityProfiles(const QualityProfiles &table)
     Word(cadence, std::bit_cast<std::uint32_t>(table.auto_fg_cadence.reenable_above_fps));
     Word(cadence, table.auto_fg_cadence.minimum_samples);
     const std::array chunks{
-        ChunkSource{static_cast<std::uint32_t>(ChunkType::QualityProfiles), 1, true, rows, 4, kQualityProfileStride},
+        ChunkSource{static_cast<std::uint32_t>(ChunkType::QualityProfiles), 2, true, rows, 4, kQualityProfileStride},
         ChunkSource{static_cast<std::uint32_t>(ChunkType::AutoFgCadence), 1, true, cadence, 1, kAutoFgCadenceStride}};
     return BuildPackage(MakeAssetId(kQualityProfilesProduct), {}, chunks);
 }
@@ -109,7 +105,7 @@ QualityProfiles DecodeQualityProfiles(std::span<const std::byte> bytes)
         if (chunk.type == ChunkType::QualityProfiles) rows = &chunk;
         if (chunk.type == ChunkType::AutoFgCadence) cadence = &chunk;
     }
-    Require(rows && cadence && rows->required && cadence->required && rows->count == 4 && cadence->count == 1);
+    Require(rows && cadence && rows->version == 2 && cadence->version == 1 && rows->required && cadence->required && rows->count == 4 && cadence->count == 1);
     QualityProfiles table; std::size_t offset{};
     for (auto &p : table.profiles)
     {
@@ -118,10 +114,10 @@ QualityProfiles DecodeQualityProfiles(std::span<const std::byte> bytes)
         F(geometry_screen_error_px); F(foliage_density); U(texture_finest_mip); F(decorative_particle_fraction);
         U(shadow_cache_mib); U(shadow_filter_samples); U(shadow_resolution); F(ao_axis_ratio);
         U(ao_directions); U(ao_steps); U(contact_shadow_steps); U(ao_spatial_radius); F(ssr_axis_ratio);
-        U(ssr_samples); U(ssr_max_steps); U(ssr_refine_steps); F(rt_axis_ratio); U(rt_diffuse_samples);
-        U(rt_specular_samples); U(rt_spatial_radius); U(rt_diffuse_bounces); U(froxel_stride); U(froxel_slices);
+        U(ssr_samples); U(ssr_max_steps); U(ssr_refine_steps);
+        U(froxel_stride); U(froxel_slices);
         U(volumetric_area_samples); U(hero_refraction_layers); U(pom_max_steps); U(pom_refinement_steps);
-        U(local_shadow_max_lights); U(local_shadow_resolution); U(local_shadow_area_samples); U(local_shadow_budget_mib); U(rtao_samples); U(ray_shadow_max_lights); U(ray_shadow_samples); U(ray_shadow_spatial_radius); U(lighting_cluster_capacity); U(gi_logical_cascades); U(gi_internal_resolution_percent); F(vfx_light_fraction); F(vfx_distortion_fraction); F(vfx_decal_fraction); F(terrain_detail_fade_start_m); F(terrain_detail_fade_end_m); U(subsurface_half_samples);
+        U(local_shadow_max_lights); U(local_shadow_resolution); U(local_shadow_area_samples); U(local_shadow_budget_mib); U(lighting_cluster_capacity); U(gi_logical_cascades); U(gi_internal_resolution_percent); F(vfx_light_fraction); F(vfx_distortion_fraction); F(vfx_decal_fraction); F(terrain_detail_fade_start_m); F(terrain_detail_fade_end_m); U(subsurface_half_samples);
 #undef F
 #undef U
     }

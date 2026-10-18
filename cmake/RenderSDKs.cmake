@@ -1,26 +1,5 @@
 # Optional native renderer SDKs are isolated from the low-level module graph.
 include("${CMAKE_SOURCE_DIR}/cmake/RenderSdkPin.cmake")
-option(HS_WITH_NRD "Build pinned NVIDIA NRD native denoising" OFF)
-set(HS_NRD_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/Build/tooling/render-sdks/nrd-4.17.3"
-    CACHE PATH "Verified locally built NVIDIA NRD SDK directory")
-
-function(hs_verify_nrd_sdk)
-    find_program(HS_SDK_POWERSHELL NAMES pwsh powershell REQUIRED)
-    execute_process(COMMAND "${HS_SDK_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
-        -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/bootstrap_render_sdks.ps1"
-        -Sdk nrd -Offline -PrintPath
-        RESULT_VARIABLE result OUTPUT_VARIABLE verified_root ERROR_VARIABLE failure
-        OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT result EQUAL 0)
-        message(FATAL_ERROR "Pinned NRD source/native build verification failed. Build the explicit NRD prerequisite first.\n${failure}")
-    endif()
-    file(REAL_PATH "${HS_NRD_SDK_ROOT}" configured_root)
-    file(REAL_PATH "${verified_root}" verified_root)
-    if(NOT configured_root STREQUAL verified_root)
-        message(FATAL_ERROR "HS_NRD_SDK_ROOT must identify ${verified_root}")
-    endif()
-endfunction()
-
 function(hs_configure_render_sdks)
     option(HS_WITH_XESS "Build pinned XeSS super resolution" OFF)
     option(HS_WITH_XESS_FG "Build pinned XeSS frame generation" OFF)
@@ -44,19 +23,13 @@ function(hs_configure_render_sdks)
         Source/RendererD3D12/Private/renderer_xell.cpp
         Source/RendererD3D12/Private/renderer_streamline.cpp
         Source/RendererD3D12/Private/renderer_fsr.cpp
-        Source/RendererD3D12/Private/renderer_nrd.cpp
         Source/RendererD3D12/Private/renderer_directsr.cpp
         Source/RendererD3D12/Private/renderer_sdk_presentation.cpp
         Source/RendererD3D12/Private/presentation-guides.cpp)
-    foreach(feature IN ITEMS XESS XESS_FG XELL STREAMLINE FSR NRD DIRECTSR)
+    foreach(feature IN ITEMS XESS XESS_FG XELL STREAMLINE FSR DIRECTSR)
         target_compile_definitions(hs_renderer_d3d12 PRIVATE HS_WITH_${feature}=$<BOOL:${HS_WITH_${feature}}>)
     endforeach()
     set(enabled)
-    if(HS_WITH_NRD)
-        hs_verify_nrd_sdk()
-        list(APPEND enabled nrd)
-        target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_NRD_SDK_ROOT}/Include")
-    endif()
     if(HS_WITH_DIRECTSR)
         list(APPEND enabled directsr)
         # Bootstrap extracts only directsr.h from this directory. The main
@@ -74,7 +47,7 @@ function(hs_configure_render_sdks)
     endif()
     if(HS_WITH_FSR)
         list(APPEND enabled fsr)
-        foreach(component IN ITEMS api upscalers framegeneration denoisers)
+        foreach(component IN ITEMS api upscalers framegeneration)
             target_include_directories(hs_renderer_d3d12 PRIVATE "${HS_FSR_SDK_ROOT}/Kits/FidelityFX/${component}/include")
         endforeach()
         target_link_libraries(hs_renderer_d3d12 PRIVATE wintrust crypt32)
@@ -83,9 +56,6 @@ function(hs_configure_render_sdks)
         find_program(HS_SDK_POWERSHELL NAMES pwsh powershell REQUIRED)
     endif()
     foreach(sdk IN LISTS enabled)
-        if(sdk STREQUAL "nrd")
-            continue()
-        endif()
         execute_process(COMMAND "${HS_SDK_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/bootstrap_render_sdks.ps1"
             -Sdk "${sdk}" -Offline -PrintPath
@@ -123,7 +93,7 @@ function(hs_deploy_render_sdks)
                     set(destination "Licenses/${sdk}")
                 elseif(sdk STREQUAL "directsr")
                     set(destination "DirectSR")
-                elseif(sdk STREQUAL "xess" OR sdk STREQUAL "nrd")
+                elseif(sdk STREQUAL "xess")
                     set(destination ".")
                 else()
                     set(destination "${sdk}")
@@ -143,33 +113,4 @@ function(hs_deploy_render_sdks)
     endforeach()
     set(HS_RUNTIME_ASSET_OUTPUTS "${HS_RUNTIME_ASSET_OUTPUTS}" PARENT_SCOPE)
     set(HS_RENDER_SDK_NATIVE_OUTPUTS "${native_outputs}" PARENT_SCOPE)
-endfunction()
-
-# Only called from the content-tools branch, after DXC discovery. The producer
-# reads CPU metadata from NRD.dll; it neither creates a D3D12 device nor compiles
-# SDK source during the main build.
-function(hs_add_nrd_shader_action)
-    if(NOT HS_WITH_NRD)
-        return()
-    endif()
-    hs_verify_nrd_sdk()
-    add_executable(hs_render_nrd_shader
-        Source/Apps/RenderNrdShader/main.cpp
-        Source/Apps/AssetPipeline/action.cpp)
-    target_link_libraries(hs_render_nrd_shader PRIVATE hs_core nlohmann_json::nlohmann_json bcrypt)
-    target_include_directories(hs_render_nrd_shader PRIVATE "${HS_NRD_SDK_ROOT}/Include")
-    target_compile_definitions(hs_render_nrd_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-    hs_configure_target(hs_render_nrd_shader)
-    set(result "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/nrd/result.json")
-    hs_render_sdk_pin(nrd nrd_pin)
-    hs_add_asset_action(NAME hs_render_nrd_shader_action BUILDER hs_render_nrd_shader
-        RESULT "${result}" DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/nrd/result.d"
-        STATIC_INPUTS "${nrd_pin}"
-            "${HS_NRD_SDK_ROOT}/native-build-receipt.json"
-            "${HS_NRD_SDK_ROOT}/bin/NRD.dll"
-            "${HS_NRD_SDK_ROOT}/generated/NRDConfig.hlsli"
-            "${HS_NRD_SDK_ROOT}/Shaders/NRD.hlsli" ${HS_DXC_TOOL_INPUTS}
-        ARGS "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--build=${CMAKE_CURRENT_BINARY_DIR}"
-            "--sdk=${HS_NRD_SDK_ROOT}" "--dxc=${HS_DXC}" "--pin=${nrd_pin}")
-    set(HS_RENDER_SHADER_RESULTS "${HS_RENDER_SHADER_RESULTS};${result}" PARENT_SCOPE)
 endfunction()

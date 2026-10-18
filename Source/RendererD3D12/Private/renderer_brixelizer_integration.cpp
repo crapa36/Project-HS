@@ -4,7 +4,7 @@
 
 namespace hs
 {
-Result AppendBrixelizerLeaf(const RaySceneGeometry &source, const RaySceneInstance &instance,
+Result AppendBrixelizerLeaf(const SoftwareSceneGeometry &source, const SoftwareSceneInstance &instance,
     std::span<const render_data::GeometrySubmesh> submeshes,
     std::span<const render_data::CharacterMaterialBinding> bindings,
     std::span<const render_data::MaterialSurfaceLayout> hero_layouts,
@@ -12,7 +12,7 @@ Result AppendBrixelizerLeaf(const RaySceneGeometry &source, const RaySceneInstan
     DirectX::XMFLOAT3 bounds_min, DirectX::XMFLOAT3 bounds_max,
     std::uint64_t material_revision,
     BrixelizerGeometryLookup &lookup,
-    std::vector<RaySceneGeometry> &geometries, std::vector<BrixelizerSceneInstance> &instances)
+    std::vector<SoftwareSceneGeometry> &geometries, std::vector<BrixelizerSceneInstance> &instances)
 {
     constexpr auto thin = static_cast<std::uint32_t>(render_data::MaterialClosureCapability::ThinTransmission) |
         static_cast<std::uint32_t>(render_data::MaterialClosureCapability::SolidTransmission);

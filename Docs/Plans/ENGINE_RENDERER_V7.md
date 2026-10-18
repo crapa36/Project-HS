@@ -6,19 +6,19 @@
 
 AAA급 스타일라이즈드 화면 품질, 실제 렌더 성능, 실행 중 그래픽 설정, 콘텐츠·재질·렌더 기능·하드웨어 확장성을 함께 만족하도록 현재 D3D12 렌더러와 관련 콘텐츠·설정 경로를 최종 구조로 교체한다. 이 문서는 구현 요구이며 현재 구현·벤치마크 결과가 아니다. v5·v6와 후속 합의를 대체하는 단일 설계 기준으로 사용한다. 아래 번호는 개발 단계가 아니라 구성요소 식별자다.
 
-중간 렌더러·미연결 subsystem·이름만 등록된 옵션으로 범위를 축소하지 않는다. 기존 렌더러를 호환용으로 병행 유지하지 않는다. Indexed/Mesh Shader, VisibilityBuffer/CompactDeferred, raster/RT, atlas/virtual shadow는 완성된 엔진의 정식 실행 경로다. 전부 동시에 실행하는 것이 아니라 활성 profile이 필요한 경로만 선택한다. 구조 변경 비용을 이유로 최종 품질·성능을 제한하지 않는다.
+중간 렌더러·미연결 subsystem·이름만 등록된 옵션으로 범위를 축소하지 않는다. 기존 렌더러를 호환용으로 병행 유지하지 않는다. Indexed/Mesh Shader, VisibilityBuffer/CompactDeferred, raster, atlas/virtual shadow는 완성된 엔진의 정식 실행 경로다. 전부 동시에 실행하는 것이 아니라 활성 profile이 필요한 경로만 선택한다. 구조 변경 비용을 이유로 최종 품질·성능을 제한하지 않는다.
 
 | 구분 | 이번 완성 범위 |
 |---|---|
-| 장면·콘텐츠 | PersistentGpuScene, indexed/meshlet/LOD/HLOD 자산, 공유 SkinCache, texture/geometry/RT streaming, 실제 개선 재질·환경광·대표 장면 |
+| 장면·콘텐츠 | PersistentGpuScene, indexed/meshlet/LOD/HLOD 자산, 공유 SkinCache, texture/geometry streaming, 실제 개선 재질·환경광·대표 장면 |
 | 재질·확장 | MaterialDefinition→typed MaterialIR→shader variant, bindless materials, 공통 opacity/deformation/surface/BSDF, 기능별 subgraph 등록 |
 | 실행 | FrameGraph DAG compiler, direct/compute/copy queue, 병렬 command recording, transient aliasing, 통합 residency, PSO cache |
 | 가시성 | GPU instance/cluster culling, previous-HZB와 current-frame retest, VisibilityBuffer 및 CompactDeferred |
-| 조명 | clustered lights, area lights, ProbeIBL, GTAO, SSR, cached virtual shadows, 공유 RT scene, RT shadow/RTAO/GI/reflection, BrixelizerGI |
+| 조명 | clustered lights, area lights, ProbeIBL, GTAO, SSR, cached virtual shadows, BrixelizerGI |
 | 표현·시간축 | 셀·젤리·피부·천·식생 재질, coat/anisotropy/sheen/subsurface/transmission, OIT·다층 hero refraction, particles, volumetrics, NativeTAA/InternalTAAU, DRS |
 | 출력·사용성 | HDR 후처리, SDR/HDR10, output-resolution UI, FG·latency·pacing, 완전한 그래픽 메뉴·저장·복구 |
-| SDK 통합 | NRD, DLSS SR/RR/FG, XeSS SR/FG·XeLL, FSR SR/FG/Ray Regeneration, DirectSR, BrixelizerGI |
-| capability별 구현 | Mesh Shader, DXR, OMM/SER, raster VRS, Sampler Feedback, DirectStorage |
+| SDK 통합 | DLSS SR/FG, XeSS SR/FG·XeLL, FSR SR/FG, DirectSR, BrixelizerGI |
+| capability별 구현 | Mesh Shader, raster VRS, Sampler Feedback, DirectStorage |
 
 SDK와 capability별 경로도 실제 초기화·입력 생성·실행·해제 코드를 구현한다. `CompiledOut`은 명시적으로 SDK를 제외한 빌드, `Unsupported`는 기기·드라이버 제약, `Unavailable`은 배포물·초기화 문제다. 어느 것도 미구현을 완료로 표시하는 용도가 아니다. 사용하지 않는 provider는 불필요한 context/history/GPU 작업을 만들지 않는다.
 
@@ -57,10 +57,10 @@ Windows x64/C++23/HLSL, 60Hz Gameplay의 phase·입력·충돌·공격 판정·�
 | `Materials/material_library, material_bindings` | cooked IR/variant/reflection, parameter/texture tables, material 변경 generation |
 | `Graph/frame_graph, frame_graph_compiler, frame_graph_executor, render_feature_registry` | typed resources/signals, DAG·barrier·aliasing·queue 계획, feature 실제 등록 |
 | `Visibility/gpu_culling, depth_pyramids, geometry_frontend, surface_resolve` | 후보·indirect commands·RasterDrawRecord, 두 frontend, surface/guide |
-| `Lighting/light_system, probe_system, shadow_system, ao_system, gi_system, reflection_system, ray_tracing_scene` | light lists, probes, cache, signal producer, 공유 AS |
+| `Lighting/light_system, probe_system, shadow_system, ao_system, gi_system, reflection_system` | light lists, probes, cache, signal producer |
 | `Temporal/view_history, temporal_inputs, exposure, dynamic_resolution` | View별 history/jitter/masks, current/next exposure, GPU 시간 기반 extent |
 | `Reconstruction/reconstruction_system, internal_taau, provider_registry, guide_conversion` | 단일 reconstruction plan, 실제 TAAU, signal별 denoising, 외부 ABI 변환 |
-| `Reconstruction/Providers/nrd, streamline, xess, fsr, directsr` | SR/RR/denoiser adapter. 같은 SDK의 전역 수명을 공유 |
+| `Reconstruction/Providers/streamline, xess, fsr, directsr` | SR adapter. 같은 SDK의 전역 수명을 공유 |
 | `Lighting/Providers/brixelizer_gi` | SDF scene 갱신, radiance cache, diffuse/specular 출력 |
 | `Effects/transparency, particles, volumetrics, post_process` | 투명 layer, VFX state, froxel, HDR post |
 | `Streaming/asset_io, streaming_manager` | page request/completion/cancel, file IO/DirectStorage, 공개·회수 |
@@ -119,11 +119,11 @@ previous_jittered_uv = current_jittered_uv + motion
                     + previous_jitter_uv - current_jitter_uv
 ```
 
-SceneOrigin은 GPU Scene/공유 TLAS의 공통 기준이며 View마다 바꾸지 않는다. ViewOrigin은 camera-relative 계산 기준이다. `P_scene=P_view_relative+(ViewOrigin-SceneOrigin)`으로 ray/lighting 조회 공간을 맞추고 previous frame의 두 origin도 보존한다. global position은 CPU의 double 또는 sector+local 좌표로 유지한다.
+SceneOrigin은 GPU Scene의 공통 기준이며 View마다 바꾸지 않는다. ViewOrigin은 camera-relative 계산 기준이다. `P_scene=P_view_relative+(ViewOrigin-SceneOrigin)`으로 lighting 조회 공간을 맞추고 previous frame의 두 origin도 보존한다. global position은 CPU의 double 또는 sector+local 좌표로 유지한다.
 
 UV는 각 frame의 active render viewport에 대한 정규화 좌표다. texture allocation UV로 바꿀 때 각각의 active rect/extent를 적용한다. SDK motion-Z는 같은 surface의 이전/현재 deformation·view에서 `previous_linear_view_z-current_linear_view_z`로 생성한다. 이전 depth texture의 임의 샘플을 현재 surface의 이전 위치로 간주하지 않는다.
 
-기존 Position.a의 Outline mask와 Normal.a의 재질 식별/roughness overload는 `MaterialId/SurfaceFlags/OutlineGroup`으로 옮긴다. RGBA32F world-position RT는 제거하되 FP16 absolute world position으로 되돌리지 않는다.
+기존 Position.a의 Outline mask와 Normal.a의 재질 식별/roughness overload는 `MaterialId/SurfaceFlags/OutlineGroup`으로 옮긴다. RGBA32F world-position render target는 제거하되 FP16 absolute world position으로 되돌리지 않는다.
 
 ## 4. 자산·MaterialIR·shader 생성
 
@@ -137,7 +137,6 @@ UV는 각 frame의 active render viewport에 대한 정규화 좌표다. texture
 |---|---|
 | mesh | indexed streams, submesh/material ranges, meshlets+primitive remap+bounds, authored LOD+cluster hierarchy+screen error, static HLOD, streaming page dependency |
 | deformation | skeleton/skin, animation clip metadata, morph/procedural parameters, conservative animated bounds. 5개 기존 animation semantic과 grounding/upper-body blend 보존 |
-| RT | 재구성 가능한 source/proxy geometry·LOD·material/alpha mapping. GPU·driver별 native BLAS를 범용 파일처럼 저장하지 않음 |
 | texture | format, color/channel semantics, full mip chain, alpha coverage, min resident tail, page/tile info. BC7/BC5/BC4/HDR는 실제 채널 의미로 선택 |
 | material | typed IR, parameter reflection/defaults, texture/sampler slots, shading model/closure mask, domain별 shader keys, opacity/deformation dependencies |
 | scene/look | 정적 instance/material 배치, bounds, environment HDR, probe·light, decal/volume 배치, exposure·grade 설정 |
@@ -167,7 +166,7 @@ closure는 metallic-roughness GGX+diffuse를 바탕으로 coat, anisotropy, shee
 
 ### 4.3 기존 지형·자산의 실제 이식
 
-`environment.hlsli`의 `TerrainSample/TerrainLayer/EnvTerrain/DecodeTerrainHistogram`, stochastic UV 회전·POM·mip별 inverse histogram·RNM·alpha LOD를 공통 재질 library로 옮긴다. 카메라 원점 이동에도 terrain tile/noise·바람 기준은 world에 고정한다. material별로 재배열한 compute lane 사이에서 ddx/ddy를 구하지 않고 **삼각형에서 복원한 명시적 gradient**를 전달한다. Gaussian texture를 일반 sRGB albedo로 바꾸지 않는다. POM은 shading relief이며 geometry silhouette/RT surface까지 변위한 것으로 취급하지 않는다.
+`environment.hlsli`의 `TerrainSample/TerrainLayer/EnvTerrain/DecodeTerrainHistogram`, stochastic UV 회전·POM·mip별 inverse histogram·RNM·alpha LOD를 공통 재질 library로 옮긴다. 카메라 원점 이동에도 terrain tile/noise·바람 기준은 world에 고정한다. material별로 재배열한 compute lane 사이에서 ddx/ddy를 구하지 않고 **삼각형에서 복원한 명시적 gradient**를 전달한다. Gaussian texture를 일반 sRGB albedo로 바꾸지 않는다. POM은 shading relief이며 geometry silhouette까지 변위한 것으로 취급하지 않는다.
 
 기존 모델·animation source를 사용해 캐릭터·슬라임 3종·boss·나무·바위·잔디·지면을 모두 새 package/material 경로로 cook한다. 파일 형식만 바꾸지 말고 roughness/normal·texel density·alpha mip·근접 silhouette·LOD를 정비하고 environment HDR/probe/look를 제공한다. 모델의 접지·체형·전투 의미를 바꾸지 않는다. 대표 장면에는 실제 gameplay와 같은 자산·lighting 경로를 사용한다. 새 외부 자산을 쓸 경우 출처·재배포 조건은 asset manifest에 기록한다.
 
@@ -175,13 +174,13 @@ closure는 metallic-roughness GGX+diffuse를 바탕으로 coat, anisotropy, shee
 
 `Scene/render_scene_extractor`는 static scene asset과 동적 snapshot을 합쳐 create/update/destroy delta를 만든다. 동적 stable_id의 slot/generation과 transform/pose/material/content revision을 독립 추적한다. static 환경 배치는 매 tick 재생성하지 않는다. 기존 배치 알고리즘을 Presentation의 `environment_projector.*`로 분리해 seed·obstacle/layout revision 변경 때만 불변 static instance 묶음을 만들고 `RenderSceneRef`와 generation으로 전달한다. snapshot lease가 이 묶음의 수명도 보유한다. collision geometry는 시뮬레이션을 재작성하지 않고 기존 read-model 의미를 보존한다.
 
-GPU table은 Instance/Transform/Mesh/Meshlet/ClusterLOD/Material/Light/Skeleton/Bounds/RTGeometry/Residency로 나눈다. CPU가 수정 구간을 병합해 DEFAULT heap에 업로드한다. 매 frame 전체 scene 재할당·전체 table 복사는 하지 않는다. in-flight frame이 읽는 version은 copy-on-write range 또는 queue dependency로 보호하고 GPU 사용이 끝나기 전 덮어쓰지 않는다.
+GPU table은 Instance/Transform/Mesh/Meshlet/ClusterLOD/Material/Light/Skeleton/Bounds/Residency로 나눈다. CPU가 수정 구간을 병합해 DEFAULT heap에 업로드한다. 매 frame 전체 scene 재할당·전체 table 복사는 하지 않는다. in-flight frame이 읽는 version은 copy-on-write range 또는 queue dependency로 보호하고 GPU 사용이 끝나기 전 덮어쓰지 않는다.
 
-`SkinCache`는 camera·shadow·RT 후보의 합집합을 대상으로 동일한 current/previous render pose를 평가한다. coarse candidate는 conservative animated bounds, 정밀 culling은 계산된 bounds를 사용한다. skeleton별 계층 평가/clip interpolation/upper-body blend/ground correction 후 vertex·normal·tangent를 생성한다. squash/stretch/shear normal은 inverse-transpose 의미를 유지한다. raster/MV/shadow/BLAS가 이 결과를 공유한다. clip frame 반올림으로 몬스터가 계단식으로 움직이지 않도록 연속 시간 보간을 구현하되 gameplay timing은 유지한다.
+`SkinCache`는 camera·shadow·software-GI 후보의 합집합을 대상으로 동일한 current/previous render pose를 평가한다. coarse candidate는 conservative animated bounds, 정밀 culling은 계산된 bounds를 사용한다. skeleton별 계층 평가/clip interpolation/upper-body blend/ground correction 후 vertex·normal·tangent를 생성한다. squash/stretch/shear normal은 inverse-transpose 의미를 유지한다. raster/MV/shadow/software-GI가 이 결과를 공유한다. clip frame 반올림으로 몬스터가 계단식으로 움직이지 않도록 연속 시간 보간을 구현하되 gameplay timing은 유지한다.
 
 pose/asset/LOD/deformation key가 같은 결과는 공유하고 instance-dependent wind·morph는 구분한다. 이전 geometry가 없는 새 instance/LOD는 현재값을 초기 previous로 사용하고 history confidence=0으로 표시한다. previous buffer도 모든 consumer 완료 전 재사용하지 않는다. offscreen reflection/shadow에 필요한 변형을 main-view culling 결과만으로 제거하지 않는다.
 
-`StreamingManager`의 상태는 Requested→Reading→Decoded→Uploading→Resident→Retiring이다. 각 요청에 asset/page ID·content generation·priority·completion을 둔다. 오래된 요청 completion은 폐기하며 upload fence 완료 후 GPU table과 descriptor를 같은 generation으로 공개한다. 요청에는 primary projected size뿐 아니라 shadow·GI·reflection·RT·필수 gameplay 표현의 수요를 합산한다.
+`StreamingManager`의 상태는 Requested→Reading→Decoded→Uploading→Resident→Retiring이다. 각 요청에 asset/page ID·content generation·priority·completion을 둔다. 오래된 요청 completion은 폐기하며 upload fence 완료 후 GPU table과 descriptor를 같은 generation으로 공개한다. 요청에는 primary projected size뿐 아니라 shadow·GI·reflection·필수 gameplay 표현의 수요를 합산한다.
 
 항상 resident인 최저 mip와 완전한 geometry fallback을 제공한다. cluster hierarchy에서 부모·자식 중 resident한 일관된 cut을 선택하며 부모와 일부 자식이 중복/누락되지 않게 한다. texture 품질 감소는 sampler bias만 아니라 실제 resident finest mip/할당량을 낮춘다. 지원 기기는 Sampler Feedback와 tiled resources를 사용하고, 미지원은 software demand+실제 mip 범위 자원 교체로 동작한다. DirectStorage와 일반 async file IO는 같은 completion 계약을 사용한다. 압축 해제·staging·업로드도 budget에 포함한다.
 
@@ -234,7 +233,7 @@ Visibility ID/depth/alpha/MV는 full-rate를 유지한다. raster VRS는 지원�
 
 각 쓰기는 새 logical version을 만든다. compiler는 RAW/WAR/WAW, 초기화 여부, 범위 overlap을 분석해 DAG·culling·queue batch·barrier·allocation·timestamp 계획을 만든다. history/export/present/streaming/AS update 등 외부 효과가 있는 pass는 단순 color 미사용으로 제거하지 않는다. read-write load는 기존 version을 명시적으로 소비한다. 동일 signal의 producer 충돌, undefined read, cycle은 compile error다.
 
-access는 ShaderRead/RT/DepthRead/DepthWrite/UAVRead/UAVWrite/CopyRead/CopyWrite/Indirect/ASBuildRead/ASBuildWrite/RayTracingRead/ShadingRateRead/Present를 구분한다. pixel/nonpixel shader 읽기, texture UAV, 같은 UAV 상태의 memory ordering, read-only DSV+SRV, AS build→trace를 표현한다. bindless read 자산은 immutable resource-set lease로 선언하고 write 자원은 개별 선언한다.
+access는 ShaderRead/RenderTarget/DepthRead/DepthWrite/UAVRead/UAVWrite/CopyRead/CopyWrite/Indirect/ShadingRateRead/Present를 구분한다. pixel/nonpixel shader 읽기, texture UAV, 같은 UAV 상태의 memory ordering, read-only DSV+SRV를 표현한다. bindless read 자산은 immutable resource-set lease로 선언하고 write 자원은 개별 선언한다.
 
 Enhanced와 Legacy barrier backend는 같은 access 모델을 변환한다. Enhanced는 sync/access/layout을 분리하며 queue 지원 범위를 지킨다. Legacy가 buffer range별 state를 제공하지 않으면 전체 buffer에 대한 보수적 state로 병합한다. aliased memory는 실제 필요한 memory ordering과 새 자원의 layout/discard/clear 초기화 후 사용한다. 같은 atlas의 사각형 영역은 독립 D3D12 subresource가 아님을 반영한다. [S2]
 
@@ -254,19 +253,19 @@ D3D12MA를 유지하고 persistent DEFAULT heap과 transient placed resources를
 
 CPU handle은 `(index,generation)`, GPU table은 유효한 heap index를 사용한다. shader-visible resource/sampler heap direct-indexing flags와 divergent index의 `NonUniformResourceIndex`를 적용한다. root ABI는 frame/view/scene table·feature parameters 중심으로 고정하고 material마다 늘리지 않는다. [S4] fallback white/black/flat normal/default material은 resident다. heap capacity 변경 시 기존 heap/index를 in-flight shader 앞에서 교체하지 않고 새 generation으로 전환한다.
 
-`ResidencyManager`는 DXGI의 local/nonlocal budget·usage 및 변화 알림으로 texture/geometry/skin/RT-AS/shadow/GI/history/transient/SDK/staging을 함께 계산한다. 물리 VRAM 총량을 곧 사용 가능 budget으로 보지 않는다. 압박 시 저우선 streaming과 재생성 cache·높은 mip/LOD부터 줄이고, 진행 중 frame·SDK-pinned·최저 fallback·필수 시각 정보는 보호한다. [S3]
+`ResidencyManager`는 DXGI의 local/nonlocal budget·usage 및 변화 알림으로 texture/geometry/skin/shadow/GI/history/transient/SDK/staging을 함께 계산한다. 물리 VRAM 총량을 곧 사용 가능 budget으로 보지 않는다. 압박 시 저우선 streaming과 재생성 cache·높은 mip/LOD부터 줄이고, 진행 중 frame·SDK-pinned·최저 fallback·필수 시각 정보는 보호한다. [S3]
 
-budget 예약은 category별 상한과 현재 critical working set을 반영한다. texture_budget는 사용자 상한 요청이며 실제값을 별도 표시한다. RT와 raster가 공유하는 page는 양쪽 완료를 기다린다. tiled mapping 변경은 read/write/AS 사용과 동기화한다. 반복적인 page 퇴출↔재요청을 막도록 hysteresis와 최소 유지 기간을 둔다.
+budget 예약은 category별 상한과 현재 critical working set을 반영한다. texture_budget는 사용자 상한 요청이며 실제값을 별도 표시한다. 여러 consumer가 공유하는 page는 모든 사용 완료를 기다린다. tiled mapping 변경은 read/write 사용과 동기화한다. 반복적인 page 퇴출↔재요청을 막도록 hysteresis와 최소 유지 기간을 둔다.
 
 설정 전환 peak는 `live old + candidate delta + in-flight/provider retained + staging`으로 계산한다. 공유 가능한 asset/context는 복제하지 않는다. 안전한 peak가 불가능하면 commit 전에 요청을 거부하고 현재 applied 상태를 유지한다. 설정 적용을 위해 기존 자원을 먼저 파괴하는 방식은 쓰지 않는다.
 
-## 9. 조명·그림자·GI·RT
+## 9. 조명·그림자·GI
 
 ### 9.1 공통 lighting
 
 광원은 stable LightId, type, transform, color, intensity/unit, range, shape, shadow flags, revision을 가진다. Directional/Point/Spot/Rectangle/Disk를 실제 평가한다. authoring 단위는 방향광 lux, point/spot luminous flux와 cone, area luminance를 명시하고 내부 radiometric 기준으로 일관되게 변환한다. 기존 조명은 look 보존용 변환 계수로 이식한다.
 
-Point/Spot은 view-frustum clustered lists를 사용하고 overflow는 spill list로 처리한다. RT hit·probe·volumetric에는 카메라 cluster 밖의 world-position light query를 제공한다. area lights는 실제 면적·방향·발광 분포를 사용하고 diffuse/GGX는 LTC 기반 평가, 미지원 특수 closure는 동일 BSDF의 면적 sampling으로 평가한다. emissive는 surface emission과 GI 기여를 분리하며 무작위 과대광을 막도록 sampling/normalization을 한다.
+Point/Spot은 view-frustum clustered lists를 사용하고 overflow는 spill list로 처리한다. probe·volumetric에는 카메라 cluster 밖의 world-position light query를 제공한다. area lights는 실제 면적·방향·발광 분포를 사용하고 diffuse/GGX는 LTC 기반 평가, 미지원 특수 closure는 동일 BSDF의 면적 sampling으로 평가한다. emissive는 surface emission과 GI 기여를 분리하며 무작위 과대광을 막도록 sampling/normalization을 한다.
 
 논리 신호는 `DirectDiffuse,DirectSpecular,IndirectDiffuse,IndirectSpecular,Emission,Visibility,Transmittance`로 구분한다. 필요한 경우 confidence/variance/hit-distance를 추가한다. 최종 producer와 fallback을 profile에서 정하고 같은 specular/occlusion을 여러 기술에서 단순 가산하지 않는다. 물리 buffer 분리는 소비자와 pass fusion에 따라 결정한다. feature/BSDF별 sample의 PDF·hit 의미를 보존하여 새 sampling 기법이 연결될 수 있게 한다.
 
@@ -276,45 +275,35 @@ HDR 환경광에서 diffuse irradiance/SH, roughness별 prefiltered specular, BR
 
 `scene_cooker/probe_cooker`는 probe 위치·bounds·baseline 환경광을 생산한다. 정적 장면의 local diffuse와 visibility는 같은 재질을 사용하는 offscreen cube views 또는 지원되는 ray bake로 생성한다. procedural layout이 바뀌면 해당 probe generation을 무효화하고 예산 내에서 다시 갱신하며 준비 중에는 environment fallback을 사용한다. Probe 모드를 실시간 전체 GI라고 표시하지 않는다.
 
-GTAO는 depth/normal 기반 horizon 검색, 품질별 half/full input, edge-aware resolve·temporal filter를 구현한다. RTAO는 짧은 visibility rays+맞는 denoiser로 구현한다. AO는 기본적으로 indirect visibility에 적용하고 RTGI/Brixelizer가 이미 계산한 occlusion과 중복 곱하지 않는다. contact 강조와 장거리 간접광 차폐는 별도 parameter다.
+GTAO는 depth/normal 기반 horizon 검색, 품질별 half/full input, edge-aware resolve·temporal filter를 구현한다. AO는 기본적으로 indirect visibility에 적용하고 Brixelizer가 이미 계산한 occlusion과 중복 곱하지 않는다. contact 강조와 장거리 간접광 차폐는 별도 parameter다.
 
 ### 9.3 그림자
 
-두 출력을 구분한다: `ShadowData`는 light별 matrix/clipmap/page/atlas/filter/RT 조회 정보, `OpaqueShadowVisibility`는 현재 opaque surface에 계산된 결과다. 투명 fragment·froxel·RT secondary hit는 자기 world position에서 ShadowData를 조회한다.
+두 출력을 구분한다: `ShadowData`는 light별 matrix/clipmap/page/atlas/filter 조회 정보, `OpaqueShadowVisibility`는 현재 opaque surface에 계산된 결과다. 투명 fragment·froxel는 자기 world position에서 ShadowData를 조회한다.
 
 Directional은 texel-snapped clipmap과 page table을 가진 cached virtual shadow로 구현한다. physical bank의 page는 초기 inner 128×128 및 filter guard를 사용하고 budget으로 개수를 정한다. GPU receiver feedback→request dedup→resident/dirty 판정→page-caster cull→indirect render→page table publish를 수행한다. opaque뿐 아니라 visible transparent bounds·volumetric view ranges도 receiver 수요에 포함한다. 물리 atlas에는 page-local clip/projection과 guard를 적용해 인접 page로 raster/filter가 새지 않게 한다. bank write와 sampling은 graph에서 실제 resource 단위로 동기화한다.
 
 정적 caster cache와 동적 caster 갱신을 분리한다. transform·LOD·skin/wind·alpha/material 변화와 **이전/현재 bounds 둘 다** dirty 영역에 반영한다. dynamic depth를 합성/조회할 때 static cache를 파괴하지 않는다. 새로운 page는 clear+render 완료 후 valid가 된다. page 부재·budget 제한·지원 profile에는 conventional cascaded/local atlas를 사용하며 근접 detail과 cascade/page 전환을 안정화한다. 기존 `base×5 × base×4` 고정 과대 할당은 제거한다.
 
-local-light shadow는 중요도·screen contribution·movement에 따라 cached atlas/cube faces를 할당한다. RT shadow는 선별 light/surface의 contact/soft visibility를 제공한다. 동일 light의 raster/RT visibility를 대안·confidence blend로 결합한다. RT shadow denoising은 해당 light/signal 범위 안에서 수행한다. [S7]
+local-light shadow는 중요도·screen contribution·movement에 따라 cached atlas/cube faces를 할당한다.
 
-### 9.4 공유 RayTracingScene
-
-DXR master가 켜지고 필요한 consumer가 있을 때만 AS를 유지한다. static mesh/LOD BLAS는 build/compact, dynamic BLAS는 SkinCache current geometry로 update한다. topology/LOD 변경 또는 refit 품질 저하에서 rebuild한다. TLAS instance에는 material/geometry generation·mask·stable scene 식별을 연결한다. build scratch·instance buffers·compaction copy·trace use를 Graph에 선언한다.
-
-RT 후보는 main camera culling과 별도로 trace 거리·shadow/reflection/GI consumer를 기준으로 정한다. 근거리 hero geometry와 deformation은 raster와 일치시키고, 원거리 proxy의 error를 명시한다. offscreen hit에 필요한 material/texture fallback도 resident하게 유지한다. ray-hit은 공통 BSDF/opacity와 ray footprint LOD를 사용한다.
-
-OMM은 alpha-test의 bake classification/alpha cutoff/material generation에 적용한다. blended slime은 opacity micromap으로 불투명화하지 않고 transmission/absorption 의미로 처리한다. SER/OMM은 지원되는 별도 shader/profile variant에서만 사용하며 일반 DXR path를 유지한다. 기본 셰이더 최소 요구를 그 전용 profile까지 일괄 올리지 않는다. [S1]
-
-### 9.5 GI·반사·radiance history
+### 9.4 GI·반사·radiance history
 
 | 모드 | 실제 구현·출력 |
 |---|---|
 | Probe GI | cooked diffuse probes+환경광, depth/normal·probe visibility에 따른 누출 억제 |
 | SoftwareHybrid GI | Brixelizer scene/SDF 갱신, 이전 lighting cache 입력, diffuse/specular 결과와 유효성. 변형 geometry·stale SDF의 한계는 proxy revision과 confidence로 처리 |
-| RayTraced GI | visible surface에서 matched diffuse BSDF/PDF sampling, secondary hit의 direct/emissive+probe/cache radiance, noisy diffuse/hit distance/variance. trace 거리·표본·해상도 품질 제어 |
 | SSR | depth hierarchy trace, roughness sampling, thickness tolerance·edge/offscreen confidence, temporal/spatial resolve |
-| HybridRT reflection | SSR confidence가 부족한 표본을 DXR로 추적, hit에서 공통 재질/광원, miss는 environment/probe. SSR/RT/probe는 하나의 indirect specular로 결합 |
 
 SSR은 같은 frame의 최종 SSR 색을 다시 읽지 않는다. `TraceRadiance`는 reflection 합성 전 direct+diffuse+emission 또는 의미가 정해진 history다. `CacheInjectionRadiance`는 DirectDiffuse/Emission과 의도적으로 재사용하는 clean diffuse indirect로 생성하고 UI/bloom/tone mapping/view-dependent specular를 제외한다. 이전 indirect로 multibounce를 구현할 때 exposure 보정·energy clamp·scene/light 변경 무효화를 적용한다. producer 없이 `PreviousRadiance`를 외부 입력처럼 남기지 않는다. [S8]
 
-신호는 noisy/clean, demodulated/modulated, radiance/visibility와 hit distance 단위를 metadata로 구분한다. NRD/FSR용 packing과 material 재적용은 해당 adapter와 lighting composite 사이에 정확히 한 번만 수행한다. specular와 GI가 제공하는 같은 indirect 항을 중복 소비하지 않는다.
+신호는 radiance/visibility와 변조 여부를 metadata로 구분한다. specular와 GI가 제공하는 같은 indirect 항을 중복 소비하지 않는다.
 
 ## 10. 투명체·subsurface·VFX·volumetrics
 
 렌더 domain은 Opaque/Masked/Translucent/Additive/HeroRefractive/Decal로 분리한다. Masked는 공통 alpha와 coverage-preserving mips를 사용한다. 일반 Translucent는 weighted OIT, Additive는 HDR 가산층이다. 불투명 재질의 skin SSS는 diffuse 성분만 profile별 thickness/depth-aware diffusion하고 specular는 흐리지 않는다.
 
-HeroRefractive는 bounded depth-layer 방식으로 구현한다. 픽셀별 nearest layer를 depth peel로 얻고 동일 instance의 front/back 또는 authored thickness로 광학 두께를 구한다. IOR/Fresnel·Beer–Lambert absorption·거친 표면 반사·저비용 내부 scattering을 사용한다. far→near로 배경을 합성하고 왜곡된 UV의 depth/coverage를 검사한다. offscreen/무효 screen sample은 probe 또는 지원되는 RT transmission으로 대체한다. layer 예산 초과는 peel된 앞 layer를 제외한 나머지 fragment만 OIT tail로 처리하며 초과 counter와 국소 temporal confidence를 제공한다. 임의 개수 굴절층의 정확한 해법이라고 간주하지 않는다.
+HeroRefractive는 bounded depth-layer 방식으로 구현한다. 픽셀별 nearest layer를 depth peel로 얻고 동일 instance의 front/back 또는 authored thickness로 광학 두께를 구한다. IOR/Fresnel·Beer–Lambert absorption·거친 표면 반사·저비용 내부 scattering을 사용한다. far→near로 배경을 합성하고 왜곡된 UV의 depth/coverage를 검사한다. offscreen/무효 screen sample은 probe으로 대체한다. layer 예산 초과는 peel된 앞 layer를 제외한 나머지 fragment만 OIT tail로 처리하며 초과 counter와 국소 temporal confidence를 제공한다. 임의 개수 굴절층의 정확한 해법이라고 간주하지 않는다.
 
 기존 슬라임의 눈/장식은 opaque, 몸체는 material 품질에 따라 OIT 또는 HeroRefractive다. low path도 같은 base tint·표정·공격 charge·사망 의미를 유지한다. 투명 body를 OIT와 hero 양쪽에 중복 그리지 않는다. solid body thickness와 단순 alpha fade를 구분하고 단순 전체 alpha 감소로 고급 재질을 대신하지 않는다.
 
@@ -324,7 +313,7 @@ Particle update는 실제 시간으로 진행하며 FG로 다시 업데이트하
 
 Volumetrics는 log-depth froxel에서 density·extinction/scattering·anisotropy·local/global volumes·light/shadow를 평가하고 깊이에 따른 누적 scattering L(z), transmittance T(z)를 만든다. opaque와 각 transparent layer는 자기 깊이 또는 layer 사이 구간을 사용해 합성한다. 이미 fogged color에 전체 fog를 다시 적용하지 않는다. reprojection은 camera/volume/light 변경과 depth 불일치를 거부하고 depth-aware upsample한다. froxel stride/Z-slices/거리·sample budget은 품질에 연결한다.
 
-Decal은 bounds와 material IR을 가진 feature로 구현하고 공통 surface resolve 이후 조명 전에 필요한 base/normal/roughness/emissive를 수정한다. masked/normal blend와 receiver flags를 사용하고 RayTracingScene에는 중요한 decal의 재질 평가가 반영되거나 명시적으로 raster-only임을 표시한다. 효과 추가 때문에 중앙 geometry/lighting switch를 늘리지 않는다.
+Decal은 bounds와 material IR을 가진 feature로 구현하고 공통 surface resolve 이후 조명 전에 필요한 base/normal/roughness/emissive를 수정한다. masked/normal blend와 receiver flags를 사용한다. 효과 추가 때문에 중앙 geometry/lighting switch를 늘리지 않는다.
 
 ## 11. TemporalSystem·DRS·재구성
 
@@ -341,27 +330,22 @@ DRS는 generated frame을 제외한 GPU render critical-path sample을 사용한
 | 선택된 profile | 실행 경로 |
 |---|---|
 | Raster | opaque+transparency/volume SceneHDR → NativeTAA/InternalTAAU 또는 선택 SR → DisplayHDR |
-| Standalone RT | noisy signals → signal별 NRD 또는 FSR Ray Regeneration → material 재적용/lighting 합성 → transparency/volume → 선택 SR/TAAU → DisplayHDR |
-| Fused DLSS RR | noisy color+DLSS RR guides 및 transparency 계약 → DLSS RR → DisplayHDR. 같은 신호의 standalone denoise와 별도 DLSS SR/TAA를 대체 |
 
-신호마다 denoiser가 하나, View마다 최종 reconstruction producer가 하나다. shadow는 ShadowSystem의 별도 signal-specific 처리이며 fused RR이 처리하지 않는 항까지 무조건 끄지 않는다. RR 입력으로 불완전한 noise/guide를 넣고 Available이라고 표시하지 않는다.
+View마다 최종 reconstruction producer가 하나다. 필요한 입력과 guide가 유효한 경우에만 해당 provider를 활성화한다.
 
-### Provider 계약과 실제 구현 [S7–S12]
+### Provider 계약과 실제 구현 [S8–S12]
 
-공통 adapter는 `QuerySupport/DescribeInputs/ResolveModeAndExtent/CreateOrReconfigure/BuildPasses/CollectCompletion/Shutdown`의 의미를 제공한다. 반환 계약에는 required/optional guides, radiance/노출/roughness/normal/depth/MV encoding, render/output extents, active rect/DRS/reset, queue/외부 submission, retained resources, produces-display-resolution, 호환 SR/FG/latency를 넣는다. 기능에 맞지 않는 하나의 거대 가상 인터페이스 대신 SR·signal-denoiser·fused-RR·present provider 역할을 구분한다.
+공통 adapter는 `QuerySupport/DescribeInputs/ResolveModeAndExtent/CreateOrReconfigure/BuildPasses/CollectCompletion/Shutdown`의 의미를 제공한다. 반환 계약에는 required/optional guides, radiance/노출/roughness/normal/depth/MV encoding, render/output extents, active rect/DRS/reset, queue/외부 submission, retained resources, produces-display-resolution, 호환 SR/FG/latency를 넣는다. 기능에 맞지 않는 하나의 거대 가상 인터페이스 대신 SR·present provider 역할을 구분한다.
 
 | Adapter | 필수 연결과 차이 |
 |---|---|
-| NRD | REBLUR/RELAX를 diffuse/specular, occlusion variant를 AO, SIGMA를 light shadow에 맞게 선택. view-Z/normal/roughness/MV/hit-distance 및 demodulation은 포함된 frontend/backend helper와 일치. source/clean semantic을 보존 |
 | DLSS SR | Streamline의 frame token/constants, depth/MV/jitter/exposure, input/output extent, quality query, resource tag·evaluate·수명. 별도 engine TAA를 선행 실행하지 않음 |
-| DLSS RR | diffuse/specular albedo, 정상 float normal/roughness, noisy color, depth/MV, specular-hit-distance 또는 specular MV, camera/exposure. RR가 SR output도 생산하므로 별도 DLSS SR 중복 금지 |
 | XeSS SR | 실제 SDK quality·optimal input size·velocity convention·responsive mask·exposure·context/pipeline 준비를 연결. XeSS라는 이름만으로 모든 GPU의 같은 path를 가정하지 않음 |
 | FSR SR | 선택한 API/runtime variant의 depth/MV/jitter·reactive/composition·exposure·frame-time·extent/reset을 연결. ML/non-ML 구현 availability는 runtime query 결과 사용 |
-| FSR Ray Regeneration | **독립 signal denoiser**, SR 포함 fused provider 아님. signed linear view-Z, XY motion+previous-current view-Z delta, SDK oct-normal/roughness/material packing. albedo의 linear/sqrt encoding은 flag와 일치시킴 |
 | DirectSR | variant GUID·권장 extent/jitter·input flags를 질의. 자체 queue상의 비동기 Execute를 ExternalQueueOperation으로 연결하고 후행 fence까지 자원 유지. direct vendor SR과 동시에 같은 작업 실행 안 함 |
 | BrixelizerGI | static/dynamic geometry revision→SDF updates, previous lit input·history depth/normal·MV·environment, diffuse/specular 출력. camera cut/origin 변경·budget·생성/삭제를 scene과 동기화 |
 
-위 표는 내부 의미 계약이다. 외부 ABI의 정확한 함수·enum·struct는 §17에서 잠근 release의 header/sample을 사용한다. 버전이 다른 ABI를 가짜 wrapper 함수로 추정하지 않는다. `GuideConversion`은 필요한 변환만 graph에 넣고, 두 consumer가 같은 변환 결과를 요구하면 공유한다. denoiser가 없으면 해당 noisy RT mode를 지원되는 clean fallback으로 resolve하며 raw noise를 완성 영상으로 노출하지 않는다.
+위 표는 내부 의미 계약이다. 외부 ABI의 정확한 함수·enum·struct는 §17에서 잠근 release의 header/sample을 사용한다. 버전이 다른 ABI를 가짜 wrapper 함수로 추정하지 않는다. `GuideConversion`은 필요한 변환만 graph에 넣고, 두 consumer가 같은 변환 결과를 요구하면 공유한다. 필수 guide가 없는 provider는 지원되는 대체 경로로 resolve한다.
 
 ## 12. HDR 후처리·UI·Display·FG
 
@@ -400,7 +384,7 @@ SettingsData schema=2는 `schema_version, graphics, 기존 master/bgm/sfx/ui vol
 
 | 키 | 타입·초기값·허용 범위 | 실제 연결·impact |
 |---|---|---|
-| `preset` | Low/Medium/High/Ultra/UltraRT/Custom; Medium | §14 preset-owned 값 묶음 적용 |
+| `preset` | Low/Medium/High/Ultra/Custom; Medium | §14 preset-owned 값 묶음 적용 |
 | `display_mode` | Windowed/BorderlessFullscreen; BorderlessFullscreen | window/display 변경; SW |
 | `display_output` | DisplayId; Auto | 실제 monitor 선택; SW/RC/H |
 | `output_extent` | extent 또는 Auto; Auto | Windowed client size. Borderless는 desktop effective extent; SW/RC/H/PC |
@@ -430,20 +414,16 @@ SettingsData schema=2는 `schema_version, graphics, 기존 master/bgm/sfx/ui vol
 | `material_quality` | Q; Medium | closure 특화·normal/detail/SSS sample; G/H/RC |
 | `pom_quality` | OQ; Medium | POM steps/distance, Off는 normal/detail 유지; C/H |
 | `lighting_quality` | Q; Medium | area sample·decorative local shadow 예산; C/SC/RC |
-| `shadow_mode` | Raster/HybridRT; Raster | virtual/atlas와 선택 RT visibility; G/PC/SC/H |
+| `shadow_mode` | Raster; Raster | virtual/atlas visibility; G/PC/SC/H |
 | `shadow_quality` | Q; Medium | texel density·physical pages·filter; SC/RC/H |
-| `shadow_distance_m` | float; 160; 20…500 | receiver/caster/RT 수요; V/SC/SB/H |
-| `contact_shadows` | bool; true | screen/RT contact subgraph; G/H |
-| `ao_mode` | Off/Auto/GTAO/RTAO; GTAO | indirect occlusion producer; G/PC/RC/H |
+| `shadow_distance_m` | float; 160; 20…500 | receiver/caster 수요; V/SC/SB/H |
+| `contact_shadows` | bool; true | screen contact subgraph; G/H |
+| `ao_mode` | Off/Auto/GTAO; GTAO | indirect occlusion producer; G/PC/RC/H |
 | `ao_quality` | Q; Medium | AO extent/samples/filter; C/RC/H |
-| `gi_mode` | Off/Probe/SoftwareHybrid/RayTraced; Probe | indirect diffuse producer; G/PC/SB/RC/H |
+| `gi_mode` | Off/Probe/SoftwareHybrid; Probe | indirect diffuse producer; G/PC/SB/RC/H |
 | `gi_quality` | Q; Medium | probe/SDF/cache/ray/extent budget; C/RC/SB/H |
-| `reflection_mode` | Off/Probe/ScreenSpace/HybridRT; ScreenSpace | indirect specular source; G/PC/RC/H |
-| `reflection_quality` | Q; Medium | SSR/RT distribution·steps·filter; C/RC/H |
-| `ray_tracing_enabled` | bool; false | RT consumer/AS의 master gate; G/V/SB/PC/H |
-| `rt_trace_distance_m` | float; 60; 5…500 | RT 후보·geometry residency·AS/history; V/SB/H |
-| `neural_ray_reconstruction` | Off/Auto/On; Auto | conventional/neural 선택 요청; G/PC/H |
-| `ray_reconstruction_provider` | ProviderId; Auto | NRD/FSR Ray Regeneration/DLSS RR의 실제 availability; G/PC/RC/H |
+| `reflection_mode` | Off/Probe/ScreenSpace; ScreenSpace | indirect specular source; G/PC/RC/H |
+| `reflection_quality` | Q; Medium | SSR distribution·steps·filter; C/RC/H |
 | `transparency_quality` | Q; Medium | OIT/hero 대상·layer 해상도·material 비용; G/RC/H |
 | `refraction_quality` | OQ; Medium | thickness/trace/layer budget; G/RC/H |
 | `volumetric_quality` | OQ; Medium | froxel XYZ/거리/sample/history; G/RC/H |
@@ -477,22 +457,20 @@ SettingsData schema=2는 `schema_version, graphics, 기존 master/bgm/sfx/ui vol
 | shadow filter samples | 4 | 8 | 12 | 16 |
 | AO 해상도 축 비율 | 0.5 | 0.5 | 1 | 1 |
 | SSR 최대 steps | 16 | 32 | 48 | 64 |
-| RT diffuse/specular samples per active pixel | 1 | 1 | 1 | 2 |
 | froxel pixel stride / Z slices | 16/32 | 12/48 | 8/64 | 8/96 |
 | hero refraction surface layers | 0 | 1 | 2 | 4 |
 | POM 최대 steps(Off=0) | 8 | 12 | 24 | 32 |
 
-density·particle 감소는 essential 범위에는 적용하지 않는다. refraction layer=0은 OIT body 경로다. 높은 layer·cache 품질은 transition peak까지 예약할 수 있을 때만 활성화한다. screen-error·material/ray 품질은 변경 가능한 데이터이며 code 상수와 중복 저장하지 않는다.
+density·particle 감소는 essential 범위에는 적용하지 않는다. refraction layer=0은 OIT body 경로다. 높은 layer·cache 품질은 transition peak까지 예약할 수 있을 때만 활성화한다. screen-error·material 품질은 변경 가능한 데이터이며 code 상수와 중복 저장하지 않는다.
 
-| preset | Q fields | AO | GI | Reflection | Shadow | Volumetric | RT master |
-|---|---|---|---|---|---|---|---|
-| Low | Low | GTAO | Probe | Probe | Raster | Off | Off |
-| Medium | Medium | GTAO | Probe | ScreenSpace | Raster | Medium | Off |
-| High | High | GTAO | Probe | ScreenSpace | Raster | High | Off |
-| Ultra | Ultra | GTAO | SoftwareHybrid | ScreenSpace | Raster | Ultra | Off |
-| UltraRT | Ultra | Auto | RayTraced | HybridRT | HybridRT | Ultra | On |
+| preset | Q fields | AO | GI | Reflection | Shadow | Volumetric |
+|---|---|---|---|---|---|---|
+| Low | Low | GTAO | Probe | Probe | Raster | Off |
+| Medium | Medium | GTAO | Probe | ScreenSpace | Raster | Medium |
+| High | High | GTAO | Probe | ScreenSpace | Raster | High |
+| Ultra | Ultra | GTAO | SoftwareHybrid | ScreenSpace | Raster | Ultra |
 
-preset-owned는 texture/geometry/foliage/material/POM/lighting/shadow/AO/GI/reflection/transparency/refraction/volumetric/particle의 품질과 위 표의 mode·RT master다. POM/refraction은 해당 Q로 설정한다. display/HDR 보정/FPS/SR/DRS/FG/latency/sharpening과 bloom·blur·DoF·outline·grading의 개인 선호는 덮어쓰지 않는다. preset-owned 값을 직접 바꾸면 Custom이다. SDK fallback 때문에 requested preset을 Custom으로 바꾸지는 않는다.
+preset-owned는 texture/geometry/foliage/material/POM/lighting/shadow/AO/GI/reflection/transparency/refraction/volumetric/particle의 품질과 위 표의 mode다. POM/refraction은 해당 Q로 설정한다. display/HDR 보정/FPS/SR/DRS/FG/latency/sharpening과 bloom·blur·DoF·outline·grading의 개인 선호는 덮어쓰지 않는다. preset-owned 값을 직접 바꾸면 Custom이다. SDK fallback 때문에 requested preset을 Custom으로 바꾸지는 않는다.
 
 ### 상태·resolve
 
@@ -500,7 +478,7 @@ preset-owned는 texture/geometry/foliage/material/POM/lighting/shadow/AO/GI/refl
 
 resolve는 값 검증→기기/monitor 지원→provider chain 호환→extent/quality→resource/transition peak→impact 순으로 수행한다. explicit provider 요청을 Auto 선호로 조용히 바꾸지 말고 effective 대체와 사유를 표시한다. Auto는 검증된 adapter profile을 우선하며 자료가 없으면 InternalTAAU·일반 raster·안전한 budget으로 결정한다. UI는 요청과 실효값을 함께 보여준다.
 
-RT master Off/미지원은 RTAO→GTAO, RTGI→SoftwareHybrid 또는 Probe, RT reflection→SSR, RT shadow→Raster다. SoftwareGI 미지원→Probe, SR 미지원→InternalTAAU, neural RR 충돌→NRD+선택 compatible SR, FG 충돌→Off, HDR 미지원→SDR이다. required guide/denoiser가 없는 효과는 그에 맞는 clean fallback으로 함께 resolve한다. material/scene/profile의 중요한 의미를 보존하면서 실제 active feature를 보고한다.
+SoftwareGI 미지원→Probe, SR 미지원→InternalTAAU, FG 충돌→Off, HDR 미지원→SDR이다. material/scene/profile의 의미를 보존하며 실제 active feature와 대체 사유를 보고한다.
 
 ### 적용 transaction
 
@@ -529,7 +507,7 @@ v1의 기존 16개 키를 읽는다. width/height/borderless/vsync/frame_cap→�
 | Subgraph | 입력 | 출력 |
 |---|---|---|
 | SceneUpload | SceneDelta, streaming completions | 현재 GpuScene/table generation |
-| CoarseVisibility | GpuScene, View, PreviousHZB, light/trace ranges | view/shadow/RT candidates |
+| CoarseVisibility | GpuScene, View, PreviousHZB, light/trace ranges | view/shadow/software-GI candidates |
 | SkinCache | candidates, current/previous pose | current/previous skin, deformed bounds |
 | ParticleUpdate | spawn/events, previous particle state, render time | current particle/indirect state |
 | Geometry | candidates, skin, GpuScene, View, PreviousHZB | depth, visibility/GBuffer, MV, rejected list |
@@ -537,23 +515,21 @@ v1의 기존 16개 키를 읽는다. width/height/borderless/vsync/frame_cap→�
 | DepthPyramids | final depth | occlusion HZB, linear/minmax effect pyramids |
 | SurfaceResolve/Decals | final visibility/GBuffer, scene/material/skin, View | Surface, requested guides/classification |
 | LightLists | Lights, View/depth bounds, world light index | view clusters + arbitrary-world-position query |
-| RayTracingScene | RT candidates, current skin, scene/residency | shared BLAS/TLAS |
-| ShadowSubgraph | receivers(surface/transparent/volume), caster/skin, Lights, cache, optional TLAS | ShadowData, OpaqueShadowVisibility |
+| ShadowSubgraph | receivers(surface/transparent/volume), caster/skin, Lights, cache | ShadowData, OpaqueShadowVisibility |
 | DirectLighting/SSS | Surface, light lists, ShadowData/opaque visibility | DirectDiffuse/Specular, Emission, SSS diffuse |
-| Indirect | Surface/guides, trace radiance, PreviousCacheRadiance, probes, depth hierarchy, optional TLAS, histories | stable indirect 또는 noisy diffuse/specular/AO·ray guides |
-| StandaloneDenoise | noisy signals+그 guide/metadata | clean signals |
+| Indirect | Surface/guides, trace radiance, PreviousCacheRadiance, probes, depth hierarchy, histories | stable indirect diffuse/specular/AO |
 | OpaqueComposite | direct+선택 indirect+AO+Surface | OpaqueHDR |
-| TransparencyVolume | opaque/noisy opaque HDR, depth, ShadowData, scene/material, skin, particles, froxel/history | SceneHDR 또는 NoisySceneHDR, transparent guides/masks |
-| SR/TAAU **또는** fused RR | 해당 color/guide/metadata/profile | 유일한 DisplayHDR |
+| TransparencyVolume | opaque HDR, depth, ShadowData, scene/material, skin, particles, froxel/history | SceneHDR, transparent guides/masks |
+| SR/TAAU | 해당 color/guide/metadata/profile | 유일한 DisplayHDR |
 | HistoryExports | final depth/HZB, Surface metadata, 정의된 cache radiance | 다음 render frame의 imported history |
 | ExposureMeter | pre-post/pre-UI scene luminance, E[current] | E[next] |
 | OutputGuides/Post | DisplayHDR, 필요한 output-guide resolve, profile/look | display-linear HUD-less color |
 | UIRender | UiModel/layout, actual output/DPI, paper white | linear premultiplied UIColorAlpha |
 | PresentationAdapter | HUD-less/UI, provider-required depth/MV, frame token, DisplayProfile, pacing | 실제 presented frames+completion |
 
-StandaloneDenoise가 필요 없는 신호는 그 단계를 지나지 않는다. DLSS RR profile의 NoisyComposite는 clean으로 위장하지 않고 raw signal과 실제 noise 의미를 보존한다. 해당 profile에서는 별도 최종 SR/TAA가 없다. visibility guide·depth·motion을 post/FG에 전달할 때 provider가 요구하는 해상도/encoding으로 변환한다.
+visibility guide·depth·motion을 post/FG에 전달할 때 provider가 요구하는 해상도/encoding으로 변환한다.
 
-`CacheInjectionExport`는 `DirectDiffuse+Emission`과 **이미 clean인 선택적 indirect diffuse**만 저장한다. fused RR이 clean diffuse를 별도로 반환하지 않는 경우 DisplayHDR에서 diffuse를 추정하지 말고 direct/emissive-only cache를 사용한다. specular/transparency/post/UI는 이 cache에 주입하지 않는다. Brixelizer/RT cache의 bounce 의미가 이 정책과 일치해야 한다.
+`CacheInjectionExport`는 `DirectDiffuse+Emission`과 **이미 clean인 선택적 indirect diffuse**만 저장한다. specular/transparency/post/UI는 이 cache에 주입하지 않는다. Brixelizer cache의 bounce 의미가 이 정책과 일치해야 한다.
 
 PreviousHZB/PreviousCacheRadiance/E[current]는 이전에 실제 제출된 render frame의 generation이다. frame을 abort하면 새 history를 publish하지 않는다. reset된 입력은 기본값·valid=false로 초기화한다. disabled feature의 producer와 consumer branch를 함께 제거하며 unresolved handle을 남기지 않는다.
 
@@ -591,8 +567,8 @@ PreviousHZB/PreviousCacheRadiance/E[current]는 이전에 실제 제출된 rende
 | `renderer_environment.cpp`, `renderer_environment_mesh.cpp` | RenderAssets/Streaming의 공통 load/upload로 교체. 고정 asset 배열·정점 확장 meshbin loader 제거 |
 | `renderer_ui.cpp` | §12 ui_renderer로 이식. fixed 1920×1080 전체 surface 무조건 redraw/upload를 output/dirty 경로로 교체 |
 | `renderer_capture.cpp`, `renderer_diagnostics.*` | 동적 pass/queue, bounded history, fence 완료 readback, PNG/HDR capture로 교체 |
-| `Source/Apps/Content/character_asset_cooker.cpp` | indexed+meshlet/deform/RT package 생산; skin/animation/grounding·body/arrow material 처리 보존 |
-| `Source/Apps/Content/environment_mesh_cooker.*` | indexed mesh/LOD/cluster/HLOD/streaming·RT geometry package |
+| `Source/Apps/Content/character_asset_cooker.cpp` | indexed+meshlet/deform package 생산; skin/animation/grounding·body/arrow material 처리 보존 |
+| `Source/Apps/Content/environment_mesh_cooker.*` | indexed mesh/LOD/cluster/HLOD/streaming geometry package |
 | `Source/Apps/Content/environment_texture_cooker.*`, `environment_histogram_cooker.*` | 채널/색공간/mip/alpha/stream metadata. Gaussian transform+inverse LUT 결과 유지 |
 | **신규** `Source/Apps/Content/material_cooker.*`, `probe_cooker.*`, `scene_cooker.*` | MaterialIR/variant, HDR/probe/look, scene/layout/render package manifest 생산 |
 | `Source/Apps/Content/content_cooker.*`, `content_source_inventory.*` | source/hash/dependency/chunk/package inventory를 통합하고 stale 부분만 recook |
@@ -620,27 +596,27 @@ PreviousHZB/PreviousCacheRadiance/E[current]는 이전에 실제 제출된 rende
 | `Materials/` | closure/opacity/deformation library, terrain Gaussian/POM, foliage, slime, skin/cloth, generated material variants |
 | `Scene/` | scene upload helpers, skeleton/skin/morph, deformed bounds |
 | `Visibility/` | cull/LOD/HZB/retest, mesh/indexed visibility/CompactDeferred, draw records, surface classification/resolve |
-| `Lighting/` | clustered lists, direct/area/probe, virtual shadow page feedback/render/filter, GTAO/SSR, GI/RT hit/miss·guide |
+| `Lighting/` | clustered lists, direct/area/probe, virtual shadow page feedback/render/filter, GTAO/SSR, software GI·guide |
 | `Temporal/` | MV/classification/guide conversion, exposure, NativeTAA/TAAU·DRS 관련 kernels |
 | `Effects/` | OIT/hero peel·refraction, particles, decals, SSS, froxel integrate/resolve |
 | `Post/` | bloom/blur/DoF/grade/outline, output-guide resolve, display map·encoding |
 | `UI/` | linear UI conversion·composition |
 
-manifest 항목은 `id,source,entry,profile,defines,include dependencies,root ABI,material layout,output,required runtime files`다. DXC depfile 또는 정확한 include dependency를 CMake에 연결하여 `environment.hlsli` 이외의 변경도 다시 컴파일한다. CPU와 shader의 struct stride/offset·root binding은 생성 schema와 reflection으로 검사한다. 일반 shader는 SM6.6, Mesh/RT/OMM/SER는 각각 필요한 profile·feature variant를 별도 컴파일한다.
+manifest 항목은 `id,source,entry,profile,defines,include dependencies,root ABI,material layout,output,required runtime files`다. DXC depfile 또는 정확한 include dependency를 CMake에 연결하여 `environment.hlsli` 이외의 변경도 다시 컴파일한다. CPU와 shader의 struct stride/offset·root binding은 생성 schema와 reflection으로 검사한다. 일반 shader는 SM6.6, Mesh는 각각 필요한 profile·feature variant를 별도 컴파일한다.
 
 PSO key는 DXIL hash/root ABI/render formats·state/geometry path/material variant/adapter·driver/SDK다. pipeline library는 재사용 실패 시 정상 재생성한다. profile 활성 전에 필요한 PSO를 준비하며 기본 gameplay draw 중 첫 사용 동기 컴파일을 하지 않는다. Debug shader/material hot reload는 새 package·PSO 준비→atomic generation 교체→영향 history 무효화로 연결한다. Release는 배포된 cooked shader/package를 사용한다.
 
 ### SDK 잠금과 초기화
 
-확인된 기준은 Agility 1.619.6 (`D3D12SDKVersion=619`), Streamline 2.14.1, XeSS 3.0.2, FSR Ray Regeneration 1.2.0의 문서 계약이다. 이것이 모든 SDK 조합을 실행 검증했다는 뜻은 아니다. [S1,S9,S10,S11]
+SDK 버전·배포물은 `RenderSDKs.lock.json`을 기준으로 한다. 문서 계약 확인이 모든 SDK 조합의 실행 검증을 의미하지 않는다. [S1,S9,S10]
 
-`RenderSDKs.lock.json`은 SDK별 release/정확한 commit·archive URI/SHA-256, DXC version, include/library/runtime DLL 목록, shader profile, 공식 ABI 문서 revision, 재배포 notice를 고정한다. 해시는 실제 받아 사용하는 bytes에서 산출한다. 임의의 예시 해시나 HEAD/tag만으로 고정됐다고 처리하지 않는다. NRD/Brixelizer 등도 같은 lock을 사용한다. FSR의 최신 SR/FG/RR와 Brixelizer가 서로 다른 배포 세대에 있으면 별도 imported target/adapter namespace로 격리한다.
+`RenderSDKs.lock.json`은 SDK별 release/정확한 commit·archive URI/SHA-256, DXC version, include/library/runtime DLL 목록, shader profile, 공식 ABI 문서 revision, 재배포 notice를 고정한다. 해시는 실제 받아 사용하는 bytes에서 산출한다. 임의의 예시 해시나 HEAD/tag만으로 고정됐다고 처리하지 않는다. Brixelizer 등도 같은 lock을 사용한다. FSR의 최신 SR/FG와 Brixelizer가 서로 다른 배포 세대에 있으면 별도 imported target/adapter namespace로 격리한다.
 
-`HS_WITH_STREAMLINE/XESS/FSR/NRD/DIRECTSR/BRIXELIZER/DIRECTSTORAGE` 빌드 선택을 제공한다. ON인데 필수 SDK가 없으면 구성 시 해당 원인을 표시하며 조용히 stub으로 대체하지 않는다. 제외 빌드는 의도적으로 CompiledOut을 보고한다. 실제 target GPU가 없는 상태와 SDK source 통합 여부도 구분한다.
+`HS_WITH_STREAMLINE/XESS/FSR/DIRECTSR/BRIXELIZER/DIRECTSTORAGE` 빌드 선택을 제공한다. ON인데 필수 SDK가 없으면 구성 시 해당 원인을 표시하며 조용히 stub으로 대체하지 않는다. 제외 빌드는 의도적으로 CompiledOut을 보고한다. 실제 target GPU가 없는 상태와 SDK source 통합 여부도 구분한다.
 
 장치 초기화는 필요한 SDK 사전 bootstrap→DXGI/adapter→D3D12/caps→SDK device 연결 순서다. 실행 중 설정에서 선택 가능한 provider의 device 이전 bootstrap은 시작 시 준비하고, 그 feature의 GPU context/history는 실제 활성화할 때 생성한다. Streamline의 `slInit`은 DXGI/D3D12 호출보다 앞, `slShutdown`은 device 파괴보다 앞이다. native/proxy 객체 소유권을 한 adapter에 모은다. 모든 기능을 켜기 위해 모든 plugin을 항상 로드하지 않는다. DirectSR은 선택한 Agility/runtime에 실제 factory/header/`directsr.dll`이 있는지 검사하고 같은 D3D12Core 배포 디렉터리 계약을 따른다. [S9,S12]
 
-최소 runtime 조건은 FL12_0·SM6.6와 사용하는 bindless/root 기능이다. Mesh Shader/DXR/VRS/feedback/OMM/SER/native FP16/wave·format 지원은 별도 query다. SDK compiled/driver/input/combination/display 조건까지 충족해야 해당 기능이 Available이다. FL12_0만 통과했다고 shader 기능을 가정하지 않는다.
+최소 runtime 조건은 FL12_0·SM6.6와 사용하는 bindless/root 기능이다. Mesh Shader/VRS/feedback/native FP16/wave·format 지원은 별도 query다. SDK compiled/driver/input/combination/display 조건까지 충족해야 해당 기능이 Available이다. FL12_0만 통과했다고 shader 기능을 가정하지 않는다.
 
 CMake는 Core 저수준 구성에서 runtime/content-only dependency를 fetch/발견하지 않는다. `hs_render_data`는 API 독립 library, renderer와 cooker는 각자 필요한 SDK를 PRIVATE link한다. `runtime=ON/content tools=OFF`는 유효한 precooked package를 입력으로 받으며 없으면 누락을 명시한다. runtime이 FBX 원본을 임의로 cook하지 않는다. runtime package는 cook manifest가 참조하는 모든 mesh/material/texture/scene/probe/shader/audio/font와 실제 선택 DLL·license를 설치/CPack에 포함한다. 예전 고정 환경·몬스터 파일 목록으로 누락시키지 않는다. 라이브러리 DLL은 신뢰한 package 경로에서 로드하고 자산 loader는 package root 밖 경로·손상 chunk·과도한 decompress 요청을 거부한다.
 
@@ -651,10 +627,10 @@ CMake는 Core 저수준 구성에서 runtime/content-only dependency를 fetch/�
 | 경계 | 필요한 확인 |
 |---|---|
 | gameplay 보존 | 기존 deterministic gate와 같은 입력/replay에서 프리셋·render FPS·FG 차이가 simulation checksum/판정에 영향 없음. essential 경고·투사체 유지 |
-| material/asset | 기존 모든 사용 자산이 새 package로 로드됨. opacity/LOD/deformation이 visibility·shadow·motion·RT에서 일치. gradient·Gaussian 색공간·mip와 MaterialIR validation 확인 |
+| material/asset | 기존 모든 사용 자산이 새 package로 로드됨. opacity/LOD/deformation이 visibility·shadow·motion·software-GI에서 일치. gradient·Gaussian 색공간·mip와 MaterialIR validation 확인 |
 | temporal/visibility | 동일 tick 다중 render, camera cut·origin/DRS 변경·신규/reused slot·LOD crossfade·skin/foliage motion에서 이전 frame 대응. HZB reject가 current frame에서 다시 나타남 |
-| graph/lifetime | same-state UAV, depth+SRV, mip/array/buffer 범위, AS build→trace, cross-queue alias, in-flight/SDK lease, DirectSR 외부 submit의 순서 확인 |
-| reconstruction/display | NRD/FSR standalone과 DLSS fused의 producer 중복 없음. HUD-less/UI/HDR/SDR encoding·alpha·DPI hit-test·실제 frame token 일치 |
+| graph/lifetime | same-state UAV, depth+SRV, mip/array/buffer 범위, cross-queue alias, in-flight/SDK lease, DirectSR 외부 submit의 순서 확인 |
+| reconstruction/display | 선택한 SR/TAAU producer가 하나만 실행됨. HUD-less/UI/HDR/SDR encoding·alpha·DPI hit-test·실제 frame token 일치 |
 | 설정 | v1 migration/v2 roundtrip, 사용자 의도 보존, pending/cancel/확인 timeout·OOM·저장 실패·late response·provider/monitor 전환 복구. 노출 옵션마다 실제 effect 변경 |
 | 자원/성능 | streaming·descriptor가 bounded하고 leak 없이 회수. 비활성 기능의 지속 비용 제거. 값은 지원 hardware에서 실제 render critical path·CPU submit·VRAM peak로 확인 |
 | 확장 | 새 MaterialIR 조합은 데이터/variant만으로 사용, 새 feature는 signal/subgraph 등록으로 연결. 새 provider의 guide는 adapter 요구로 생성되고 중앙 Render에 재질·SDK별 분기를 추가하지 않음 |
@@ -672,16 +648,14 @@ Diagnostics는 queue/pass timestamp를 **완료된 fence 이후** 읽고 bounded
 [P]는 기준 커밋의 실제 코드, 아래 [S]는 외부 ABI·기술 계약 확인용이다. 본문의 나머지는 이 프로젝트에 적용할 **설계 결정**이다. 선행 대화·v5/v6를 다시 읽어야만 해석되는 요구는 남기지 않는다.
 
 - [P] `https://github.com/crapa36/Project-HS/tree/1354b1edb3939d480dab62c05ebb264d9d6e05d8` — ARCHITECTURE, Core/settings·render_snapshot·cooked_format, RendererD3D12, Runtime, Presentation, Content shaders/cookers, CMake. main 재확인 2026-09-27.
-- [S1] `https://devblogs.microsoft.com/directx/directx12agility/` — Agility 1.619.6/619, SM·DXR capability 경계.
+- [S1] `https://devblogs.microsoft.com/directx/directx12agility/` — Agility 1.619.6/619, SM capability 경계.
 - [S2] `https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html` — access/sync/layout·aliasing 계약.
 - [S3] `https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_4/nf-dxgi1_4-idxgiadapter3-queryvideomemoryinfo` — process memory budget.
 - [S4] `https://learn.microsoft.com/en-us/windows/win32/direct3d12/resource-binding-in-hlsl` — binding ABI.
 - [S5] `https://google.github.io/filament/main/filament.html` — PBR·coat·anisotropy·cloth/subsurface 참고. 프로젝트 MaterialIR 설계 자체를 제공하는 문서는 아님.
 - [S6] `https://learn.microsoft.com/en-us/samples/microsoft/xbox-gdk-samples/visibilitybuffer/` — visibility/attribute 복원 및 frontend 성능 특성.
-- [S7] `https://github.com/NVIDIA-RTX/NRD` — signal packing·NRD integration.
 - [S8] `https://gpuopen.com/manuals/fidelityfx_sdk/techniques/brixelizer-gi/` — SDF/previous radiance와 GI 입력·출력.
-- [S9] `https://github.com/NVIDIA-RTX/Streamline/tree/v2.14.1/docs` — ProgrammingGuide, DLSS, DLSS_RR, DLSS_G, Reflex의 bootstrap/resource/present 계약.
+- [S9] `https://github.com/NVIDIA-RTX/Streamline/tree/v2.14.1/docs` — ProgrammingGuide, DLSS, DLSS_G, Reflex의 bootstrap/resource/present 계약.
 - [S10] `https://github.com/intel/xess/tree/v3.0.2/doc` — SR/FG/XeLL 통합. `https://github.com/intel/xess/releases`.
-- [S11] `https://gpuopen.com/manuals/fsr_sdk/techniques/denoising/` — Ray Regeneration 1.2 독립 denoising·2.5D motion·packing. 같은 공식 SDK 문서의 upscaling/frame-generation 계약과 함께 해당 lock release를 사용.
 - [S12] `https://microsoft.github.io/DirectX-Specs/DirectSR/DirectSR.html` — variant·runtime 배포·자체 queue execute/completion.
 - [S13] `https://learn.microsoft.com/en-us/windows/win32/direct3darticles/high-dynamic-range` — Advanced Color/HDR output 계약.

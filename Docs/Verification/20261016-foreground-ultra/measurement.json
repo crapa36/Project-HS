@@ -1,0 +1,2537 @@
+{
+  "source": "Build\\play-captures\\20261016-structure-ultra-01",
+  "classification": "new goal progress; real foreground evidence, target not achieved",
+  "capture_complete": true,
+  "analysis_status": "partial",
+  "game_exit_code": 0,
+  "binary_sha256": "ADA3DFAA8A60F7C6A626DE17259E5DFA272C81D0BDD617C548970067E44226CD",
+  "generation": "8c5527e9b37e6eb4d6e3c71dd04110e02437022569bd7cc00f08d44c4ec193d8",
+  "playing": {
+    "frames": 186,
+    "phase_frames": {
+      "playing": 186
+    },
+    "simulation_tick_range": [
+      8,
+      1381
+    ],
+    "fps_contiguous_same_phase_config": {
+      "available": true,
+      "frame_intervals": 184,
+      "wall_seconds": 21.96348929999658,
+      "fps": 8.377539537856066,
+      "interval_ms": {
+        "mean": 119.36678967389447,
+        "min": 105.20579999865731,
+        "max": 551.2851999956183
+      }
+    },
+    "raw_adjacent_frame_throughput": {
+      "available": true,
+      "frame_intervals": 185,
+      "wall_seconds": 22.87164639999537,
+      "fps": 8.088617529520631,
+      "interval_ms": {
+        "mean": 123.63052108105606,
+        "min": 105.20579999865731,
+        "max": 908.1570999987889
+      }
+    },
+    "transition_intervals_excluded": 1,
+    "cpu_stage_wall_ms": {
+      "adapter": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 4.185955376344089,
+        "weighted_mean": 4.185955376344089,
+        "min": 0.35090000000000005,
+        "max": 473.5248
+      },
+      "render": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 119.12785161290324,
+        "weighted_mean": 119.12785161290324,
+        "min": 103.71910000000001,
+        "max": 537.2665999999999
+      },
+      "wait": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.022607526881720397,
+        "weighted_mean": 0.022607526881720397,
+        "min": 0.004,
+        "max": 0.075
+      },
+      "streaming": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.3497634408602148,
+        "weighted_mean": 0.3497634408602148,
+        "min": 0.271,
+        "max": 1.835
+      },
+      "scene_prepare": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1.1934301075268818,
+        "weighted_mean": 1.1934301075268818,
+        "min": 1.026,
+        "max": 5.718
+      },
+      "ui": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.9845645161290333,
+        "weighted_mean": 0.9845645161290333,
+        "min": 0.0,
+        "max": 10.506
+      },
+      "constants_upload": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 2.5788978494623667,
+        "weighted_mean": 2.5788978494623667,
+        "min": 1.821,
+        "max": 6.823
+      },
+      "graph_build": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 50.30702688172042,
+        "weighted_mean": 50.30702688172042,
+        "min": 43.622,
+        "max": 345.511
+      },
+      "graph_prepare": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 18.273500000000002,
+        "weighted_mean": 18.273500000000002,
+        "min": 15.377,
+        "max": 22.002
+      },
+      "descriptors": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.112241935483871,
+        "weighted_mean": 0.112241935483871,
+        "min": 0.089,
+        "max": 0.138
+      },
+      "graph_plan": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 7.322596774193552,
+        "weighted_mean": 7.322596774193552,
+        "min": 5.45,
+        "max": 86.602
+      },
+      "graph_record": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 18.881451612903227,
+        "weighted_mean": 18.881451612903227,
+        "min": 16.014,
+        "max": 58.79
+      },
+      "graph_submit": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 6.366010752688168,
+        "weighted_mean": 6.366010752688168,
+        "min": 5.299,
+        "max": 17.202
+      },
+      "post_submit": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 8.12118279569892,
+        "weighted_mean": 8.12118279569892,
+        "min": 5.777,
+        "max": 15.469
+      },
+      "present": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1.0065591397849458,
+        "weighted_mean": 1.0065591397849458,
+        "min": 0.119,
+        "max": 81.603
+      },
+      "diagnostics": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1.9754193548387087,
+        "weighted_mean": 1.9754193548387087,
+        "min": 1.629,
+        "max": 3.181
+      },
+      "wrapper": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.5385752688172053,
+        "weighted_mean": 0.5385752688172053,
+        "min": 0.146,
+        "max": 68.319
+      }
+    },
+    "cpu_stage_subsets_wall_ms": {
+      "ray_geometry_register": {
+        "parent_stage": "graph_build",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.9736559139784946,
+        "weighted_mean": 0.9736559139784946,
+        "min": 0.845,
+        "max": 1.293
+      },
+      "ray_omm_prepare_register": {
+        "parent_stage": "graph_build",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 4.82662365591398,
+        "weighted_mean": 4.82662365591398,
+        "min": 4.397,
+        "max": 14.581
+      },
+      "ray_scene_register": {
+        "parent_stage": "graph_build",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 26.373306451612905,
+        "weighted_mean": 26.373306451612905,
+        "min": 20.286,
+        "max": 315.068
+      },
+      "graph_prepare_validation": {
+        "parent_stage": "graph_prepare",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1.849489247311829,
+        "weighted_mean": 1.849489247311829,
+        "min": 1.538,
+        "max": 2.718
+      },
+      "graph_prepare_info_key": {
+        "parent_stage": "graph_prepare",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 5.206053763440861,
+        "weighted_mean": 5.206053763440861,
+        "min": 4.558,
+        "max": 6.832
+      },
+      "graph_prepare_compile": {
+        "parent_stage": "graph_prepare",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 10.40152688172043,
+        "weighted_mean": 10.40152688172043,
+        "min": 7.821,
+        "max": 12.498
+      },
+      "graph_prepare_transient": {
+        "parent_stage": "graph_prepare",
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.35562365591397843,
+        "weighted_mean": 0.35562365591397843,
+        "min": 0.252,
+        "max": 0.879
+      }
+    },
+    "cpu_stage_unattributed_wall_ms": {
+      "graph_build": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 18.13344086021506,
+        "weighted_mean": 18.13344086021506,
+        "min": 16.875,
+        "max": 38.292
+      },
+      "graph_prepare": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.4608064516129033,
+        "weighted_mean": 0.4608064516129033,
+        "min": 0.39,
+        "max": 0.824
+      }
+    },
+    "streamline_reported_present": {
+      "available": true,
+      "observations": 184,
+      "sdk_reported_present_count": 366,
+      "observed_query_interval_seconds": 21.533841999997094,
+      "sdk_reported_present_fps": 16.996502528441017,
+      "transition_or_window_observations_excluded": 0,
+      "invalid_observations": 0,
+      "physical_display_cadence_verified": false,
+      "source": "Streamline numFramesActuallyPresented since preceding native GetState; excludes FSR generated/XeSS queued counts"
+    },
+    "frame_slot_wait_ms": {
+      "available": true,
+      "count": 186,
+      "rejected": 0,
+      "mean": 0.0014048387096774208,
+      "weighted_mean": 0.0014048387096774208,
+      "min": 0.001,
+      "max": 0.0028
+    },
+    "cached_frame_metrics": {
+      "local_usage_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 6779016070.881721,
+        "weighted_mean": 6779016070.881721,
+        "min": 6148341760.0,
+        "max": 6929240064.0
+      },
+      "tracked_live_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 896640656.516129,
+        "weighted_mean": 896640656.516129,
+        "min": 895839744.0,
+        "max": 896647168.0
+      },
+      "tracked_retiring_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 0.0,
+        "weighted_mean": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "texture_physical_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 345820160.0,
+        "weighted_mean": 345820160.0,
+        "min": 345820160.0,
+        "max": 345820160.0
+      },
+      "acceleration_structure_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 737349435.1827956,
+        "weighted_mean": 737349435.1827956,
+        "min": 543425024.0,
+        "max": 913673216.0
+      },
+      "host_staging_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 16029152.752688171,
+        "weighted_mean": 16029152.752688171,
+        "min": 15864366.0,
+        "max": 17557262.0
+      },
+      "direct_batches": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 193.1720430107527,
+        "weighted_mean": 193.1720430107527,
+        "min": 192.0,
+        "max": 196.0
+      },
+      "compute_batches": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 32.97849462365591,
+        "weighted_mean": 32.97849462365591,
+        "min": 32.0,
+        "max": 33.0
+      },
+      "copy_batches": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 15.634408602150538,
+        "weighted_mean": 15.634408602150538,
+        "min": 15.0,
+        "max": 16.0
+      },
+      "cross_queue_waits": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 30.623655913978496,
+        "weighted_mean": 30.623655913978496,
+        "min": 30.0,
+        "max": 31.0
+      },
+      "record_jobs": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 384.1720430107527,
+        "weighted_mean": 384.1720430107527,
+        "min": 380.0,
+        "max": 395.0
+      },
+      "output_width": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1920.0,
+        "weighted_mean": 1920.0,
+        "min": 1920.0,
+        "max": 1920.0
+      },
+      "output_height": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1080.0,
+        "weighted_mean": 1080.0,
+        "min": 1080.0,
+        "max": 1080.0
+      },
+      "render_active_width": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1920.0,
+        "weighted_mean": 1920.0,
+        "min": 1920.0,
+        "max": 1920.0
+      },
+      "render_active_height": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1080.0,
+        "weighted_mean": 1080.0,
+        "min": 1080.0,
+        "max": 1080.0
+      },
+      "render_capacity_width": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1920.0,
+        "weighted_mean": 1920.0,
+        "min": 1920.0,
+        "max": 1920.0
+      },
+      "render_capacity_height": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 1080.0,
+        "weighted_mean": 1080.0,
+        "min": 1080.0,
+        "max": 1080.0
+      },
+      "local_budget_bytes": {
+        "available": true,
+        "count": 186,
+        "rejected": 0,
+        "mean": 16022241280.0,
+        "weighted_mean": 16022241280.0,
+        "min": 16022241280.0,
+        "max": 16022241280.0
+      }
+    },
+    "diagnostic_identity_invalid": 0
+  },
+  "playing_gpu_critical_path_ms": {
+    "available": true,
+    "count": 186,
+    "rejected": 0,
+    "mean": 96.59101866666661,
+    "weighted_mean": 96.59101866666661,
+    "min": 48.935936,
+    "max": 120.952832
+  },
+  "playing_utilization": {
+    "available": true,
+    "sampling_metadata": {
+      "schema": 3,
+      "complete": true,
+      "process_id": 9800,
+      "process_start_utc": "2026-10-15T16:07:31.6284683Z",
+      "start_utc": "2026-10-15T16:07:32.0635594Z",
+      "end_utc": "2026-10-15T16:08:28.5723764Z",
+      "start_qpc": 531919049643,
+      "end_qpc": 532484144805,
+      "qpc_frequency": 10000000,
+      "logical_processors": 20,
+      "samples": 52,
+      "reason": "process_exit",
+      "error": null,
+      "max_seconds": 0,
+      "unlimited": true,
+      "pdh_query_retries": 0,
+      "invalid_sample_errors": 40,
+      "counter_errors_total": 41,
+      "pdh_query_refreshes": 0,
+      "pdh_refresh_missing_target": 0,
+      "pdh_refresh_periodic": 0,
+      "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+      "issues_total": 0,
+      "recent_issues": [],
+      "issues_stream": "sampling-errors.jsonl",
+      "pdh_worker": {
+        "schema": 3,
+        "complete": true,
+        "process_id": 9800,
+        "process_start_utc": "2026-10-15T16:07:31.6284683Z",
+        "start_utc": "2026-10-15T16:07:32.7983866Z",
+        "end_utc": "2026-10-15T16:08:28.4615295Z",
+        "start_qpc": 531926396490,
+        "end_qpc": 532483031427,
+        "qpc_frequency": 10000000,
+        "logical_processors": 20,
+        "samples": 40,
+        "reason": "process_exit",
+        "error": null,
+        "max_seconds": 0,
+        "unlimited": true,
+        "pdh_query_retries": 0,
+        "invalid_sample_errors": 40,
+        "counter_errors_total": 41,
+        "pdh_query_refreshes": 0,
+        "pdh_refresh_missing_target": 0,
+        "pdh_refresh_periodic": 0,
+        "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+        "issues_total": 41,
+        "recent_issues": [
+          {
+            "utc": "2026-10-15T16:07:53.7708625Z",
+            "qpc": 532136120642,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:07:54.9021237Z",
+            "qpc": 532147435736,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:07:56.0210414Z",
+            "qpc": 532158625210,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:07:57.1392720Z",
+            "qpc": 532169805933,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:07:58.2550931Z",
+            "qpc": 532180966714,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:07:59.3604931Z",
+            "qpc": 532192016958,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:00.4811336Z",
+            "qpc": 532203224564,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:01.5865274Z",
+            "qpc": 532214278822,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:02.7371836Z",
+            "qpc": 532225784482,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:03.8495543Z",
+            "qpc": 532236912038,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:04.9672990Z",
+            "qpc": 532248089076,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:06.0897705Z",
+            "qpc": 532259318004,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:07.2164853Z",
+            "qpc": 532270580888,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:08.3266436Z",
+            "qpc": 532281683021,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:09.4364781Z",
+            "qpc": 532292783892,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:10.5466332Z",
+            "qpc": 532303880452,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:11.6706744Z",
+            "qpc": 532315122185,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:12.7767647Z",
+            "qpc": 532326185971,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:13.8863269Z",
+            "qpc": 532337283219,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:14.9993926Z",
+            "qpc": 532348406313,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:16.1231716Z",
+            "qpc": 532359652610,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:17.2474565Z",
+            "qpc": 532370886153,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:18.3707715Z",
+            "qpc": 532382120362,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:19.4810795Z",
+            "qpc": 532393227089,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:20.5917349Z",
+            "qpc": 532404338301,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:21.7116204Z",
+            "qpc": 532415535639,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:22.8138162Z",
+            "qpc": 532426566050,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:23.9402849Z",
+            "qpc": 532437818630,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:25.0594358Z",
+            "qpc": 532449009138,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:26.1755519Z",
+            "qpc": 532460169754,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:27.2817377Z",
+            "qpc": 532471231271,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-15T16:08:28.4085128Z",
+            "qpc": 532482503617,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          }
+        ],
+        "issues_stream": "pdh-errors.jsonl",
+        "pdh_worker": null,
+        "pdh_worker_stopped_by_owner": false,
+        "counter_worker_process_id": 27792,
+        "counter_initialization_pending": false,
+        "first_counter_qpc": 532034907957,
+        "counter_initialization_latency_seconds": 10.8511467,
+        "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+        "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+        "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\renderer_features.jsonl",
+        "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+        "gpu_ready_wait_state": "ready",
+        "gpu_ready_observed_qpc": 531978267164,
+        "first_gpu_sample_is_warmup": true,
+        "gpu_counters_enabled": true,
+        "gpu_adapter_preference": "",
+        "observed_target_luids": [
+          "0x00000000_0x0000f3c1",
+          "0x00000000_0x00010c4b"
+        ],
+        "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+        "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+        "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+        "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+        "nvidia_requested": false,
+        "nvidia_worker": {
+          "complete": true,
+          "error": null,
+          "whole_device_includes_other_apps": true,
+          "samples": 55,
+          "reason": "target_exit_or_limit"
+        },
+        "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+      },
+      "pdh_worker_stopped_by_owner": false,
+      "counter_worker_process_id": 27792,
+      "counter_initialization_pending": false,
+      "first_counter_qpc": 532034907957,
+      "counter_initialization_latency_seconds": 11.5858314,
+      "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+      "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+      "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\renderer_features.jsonl",
+      "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+      "gpu_ready_wait_state": "ready",
+      "gpu_ready_observed_qpc": 531978267164,
+      "first_gpu_sample_is_warmup": true,
+      "gpu_counters_enabled": true,
+      "gpu_adapter_preference": "",
+      "observed_target_luids": [
+        "0x00000000_0x0000f3c1",
+        "0x00000000_0x00010c4b"
+      ],
+      "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+      "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+      "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+      "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+      "nvidia_requested": true,
+      "nvidia_worker": {
+        "complete": true,
+        "error": null,
+        "whole_device_includes_other_apps": true,
+        "samples": 55,
+        "reason": "target_exit_or_limit"
+      },
+      "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+    },
+    "process_cpu": {
+      "samples": 20,
+      "sampled_wall_seconds": 21.648657899999996,
+      "process_cpu_seconds": 27.25,
+      "weighted_core_equivalents": 1.2587385382444427,
+      "machine_percent": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 6.289836965777265,
+        "weighted_mean": 6.293692691222213,
+        "min": 4.991745649394161,
+        "max": 8.370286598613138
+      },
+      "logical_processors": [
+        20
+      ]
+    },
+    "system_cpu_percent": {
+      "available": true,
+      "count": 20,
+      "rejected": 0,
+      "mean": 14.48724435707274,
+      "weighted_mean": 14.500159778590804,
+      "min": 7.11334334809146,
+      "max": 19.9806426077099
+    },
+    "process_and_system_metrics": {
+      "working_set_bytes": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 3670900736.0,
+        "weighted_mean": 3671581352.0289536,
+        "min": 3468914688.0,
+        "max": 3812327424.0
+      },
+      "private_memory_bytes": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 9766548275.2,
+        "weighted_mean": 9769861646.950073,
+        "min": 9251082240.0,
+        "max": 10195210240.0
+      },
+      "handle_count": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 1061.05,
+        "weighted_mean": 1061.0677251175005,
+        "min": 1059.0,
+        "max": 1072.0
+      },
+      "system_busy_core_equivalents": {
+        "available": true,
+        "count": 19,
+        "rejected": 1,
+        "mean": 2.8711706978111864,
+        "weighted_mean": 2.8824827490256664,
+        "min": 1.4226686696182922,
+        "max": 3.996128521541979
+      }
+    },
+    "logical_cpu_percent": {
+      "0,0": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 28.897274041569755,
+        "weighted_mean": 28.919477509268113,
+        "min": 13.906767928416,
+        "max": 47.1930399225954
+      },
+      "0,1": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 0.7268723060586689,
+        "weighted_mean": 0.7263924718400027,
+        "min": 0.0,
+        "max": 3.79047459439402
+      },
+      "0,10": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 43.8672131669375,
+        "weighted_mean": 43.89186075053658,
+        "min": 27.0231517591507,
+        "max": 63.7471353544093
+      },
+      "0,11": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 3.0541978706964756,
+        "weighted_mean": 3.053954779231554,
+        "min": 0.0,
+        "max": 24.8513861011536
+      },
+      "0,12": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 16.849573688149867,
+        "weighted_mean": 16.883352498710025,
+        "min": 2.42305778102635,
+        "max": 36.0440682397112
+      },
+      "0,13": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 7.789814324428866,
+        "weighted_mean": 7.804943985042031,
+        "min": 0.0,
+        "max": 27.6346680974072
+      },
+      "0,14": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 5.067436152467382,
+        "weighted_mean": 5.086590897375042,
+        "min": 0.0,
+        "max": 24.0762953371372
+      },
+      "0,15": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 3.1046719310434194,
+        "weighted_mean": 3.113122768753921,
+        "min": 0.0,
+        "max": 22.0681041049001
+      },
+      "0,16": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 1.6448917210709069,
+        "weighted_mean": 1.6453269493788578,
+        "min": 0.0,
+        "max": 8.23714138741171
+      },
+      "0,17": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 3.6389210928943614,
+        "weighted_mean": 3.638204323959448,
+        "min": 0.0,
+        "max": 24.705588813004
+      },
+      "0,18": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 23.217615017338545,
+        "weighted_mean": 23.248547686359696,
+        "min": 1.00889919814267,
+        "max": 52.7282243510909
+      },
+      "0,19": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 13.632899043301055,
+        "weighted_mean": 13.666110265108804,
+        "min": 1.00889919814267,
+        "max": 39.5422351758685
+      },
+      "0,2": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 40.01103016055148,
+        "weighted_mean": 40.04145046799075,
+        "min": 17.9788021927468,
+        "max": 53.8707218404961
+      },
+      "0,3": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 1.5240629641454666,
+        "weighted_mean": 1.5266426485107403,
+        "min": 0.0,
+        "max": 16.5913616409055
+      },
+      "0,4": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 31.64732052781842,
+        "weighted_mean": 31.649110043653994,
+        "min": 9.49385069544473,
+        "max": 53.4487848609354
+      },
+      "0,5": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 3.493556184128219,
+        "weighted_mean": 3.4981411007218206,
+        "min": 0.0,
+        "max": 22.1792167280354
+      },
+      "0,6": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 48.05464253141089,
+        "weighted_mean": 48.08722614654673,
+        "min": 8.07969211256106,
+        "max": 69.0359167152183
+      },
+      "0,7": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 1.0090477405236802,
+        "weighted_mean": 1.0077724984956598,
+        "min": 0.0,
+        "max": 6.25681946659582
+      },
+      "0,8": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 18.769372268101783,
+        "weighted_mean": 18.79673203881532,
+        "min": 0.0,
+        "max": 32.1628262360237
+      },
+      "0,9": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 6.893596410167724,
+        "weighted_mean": 6.8894398526029725,
+        "min": 0.0,
+        "max": 40.6053395188856
+      }
+    },
+    "cpu_total_and_group_percent": {
+      "0,_total": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 14.48724490598004,
+        "weighted_mean": 14.50016140037938,
+        "min": 7.11334334809146,
+        "max": 19.9806426077099
+      },
+      "_total": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 14.48724435707274,
+        "weighted_mean": 14.500159778590804,
+        "min": 7.11334334809146,
+        "max": 19.9806426077099
+      }
+    },
+    "system_cpu_summary_source": "Independent PDH sample QPC intervals; cached CPU-row summary percentages are not repeated",
+    "busiest_threads": [
+      {
+        "thread_id": 528,
+        "cpu_seconds": 17.453125,
+        "core_equivalents": 0.8061989376255977
+      },
+      {
+        "thread_id": 36644,
+        "cpu_seconds": 1.078125,
+        "core_equivalents": 0.04980100868054274
+      },
+      {
+        "thread_id": 19280,
+        "cpu_seconds": 1.078125,
+        "core_equivalents": 0.04980100868054274
+      },
+      {
+        "thread_id": 39072,
+        "cpu_seconds": 1.0625,
+        "core_equivalents": 0.04907925493154937
+      },
+      {
+        "thread_id": 38052,
+        "cpu_seconds": 1.015625,
+        "core_equivalents": 0.04691399368456925
+      },
+      {
+        "thread_id": 38956,
+        "cpu_seconds": 1.0,
+        "core_equivalents": 0.04619223993557588
+      },
+      {
+        "thread_id": 29508,
+        "cpu_seconds": 0.984375,
+        "core_equivalents": 0.045470486186582504
+      },
+      {
+        "thread_id": 35444,
+        "cpu_seconds": 0.859375,
+        "core_equivalents": 0.03969645619463552
+      },
+      {
+        "thread_id": 31308,
+        "cpu_seconds": 0.8125,
+        "core_equivalents": 0.037531194947655395
+      },
+      {
+        "thread_id": 29516,
+        "cpu_seconds": 0.421875,
+        "core_equivalents": 0.019487351222821074
+      },
+      {
+        "thread_id": 39760,
+        "cpu_seconds": 0.359375,
+        "core_equivalents": 0.01660033622684758
+      },
+      {
+        "thread_id": 36268,
+        "cpu_seconds": 0.296875,
+        "core_equivalents": 0.013713321230874088
+      },
+      {
+        "thread_id": 37464,
+        "cpu_seconds": 0.234375,
+        "core_equivalents": 0.010826306234900596
+      },
+      {
+        "thread_id": 37640,
+        "cpu_seconds": 0.109375,
+        "core_equivalents": 0.005052276242953612
+      },
+      {
+        "thread_id": 10196,
+        "cpu_seconds": 0.09375,
+        "core_equivalents": 0.004330522493960238
+      },
+      {
+        "thread_id": 22540,
+        "cpu_seconds": 0.078125,
+        "core_equivalents": 0.003608768744966865
+      },
+      {
+        "thread_id": 32428,
+        "cpu_seconds": 0.0625,
+        "core_equivalents": 0.0028870149959734923
+      },
+      {
+        "thread_id": 12484,
+        "cpu_seconds": 0.046875,
+        "core_equivalents": 0.002165261246980119
+      },
+      {
+        "thread_id": 21992,
+        "cpu_seconds": 0.03125,
+        "core_equivalents": 0.0014435074979867461
+      },
+      {
+        "thread_id": 4292,
+        "cpu_seconds": 0.03125,
+        "core_equivalents": 0.0014435074979867461
+      }
+    ],
+    "process_gpu": {
+      "target_pid": 9800,
+      "busiest_engine_percent": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 69.40564869258894,
+        "weighted_mean": 69.42655697480836,
+        "min": 6.555143179370608,
+        "max": 89.24067237785187
+      },
+      "sampled_wall_seconds": 22.33721080000396,
+      "frame_window_seconds": 22.87164639999537,
+      "initial_target_observation_gap_seconds": 0.10357529999600956,
+      "window_coverage_fraction": 0.9766332693919437,
+      "sources": [
+        {
+          "directory": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\utilization",
+          "supplemental": false,
+          "sampled_wall_seconds": 22.33721080000396,
+          "accepted_intervals": 20,
+          "overlapping_intervals_excluded": 0,
+          "metadata": {
+            "pdh-worker.json": {
+              "schema": 3,
+              "complete": true,
+              "process_id": 9800,
+              "process_start_utc": "2026-10-15T16:07:31.6284683Z",
+              "start_utc": "2026-10-15T16:07:32.7983866Z",
+              "end_utc": "2026-10-15T16:08:28.4615295Z",
+              "start_qpc": 531926396490,
+              "end_qpc": 532483031427,
+              "qpc_frequency": 10000000,
+              "logical_processors": 20,
+              "samples": 40,
+              "reason": "process_exit",
+              "error": null,
+              "max_seconds": 0,
+              "unlimited": true,
+              "pdh_query_retries": 0,
+              "invalid_sample_errors": 40,
+              "counter_errors_total": 41,
+              "pdh_query_refreshes": 0,
+              "pdh_refresh_missing_target": 0,
+              "pdh_refresh_periodic": 0,
+              "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+              "issues_total": 41,
+              "recent_issues": [
+                {
+                  "utc": "2026-10-15T16:07:53.7708625Z",
+                  "qpc": 532136120642,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:07:54.9021237Z",
+                  "qpc": 532147435736,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:07:56.0210414Z",
+                  "qpc": 532158625210,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:07:57.1392720Z",
+                  "qpc": 532169805933,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:07:58.2550931Z",
+                  "qpc": 532180966714,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:07:59.3604931Z",
+                  "qpc": 532192016958,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:00.4811336Z",
+                  "qpc": 532203224564,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:01.5865274Z",
+                  "qpc": 532214278822,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:02.7371836Z",
+                  "qpc": 532225784482,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:03.8495543Z",
+                  "qpc": 532236912038,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:04.9672990Z",
+                  "qpc": 532248089076,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:06.0897705Z",
+                  "qpc": 532259318004,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:07.2164853Z",
+                  "qpc": 532270580888,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:08.3266436Z",
+                  "qpc": 532281683021,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:09.4364781Z",
+                  "qpc": 532292783892,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:10.5466332Z",
+                  "qpc": 532303880452,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:11.6706744Z",
+                  "qpc": 532315122185,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:12.7767647Z",
+                  "qpc": 532326185971,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:13.8863269Z",
+                  "qpc": 532337283219,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:14.9993926Z",
+                  "qpc": 532348406313,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:16.1231716Z",
+                  "qpc": 532359652610,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:17.2474565Z",
+                  "qpc": 532370886153,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:18.3707715Z",
+                  "qpc": 532382120362,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:19.4810795Z",
+                  "qpc": 532393227089,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:20.5917349Z",
+                  "qpc": 532404338301,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:21.7116204Z",
+                  "qpc": 532415535639,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:22.8138162Z",
+                  "qpc": 532426566050,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:23.9402849Z",
+                  "qpc": 532437818630,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:25.0594358Z",
+                  "qpc": 532449009138,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:26.1755519Z",
+                  "qpc": 532460169754,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:27.2817377Z",
+                  "qpc": 532471231271,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-15T16:08:28.4085128Z",
+                  "qpc": 532482503617,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                }
+              ],
+              "issues_stream": "pdh-errors.jsonl",
+              "pdh_worker": null,
+              "pdh_worker_stopped_by_owner": false,
+              "counter_worker_process_id": 27792,
+              "counter_initialization_pending": false,
+              "first_counter_qpc": 532034907957,
+              "counter_initialization_latency_seconds": 10.8511467,
+              "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+              "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+              "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\renderer_features.jsonl",
+              "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+              "gpu_ready_wait_state": "ready",
+              "gpu_ready_observed_qpc": 531978267164,
+              "first_gpu_sample_is_warmup": true,
+              "gpu_counters_enabled": true,
+              "gpu_adapter_preference": "",
+              "observed_target_luids": [
+                "0x00000000_0x0000f3c1",
+                "0x00000000_0x00010c4b"
+              ],
+              "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+              "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+              "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+              "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+              "nvidia_requested": false,
+              "nvidia_worker": {
+                "complete": true,
+                "error": null,
+                "whole_device_includes_other_apps": true,
+                "samples": 55,
+                "reason": "target_exit_or_limit"
+              },
+              "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+            },
+            "sampling.json": {
+              "schema": 3,
+              "complete": true,
+              "process_id": 9800,
+              "process_start_utc": "2026-10-15T16:07:31.6284683Z",
+              "start_utc": "2026-10-15T16:07:32.0635594Z",
+              "end_utc": "2026-10-15T16:08:28.5723764Z",
+              "start_qpc": 531919049643,
+              "end_qpc": 532484144805,
+              "qpc_frequency": 10000000,
+              "logical_processors": 20,
+              "samples": 52,
+              "reason": "process_exit",
+              "error": null,
+              "max_seconds": 0,
+              "unlimited": true,
+              "pdh_query_retries": 0,
+              "invalid_sample_errors": 40,
+              "counter_errors_total": 41,
+              "pdh_query_refreshes": 0,
+              "pdh_refresh_missing_target": 0,
+              "pdh_refresh_periodic": 0,
+              "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+              "issues_total": 0,
+              "recent_issues": [],
+              "issues_stream": "sampling-errors.jsonl",
+              "pdh_worker": {
+                "schema": 3,
+                "complete": true,
+                "process_id": 9800,
+                "process_start_utc": "2026-10-15T16:07:31.6284683Z",
+                "start_utc": "2026-10-15T16:07:32.7983866Z",
+                "end_utc": "2026-10-15T16:08:28.4615295Z",
+                "start_qpc": 531926396490,
+                "end_qpc": 532483031427,
+                "qpc_frequency": 10000000,
+                "logical_processors": 20,
+                "samples": 40,
+                "reason": "process_exit",
+                "error": null,
+                "max_seconds": 0,
+                "unlimited": true,
+                "pdh_query_retries": 0,
+                "invalid_sample_errors": 40,
+                "counter_errors_total": 41,
+                "pdh_query_refreshes": 0,
+                "pdh_refresh_missing_target": 0,
+                "pdh_refresh_periodic": 0,
+                "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+                "issues_total": 41,
+                "recent_issues": [
+                  {
+                    "utc": "2026-10-15T16:07:53.7708625Z",
+                    "qpc": 532136120642,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:07:54.9021237Z",
+                    "qpc": 532147435736,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:07:56.0210414Z",
+                    "qpc": 532158625210,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:07:57.1392720Z",
+                    "qpc": 532169805933,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:07:58.2550931Z",
+                    "qpc": 532180966714,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:07:59.3604931Z",
+                    "qpc": 532192016958,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:00.4811336Z",
+                    "qpc": 532203224564,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:01.5865274Z",
+                    "qpc": 532214278822,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:02.7371836Z",
+                    "qpc": 532225784482,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:03.8495543Z",
+                    "qpc": 532236912038,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:04.9672990Z",
+                    "qpc": 532248089076,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:06.0897705Z",
+                    "qpc": 532259318004,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:07.2164853Z",
+                    "qpc": 532270580888,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:08.3266436Z",
+                    "qpc": 532281683021,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:09.4364781Z",
+                    "qpc": 532292783892,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:10.5466332Z",
+                    "qpc": 532303880452,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:11.6706744Z",
+                    "qpc": 532315122185,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:12.7767647Z",
+                    "qpc": 532326185971,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:13.8863269Z",
+                    "qpc": 532337283219,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:14.9993926Z",
+                    "qpc": 532348406313,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:16.1231716Z",
+                    "qpc": 532359652610,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:17.2474565Z",
+                    "qpc": 532370886153,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:18.3707715Z",
+                    "qpc": 532382120362,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:19.4810795Z",
+                    "qpc": 532393227089,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:20.5917349Z",
+                    "qpc": 532404338301,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:21.7116204Z",
+                    "qpc": 532415535639,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:22.8138162Z",
+                    "qpc": 532426566050,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:23.9402849Z",
+                    "qpc": 532437818630,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:25.0594358Z",
+                    "qpc": 532449009138,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:26.1755519Z",
+                    "qpc": 532460169754,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:27.2817377Z",
+                    "qpc": 532471231271,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-15T16:08:28.4085128Z",
+                    "qpc": 532482503617,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  }
+                ],
+                "issues_stream": "pdh-errors.jsonl",
+                "pdh_worker": null,
+                "pdh_worker_stopped_by_owner": false,
+                "counter_worker_process_id": 27792,
+                "counter_initialization_pending": false,
+                "first_counter_qpc": 532034907957,
+                "counter_initialization_latency_seconds": 10.8511467,
+                "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+                "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+                "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\renderer_features.jsonl",
+                "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+                "gpu_ready_wait_state": "ready",
+                "gpu_ready_observed_qpc": 531978267164,
+                "first_gpu_sample_is_warmup": true,
+                "gpu_counters_enabled": true,
+                "gpu_adapter_preference": "",
+                "observed_target_luids": [
+                  "0x00000000_0x0000f3c1",
+                  "0x00000000_0x00010c4b"
+                ],
+                "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+                "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+                "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+                "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+                "nvidia_requested": false,
+                "nvidia_worker": {
+                  "complete": true,
+                  "error": null,
+                  "whole_device_includes_other_apps": true,
+                  "samples": 55,
+                  "reason": "target_exit_or_limit"
+                },
+                "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+              },
+              "pdh_worker_stopped_by_owner": false,
+              "counter_worker_process_id": 27792,
+              "counter_initialization_pending": false,
+              "first_counter_qpc": 532034907957,
+              "counter_initialization_latency_seconds": 11.5858314,
+              "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+              "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+              "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-structure-ultra-01\\renderer_features.jsonl",
+              "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+              "gpu_ready_wait_state": "ready",
+              "gpu_ready_observed_qpc": 531978267164,
+              "first_gpu_sample_is_warmup": true,
+              "gpu_counters_enabled": true,
+              "gpu_adapter_preference": "",
+              "observed_target_luids": [
+                "0x00000000_0x0000f3c1",
+                "0x00000000_0x00010c4b"
+              ],
+              "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+              "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+              "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+              "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+              "nvidia_requested": true,
+              "nvidia_worker": {
+                "complete": true,
+                "error": null,
+                "whole_device_includes_other_apps": true,
+                "samples": 55,
+                "reason": "target_exit_or_limit"
+              },
+              "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+            }
+          }
+        }
+      ],
+      "engines": [
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "0",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 69.40564869258894,
+            "weighted_mean": 69.42655697480836,
+            "min": 6.555143179370608,
+            "max": 89.24067237785187
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "10",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "11",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "12",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "13",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "14",
+          "engine_type": "security_1",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "1",
+          "engine_type": "legacyoverlay",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "2",
+          "engine_type": "videodecode",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "3",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "4",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.6170222507667322,
+            "weighted_mean": 0.6173935702565202,
+            "min": 0.1035842878790635,
+            "max": 0.811195330997692
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "5",
+          "engine_type": "security",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "6",
+          "engine_type": "videoencode",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "7",
+          "engine_type": "videoencode",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "8",
+          "engine_type": "ofa_0",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f3c1",
+          "physical_adapter": "0",
+          "engine": "9",
+          "engine_type": "vr",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "0",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "10",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.1123884699833541,
+            "weighted_mean": 0.11243659333752395,
+            "min": 0.03419322320726098,
+            "max": 0.17102265885459528
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "11",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "12",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "13",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "14",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "15",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "16",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "17",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "18",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "19",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "1",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "20",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "2",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "3",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "4",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "5",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "6",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "7",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "8",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010c4b",
+          "physical_adapter": "0",
+          "engine": "9",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 20,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        }
+      ],
+      "note": "Original plus optional supplemental GPU-only segments use independent PDH QPC intervals. Intervals before and after every query warmup, gaps and overlaps are N/A; original System/CPU/NVIDIA are not duplicated. Target PID only, maximum engine, no engine sum."
+    },
+    "nvidia_device_context": [
+      {
+        "uuid": " GPU-bc269b7d-8628-6f57-6a33-88e466eeb257",
+        "pci_bus_id": " 00000000:01:00.0",
+        "name": " NVIDIA GeForce RTX 4080",
+        "metrics": {
+          "gpu_percent": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 79.81818181818181,
+            "weighted_mean": 79.81818181818181,
+            "min": 3.0,
+            "max": 99.0
+          },
+          "memory_controller_percent": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 10.954545454545455,
+            "weighted_mean": 10.954545454545455,
+            "min": 1.0,
+            "max": 15.0
+          },
+          "graphics_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 2807.0454545454545,
+            "weighted_mean": 2807.0454545454545,
+            "min": 2805.0,
+            "max": 2820.0
+          },
+          "sm_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 2807.0454545454545,
+            "weighted_mean": 2807.0454545454545,
+            "min": 2805.0,
+            "max": 2820.0
+          },
+          "memory_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 11201.0,
+            "weighted_mean": 11201.0,
+            "min": 11201.0,
+            "max": 11201.0
+          },
+          "memory_used_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 8570.0,
+            "weighted_mean": 8570.0,
+            "min": 8211.0,
+            "max": 8792.0
+          },
+          "memory_total_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 16376.0,
+            "weighted_mean": 16376.0,
+            "min": 16376.0,
+            "max": 16376.0
+          },
+          "memory_free_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 7479.0,
+            "weighted_mean": 7479.0,
+            "min": 7257.0,
+            "max": 7838.0
+          },
+          "temperature_c": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 59.40909090909091,
+            "weighted_mean": 59.40909090909091,
+            "min": 52.0,
+            "max": 63.0
+          },
+          "power_watts": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 179.05,
+            "weighted_mean": 179.05,
+            "min": 89.58,
+            "max": 204.53
+          },
+          "power_limit_watts": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 340.0,
+            "weighted_mean": 340.0,
+            "min": 340.0,
+            "max": 340.0
+          }
+        },
+        "scope": "Whole physical device, includes other processes; no Windows LUID mapping is assumed from NVIDIA index."
+      }
+    ],
+    "scope": "Only intervals fully contained in contiguous Playing CPU-frame QPC windows; no interpolation across menus or transitions. NVIDIA samples use their own timestamps.",
+    "windows_qpc_seconds": [
+      [
+        53217.9936116,
+        53240.865258
+      ]
+    ],
+    "window_seconds": 22.87164639999537,
+    "issues": [
+      "GPU segment utilization worker partial/counter errors: complete=True, reason=process_exit, counter_errors=41; invalid/warmup intervals excluded"
+    ]
+  },
+  "same_config_foreground_intervals": {
+    "count": 184,
+    "mean_ms": 119.36678967391305,
+    "median_ms": 113.05255,
+    "p95_nearest_rank_ms": 126.39580000000001,
+    "p99_nearest_rank_ms": 393.18550000000005,
+    "intervals_within_72_base_fps_budget": 0
+  },
+  "target_gpu_status_counts": {
+    "0": 1440
+  },
+  "other_gpu_status_counts": {
+    "0": 32160,
+    "3221228486": 600
+  },
+  "native_resolution": [
+    1920,
+    1080
+  ],
+  "reported_monitor_refresh_hz": 143,
+  "settings_revision_measured": 3,
+  "settings_count_per_revision": 56,
+  "comparison_limit": "Capture05 and current content/load/CPU fixes differ; no controlled speedup ratio."
+}

@@ -1,0 +1,680 @@
+{
+  "complete": true,
+  "meshes": [
+    {
+      "name": "shrub_low",
+      "triangles": 11130,
+      "bounds_engine_m": [
+        [
+          -0.5079753398895264,
+          0.0,
+          -0.5805299282073975
+        ],
+        [
+          0.56390780210495,
+          0.69575434923172,
+          0.6317511796951294
+        ]
+      ],
+      "minimum_triangle_area_m2": 9.74236062966706e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.98828125,
+          0.9810234308242798
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "shrub_low_lod1",
+      "triangles": 5544,
+      "bounds_engine_m": [
+        [
+          -0.49484261870384216,
+          0.0,
+          -0.5745571851730347
+        ],
+        [
+          0.5513902902603149,
+          0.695700466632843,
+          0.6317511796951294
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.0699111470829707e-06,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.98828125,
+          0.9784274101257324
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "shrub_low_lod2",
+      "triangles": 2016,
+      "bounds_engine_m": [
+        [
+          -0.5079753398895264,
+          0.0,
+          -0.5805299282073975
+        ],
+        [
+          0.56390780210495,
+          0.6957709789276123,
+          0.5214119553565979
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.1249819908171326e-06,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.98828125,
+          0.9837499856948853
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "stump_roots",
+      "triangles": 784,
+      "bounds_engine_m": [
+        [
+          -0.9627302885055542,
+          0.0,
+          -0.7986833453178406
+        ],
+        [
+          1.0359084606170654,
+          0.7139999866485596,
+          1.0942885875701904
+        ]
+      ],
+      "minimum_triangle_area_m2": 0.0005806246887845153,
+      "uv0_range": [
+        [
+          0.27814212441444397,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.9679421186447144
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "stump_roots_lod1",
+      "triangles": 360,
+      "bounds_engine_m": [
+        [
+          -0.8606612682342529,
+          0.0,
+          -0.8098362684249878
+        ],
+        [
+          1.0039054155349731,
+          0.7139999866485596,
+          1.0942885875701904
+        ]
+      ],
+      "minimum_triangle_area_m2": 0.0018783785540358868,
+      "uv0_range": [
+        [
+          0.275062620639801,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.9682106375694275
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "stump_roots_lod2",
+      "triangles": 176,
+      "bounds_engine_m": [
+        [
+          -0.9829528331756592,
+          0.0,
+          -0.7802523970603943
+        ],
+        [
+          0.9940120577812195,
+          0.7086998224258423,
+          0.7572069764137268
+        ]
+      ],
+      "minimum_triangle_area_m2": 0.006281656787053368,
+      "uv0_range": [
+        [
+          0.2828185558319092,
+          0.51171875
+        ],
+        [
+          0.98828125,
+          0.9632688760757446
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_intact",
+      "triangles": 7560,
+      "bounds_engine_m": [
+        [
+          -0.45549893379211426,
+          0.0,
+          -0.4304569661617279
+        ],
+        [
+          0.45814254879951477,
+          0.6586655974388123,
+          0.4330425560474396
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.352560746744379e-07,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_intact_lod1",
+      "triangles": 1728,
+      "bounds_engine_m": [
+        [
+          -0.45547062158584595,
+          0.0,
+          -0.4304569661617279
+        ],
+        [
+          0.45549601316452026,
+          0.6586655974388123,
+          0.4299086630344391
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.95886419261436e-05,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_intact_lod2",
+      "triangles": 864,
+      "bounds_engine_m": [
+        [
+          -0.4554115831851959,
+          0.0,
+          -0.42787063121795654
+        ],
+        [
+          0.455336332321167,
+          0.645484447479248,
+          0.4291764497756958
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.390665398209377e-05,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_broken",
+      "triangles": 7000,
+      "bounds_engine_m": [
+        [
+          -0.45549893379211426,
+          0.0,
+          -0.4304569661617279
+        ],
+        [
+          0.45814254879951477,
+          0.6712526679039001,
+          0.5111390948295593
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.352560746744379e-07,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_broken_lod1",
+      "triangles": 1600,
+      "bounds_engine_m": [
+        [
+          -0.45547062158584595,
+          0.0,
+          -0.4304569661617279
+        ],
+        [
+          0.45549601316452026,
+          0.6712526679039001,
+          0.5086625814437866
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.95886419261436e-05,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "crate_broken_lod2",
+      "triangles": 800,
+      "bounds_engine_m": [
+        [
+          -0.4554115831851959,
+          0.0,
+          -0.42787063121795654
+        ],
+        [
+          0.455336332321167,
+          0.6597122550010681,
+          0.5088743567466736
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.390665398209377e-05,
+      "uv0_range": [
+        [
+          0.015694575384259224,
+          0.7662500143051147
+        ],
+        [
+          0.48374998569488525,
+          0.9842889308929443
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_intact",
+      "triangles": 4760,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.37534376978874207,
+          0.9129425287246704,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.9767250514815589e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_intact_lod1",
+      "triangles": 1784,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.37534376978874207,
+          0.9104816317558289,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.666321314156316e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_intact_lod2",
+      "triangles": 904,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.37534376978874207,
+          0.9104816317558289,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.961120692941987e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_broken",
+      "triangles": 3324,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.5432113409042358,
+          0.9243999719619751,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.9767472478210528e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_broken_lod1",
+      "triangles": 1344,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.5432113409042358,
+          0.9243999719619751,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.666435477775327e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "barrel_broken_lod2",
+      "triangles": 692,
+      "bounds_engine_m": [
+        [
+          -0.37534376978874207,
+          0.0,
+          -0.37534376978874207
+        ],
+        [
+          0.5432546734809875,
+          0.9243999719619751,
+          0.37534376978874207
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.961120469157258e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48828125,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "cart_broken",
+      "triangles": 12356,
+      "bounds_engine_m": [
+        [
+          -0.9809423089027405,
+          0.0,
+          -0.8104249238967896
+        ],
+        [
+          0.9771618843078613,
+          1.201725959777832,
+          1.6290907859802246
+        ]
+      ],
+      "minimum_triangle_area_m2": 9.363371929676547e-08,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48374998569488525,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "cart_broken_lod1",
+      "triangles": 3068,
+      "bounds_engine_m": [
+        [
+          -0.9809423089027405,
+          0.0,
+          -0.8104249238967896
+        ],
+        [
+          0.9771618843078613,
+          1.201725959777832,
+          1.6290907859802246
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.944692899226251e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48374998569488525,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "cart_broken_lod2",
+      "triangles": 1580,
+      "bounds_engine_m": [
+        [
+          -0.9700000286102295,
+          0.0,
+          -0.7999999523162842
+        ],
+        [
+          0.9700002670288086,
+          1.1993000507354736,
+          1.6239140033721924
+        ]
+      ],
+      "minimum_triangle_area_m2": 3.734125077114338e-05,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.76171875
+        ],
+        [
+          0.48374998569488525,
+          0.98828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    }
+  ],
+  "cart_wheel_track_m": 1.64,
+  "material": "ground_detail",
+  "seed": 712
+}

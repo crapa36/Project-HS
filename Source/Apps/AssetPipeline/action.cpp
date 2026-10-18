@@ -866,15 +866,20 @@ std::size_t ActionResultSnapshot::ProductCount() const
     return result_.at("products").size();
 }
 
+const Json &ActionResultSnapshot::ProductMetadata(std::string_view product_id) const
+{
+    const auto found = product_indexes_.find(std::string(product_id));
+    Require(found != product_indexes_.end(),
+            "upstream product is missing from ActionResult: " + std::string(product_id));
+    return result_.at("products").at(found->second);
+}
+
 void ActionResultSnapshot::ReadProduct(std::string_view product_id,
                                        UpstreamProduct &dependency,
                                        fs::path &product_path,
                                        ProductReadPolicy policy) const
 {
-    const auto found = product_indexes_.find(std::string(product_id));
-    Require(found != product_indexes_.end(),
-            "upstream product is missing from ActionResult: " + std::string(product_id));
-    const auto &product = result_.at("products").at(found->second);
+    const auto &product = ProductMetadata(product_id);
     const auto id = result_.at("product_set_id").get<std::string>();
     const auto locator = product.at("locator").get<std::string>();
     const auto expected = (fs::path("Products") / namespace_path_ / id /

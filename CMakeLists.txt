@@ -278,9 +278,6 @@ add_library(hs_render_data STATIC
     Source/RenderData/Private/ltc_lut.cpp
     Source/RenderData/Private/texture_package.cpp
     Source/RenderData/Private/volume_texture_package.cpp)
-target_sources(hs_render_data PRIVATE
-    Source/RenderData/Private/opacity_micromap_package.cpp
-    Source/RenderData/Private/opacity_micromap_bake.cpp)
 target_include_directories(hs_render_data PUBLIC Source/RenderData/Public)
 target_link_libraries(hs_render_data PUBLIC hs_core)
 hs_configure_target(hs_render_data)
@@ -393,24 +390,17 @@ add_library(
     Source/RendererD3D12/Private/renderer_probe.cpp
     Source/RendererD3D12/Private/renderer_ltc.cpp
     Source/RendererD3D12/Private/renderer_hdr_post.cpp
-    Source/RendererD3D12/Private/renderer_ray_scene.cpp
-    Source/RendererD3D12/Private/renderer_ray_geometry.cpp
-    Source/RendererD3D12/Private/renderer_ray_ambient_occlusion.cpp
-    Source/RendererD3D12/Private/renderer_ray_transport.cpp
-    Source/RendererD3D12/Private/renderer_ray_omm.cpp
-    Source/RendererD3D12/Private/renderer_ray_ser.cpp
+    Source/RendererD3D12/Private/renderer_scene_geometry.cpp
     Source/RendererD3D12/Private/renderer_entity_surface.cpp
     Source/RendererD3D12/Private/renderer_decal_surface.cpp
     Source/RendererD3D12/Private/renderer_decal_materials.cpp
     Source/RendererD3D12/Private/renderer_views.cpp
     Source/RendererD3D12/Private/renderer_settings.cpp
     Source/RendererD3D12/Private/renderer_named_animation.cpp
-    Source/RendererD3D12/Private/renderer_ray_reconstruction.cpp
     Source/RendererD3D12/Private/renderer_brixelizer_gi.cpp
     Source/RendererD3D12/Private/renderer_brixelizer_integration.cpp
     Source/RendererD3D12/Private/renderer_virtual_shadow.cpp
     Source/RendererD3D12/Private/renderer_local_shadow.cpp
-    Source/RendererD3D12/Private/renderer_ray_shadow.cpp
     Source/RendererD3D12/Private/renderer_hlod.cpp
     Source/RendererD3D12/Private/renderer_hlod_runtime.cpp
     Source/RendererD3D12/Private/renderer_local_probe.cpp
@@ -568,8 +558,6 @@ hs_compile_shader(cluster_emit_cs.dxil EmitCuts cs_6_0)
 hs_compile_shader(cluster_occlusion_cs.dxil CullClusters cs_6_0)
 hs_compile_shader(cluster_retest_cs.dxil RetestClusters cs_6_0)
 hs_compile_shader(scene_ps.dxil ScenePS ps_6_0)
-hs_compile_shader(environment_opaque_ps.dxil EnvironmentOpaquePS ps_6_0)
-hs_compile_shader(environment_masked_ps.dxil EnvironmentMaskedPS ps_6_0)
 hs_compile_shader(visibility_ps.dxil VisibilityPS ps_6_0 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_buffer.hlsl")
 hs_compile_shader(surface_resolve_cs.dxil SurfaceResolveCS cs_6_0 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_buffer.hlsl")
 hs_compile_shader(raster_records_cs.dxil BuildRasterRecordsCS cs_6_0 "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/visibility_buffer.hlsl")
@@ -582,7 +570,6 @@ hs_compile_shader(shadow_vs.dxil ShadowVS vs_6_0)
 hs_compile_shader(shadow_ms.dxil ShadowMS ms_6_5)
 hs_compile_shader(shadow_ps.dxil ShadowPS ps_6_0)
 hs_compile_shader(environment_opaque_shadow_ps.dxil EnvironmentOpaqueShadowPS ps_6_0)
-hs_compile_shader(environment_masked_shadow_ps.dxil EnvironmentMaskedShadowPS ps_6_0)
 hs_compile_shader(particle_vs.dxil ParticleVS vs_6_0)
 hs_compile_shader(ground_ring_vs.dxil GroundRingVS vs_6_0)
 hs_compile_shader(ground_add_ps.dxil GroundAddPS ps_6_0)
@@ -981,7 +968,8 @@ set(HS_ENVIRONMENT_MANIFEST
 foreach(mode IN ITEMS histogram meshes)
     if(mode STREQUAL "meshes")
         set(action_inputs
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json")
+            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/meadow_surface_meshes.json")
     else()
         set(action_inputs "${HS_ENVIRONMENT_MANIFEST}")
     endif()
@@ -996,9 +984,11 @@ foreach(mode IN ITEMS histogram meshes)
 endforeach()
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS hs_environment_texture=1)
 set(HS_ENVIRONMENT_TEXTURE_RESULTS)
-foreach(group IN ITEMS terrain rock bark grass leaf)
+foreach(group IN ITEMS terrain rock bark grass leaf ground_detail)
     if(group STREQUAL "terrain")
         set(roles base_color surface_ra normal detail_normal height)
+    elseif(group STREQUAL "ground_detail")
+        set(roles base_color surface_ra normal)
     elseif(group STREQUAL "rock" OR group STREQUAL "bark")
         set(roles base_color surface_ra normal detail_normal)
     else()
@@ -1009,7 +999,7 @@ foreach(group IN ITEMS terrain rock bark grass leaf)
         set(action_depfile "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/${group}/${role}/result.d")
         set(action_inputs "${HS_ENVIRONMENT_MANIFEST}")
         list(APPEND action_inputs "${CMAKE_CURRENT_BINARY_DIR}/RecipeIdentity/hs_environment.json")
-        if(group STREQUAL "rock" OR group STREQUAL "bark" OR
+        if(group STREQUAL "rock" OR group STREQUAL "bark" OR group STREQUAL "ground_detail" OR
                 (group STREQUAL "grass" OR group STREQUAL "leaf") AND NOT role STREQUAL "base_color")
             list(APPEND action_inputs
                 "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/baked_materials.json")
@@ -1086,13 +1076,14 @@ set(HS_RENDER_TEXTURE_NAMES
     rock_basecolor rock_surface rock_normal rock_detail
     bark_basecolor bark_surface bark_normal bark_detail
     grass_basecolor grass_normal grass_roughness
-    leaf_basecolor leaf_normal leaf_roughness)
+    leaf_basecolor leaf_normal leaf_roughness
+    ground_detail_basecolor ground_detail_surface ground_detail_normal)
 foreach(texture_name IN LISTS HS_RENDER_TEXTURE_NAMES)
     if(texture_name STREQUAL "terrain_gaussian" OR texture_name STREQUAL "terrain_histogram")
         set(texture_upstream
             "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/histogram/result.json")
     else()
-        string(REGEX MATCH "^([^_]+)_(.+)$" ignored "${texture_name}")
+        string(REGEX MATCH "^(.+)_([^_]+)$" ignored "${texture_name}")
         set(texture_group "${CMAKE_MATCH_1}")
         set(texture_role "${CMAKE_MATCH_2}")
         if(texture_role STREQUAL "basecolor")
@@ -1181,10 +1172,10 @@ add_executable(hs_render_runtime_shader
     Source/Apps/RenderRuntimeShader/main.cpp
     Source/Apps/AssetPipeline/action.cpp)
 target_link_libraries(hs_render_runtime_shader PRIVATE
-    hs_core nlohmann_json::nlohmann_json bcrypt)
+    hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
 target_compile_definitions(hs_render_runtime_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_render_runtime_shader)
-foreach(family IN ITEMS project geometry visibility static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion reconstruction-guides sdk-presentation hdr-post light-list ray-geometry virtual-shadow volumetrics scene-hlod local-probe-bake)
+foreach(family IN ITEMS project geometry visibility static-visibility depth-pyramid skin-cache exposure cluster-refinement ambient-occlusion reconstruction-guides sdk-presentation hdr-post light-list scene-geometry virtual-shadow volumetrics scene-hlod local-probe-bake)
     if(family STREQUAL "project")
         set(family_source project_hs.hlsl)
     elseif(family STREQUAL "visibility")
@@ -1210,12 +1201,6 @@ foreach(family IN ITEMS project geometry visibility static-visibility depth-pyra
             "--build=${CMAKE_CURRENT_BINARY_DIR}" "--dxc=${HS_DXC}")
     list(APPEND HS_RENDER_SHADER_RESULTS "${family_result}")
 endforeach()
-# Optional NRD CPU metadata producer joins the same packed shader result set.
-# Content-tools-only builds do not enter hs_configure_render_sdks above.
-if(NOT COMMAND hs_add_nrd_shader_action)
-    include(cmake/RenderSDKs.cmake)
-endif()
-hs_add_nrd_shader_action()
 if(HS_WITH_BRIXELIZER)
     add_executable(hs_render_brixelizer_shader
         Source/Apps/RenderBrixelizerShaderPackage/main.cpp
@@ -1247,14 +1232,6 @@ if(HS_WITH_BRIXELIZER)
             "--sdk=${HS_BRIXELIZER_SDK_ROOT}" "--pin=${HS_BRIXELIZER_PIN}")
     list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BRIXELIZER_SHADER_RESULT}")
 endif()
-set(HS_NRD_TRANSPORT_ARGS)
-set(HS_NRD_TRANSPORT_RESULTS)
-set(HS_NRD_TRANSPORT_INPUTS)
-if(HS_WITH_NRD)
-    list(APPEND HS_NRD_TRANSPORT_ARGS --with-nrd)
-    list(APPEND HS_NRD_TRANSPORT_RESULTS "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/nrd/result.json")
-    list(APPEND HS_NRD_TRANSPORT_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_nrd_conversion.hlsl")
-endif()
 set(HS_BRIXELIZER_TRANSPORT_ARGS)
 set(HS_BRIXELIZER_TRANSPORT_INPUTS)
 if(HS_WITH_BRIXELIZER)
@@ -1270,7 +1247,10 @@ set(HS_BSDF_SHADER_RESULT
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/bsdf-preintegrate/result.json")
 set(HS_AUTHORED_MATERIAL_NAMES
     trunk_0 trunk_1 trunk_2 leaf_0 leaf_1 leaf_2 rock_0 rock_1 rock_2 rock_3
-    grass_0 grass_1 grass_2 grass_3 terrain)
+    grass_0 grass_1 grass_2 grass_3 terrain ground_detail)
+set(HS_GROUND_DETAIL_MESH_NAMES
+    flower_daisy flower_buttercup flower_violet clover_patch ground_leaves twig_cluster fence_short
+    shrub_low stump_roots crate_intact crate_broken barrel_intact barrel_broken cart_broken)
 set(HS_HERO_MATERIAL_NAMES
     archer_skin archer_cloth archer_cutout archer_equipment slime_features slime_body monster_pbr)
 set(HS_DEFERRED_MATERIAL_INPUTS)
@@ -1278,46 +1258,17 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES HS_HERO_MATERIAL_NAMES)
     list(APPEND HS_DEFERRED_MATERIAL_INPUTS
         "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Materials/${name}.json")
 endforeach()
-include(cmake/Dxc69.cmake)
-hs_configure_dxc69()
-add_executable(hs_render_native_ray_shader
-    Source/Apps/RenderNativeRayShader/main.cpp
-    Source/Apps/RenderMaterialShader/material_graph_parser.cpp
-    Source/Apps/AssetPipeline/action.cpp)
-target_link_libraries(hs_render_native_ray_shader PRIVATE
-    hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
-target_compile_definitions(hs_render_native_ray_shader PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-hs_configure_target(hs_render_native_ray_shader)
-set(HS_NATIVE_RAY_SHADER_RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/ray-native/result.json")
-hs_add_asset_action(NAME hs_render_native_ray_shader_action BUILDER hs_render_native_ray_shader
-    RESULT "${HS_NATIVE_RAY_SHADER_RESULT}"
-    DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/ray-native/result.d"
-    UPSTREAM_RESULTS ${HS_NRD_TRANSPORT_RESULTS}
-    STATIC_INPUTS "${HS_DXC69_PIN}" ${HS_DXC69_TOOL_INPUTS}
-        "${HS_DXC69_ROOT}/../dxc69-1.9.2602.24.zip"
-        ${HS_DEFERRED_MATERIAL_INPUTS} ${HS_MATERIAL_SURFACE_LIBRARY}
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_gi.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_reflections.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_gi_ser.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_reflections_ser.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_native_trace.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_hit.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_radiance.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_transport.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
-    ARGS "--source=${CMAKE_CURRENT_SOURCE_DIR}" "--build=${CMAKE_CURRENT_BINARY_DIR}"
-        "--dxc=${HS_DXC69}" "--pin=${HS_DXC69_PIN}" ${HS_NRD_TRANSPORT_ARGS})
-list(APPEND HS_RENDER_SHADER_RESULTS "${HS_NATIVE_RAY_SHADER_RESULT}")
 hs_add_asset_action(
     NAME hs_render_bsdf_preintegrate
     BUILDER hs_render_material_shader
     RESULT "${HS_BSDF_SHADER_RESULT}"
     DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/bsdf-preintegrate/result.d"
-    UPSTREAM_RESULTS ${HS_NRD_TRANSPORT_RESULTS}
     STATIC_INPUTS
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/bsdf_preintegrate.hlsl"
         "${HS_SHADER_SOURCE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment_wind.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/deferred_surface.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/subsurface_diffusion.hlsl"
@@ -1329,30 +1280,20 @@ hs_add_asset_action(
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/probe_ibl.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/light_list.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ltc_area.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_geometry.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_hit.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_ambient_occlusion.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_transport.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_radiance.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_gi.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_native_trace.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_reflections.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_shadow.hlsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsl"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/scene_geometry.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_shadow.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_shadow_data.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_transport_composite.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_reconstruction_guides.hlsl"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/shadow_data.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/temporal_reconstruction.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/display_transform.hlsli"
         "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
         ${HS_DEFERRED_MATERIAL_INPUTS}
         "${HS_GPU_SCENE_TABLES_SOURCE}" ${HS_GEOMETRY_SHADER_SOURCE}
-        ${HS_MATERIAL_SURFACE_LIBRARY} ${HS_DXC_TOOL_INPUTS} ${HS_NRD_TRANSPORT_INPUTS}
+        ${HS_MATERIAL_SURFACE_LIBRARY} ${HS_DXC_TOOL_INPUTS}
         ${HS_BRIXELIZER_TRANSPORT_INPUTS}
     ARGS --bsdf-preintegrate --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
         --build-root "${CMAKE_CURRENT_BINARY_DIR}" --dxc "${HS_DXC}"
-        ${HS_NRD_TRANSPORT_ARGS} ${HS_BRIXELIZER_TRANSPORT_ARGS})
+        ${HS_BRIXELIZER_TRANSPORT_ARGS})
 list(APPEND HS_RENDER_SHADER_RESULTS "${HS_BSDF_SHADER_RESULT}")
 add_custom_command(
     OUTPUT ${HS_SHADER_OUTPUTS}
@@ -1404,7 +1345,7 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
         list(APPEND material_library_inputs "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/material_terrain.hlsli")
     endif()
     set(material_geometry_results)
-    if(NOT name STREQUAL "terrain")
+    if(NOT name STREQUAL "terrain" AND NOT name STREQUAL "ground_detail")
         list(APPEND material_geometry_results "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/meshes/result.json")
     endif()
     hs_add_asset_action(
@@ -1418,7 +1359,9 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
             "${material_schema}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/project_hs.hlsl"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment.hlsli"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/environment_wind.hlsli"
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_capture.hlsl"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/local_probe_draw.hlsli"
             ${material_library_inputs}
             ${HS_MATERIAL_SURFACE_LIBRARY}
             "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/vfx_ribbon.hlsli"
@@ -1454,6 +1397,28 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
         ARGS --name "${name}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
+set(HS_GROUND_DETAIL_GEOMETRY_RESULTS)
+list(APPEND HS_GROUND_DETAIL_MESH_NAMES meadow_ground meadow_water)
+foreach(name IN LISTS HS_GROUND_DETAIL_MESH_NAMES)
+    if(name STREQUAL "meadow_ground")
+        set(surface_material terrain)
+    else()
+        set(surface_material ground_detail)
+    endif()
+    set(action_result "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${name}/result.json")
+    hs_add_asset_action(
+        NAME "hs_render_${name}" BUILDER hs_render_package
+        RESULT "${action_result}"
+        DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${name}/result.d"
+        STATIC_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Materials/${surface_material}.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
+        UPSTREAM_RESULTS "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/meshes/result.json"
+            "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${surface_material}/result.json"
+        ARGS --name "${name}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --build-root "${CMAKE_CURRENT_BINARY_DIR}")
+    list(APPEND HS_GROUND_DETAIL_GEOMETRY_RESULTS "${action_result}")
+endforeach()
+list(APPEND HS_RENDER_ACTION_RESULTS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
 set(HS_HERO_MATERIAL_RESULTS)
 set(HS_SCENE_HLOD_RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/hlod/arena/result.json")
 set(HS_SCENE_HLOD_UPSTREAMS "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/simulation-payload/result.json")
@@ -1473,6 +1438,8 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
         list(APPEND HS_SCENE_HLOD_UPSTREAMS "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${name}/result.json")
     endif()
 endforeach()
+list(APPEND HS_SCENE_PROBE_UPSTREAMS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
+list(APPEND HS_SCENE_HLOD_UPSTREAMS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
 hs_add_asset_action(NAME hs_render_scene_hlod BUILDER hs_render_scene_package
     RESULT "${HS_SCENE_HLOD_RESULT}"
     DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/hlod/arena/result.d"
@@ -1678,43 +1645,6 @@ foreach(mode IN ITEMS archer slime-melee slime-ranged slime-suicide slime-projec
     list(APPEND HS_CHARACTER_TEXTURE_RESULTS "${texture_result}")
 endforeach()
 add_custom_target(hs_render_character_texture_products DEPENDS ${HS_CHARACTER_TEXTURE_RESULTS})
-add_executable(hs_render_opacity_micromap
-    Source/Apps/RenderOpacityMicromap/main.cpp
-    Source/Apps/RenderMaterialShader/material_graph_parser.cpp
-    Source/Apps/AssetPipeline/action.cpp)
-target_link_libraries(hs_render_opacity_micromap PRIVATE
-    hs_render_data hs_core nlohmann_json::nlohmann_json bcrypt)
-target_compile_definitions(hs_render_opacity_micromap PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-hs_configure_target(hs_render_opacity_micromap)
-set(HS_OMM_RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/ray/omm/result.json")
-set(HS_OMM_UPSTREAM_RESULTS ${HS_CHARACTER_PACKAGE_RESULTS} ${HS_CHARACTER_TEXTURE_RESULTS}
-    ${HS_RENDER_TEXTURE_RESULTS} "${HS_SCENE_HLOD_RESULT}")
-foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
-    if(name STREQUAL "terrain")
-        continue()
-    endif()
-    list(APPEND HS_OMM_UPSTREAM_RESULTS
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/${name}/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${name}/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/material/${name}/parameters/result.json")
-endforeach()
-foreach(name IN LISTS HS_HERO_MATERIAL_NAMES)
-    list(APPEND HS_OMM_UPSTREAM_RESULTS
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/shader/${name}/result.json"
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/material/${name}/parameters/result.json")
-endforeach()
-hs_add_asset_action(NAME hs_render_opacity_micromap_action BUILDER hs_render_opacity_micromap
-    RESULT "${HS_OMM_RESULT}" DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/ray/omm/result.d"
-    UPSTREAM_RESULTS ${HS_OMM_UPSTREAM_RESULTS}
-    STATIC_INPUTS ${HS_DEFERRED_MATERIAL_INPUTS} ${HS_MATERIAL_SURFACE_LIBRARY}
-        "${CMAKE_CURRENT_SOURCE_DIR}/Schemas/material_graph.schema.json"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/project_hs.hlsl"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_hit.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/ray_radiance.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Content/Shaders/hero_material.hlsli"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Source/RendererD3D12/Private/renderer_view_resources.cpp"
-    ARGS --source-root "${CMAKE_CURRENT_SOURCE_DIR}" --build-root "${CMAKE_CURRENT_BINARY_DIR}"
-        --subdivision-level 1 --byte-budget 67108864)
 add_executable(hs_vfx_content
     Source/Apps/VfxContent/main.cpp
     Source/Apps/VfxContent/particle_bridge.cpp
@@ -1866,7 +1796,6 @@ hs_add_test_generation(combat RESULTS
         game-data/gameplay-identity)
 set(HS_RUNTIME_FULL_RESULTS
     "${HS_QUALITY_PROFILES_RESULT}"
-    "${HS_OMM_RESULT}"
     "${HS_VOLUMETRIC_MEDIA_RESULT}"
     "${HS_SCENE_HLOD_RESULT}"
     "${HS_SCENE_PROBE_RESULT}"
@@ -2061,11 +1990,25 @@ if(HS_BUILD_TESTS)
         target_include_directories(hs_renderer_caster_storage_tests PRIVATE Source/RendererD3D12/Private)
         hs_configure_target(hs_renderer_caster_storage_tests)
         add_test(NAME rendering.caster-storage COMMAND hs_renderer_caster_storage_tests)
+        add_executable(hs_local_probe_draw_tests Tests/local_probe_draw_tests.cpp)
+        target_link_libraries(hs_local_probe_draw_tests PRIVATE hs_core)
+        target_include_directories(hs_local_probe_draw_tests PRIVATE Source/RendererD3D12/Private)
+        hs_configure_target(hs_local_probe_draw_tests)
+        add_test(NAME rendering.local-probe-draws COMMAND hs_local_probe_draw_tests)
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
             add_test(NAME rendering.shader-reconstruction-contracts
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_shader_reconstruction.py")
+            add_test(NAME rendering.ssr-spatial-composition-contracts
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_ssr_spatial_composition.py")
+            add_test(NAME rendering.graphics-option-cost-selfcheck
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/analyze-graphics-options.py" --self-test)
+            add_test(NAME rendering.play-capture-selfcheck
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tools/analyze-play-capture.py" --self-test)
             add_test(NAME rendering.oit-capture-analyzer-selfcheck
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py")
@@ -2189,9 +2132,17 @@ if(HS_BUILD_TESTS)
     add_test(NAME content.render-package-format COMMAND hs_render_package_tests)
     if(HS_BUILD_CONTENT_TOOLS)
         add_executable(hs_scene_hlod_cooker_tests Tests/scene_hlod_cooker_tests.cpp)
-        target_link_libraries(hs_scene_hlod_cooker_tests PRIVATE hs_scene_hlod_cooker)
+        target_link_libraries(hs_scene_hlod_cooker_tests PRIVATE hs_scene_hlod_cooker hs_environment_layout)
         hs_configure_target(hs_scene_hlod_cooker_tests)
         add_test(NAME content.scene-hlod-cooker COMMAND hs_scene_hlod_cooker_tests)
+        add_executable(hs_environment_mesh_cooker_tests
+            Tests/environment_mesh_cooker_tests.cpp
+            Source/Apps/Content/environment_mesh_cooker.cpp)
+        target_include_directories(hs_environment_mesh_cooker_tests PRIVATE Source/Apps/Content)
+        target_link_libraries(hs_environment_mesh_cooker_tests PRIVATE hs_core nlohmann_json::nlohmann_json)
+        hs_configure_target(hs_environment_mesh_cooker_tests)
+        add_test(NAME content.environment-mesh-cooker COMMAND hs_environment_mesh_cooker_tests)
+        set_tests_properties(content.environment-mesh-cooker PROPERTIES TIMEOUT 30)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         add_test(NAME content.material-parameter-actions
             COMMAND "${Python3_EXECUTABLE}"
@@ -2230,7 +2181,7 @@ if(HS_BUILD_TESTS)
         COMMAND powershell -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_generation_upstream_identity.ps1"
             -GenerationExecutable "$<TARGET_FILE:hs_generation>"
-            -FixtureParent "${CMAKE_CURRENT_BINARY_DIR}/test-fixtures")
+            -FixtureParent "${CMAKE_CURRENT_BINARY_DIR}")
     add_executable(hs_vfx_authoring_tests Tests/vfx_authoring_tests.cpp
         Source/RendererD3D12/Private/vfx_program_loader.cpp)
     target_link_libraries(hs_vfx_authoring_tests PRIVATE hs_vfx_authoring nlohmann_json::nlohmann_json)
@@ -2337,6 +2288,15 @@ if(HS_BUILD_TESTS)
     # measured 281 seconds before 0.233 seconds of GPU work on this test path.
     # Keep validation/assertions intact and allow that bounded cold startup.
     set_tests_properties(rendering.dynamic-lod-skin-growth PROPERTIES TIMEOUT 600)
+    add_test(NAME rendering.timing-stream
+        COMMAND hs_render_test_runner
+            --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
+            --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/timing-stream
+            --frames=8 --timing-stream-probe
+            --surface=compact --geometry=indexed --barriers=enhanced --validation
+        BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
+    set_tests_properties(rendering.timing-stream PROPERTIES
+        TIMEOUT 600 RESOURCE_LOCK projecths_d3d12)
     add_test(NAME rendering.residency-streaming-gpu
         COMMAND hs_render_test_runner
             --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
@@ -2393,8 +2353,9 @@ if(HS_BUILD_TESTS)
                 --artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/material-parameter-reload"
                 --geometry indexed --surface visibility --barriers enhanced
             BUILD_DEPENDS hs_render_test_runner hs_render_material_shader hs_generation hs_test_render_generation)
+        # Cold GBV shader instrumentation also exceeded 300 seconds in adjacent GPU fixtures.
         set_tests_properties(rendering.material-parameter-reload PROPERTIES
-            TIMEOUT 300 RESOURCE_LOCK projecths_d3d12)
+            TIMEOUT 600 RESOURCE_LOCK projecths_d3d12)
     endif()
     add_test(
         NAME experiment.offscreen
@@ -2566,11 +2527,11 @@ if(HS_BUILD_TESTS)
     add_executable(hs_render_graph_multi_queue_tests
         Tests/render_graph_multi_queue_tests.cpp)
     target_link_libraries(hs_render_graph_multi_queue_tests PRIVATE
-        hs_renderer_d3d12 D3D12MemoryAllocator d3d12 dxgi)
+        hs_renderer_d3d12 hs_render_data D3D12MemoryAllocator d3d12 dxgi)
     target_include_directories(hs_render_graph_multi_queue_tests PRIVATE
         Source/RendererD3D12/Private)
     target_compile_definitions(hs_render_graph_multi_queue_tests PRIVATE
-        WIN32_LEAN_AND_MEAN NOMINMAX)
+        WIN32_LEAN_AND_MEAN NOMINMAX HS_TEST_DXC_PATH="${HS_DXC}")
     hs_configure_target(hs_render_graph_multi_queue_tests)
     add_dependencies(hs_render_graph_multi_queue_tests hs_runtime_native_assets)
     add_test(NAME rendering.multi-queue-graph
@@ -2679,6 +2640,12 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_graphics_settings_store_tests)
     add_test(NAME runtime.graphics-settings-store
         COMMAND hs_graphics_settings_store_tests)
+    add_executable(hs_runtime_native_input_tests Tests/runtime_native_input_tests.cpp)
+    target_link_libraries(hs_runtime_native_input_tests PRIVATE hs_core)
+    target_include_directories(hs_runtime_native_input_tests PRIVATE Source/Runtime/Private)
+    hs_configure_target(hs_runtime_native_input_tests)
+    add_test(NAME runtime.native-input COMMAND hs_runtime_native_input_tests)
+    set_tests_properties(runtime.native-input PROPERTIES TIMEOUT 10)
     add_executable(hs_generation_reload_watch_tests Tests/generation_reload_watch_tests.cpp)
     target_include_directories(hs_generation_reload_watch_tests PRIVATE Source/Runtime/Private)
     hs_configure_target(hs_generation_reload_watch_tests)

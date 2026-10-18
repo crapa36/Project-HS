@@ -110,6 +110,7 @@ Result SdkPresentation::Resolve(ID3D12Device *device, const RendererPresentation
 {
     if (impl_) return Failure(ErrorCode::InvalidState, "Destroy the detached presentation configuration before resolving another request.");
     status_ = {};
+    actual_present_count_ = {};
     status_.requested = request;
     status_.availability = "available";
     if (request.mode == GraphicsFrameGenerationMode::Off && request.low_latency != GraphicsAutoToggle::On)
@@ -366,6 +367,7 @@ Result SdkPresentation::NotifySubmission(const SdkFrameIdentity &identity, ID3D1
 }
 Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &identity, UINT sync, UINT flags)
 {
+    actual_present_count_ = {};
     if (!chain) return Failure(ErrorCode::InvalidArgument, "Present requires the sole current swapchain.");
     if (impl_)
     {
@@ -379,10 +381,11 @@ Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &
     Result sdk = Result::Success();
     HRESULT native = S_OK;
     std::uint32_t streamline_frames_actually_presented{};
+    RendererStreamlinePresentCount observation;
     if (impl_ && impl_->owner == SdkPresentationOwner::Fsr) sdk = impl_->fsr->Present(sync, flags);
     else native = chain->Present(sync, flags);
     if (impl_ && impl_->owner == SdkPresentationOwner::Streamline)
-        sdk = impl_->sl->PresentCompleted(identity, &streamline_frames_actually_presented);
+        sdk = impl_->sl->PresentCompleted(identity, &streamline_frames_actually_presented, &observation);
     if (impl_ && impl_->owner == SdkPresentationOwner::Xess)
     {
         XessFrameGenerationPresentStatus actual;
@@ -398,6 +401,7 @@ Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &
     if (!sdk) { status_.availability = "unavailable"; status_.fallback_reason = sdk.Message(); return sdk; }
     if (!marker) return marker;
     if (FAILED(native)) return Failure(ErrorCode::TaskFailed, "Native swapchain Present failed (HRESULT " + std::to_string(static_cast<std::int32_t>(native)) + ").");
+    actual_present_count_ = observation;
     return Result::Success();
 }
 Result SdkPresentation::DrainBeforeSwapChainMutation(bool abandonCompletedPrepare)
@@ -469,10 +473,13 @@ Result SdkPresentation::Marker(const SdkFrameIdentity &identity, SdkLatencyMarke
     }
 }
 const RendererPresentationStatus &SdkPresentation::Status() const noexcept { return status_; }
-void SdkPresentation::ReportAutoCadenceResolution(const RendererPresentationRequest &requested, bool suppressed)
+const RendererStreamlinePresentCount &SdkPresentation::ActualPresentCount() const noexcept { return actual_present_count_; }
+void SdkPresentation::ReportFrameGenerationPolicy(const RendererPresentationRequest &requested, bool suppressed, bool allowed)
 {
     status_.requested = requested;
-    if (suppressed)
+    if (!allowed && requested.mode != GraphicsFrameGenerationMode::Off)
+        status_.fallback_reason = "Frame generation is Off outside active gameplay (menus, pause or loading).";
+    else if (suppressed)
         status_.fallback_reason = "Auto frame generation is Off because completed base render cadence is below the authored quality profile threshold.";
 }
 SdkPresentationOwner SdkPresentation::PresentationOwner() const noexcept { return impl_ ? impl_->owner : SdkPresentationOwner::None; }

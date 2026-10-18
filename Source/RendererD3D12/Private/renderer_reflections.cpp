@@ -16,12 +16,12 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSrvCount = 14, kUavCount = 7, kDescriptorCount = 21;
+constexpr std::uint32_t kSrvCount = 13, kUavCount = 7, kDescriptorCount = 20;
 constexpr std::uint32_t kConstantStride = 768;
-constexpr std::array<std::string_view, 6> kShaderProducts{
+constexpr std::array<std::string_view, 5> kShaderProducts{
     "render/shader/ssr_depth_init_cs.dxil", "render/shader/ssr_depth_reduce_cs.dxil",
     "render/shader/ssr_trace_cs.dxil", "render/shader/ssr_temporal_cs.dxil",
-    "render/shader/ssr_spatial_cs.dxil", "render/shader/ssr_compose_cs.dxil"};
+    "render/shader/ssr_spatial_cs.dxil"};
 
 Result ReflectionFailure(ErrorCode code, std::string message)
 {
@@ -101,7 +101,7 @@ struct ScreenReflectionsTargets
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>, 6> pipelines;
+    std::array<ComPtr<ID3D12PipelineState>, kShaderProducts.size()> pipelines;
     ComPtr<ID3D12DescriptorHeap> descriptors, export_descriptors;
     AllocationResource constants, hierarchy, raw, composed;
     std::array<AllocationResource, 2> history, validation_history;
@@ -257,16 +257,14 @@ Result ScreenReflectionsSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->descriptors));
     if (FAILED(native)) return NativeFailure("Create reflection descriptors", native);
     next->descriptor_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
-    heap.NumDescriptors = 2; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    heap.NumDescriptors = 1; heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->export_descriptors));
     if (FAILED(native)) return NativeFailure("Create reflection export descriptors", native);
     D3D12_SHADER_RESOURCE_VIEW_DESC exportView{};
     exportView.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     exportView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; exportView.Texture2D.MipLevels = 1;
     auto exportHandle = next->export_descriptors->GetCPUDescriptorHandleForHeapStart();
-    exportView.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    device->CreateShaderResourceView(next->raw.resource.Get(), &exportView, exportHandle);
-    exportHandle.ptr += next->descriptor_stride; exportView.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    exportView.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     device->CreateShaderResourceView(next->composed.resource.Get(), &exportView, exportHandle);
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD; buffer.Width = UINT64(frameSlots) * kConstantStride;
     buffer.Flags = D3D12_RESOURCE_FLAG_NONE;
@@ -373,7 +371,6 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
         storage->Srv(inputs.frame_slot, 10 + index, index < inputs.sidecar_plane_count ? inputs.sidecars[index].resource : nullptr,
             index < inputs.sidecar_plane_count ? inputs.sidecars[index].resource->GetDesc().Format : DXGI_FORMAT_R32G32B32A32_UINT);
     storage->Srv(inputs.frame_slot, 12, inputs.ambient_visibility_enabled ? inputs.ambient_visibility.resource : nullptr, DXGI_FORMAT_R16_FLOAT);
-    storage->Srv(inputs.frame_slot, 13, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 0, storage->raw.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->history[storage->read_index].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
     storage->Uav(inputs.frame_slot, 2, storage->history[writeIndex].resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
@@ -401,7 +398,7 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
         return graph.Version(handle);
     };
     auto hierarchy = import(storage->hierarchy, "SSR.ClosestDepthHierarchy");
-    auto raw = import(storage->raw, "SSR.TraceAndResolved");
+    auto raw = import(storage->raw, "SSR.Trace");
     auto previous = import(storage->history[storage->read_index], "SSR.PreviousRadiance");
     auto previousValidation = import(storage->validation_history[storage->read_index], "SSR.PreviousValidation");
     auto current = import(storage->history[writeIndex], "SSR.CurrentRadiance");
@@ -463,18 +460,15 @@ Result ScreenReflectionsSystem::Register(RenderGraphBuilder &graph, const Screen
     }
     current = temporal.Write(current, Access::UnorderedWrite); validation = temporal.Write(validation, Access::UnorderedWrite);
     temporal.SetExecuteChecked(execute(3, traceActive));
-    auto spatial = graph.AddPass(72, "SSRSpatial", QueueHint::Direct);
+    auto spatial = graph.AddPass(72, "SSRSpatialCompose", QueueHint::Direct);
     readSurface(spatial); spatial.Read(current, Access::UnorderedRead); spatial.Read(validation, Access::UnorderedRead);
-    raw = spatial.Write(raw, Access::UnorderedWrite); spatial.SetExecuteChecked(execute(4, active));
-    auto compose = graph.AddPass(73, "SSRCompose", QueueHint::Direct);
-    compose.Read(raw, Access::ComputeRead); compose.Read(inputs.opaque_hdr.version, Access::ComputeRead);
-    compose.Read(inputs.environment_specular.version, Access::ComputeRead);
-    composed = compose.Write(composed, Access::UnorderedWrite); compose.SetExecuteChecked(execute(5, active));
+    spatial.Read(inputs.opaque_hdr.version, Access::ComputeRead);
+    spatial.Read(inputs.environment_specular.version, Access::ComputeRead);
+    composed = spatial.Write(composed, Access::UnorderedWrite); spatial.SetExecuteChecked(execute(4, active));
     graph.SetFinalAccess(current, Access::UnorderedRead); graph.SetFinalAccess(validation, Access::UnorderedRead);
-    graph.SetFinalAccess(raw, Access::ComputeRead); graph.SetFinalAccess(composed, Access::ComputeRead);
-    outputs = {raw, composed, storage->raw.resource.Get(), storage->composed.resource.Get(),
-               storage->export_descriptors->GetCPUDescriptorHandleForHeapStart(), storage->export_descriptors->GetCPUDescriptorHandleForHeapStart()};
-    outputs.composed_srv.ptr += storage->descriptor_stride;
+    graph.SetFinalAccess(composed, Access::ComputeRead);
+    outputs = {composed, storage->composed.resource.Get(),
+               storage->export_descriptors->GetCPUDescriptorHandleForHeapStart()};
     impl_->pending = std::move(pending);
     return Result::Success();
 }

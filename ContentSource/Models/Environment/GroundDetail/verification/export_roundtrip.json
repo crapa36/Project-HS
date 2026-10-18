@@ -1,0 +1,201 @@
+{
+  "complete": true,
+  "blender_version": "5.2.2 LTS",
+  "fbx_roundtrip": [
+    {
+      "file": "FBX/flower_daisy.fbx",
+      "meshes": [
+        {
+          "name": "flower_daisy",
+          "triangles": 11144,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_daisy_lod1",
+          "triangles": 4260,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_daisy_lod2",
+          "triangles": 1050,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 947500
+    },
+    {
+      "file": "FBX/flower_buttercup.fbx",
+      "meshes": [
+        {
+          "name": "flower_buttercup",
+          "triangles": 7168,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_buttercup_lod1",
+          "triangles": 2880,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_buttercup_lod2",
+          "triangles": 738,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 642172
+    },
+    {
+      "file": "FBX/flower_violet.fbx",
+      "meshes": [
+        {
+          "name": "flower_violet",
+          "triangles": 7308,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_violet_lod1",
+          "triangles": 3360,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "flower_violet_lod2",
+          "triangles": 936,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 704556
+    },
+    {
+      "file": "FBX/clover_patch.fbx",
+      "meshes": [
+        {
+          "name": "clover_patch",
+          "triangles": 5112,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "clover_patch_lod1",
+          "triangles": 2160,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "clover_patch_lod2",
+          "triangles": 672,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 481084
+    },
+    {
+      "file": "FBX/ground_leaves.fbx",
+      "meshes": [
+        {
+          "name": "ground_leaves",
+          "triangles": 2040,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "ground_leaves_lod1",
+          "triangles": 748,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "ground_leaves_lod2",
+          "triangles": 264,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 186844
+    },
+    {
+      "file": "FBX/twig_cluster.fbx",
+      "meshes": [
+        {
+          "name": "twig_cluster",
+          "triangles": 1510,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "twig_cluster_lod1",
+          "triangles": 520,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "twig_cluster_lod2",
+          "triangles": 162,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 154684
+    },
+    {
+      "file": "FBX/fence_short.fbx",
+      "meshes": [
+        {
+          "name": "fence_short",
+          "triangles": 1248,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "fence_short_lod1",
+          "triangles": 336,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        },
+        {
+          "name": "fence_short_lod2",
+          "triangles": 128,
+          "dimension_max_error_m": 0.0,
+          "uv0": true,
+          "one_opaque_material": true
+        }
+      ],
+      "bytes": 127148
+    }
+  ],
+  "glb_roundtrip": {
+    "meshes": 7,
+    "embedded_maps": true,
+    "triangles_match": true
+  },
+  "actual_visual_review": "See preview images; human/agent image review is separate from structural checks."
+}

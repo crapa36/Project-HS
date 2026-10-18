@@ -14,7 +14,6 @@ enum class ResidencyCategory : std::uint8_t
     Texture,
     Geometry,
     Skin,
-    RayTracing,
     Shadow,
     Gi,
     History,

@@ -49,7 +49,7 @@ struct LocalProbeRuntimeFrameInputs
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> frame_srv_heap, sampler_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE frame_srv_base{}; // First texture descriptor of this frame.
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_table{};
-    // Exactly kAuthoredMaterialNames order: fourteen environment variants, terrain.
+    // Complete geometry catalog order, followed by terrain. Material ordinals are separate.
     std::span<const LocalProbeCapturePage> pages;
     // All actual texture/material/light/shadow/environment/LTC/LUT/frame binding
     // reads. Native vertex/index/static table and private constants are appended.

@@ -92,11 +92,6 @@ void Produce(const fs::path &source, const fs::path &build)
         p.ssr_samples = row.at("ssr_samples").get<std::uint32_t>();
         p.ssr_max_steps = row.at("ssr_max_steps").get<std::uint32_t>();
         p.ssr_refine_steps = row.at("ssr_refine_steps").get<std::uint32_t>();
-        p.rt_axis_ratio = row.at("rt_axis_ratio").get<float>();
-        p.rt_diffuse_samples = row.at("rt_diffuse_samples").get<std::uint32_t>();
-        p.rt_specular_samples = row.at("rt_specular_samples").get<std::uint32_t>();
-        p.rt_spatial_radius = row.at("rt_spatial_radius").get<std::uint32_t>();
-        p.rt_diffuse_bounces = row.at("rt_diffuse_bounces").get<std::uint32_t>();
         p.froxel_stride = row.at("froxel_stride").get<std::uint32_t>();
         p.froxel_slices = row.at("froxel_slices").get<std::uint32_t>();
         p.volumetric_area_samples = row.at("volumetric_area_samples").get<std::uint32_t>();
@@ -107,10 +102,6 @@ void Produce(const fs::path &source, const fs::path &build)
         p.local_shadow_resolution = row.at("local_shadow_resolution").get<std::uint32_t>();
         p.local_shadow_area_samples = row.at("local_shadow_area_samples").get<std::uint32_t>();
         p.local_shadow_budget_mib = row.at("local_shadow_budget_mib").get<std::uint32_t>();
-        p.rtao_samples = row.at("rtao_samples").get<std::uint32_t>();
-        p.ray_shadow_max_lights = row.at("ray_shadow_max_lights").get<std::uint32_t>();
-        p.ray_shadow_samples = row.at("ray_shadow_samples").get<std::uint32_t>();
-        p.ray_shadow_spatial_radius = row.at("ray_shadow_spatial_radius").get<std::uint32_t>();
         p.lighting_cluster_capacity = row.at("lighting_cluster_capacity").get<std::uint32_t>();
         p.gi_logical_cascades = row.at("gi_logical_cascades").get<std::uint32_t>();
         p.gi_internal_resolution_percent = row.at("gi_internal_resolution_percent").get<std::uint32_t>();

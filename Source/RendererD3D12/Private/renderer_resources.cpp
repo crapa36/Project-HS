@@ -64,7 +64,7 @@ Result D3D12Renderer::Impl::ResolvePresentation(const RendererConfig &candidate,
     auto request = candidate.presentation_request;
     const bool suppressed = request.mode == GraphicsFrameGenerationMode::Auto &&
         cadence_suppression.value_or(auto_fg_cadence_suppressed);
-    if (suppressed) request.mode = GraphicsFrameGenerationMode::Off;
+    if (suppressed || !candidate.frame_generation_allowed) request.mode = GraphicsFrameGenerationMode::Off;
     if (request.mode != GraphicsFrameGenerationMode::Off &&
         (candidate.presentation_request.provider.value == "auto" || candidate.presentation_request.provider.value == "fsr") &&
         !fsr_session)
@@ -77,7 +77,7 @@ Result D3D12Renderer::Impl::ResolvePresentation(const RendererConfig &candidate,
     auto result = sdk_presentation.Resolve(device.Get(), request, streamline_session.get(),
         fsr_session.get(), {capacity, output, display.format, display.color_space, candidate.vsync,
             candidate.dynamic_resolution, static_cast<float>(candidate.target_render_fps)}, true);
-    if (result) sdk_presentation.ReportAutoCadenceResolution(candidate.presentation_request, suppressed);
+    if (result) sdk_presentation.ReportFrameGenerationPolicy(candidate.presentation_request, suppressed, candidate.frame_generation_allowed);
     return result;
 }
 

@@ -9,7 +9,7 @@
 
 namespace hs
 {
-enum class FsrEffect : std::uint8_t { SuperResolution, RayRegeneration, FrameGeneration, Presentation };
+enum class FsrEffect : std::uint8_t { SuperResolution, FrameGeneration, Presentation };
 struct FsrVariant
 {
     // IDs and names are copied together from ffxQueryDescGetVersions for this
@@ -21,27 +21,6 @@ struct FsrUpscaleRequirements
 {
     bool exposure{}, reactive{}, composition{};
     bool optional_exposure{}, optional_reactive{}, optional_composition{};
-};
-enum class FsrRaySignal : std::uint8_t { Diffuse, Specular };
-class FsrSession;
-// A candidate owns one native denoiser context for one real signal. Creation
-// leaves the shared session's live SR, RR and presentation contexts untouched.
-class FsrRayRegenerationContext
-{
-  public:
-    FsrRayRegenerationContext();
-    ~FsrRayRegenerationContext();
-    FsrRayRegenerationContext(const FsrRayRegenerationContext &) = delete;
-    FsrRayRegenerationContext &operator=(const FsrRayRegenerationContext &) = delete;
-    [[nodiscard]] Result ReleaseAfterCompletion(bool gpu_idle_acknowledged);
-    [[nodiscard]] ReconstructionAvailability Availability() const noexcept;
-    [[nodiscard]] std::string_view FailureReason() const noexcept;
-    [[nodiscard]] FsrRaySignal Signal() const noexcept;
-    [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
-  private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-    friend class FsrSession;
 };
 struct FsrCompositionCall
 {
@@ -82,24 +61,7 @@ class FsrSession
         const SdkReconstructionFrame &frame);
     [[nodiscard]] const FsrUpscaleRequirements &UpscaleRequirements() const noexcept;
 
-    // Standalone native denoising of INDIRECT diffuse and specular signals;
-    // compose their results and then run SR separately. Does not replace SR.
-    // The native packet must contain converted SDK guides and distinct outputs:
-    // signed_view_z R32F; packed_motion RGBA16F (RG=PreviousUV-CurrentUV,
-    // B=PreviousViewZ-CurrentViewZ); normal_roughness RGBA16F (RG=oct normal
-    // in [0,1], B=linear roughness, A=materialType/3 for IDs 0..3); albedos
-    // linear RGBA16F; radiance RGBA16F (RGB=indirect signal, A=hit distance,
-    // negative A marks inactive signal). Native outputs are separate RGBA16F
-    // UAVs. Raw normal/roughness GBuffer and raw XY motion do not satisfy this.
-    [[nodiscard]] Result ConfigureRayRegeneration(ViewExtent maximum_render,
-        std::uint64_t variant_id = 0);
-    [[nodiscard]] Result ExecuteRayRegeneration(ID3D12GraphicsCommandList *commands,
-        const SdkRayReconstructionFrame &frame);
-    [[nodiscard]] Result CreateRayRegenerationContext(ViewExtent maximum_render, FsrRaySignal signal,
-        std::unique_ptr<FsrRayRegenerationContext> &context, std::uint64_t variant_id = 0);
-    [[nodiscard]] Result ExecuteRayRegeneration(FsrRayRegenerationContext &, ID3D12GraphicsCommandList *,
-        const SdkRayReconstructionFrame &);
-    // Caller has completed ALL graph lists using SR/RR, or reset unsubmitted
+    // Caller has completed ALL graph lists using SR, or reset unsubmitted
     // lists. Resizing/changing variants requires release before configure.
     [[nodiscard]] Result ReleaseReconstructionAfterCompletion(bool gpu_idle_acknowledged);
 

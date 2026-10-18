@@ -500,29 +500,43 @@ void RequireDependencyClosure(const std::vector<Product> &products)
     // Products are sorted by logical ID. Checking every selected product also
     // checks the complete transitive closure of its declared dependencies.
     std::vector<std::uint8_t> state(products.size(), 0);
-    const auto visit = [&](const auto &self, std::size_t index) -> void {
-        if (state[index] == 2)
-            return;
-        if (state[index] == 1)
-            Fail("cyclic-product-dependency", products[index].action_id,
-                 products[index].logical_id);
+    std::vector<std::pair<std::size_t, std::size_t>> pending;
+    pending.reserve(products.size());
+    for (std::size_t index = 0; index < products.size(); ++index)
+    {
+        if (state[index] == 2) continue;
         state[index] = 1;
-        for (const auto &dependency : products[index].dependencies)
+        pending.emplace_back(index, 0);
+        while (!pending.empty())
         {
+            auto &[current, next] = pending.back();
+            const auto &dependencies = products[current].dependencies;
+            if (next == dependencies.size())
+            {
+                state[current] = 2;
+                pending.pop_back();
+                continue;
+            }
+            const auto &dependency = dependencies[next++];
             const auto found = std::lower_bound(
                 products.begin(), products.end(), dependency,
                 [](const Product &product, const std::string &id) {
                     return product.logical_id < id;
                 });
             if (found == products.end() || found->logical_id != dependency)
-                Fail("missing-product-dependency", products[index].action_id,
-                     products[index].logical_id + " -> " + dependency);
-            self(self, static_cast<std::size_t>(found - products.begin()));
+                Fail("missing-product-dependency", products[current].action_id,
+                     products[current].logical_id + " -> " + dependency);
+            const auto child = static_cast<std::size_t>(found - products.begin());
+            if (state[child] == 1)
+                Fail("cyclic-product-dependency", products[child].action_id,
+                     products[child].logical_id);
+            if (state[child] == 0)
+            {
+                state[child] = 1;
+                pending.emplace_back(child, 0);
+            }
         }
-        state[index] = 2;
-    };
-    for (std::size_t index = 0; index < products.size(); ++index)
-        visit(visit, index);
+    }
 }
 
 void RequireUpstreamIdentity(
@@ -1160,7 +1174,7 @@ void Compose(const fs::path &root, const std::string &scope,
             throw;
         }
     }
-    VerifyProducts(root, products, "-");
+    // Both existing and newly copied snapshots were fully verified above.
     // Readers require only the committed manifest; marker removal is best effort.
     std::error_code marker_cleanup_error;
     fs::remove(pending, marker_cleanup_error);
@@ -1438,7 +1452,7 @@ void ExportSnapshot(const fs::path &root, const std::string &scope, const std::s
         if (fs::exists(target)) continue; // Existing immutable bytes are verified below, never overwritten.
         fs::create_directories(target.parent_path());
         CheckPath(destination, relative, "-");
-        auto temporary = target; temporary += TempSuffix();
+        const auto temporary = target.parent_path() / TempSuffix();
         try
         {
             fs::copy_file(root / relative, temporary);

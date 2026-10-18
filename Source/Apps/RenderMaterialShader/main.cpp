@@ -3,6 +3,7 @@
 #endif
 
 #include "../AssetPipeline/action.hpp"
+#include "../AssetPipeline/render_shader_binding_inputs.hpp"
 #include "material_graph_parser.hpp"
 #include <hs/core/cooked_format.hpp>
 
@@ -60,10 +61,11 @@ ap::Input SemanticInput(std::string logical_id, const fs::path &dependency_path,
 
 void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_root)
 {
-    // These common includes affect named material, hero, deferred and ray shaders.
-    for(const auto *relative:{"Content/Shaders/local_probe_sampling.hlsli",
+    hs::shader_content::AddRenderBindingInputs(spec.inputs, source_root);
+    // These common includes affect named material, hero and deferred shaders.
+    for(const auto *relative:{"Content/Shaders/render_binding_contract.hlsli", "Content/Shaders/local_probe_sampling.hlsli",
         "Content/Shaders/shadow_data.hlsli","Content/Shaders/local_shadow.hlsli",
-        "Content/Shaders/ray_shadow_data.hlsli","Content/Shaders/volumetric_sampling.hlsli",
+        "Content/Shaders/volumetric_sampling.hlsli",
         "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli"})
         if(std::ranges::none_of(spec.inputs,[&](const auto &input) { return input.logical_id==relative; }))
             spec.inputs.push_back(ap::HashInput(relative,source_root/relative));
@@ -92,7 +94,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
             const fs::path &stage, const fs::path &output,
             const fs::path &source, std::wstring_view entry,
             std::wstring_view profile, std::wstring_view define,
-            std::uint32_t sidecar_planes = 0, bool generated_deferred = false, bool with_nrd = false,
+            std::uint32_t sidecar_planes = 0, bool generated_deferred = false,
             bool feedback = false)
 {
     auto diagnostics = output;
@@ -105,9 +107,9 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
         L"-Fo", output.wstring(),
         L"-Fe", diagnostics.wstring(),
         source.wstring()};
+    hs::shader_content::AppendRenderBindingArguments(args);
     if (!define.empty()) args.emplace_back(define);
     if (generated_deferred) args.emplace_back(L"-DHS_GENERATED_DEFERRED_MATERIALS=1");
-    if (with_nrd) args.emplace_back(L"-DHS_WITH_NRD=1");
     if (feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
@@ -136,7 +138,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
-                           const fs::path &dxc, bool with_nrd, bool with_brixelizer)
+                           const fs::path &dxc, bool with_brixelizer)
 {
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
             "all paths must be absolute");
@@ -148,17 +150,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     spec.recipe_id = "project-hs.render.bsdf-preintegrate";
     spec.recipe_version = 10;
     spec.namespace_path = "render/shader/bsdf-preintegrate";
-    std::vector<std::pair<ap::UpstreamProduct, fs::path>> nrd_inputs;
-    if (with_nrd)
-    {
-        for (const auto *id : {"nrd/NRDConfig.hlsli", "nrd/NRD.hlsli", "nrd/provenance.json"})
-        {
-            ap::UpstreamProduct upstream; fs::path path;
-            (void)ap::ReadActionResult(build_root, "render/shader/nrd", id, upstream, path);
-            spec.upstream.push_back(upstream); nrd_inputs.emplace_back(std::move(upstream), std::move(path));
-        }
-        spec.inputs.push_back(ap::HashInput("Content/Shaders/ray_nrd_conversion.hlsl", source_root / "Content/Shaders/ray_nrd_conversion.hlsl"));
-    }
     if (with_brixelizer)
         for (const auto *relative : {"Content/Shaders/brixelizer_common.hlsli", "Content/Shaders/brixelizer_guides.hlsl",
                                    "Content/Shaders/brixelizer_gi_resolve.hlsl",
@@ -168,13 +159,13 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     const auto generated = DeferredContextInclude(spec, source_root);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root));
     const auto hero_context = HeroContextInclude(spec, source_root);
-    const auto ray_context = RayEnvironmentContextInclude(spec, source_root);
     spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json",
                                       source_root / "Schemas/material_graph.schema.json"));
     for (const auto *relative : {"Content/Shaders/bsdf_preintegrate.hlsl",
                                  "Content/Shaders/bsdf_metallic_roughness.hlsli",
                                  "Content/Shaders/bsdf_layers.hlsli",
                                  "Content/Shaders/material_surface.hlsli",
+                                 "Content/Shaders/material_terrain.hlsli",
                                  "Content/Shaders/hero_material.hlsli",
                                  "Content/Shaders/material_sidecar.hlsli",
                                  "Content/Shaders/material_parameters.hlsli",
@@ -190,20 +181,9 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                 "Content/Shaders/probe_ibl.hlsli",
                                 "Content/Shaders/light_list.hlsli",
                                 "Content/Shaders/ltc_area.hlsli",
-                                "Content/Shaders/ray_hit.hlsli",
-                                "Content/Shaders/ray_geometry.hlsl",
-                                 "Content/Shaders/ray_ambient_occlusion.hlsl",
-                                 "Content/Shaders/ray_transport.hlsli",
-                                 "Content/Shaders/ray_radiance.hlsli",
-                                 "Content/Shaders/ray_native_trace.hlsli",
-                                 "Content/Shaders/ray_gi.hlsl",
-                                 "Content/Shaders/ray_reflections.hlsl",
-                                 "Content/Shaders/ray_shadow.hlsl",
-                                 "Content/Shaders/ray_transport_composite.hlsl",
-                                 "Content/Shaders/ray_reconstruction_guides.hlsl",
                                  "Content/Shaders/shadow_data.hlsli",
                                  "Content/Shaders/local_shadow.hlsli",
-                                 "Content/Shaders/ray_shadow_data.hlsli",
+
                                  "Content/Shaders/gpu_scene_tables.hlsli",
                                 "Content/Shaders/geometry.hlsli",
                                 "Content/Shaders/geometry_records.hlsli",
@@ -219,48 +199,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                           dxc.parent_path() / library));
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
     std::vector outputs{
-        ProgramOutput{"render/shader/rr_diffuse_pack_cs.dxil", "rr_diffuse_pack_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"RRDiffusePackCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/rr_diffuse_resolve_cs.dxil", "rr_diffuse_resolve_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"RRDiffuseResolveCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/rr_specular_pack_cs.dxil", "rr_specular_pack_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"RRSpecularPackCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/rr_specular_resolve_cs.dxil", "rr_specular_resolve_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"RRSpecularResolveCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/dlss_rr_guides_cs.dxil", "dlss_rr_guides_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"DLSSRRGuidesCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/rr_pre_exposure_cs.dxil", "rr_pre_exposure_cs.dxil",
-                      "Content/Shaders/ray_reconstruction_guides.hlsl", L"RRPreExposureCS", L"cs_6_6"},
-        ProgramOutput{"render/shader/rtgi_trace_cs.dxil", "rtgi_trace_cs.dxil",
-                      "Content/Shaders/ray_gi.hlsl", L"GITraceCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/rtgi_temporal_cs.dxil", "rtgi_temporal_cs.dxil",
-                      "Content/Shaders/ray_gi.hlsl", L"GITemporalCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/rtgi_spatial_cs.dxil", "rtgi_spatial_cs.dxil",
-                      "Content/Shaders/ray_gi.hlsl", L"GISpatialCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/hybrid_depth_init_cs.dxil", "hybrid_depth_init_cs.dxil",
-                      "Content/Shaders/ray_reflections.hlsl", L"HybridDepthInitCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/hybrid_depth_reduce_cs.dxil", "hybrid_depth_reduce_cs.dxil",
-                      "Content/Shaders/ray_reflections.hlsl", L"HybridDepthReduceCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/hybrid_reflection_trace_cs.dxil", "hybrid_reflection_trace_cs.dxil",
-                      "Content/Shaders/ray_reflections.hlsl", L"HybridReflectionTraceCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/hybrid_reflection_temporal_cs.dxil", "hybrid_reflection_temporal_cs.dxil",
-                      "Content/Shaders/ray_reflections.hlsl", L"HybridReflectionTemporalCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/hybrid_reflection_spatial_cs.dxil", "hybrid_reflection_spatial_cs.dxil",
-                      "Content/Shaders/ray_reflections.hlsl", L"HybridReflectionSpatialCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/ray_transport_compose_cs.dxil", "ray_transport_compose_cs.dxil",
-                      "Content/Shaders/ray_transport_composite.hlsl", L"TransportComposeCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/rtao_trace_cs.dxil", "rtao_trace_cs.dxil",
-                      "Content/Shaders/ray_ambient_occlusion.hlsl", L"RTAOTraceCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/rtao_temporal_cs.dxil", "rtao_temporal_cs.dxil",
-                      "Content/Shaders/ray_ambient_occlusion.hlsl", L"RTAOTemporalCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/rtao_resolve_cs.dxil", "rtao_resolve_cs.dxil",
-                      "Content/Shaders/ray_ambient_occlusion.hlsl", L"RTAOResolveCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/ray_shadow_trace_cs.dxil", "ray_shadow_trace_cs.dxil",
-                      "Content/Shaders/ray_shadow.hlsl", L"RayShadowTraceCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/ray_shadow_temporal_cs.dxil", "ray_shadow_temporal_cs.dxil",
-                      "Content/Shaders/ray_shadow.hlsl", L"RayShadowTemporalCS", L"cs_6_5"},
-        ProgramOutput{"render/shader/ray_shadow_resolve_cs.dxil", "ray_shadow_resolve_cs.dxil",
-                      "Content/Shaders/ray_shadow.hlsl", L"RayShadowResolveCS", L"cs_6_5"},
         ProgramOutput{"render/shader/bsdf_preintegrate_cs.dxil", "bsdf_preintegrate_cs.dxil",
                       "Content/Shaders/bsdf_preintegrate.hlsl", L"main", L"cs_6_0"},
         ProgramOutput{"render/shader/deferred_ps.dxil", "deferred_ps.dxil",
@@ -279,8 +217,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/screen_reflections.hlsl", L"ScreenReflectionTemporalCS", L"cs_6_0"},
         ProgramOutput{"render/shader/ssr_spatial_cs.dxil", "ssr_spatial_cs.dxil",
                       "Content/Shaders/screen_reflections.hlsl", L"ScreenReflectionSpatialCS", L"cs_6_0"},
-        ProgramOutput{"render/shader/ssr_compose_cs.dxil", "ssr_compose_cs.dxil",
-                      "Content/Shaders/screen_reflections.hlsl", L"ScreenReflectionComposeCS", L"cs_6_0"},
         ProgramOutput{"render/shader/vfx_screen_overlay_mask_cs.dxil", "vfx_screen_overlay_mask_cs.dxil",
                       "Content/Shaders/vfx_screen_overlay.hlsl", L"ScreenOverlayMaskCS", L"cs_6_0"},
         ProgramOutput{"render/shader/vfx_screen_overlay_vs.dxil", "vfx_screen_overlay_vs.dxil",
@@ -307,13 +243,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/project_hs.hlsl", L"HeroTransparentGuidePS", L"ps_6_0"},
         ProgramOutput{"render/shader/hero_layer_composite_ps.dxil", "hero_layer_composite_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"HeroLayerCompositePS", L"ps_6_0"}};
-    if (with_nrd)
-    {
-        outputs.push_back({"render/shader/rtgi_nrd_pack_cs.dxil", "rtgi_nrd_pack_cs.dxil", "Content/Shaders/ray_nrd_conversion.hlsl", L"RtGiNrdPackCS", L"cs_6_5"});
-        outputs.push_back({"render/shader/rtgi_nrd_resolve_cs.dxil", "rtgi_nrd_resolve_cs.dxil", "Content/Shaders/ray_nrd_conversion.hlsl", L"RtGiNrdResolveCS", L"cs_6_5"});
-        outputs.push_back({"render/shader/reflection_nrd_pack_cs.dxil", "reflection_nrd_pack_cs.dxil", "Content/Shaders/ray_nrd_conversion.hlsl", L"RtSpecularNrdPackCS", L"cs_6_5"});
-        outputs.push_back({"render/shader/reflection_nrd_resolve_cs.dxil", "reflection_nrd_resolve_cs.dxil", "Content/Shaders/ray_nrd_conversion.hlsl", L"RtSpecularNrdResolveCS", L"cs_6_5"});
-    }
     if (with_brixelizer)
     {
         outputs.push_back({"render/shader/brixelizer_guides_cs.dxil", "brixelizer_guides_cs.dxil", "Content/Shaders/brixelizer_guides.hlsl", L"BrixelizerGuidesCS", L"cs_6_6"});
@@ -354,48 +283,25 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
-        for (const auto &[upstream, path] : nrd_inputs)
-            if (path.extension() == ".hlsli")
-            {
-                const auto staged = ap::CopyAndHashInput(upstream.logical_id, path, stage / path.filename());
-                Require(staged.digest == upstream.digest, "pinned NRD helper changed while creating the shader snapshot");
-            }
         const auto include_path = stage / "deferred_materials.generated.hlsli";
         ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
         const auto hero_include_path = stage / "hero_materials.generated.hlsli";
         ap::WriteBytes(hero_include_path, std::as_bytes(std::span(hero_context.data(), hero_context.size())));
-        const auto ray_include_path = stage / "ray_materials.generated.hlsli";
-        ap::WriteBytes(ray_include_path, std::as_bytes(std::span(ray_context.data(), ray_context.size())));
         std::vector<ap::Product> products;
         for (const auto &program : outputs)
         {
             const auto output = stage / program.filename;
-            const bool native_guides = program.id.starts_with("render/shader/rr_") ||
-                program.id.starts_with("render/shader/dlss_rr_") ||
-                (program.id.starts_with("render/shader/brixelizer_") && program.profile.starts_with(L"cs_"));
-            const auto define = (program.id.starts_with("render/shader/hero_") ||
-                                 program.id.starts_with("render/shader/rtao_") ||
-                                 program.id.starts_with("render/shader/rtgi_") ||
-                                 program.id.starts_with("render/shader/hybrid_") ||
-                                 program.id.starts_with("render/shader/ray_shadow_") ||
-                                 program.id.starts_with("render/shader/reflection_nrd_") ||
-                                 program.id.starts_with("render/shader/ray_transport_") || native_guides)
+            const bool brixelizer_guides = program.id.starts_with("render/shader/brixelizer_") && program.profile.starts_with(L"cs_");
+            const auto define = (program.id.starts_with("render/shader/hero_") || brixelizer_guides)
                 ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
             RunDxc(dxc, source_root, stage, output, source_root / program.source_relative,
-                   program.entry, program.profile, define, sidecar_layout.plane_count,
-                   program.id.starts_with("render/shader/rtgi_") ||
-                   program.id.starts_with("render/shader/hybrid_") ||
-                   program.id.starts_with("render/shader/ray_shadow_") ||
-                   program.id.starts_with("render/shader/reflection_nrd_") ||
-                   program.id.starts_with("render/shader/ray_transport_") || native_guides, with_nrd);
+                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
         fs::remove(include_path);
         fs::remove(hero_include_path);
-        fs::remove(ray_include_path);
-        if (with_nrd) { fs::remove(stage / "NRD.hlsli"); fs::remove(stage / "NRDConfig.hlsli"); }
         ap::Publish(build_root, spec, stage, std::move(products));
     }
     catch (...)
@@ -511,6 +417,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
     spec.recipe_id = "project-hs.render.decal-surface";
     spec.recipe_version = 1;
     spec.namespace_path = "render/shader/decal-surface";
+    hs::shader_content::AddRenderBindingInputs(spec.inputs, source_root);
     std::vector<rd::MaterialGraph> graphs;
     std::string generated;
     for (std::size_t ordinal = 0; ordinal < rd::kDecalMaterialNames.size(); ++ordinal)
@@ -544,7 +451,8 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
         generated += "    case " + std::to_string(ordinal) + "u: return HsDecalEvaluate_" + std::to_string(ordinal) + "(ctx);\n";
     generated += "    default: return HsMaterialMakeSurfaceClosure(ctx.sampled_base_color, ctx.normal, ctx.sampled_roughness, 0.0, 1.0, 0.0);\n    }\n}\n";
     for (const auto *relative : {"Schemas/decal_material_graph.schema.json", "Schemas/material_graph.schema.json", "Content/Shaders/decal_surface.hlsl",
-        "Content/Shaders/material_surface.hlsli", "Content/Shaders/material_parameters.hlsli"})
+        "Content/Shaders/material_surface.hlsli", "Content/Shaders/material_parameters.hlsli",
+        "Content/Shaders/render_binding_contract.hlsli"})
         spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
     spec.inputs.push_back(ap::HashInput("tool/dxc.exe", dxc));
     for (const auto *library : {"dxcompiler.dll", "dxil.dll"})
@@ -651,7 +559,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         "Content/Shaders/hero_material.hlsli", "Content/Shaders/material_sidecar.hlsli", "Content/Shaders/material_parameters.hlsli",
         "Content/Shaders/probe_ibl.hlsli",
         "Content/Shaders/light_list.hlsli",
-        "Content/Shaders/local_shadow.hlsli", "Content/Shaders/ray_shadow_data.hlsli",
+        "Content/Shaders/local_shadow.hlsli",
         "Content/Shaders/ltc_area.hlsli",
         "Content/Shaders/deferred_surface.hlsli", "Content/Shaders/temporal_reconstruction.hlsli", "Content/Shaders/display_transform.hlsli",
         "Content/Shaders/bsdf_metallic_roughness.hlsli", "Content/Shaders/bsdf_layers.hlsli", "Content/Shaders/gpu_scene_tables.hlsli",
@@ -777,8 +685,8 @@ void Produce(std::string_view name, const fs::path &source_root,
                            "Content/Shaders/local_probe_capture.hlsl", L"CaptureStaticShadowPS", L"ps_6_0"});
         if(terrain)
         {
-            outputs.push_back({"render/shader/local_probe_capture_vs.dxil", "local_probe_capture_vs.dxil",
-                               "Content/Shaders/local_probe_capture.hlsl", L"LocalProbeCaptureVS", L"vs_6_0"});
+            outputs.push_back({"render/shader/local_probe_capture_source_base_vs.dxil", "local_probe_capture_source_base_vs.dxil",
+                               "Content/Shaders/local_probe_capture.hlsl", L"LocalProbeCaptureSourceBaseVS", L"vs_6_0"});
             outputs.push_back({"render/shader/local_probe_capture_sky_ps.dxil", "local_probe_capture_sky_ps.dxil",
                                "Content/Shaders/local_probe_capture.hlsl", L"LocalProbeSkyCapturePS", L"ps_6_0"});
         }
@@ -816,12 +724,13 @@ void Produce(std::string_view name, const fs::path &source_root,
     for (const auto *relative : {"Schemas/material_graph.schema.json",
                                  "Content/Shaders/project_hs.hlsl",
                                  "Content/Shaders/local_probe_capture.hlsl",
+                                 "Content/Shaders/local_probe_draw.hlsli",
                                   "Content/Shaders/environment.hlsli",
                                   "Content/Shaders/probe_ibl.hlsli",
                                   "Content/Shaders/shadow_data.hlsli",
                                   "Content/Shaders/light_list.hlsli",
                                   "Content/Shaders/local_shadow.hlsli",
-                                  "Content/Shaders/ray_shadow_data.hlsli",
+
                                   "Content/Shaders/ltc_area.hlsli",
                                  "Content/Shaders/material_surface.hlsli",
                                  "Content/Shaders/hero_material.hlsli",
@@ -893,7 +802,7 @@ void Produce(std::string_view name, const fs::path &source_root,
             const auto output = stage / std::string(program.filename);
             RunDxc(dxc, source_root, stage, output,
                    source_root / program.source_relative, program.entry, program.profile,
-                   L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1", sidecar_layout.plane_count, false, false,
+                   L"-DHS_GENERATED_ENVIRONMENT_MATERIAL=1", sidecar_layout.plane_count, false,
                    program.feedback);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(std::string(program.id),
@@ -919,7 +828,6 @@ int wmain(int argc, wchar_t **argv)
     ap::Json action_id = nullptr;
     bool preintegrate = false;
     bool parameters = false;
-    bool with_nrd = false;
     bool with_brixelizer = false;
     bool decal_surface = false;
     try
@@ -939,8 +847,6 @@ int wmain(int argc, wchar_t **argv)
                 decal_surface = true;
             else if (arg == L"--parameters" && !parameters)
                 parameters = true;
-            else if (arg == L"--with-nrd" && !with_nrd)
-                with_nrd = true;
             else if (arg == L"--with-brixelizer" && !with_brixelizer)
                 with_brixelizer = true;
             else if (arg == L"--name" && name.empty() && ++i < argc)
@@ -961,7 +867,7 @@ int wmain(int argc, wchar_t **argv)
             (preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
             (decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
             (!preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty());
-        Require(valid_mode && (!with_nrd || preintegrate) && (!with_brixelizer || preintegrate) &&
+        Require(valid_mode && (!with_brixelizer || preintegrate) &&
                 !source_root.empty() && !build_root.empty(),
                 "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
         if (parameters)
@@ -981,7 +887,7 @@ int wmain(int argc, wchar_t **argv)
         {
             action_id = "render.shader.bsdf-preintegrate";
             ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), with_nrd, with_brixelizer);
+                                  dxc.lexically_normal(), with_brixelizer);
         }
         else
         {
@@ -998,7 +904,7 @@ int wmain(int argc, wchar_t **argv)
                           {{"action_id", action_id}, {"name", name},
                            {"bsdf_preintegrate", preintegrate},
                            {"parameters", parameters}, {"decal_surface", decal_surface},
-                           {"with_nrd", with_nrd}, {"with_brixelizer", with_brixelizer},
+                           {"with_brixelizer", with_brixelizer},
                            {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)},
                            {"dependency", {{"dxc", ap::DiagnosticPath(dxc)}}}});

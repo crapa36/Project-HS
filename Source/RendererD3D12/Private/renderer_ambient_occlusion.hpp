@@ -20,11 +20,11 @@ namespace hs
 {
 struct AllocationResource;
 // Mirrors b0/space12 in ambient_occlusion.hlsl. Matrices use row-vector HLSL
-// convention. The first inverse transforms jittered NDC into camera-relative
-// world position; world_to_view is used for its rotational part only.
+// convention. The first inverse transforms jittered NDC directly into view
+// position; world_to_view rotates world normals and light directions.
 struct alignas(16) AmbientOcclusionConstants
 {
-    DirectX::XMFLOAT4X4 inverse_view_projection{};
+    DirectX::XMFLOAT4X4 inverse_projection{};
     DirectX::XMFLOAT4X4 world_to_view{};
     DirectX::XMFLOAT4X4 projection{};
     DirectX::XMFLOAT4 render_size{};

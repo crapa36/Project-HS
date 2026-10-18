@@ -1,6 +1,6 @@
 // Native static-scene cube convolution. Capture itself uses the renderer's
 // common material/opacity path and outputs clean HDR radiance plus hit distance.
-// No local probe sampling, camera exposure, screen histories or DXR are used.
+// No local probe sampling, camera exposure or screen histories are used.
 cbuffer HsLocalProbeBakeConstants : register(b0, space23)
 {
     uint BakeEdge, BakeMipCount, BakeProbeCount, BakeSampleCount;

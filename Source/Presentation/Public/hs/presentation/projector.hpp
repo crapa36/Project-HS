@@ -170,7 +170,8 @@ class EnemyAnimationState
 };
 
 [[nodiscard]] std::size_t ProjectDomainSignal(
-    const DomainSignal &signal, std::span<PresentationEvent> output) noexcept;
+    const DomainSignal &signal, std::span<PresentationEvent> output,
+    float arena_half_extent = 0.0f) noexcept;
 [[nodiscard]] UiInteraction ResolveUiInteraction(const SessionProbe &session,
                                                  PresentationUiState &ui,
                                                  const SettingsData &settings,

@@ -3,6 +3,7 @@
 #include "../Content/scene_hlod_cooker.hpp"
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/render_asset_format.hpp>
+#include <hs/render_data/material_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -86,9 +87,7 @@ void Produce(const fs::path &source, const fs::path &build)
         members.push_back({layout.instances.at(member.instance_index), member.object_id});
     struct Source { std::string id; rd::GeometryData geometry; std::vector<std::string> materials; };
     std::map<std::uint64_t, Source> assets;
-    constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1", "leaf_2",
-                               "rock_0", "rock_1", "rock_2", "rock_3"};
-    for (const auto *name : names)
+    for (const auto name : rd::kEnvironmentMaterialNames)
     {
         const auto id = "render/" + std::string(name) + ".rpkg";
         const auto asset_id = hs::MakeAssetId(id);
@@ -104,7 +103,10 @@ void Produce(const fs::path &source, const fs::path &build)
         auto geometry = rd::DecodeGeometryPage(Bytes(page_bytes), hs::MakeAssetId(page_id), metadata);
         std::uint32_t selectors{};
         for (const auto &vertex : geometry.vertices) selectors = std::max(selectors, std::uint32_t(vertex.material_index) + 1);
-        assets.emplace(asset_id.value, Source{id, std::move(geometry), std::vector<std::string>(selectors, id)});
+        const auto ordinal = static_cast<std::uint32_t>(std::ranges::find(rd::kEnvironmentMaterialNames, name) - rd::kEnvironmentMaterialNames.begin());
+        const auto material_id = rd::EnvironmentGeometryMaterialOrdinal(ordinal) == rd::kGroundDetailMaterialOrdinal
+            ? std::string("render/material/ground_detail.rpkg") : id;
+        assets.emplace(asset_id.value, Source{id, std::move(geometry), std::vector<std::string>(selectors, material_id)});
     }
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
     std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);

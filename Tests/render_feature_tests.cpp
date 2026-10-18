@@ -113,37 +113,37 @@ void CompositionValidation()
         {ResourceKind::Texture, {640, 360}, SignalEncoding::Depth, RadiometricMeaning::None}, SignalUsage::Guide};
     const SignalDeclaration history{{SignalSemantic::SurfaceHistory, 3, 0},
         {ResourceKind::Texture, {640, 360}, SignalEncoding::SurfaceHistory, RadiometricMeaning::None}, SignalUsage::History};
-    const SignalDeclaration noisy{{SignalSemantic::NoisyDiffuseRadiance, 3, 1},
+    const SignalDeclaration noisy{{SignalSemantic::DiffuseDelta, 3, 1},
         {ResourceKind::Texture, {320, 180}, SignalEncoding::RgbaFloat, RadiometricMeaning::SceneLinear, 1, SignalFiltering::Noisy}};
     const SignalDeclaration clean{{SignalSemantic::DiffuseRadiance, 3, 1},
         {ResourceKind::Texture, {640, 360}, SignalEncoding::RgbaFloat, RadiometricMeaning::SceneLinear, 1, SignalFiltering::Resolved}};
     const std::array lighting_imports{SignalHandle{depth, FeatureId::Imported, Texture(31, 2)},
         SignalHandle{history, FeatureId::Imported, Texture(32, 4)}};
-    auto trace = Feature(FeatureId::DiffuseTransport, {depth}, noisy, build_count);
-    auto denoise = Feature(FeatureId::DiffuseDenoising, {noisy, depth, history}, clean, build_count);
-    denoise.build = [&](std::span<const SignalHandle> inputs, std::vector<SignalHandle> &outputs) {
+    auto gi = Feature(FeatureId::SoftwareGi, {depth}, noisy, build_count);
+    auto composite = Feature(FeatureId::SoftwareGiComposite, {noisy, depth, history}, clean, build_count);
+    composite.build = [&](std::span<const SignalHandle> inputs, std::vector<SignalHandle> &outputs) {
         ++build_count;
-        Check(inputs.size() == 3 && inputs[0].producer == FeatureId::DiffuseTransport &&
+        Check(inputs.size() == 3 && inputs[0].producer == FeatureId::SoftwareGi &&
             SameVersion(inputs[1].resource, Texture(31, 2)) && inputs[1].declaration.usage == SignalUsage::Guide &&
             SameVersion(inputs[2].resource, Texture(32, 4)) && inputs[2].declaration.usage == SignalUsage::History,
-            "denoising receives the actual noisy producer and resolved guide/history versions");
-        outputs.push_back({clean, FeatureId::DiffuseDenoising, Texture(33, 1)});
+            "composition receives the actual noisy producer and resolved guide/history versions");
+        outputs.push_back({clean, FeatureId::SoftwareGiComposite, Texture(33, 1)});
         return Result::Success();
     };
-    const std::array lighting_features{denoise, trace};
+    const std::array lighting_features{composite, gi};
     build_count = 0;
     Check(ComposeRenderFeatures(lighting_imports, lighting_features, result).Succeeded() && build_count == 2 &&
-        result.order == std::vector{FeatureId::DiffuseTransport, FeatureId::DiffuseDenoising},
-        "concrete transport/denoising order is established by noisy-signal dependencies");
+        result.order == std::vector{FeatureId::SoftwareGi, FeatureId::SoftwareGiComposite},
+        "concrete GI/composite order is established by noisy-signal dependencies");
     build_count = 0;
     Check(!ComposeRenderFeatures(std::span(lighting_imports).first(1), lighting_features, result) && build_count == 0,
-        "missing history producer fails before transport or native denoising mutates state");
-    auto wrong_guide = denoise;
+        "missing history producer fails before GI or composition mutates state");
+    auto wrong_guide = composite;
     ++wrong_guide.inputs[1].metadata.extent.width;
-    const std::array invalid_lighting{trace, wrong_guide};
+    const std::array invalid_lighting{gi, wrong_guide};
     build_count = 0;
     Check(!ComposeRenderFeatures(lighting_imports, invalid_lighting, result) && build_count == 0,
-        "denoising guide metadata is validated before any feature build");
+        "composite guide metadata is validated before any feature build");
 
     auto buffer_source = source;
     buffer_source.metadata.kind = ResourceKind::Buffer;
@@ -311,17 +311,11 @@ int main()
         plan.reflection_mode = GraphicsReflectionMode::ScreenSpace;
         Check(LightingAuxiliaryTargets(plan, false) == std::array{false, true, false},
             "SSR retains only its environment fallback");
-        plan.reflection_mode = GraphicsReflectionMode::HybridRT;
-        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
-            "native reflections retain the complete transport guide contract");
         plan.reflection_mode = GraphicsReflectionMode::Off;
         plan.software_gi_enabled = true;
         Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
             "software GI retains all backing signals");
         plan.software_gi_enabled = false;
-        plan.gi_mode = GraphicsGiMode::RayTraced;
-        Check(LightingAuxiliaryTargets(plan, false) == std::array{true, true, true},
-            "native GI retains all backing signals");
         CompositionValidation();
         LargeSignalComposition();
         ConfiguredPostTopology();

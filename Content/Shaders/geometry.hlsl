@@ -3,19 +3,25 @@
 
 // A cluster list spans physical pages. Pull its canonical index/vertex using
 // the GPU draw record instead of depending on one IA binding for the list.
-SceneOutput ClusterSceneVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
+SceneOutput EvaluateClusterVertex(uint vertex_id, uint instance_id, bool evaluate_history)
 {
     const GeometryDrawRecord record = LoadGeometryDrawRecord(HsShadowIsDraw(PassValue)
         ? HsShadowLoadDraw(PassValue).geometry_record : PassValue >> 2u);
     const uint descriptors = 1u + record.PageSlot * 4u;
     const uint canonical_vertex = GeometryBuffers[NonUniformResourceIndex(descriptors + 1u)].Load(
         (record.FirstIndex + vertex_id) * 4u);
-    return SceneVS(LoadGeometryVertex(descriptors, canonical_vertex), instance_id, canonical_vertex);
+    return EvaluateSceneVertex(LoadGeometryVertex(descriptors, canonical_vertex),
+        GeometryVisibleInstance(instance_id), canonical_vertex, (SceneDrawMaterial & 1u) != 0, evaluate_history);
+}
+
+SceneOutput ClusterSceneVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
+{
+    return EvaluateClusterVertex(vertex_id, instance_id, true);
 }
 
 SceneOutput ClusterShadowVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
 {
-    SceneOutput output = ClusterSceneVS(vertex_id, instance_id);
+    SceneOutput output = EvaluateClusterVertex(vertex_id, instance_id, false);
     output.Position = HsShadowIsDraw(PassValue)
         ? HsShadowProject(output.WorldPosition, PassValue)
         : mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[(PassValue & 3u) - 1u]);

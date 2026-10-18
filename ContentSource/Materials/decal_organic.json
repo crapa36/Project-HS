@@ -198,7 +198,6 @@
   },
   "render_flags": {
     "alpha_mode": "mask",
-    "rt_policy": "raster_only",
     "receivers": {
       "models": [
         "environment"

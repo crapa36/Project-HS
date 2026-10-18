@@ -1,4 +1,5 @@
 #include "renderer_local_probe_runtime.hpp"
+#include "renderer_local_probe_draws.hpp"
 #include "renderer_impl.hpp"
 #include "renderer_pipeline_cache.hpp"
 #include "renderer_quality.hpp"
@@ -90,9 +91,19 @@ std::uint32_t MaterialOrdinal(const RenderInstance &instance)
     case RenderMesh::TreeCanopy: Require(instance.environment_variant<3,"Invalid static canopy variant"); return 3+instance.environment_variant;
     case RenderMesh::Rock: Require(instance.environment_variant<4,"Invalid static rock variant"); return 6+instance.environment_variant;
     case RenderMesh::Grass: Require(instance.environment_variant<4,"Invalid static grass variant"); return 10+instance.environment_variant;
-    case RenderMesh::Ground: case RenderMesh::DirtPatch: return 14;
+    case RenderMesh::MeadowSurface: Require(instance.environment_variant<2,"Invalid meadow variant"); return instance.environment_variant==0 ? rd::kTerrainMaterialOrdinal : rd::kGroundDetailMaterialOrdinal;
+    case RenderMesh::GroundDetail: Require(instance.environment_variant<kGroundDetailVariantCount,"Invalid static ground-detail variant"); return rd::kGroundDetailMaterialOrdinal;
+    case RenderMesh::Ground: case RenderMesh::DirtPatch: return rd::kTerrainMaterialOrdinal;
     default: throw std::runtime_error("Dynamic/unsupported mesh in immutable local-probe static scene");
     }
+}
+std::uint32_t PageOrdinal(const RenderInstance &instance)
+{
+    // All seven detail geometries share material15, but retain distinct complete pages.
+    (void)MaterialOrdinal(instance);
+    return rd::IsEnvironmentMesh(instance.mesh)
+        ? rd::EnvironmentGeometryOrdinal(instance.mesh,instance.environment_variant)
+        : static_cast<std::uint32_t>(rd::kEnvironmentMaterialNames.size());
 }
 bool Masked(std::size_t ordinal) { return (ordinal>=3 && ordinal<6) || (ordinal>=10 && ordinal<14); }
 void ValidateBounds(const rd::GeometryBounds &bounds)
@@ -133,7 +144,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
     XMFLOAT3 maximum{-minimum.x,-minimum.y,-minimum.z};
     for(const auto &instance:scene->instances)
     {
-        const auto &bounds=pages[MaterialOrdinal(instance)].bounds; ValidateBounds(bounds);
+        const auto &bounds=pages[PageOrdinal(instance)].bounds; ValidateBounds(bounds);
         Require(std::isfinite(instance.yaw) && std::isfinite(instance.scale.x) && std::isfinite(instance.scale.y) &&
             std::isfinite(instance.scale.z) && instance.scale.x>0 && instance.scale.y>0 && instance.scale.z>0 &&
             std::isfinite(instance.position.x) && std::isfinite(instance.position.y) && std::isfinite(instance.position.z),
@@ -149,7 +160,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
             const float world_z=instance.position.z-x*sine+z*cosine;
             // Capture zeroes grass benders/time. BendGrass still adds its fixed
             // world-space wind envelope: 0.035 X and 0.035*0.7 Z, at most.
-            const float wind=instance.mesh==RenderMesh::Grass?.035f:0.0f;
+            const float wind=HasEnvironmentWind(instance.mesh,instance.environment_variant)?.035f:0.0f;
             for(UINT wind_corner=0;wind_corner<(wind>0?4u:1u);++wind_corner)
             {
                 const auto world=XMVectorSet(world_x+((wind_corner&1)?wind:-wind),world_y,
@@ -243,8 +254,7 @@ struct LocalProbeCaptureFrame
     std::shared_ptr<LocalProbeCaptureState> capture;
     std::shared_ptr<const StaticRenderScene> scene;
     std::vector<LocalProbeCapturePage> pages;
-    std::vector<std::uint32_t> ordinals;
-    float foliage_density{};
+    std::vector<LocalProbeDraw> draws;
     std::vector<std::shared_ptr<const void>> binding_owners;
     ComPtr<ID3D12Resource> static_instances; ComPtr<D3D12MA::Allocation> static_allocation;
     ComPtr<ID3D12DescriptorHeap> descriptors,samplers,source_descriptors;
@@ -285,20 +295,30 @@ struct LocalProbeCaptureFrame
         list->SetGraphicsRootShaderResourceView(34,static_instances->GetGPUVirtualAddress());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
-    void DrawInstances(ID3D12GraphicsCommandList *list,bool shadow_pass)
+    void DrawInstances(ID3D12GraphicsCommandList *list,bool shadow_pass,const LocalProbeFrustum *frustum=nullptr)
     {
-        for(std::size_t instance=0;instance<ordinals.size();++instance)
+        std::uint32_t previous_ordinal=UINT32_MAX, previous_page=UINT32_MAX;
+        ForEachLocalProbeDrawRun(draws,shadow_pass?nullptr:frustum,[&](const LocalProbeDrawRun &run)
         {
-            if(!RetainDecorativeFoliage(scene->instances[instance],instance,foliage_density)) continue;
-            const auto ordinal=ordinals[instance]; const auto &page=pages[ordinal];
-            const auto &bases=base.material_parameter_bases[ordinal/4];
-            const UINT parameter_base=std::array<UINT,4>{bases.x,bases.y,bases.z,bases.w}[ordinal%4];
-            const UINT material[2]{ordinal,(parameter_base<<1)|1u};
-            list->SetGraphicsRoot32BitConstants(6,2,material,0);
-            list->SetPipelineState((shadow_pass?capture->shadows[ordinal]:capture->materials[ordinal]).Get());
-            list->IASetVertexBuffers(0,1,&page.vertex_view); list->IASetIndexBuffer(&page.index_view);
-            list->DrawIndexedInstanced(page.index_count,1,page.first_index,page.base_vertex,static_cast<UINT>(instance));
-        }
+            Require(LocalProbeDrawRunValid(run,scene->instances.size()),"Capture source run exceeds packed source/material bounds");
+            const auto ordinal=run.material_ordinal; const auto &page=pages[run.page_ordinal];
+            if(ordinal!=previous_ordinal)
+            {
+                const auto &bases=base.material_parameter_bases[ordinal/4];
+                const UINT parameter_base=std::array<UINT,4>{bases.x,bases.y,bases.z,bases.w}[ordinal%4];
+                list->SetGraphicsRoot32BitConstant(6,(parameter_base<<1)|1u,1);
+                list->SetPipelineState((shadow_pass?capture->shadows[ordinal]:capture->materials[ordinal]).Get());
+                previous_ordinal=ordinal;
+            }
+            if(run.page_ordinal!=previous_page)
+            {
+                list->IASetVertexBuffers(0,1,&page.vertex_view); list->IASetIndexBuffer(&page.index_view);
+                previous_page=run.page_ordinal;
+            }
+            // SV_InstanceID is draw-local; every run carries its exact source base.
+            list->SetGraphicsRoot32BitConstant(6,LocalProbePassValue(run),0);
+            list->DrawIndexedInstanced(page.index_count,run.instance_count,page.first_index,page.base_vertex,0);
+        });
     }
     Result DrawShadow(RenderPassContext &context)
     {
@@ -333,7 +353,9 @@ struct LocalProbeCaptureFrame
         // Background is one global environment contribution. Depth is reversed;
         // geometry replaces it and writes the radial first hit to MRT1.
         list->SetPipelineState(capture->sky.Get()); list->DrawInstanced(3,1,0,0);
-        DrawInstances(list,false);
+        std::array<float,16> matrix{}; std::memcpy(matrix.data(),&view.view_projection,sizeof(matrix));
+        const auto frustum=MakeLocalProbeFrustum(matrix);
+        DrawInstances(list,false,&frustum);
         return Result::Success();
     }
 };
@@ -380,7 +402,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         for(const auto &[id,digest]:config.product_digests)
             if(MaterialIdentity(id)) capture->material_products.emplace(id,digest);
         capture->material_products[std::string(kProduct)]=capture->probe_digest;
-        const auto vertex=ReadProduct(config,"render/shader/local_probe_capture_vs.dxil");
+        const auto vertex=ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil");
         const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
         const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
         constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
@@ -451,7 +473,7 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     try
     {
         Require(in.scene && in.frame_constants && in.scene->content_generation_id==capture->scene_generation && in.static_instance_generation &&
-            in.pages.size()==rd::kAuthoredMaterialNames.size(),"Native local-probe scene/page generation does not match adoption");
+            in.pages.size()==rd::kEnvironmentMaterialNames.size()+1,"Native local-probe scene/page generation does not match adoption");
         // The retained scene is immutable; revalidate its layout only when its adoption or density changes.
         if(capture->revision_scene!=in.scene || capture->revision_instance_generation!=in.static_instance_generation ||
             capture->revision_foliage_density!=in.foliage_density)
@@ -552,7 +574,8 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
         Require(in.frame_constants && in.static_instances && in.static_version.resource && in.frame_srv_heap && in.sampler_heap &&
             in.frame_srv_base.ptr && in.sampler_table.ptr && in.bind_graphics && in.restore_graphics && !in.scene_reads.empty(),
             "Capture requires actual static/shared bindings, graph reads and parent restore callback");
-        Require(in.scene->instances.size()<=UINT_MAX && in.max_cube_views<=6,"Capture instance/view budget overflow");
+        Require(in.scene->instances.size()<=kLocalProbeSourceCapacity && in.max_cube_views<=6,
+            "Capture instance/view budget exceeds packed source-base bounds");
         for(const auto &read:in.scene_reads)
             Require(read.version.resource && read.access!=Access::Undefined && read.access!=Access::Common &&
                 read.access!=Access::RenderTarget && read.access!=Access::DepthWrite && read.access!=Access::UnorderedWrite && read.access!=Access::CopyDest,
@@ -560,8 +583,10 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
         auto frame=std::make_shared<LocalProbeCaptureFrame>(); frame->capture=impl_->capture; frame->scene=in.scene;
         frame->pages.assign(in.pages.begin(),in.pages.end()); frame->binding_owners=in.binding_owners;
         frame->static_instances=in.static_instances; frame->static_allocation=in.static_allocation;
-        frame->generation=in.static_instance_generation; frame->base=*in.frame_constants; frame->foliage_density=in.foliage_density;
-        frame->shadow=MakeStaticShadowView(in.scene,in.pages,in.lights);
+        frame->generation=in.static_instance_generation; frame->base=*in.frame_constants;
+        // CurrentRevisions qualified these exact scene/page/light inputs. Capture time,
+        // benders and origin are fixed by FillFaceConstants for every private bank.
+        frame->shadow=impl_->capture->revision_shadow;
         for(UINT cascade=0;cascade<3;++cascade)
         {
             const auto matrix=frame->shadow.enabled?DirectX::XMLoadFloat4x4(&frame->shadow.view.view_projection):DirectX::XMMatrixIdentity();
@@ -572,7 +597,16 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
             DirectX::XMFLOAT4{1.0f/kShadowEdge,1.0f/kShadowEdge,0,in.frame_constants->shadow_atlas_texel_size.w}:DirectX::XMFLOAT4{};
         frame->bind=in.bind_graphics; frame->restore=in.restore_graphics; frame->samplers=in.sampler_heap;
         frame->sampler_table=in.sampler_table; frame->source_descriptors=in.frame_srv_heap;
-        for(const auto &instance:in.scene->instances) frame->ordinals.push_back(MaterialOrdinal(instance));
+        frame->draws.reserve(in.scene->instances.size());
+        for(std::size_t index=0;index<in.scene->instances.size();++index)
+        {
+            const auto &instance=in.scene->instances[index];
+            if(!RetainDecorativeFoliage(instance,index,in.foliage_density)) continue;
+            const auto ordinal=MaterialOrdinal(instance);
+            const auto page=PageOrdinal(instance);
+            frame->draws.push_back({static_cast<std::uint32_t>(index),ordinal,
+                LocalProbeWorldSphere(instance,frame->pages[page].bounds.sphere),page});
+        }
         for(const auto &page:frame->pages)
         {
             Require(page.vertices && page.indices && page.vertex_version.resource && page.index_version.resource &&

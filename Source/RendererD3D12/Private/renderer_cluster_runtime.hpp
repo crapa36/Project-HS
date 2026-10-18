@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_cluster_catalog.hpp"
+#include <hs/render_data/material_schema.hpp>
 #include "d3d12_resources.hpp"
 #include "residency_manager.hpp"
 #include "streaming_manager.hpp"
@@ -16,7 +17,7 @@ namespace hs
 {
 namespace renderer_detail { struct GeometryPageGpu; }
 inline constexpr std::uint32_t kClusterRuntimeFrames = 3;
-inline constexpr std::uint32_t kClusterRuntimeCatalogs = 14;
+inline constexpr std::uint32_t kClusterRuntimeCatalogs = static_cast<std::uint32_t>(render_data::kEnvironmentMaterialNames.size());
 inline constexpr std::uint32_t kClusterCutSrvCount = 10;
 inline constexpr std::uint32_t kClusterCutUavCount = 18;
 inline constexpr std::uint32_t kClusterCutDescriptorCount = 29;
@@ -46,7 +47,7 @@ struct ClusterPageStream
     ClusterPageStream &operator=(const ClusterPageStream &) = delete;
     std::uint32_t catalog{}, local_page{}, logical_slot{}, priority{};
     // Both mesh hierarchy and scene HLOD pages share this directory, pool,
-    // request state machine and fence publication. Catalog14 is scene HLOD.
+    // request state machine and fence publication. The catalog after all environment geometries is scene HLOD.
     std::string source_id, logical_id;
     std::filesystem::path path;
     std::function<Result(std::span<const std::byte>, render_data::GeometryData &)> decode;
@@ -141,7 +142,7 @@ struct ClusterRuntimeState : ClusterViewRuntime
     // Geometry records are shared execution scratch, so their growth tickets
     // stay with the shared owner rather than exchanging with view histories.
     std::array<ResidencyTicket, kClusterRuntimeFrames> geometry_records_residency;
-    std::array<std::uint32_t, 128> physical_owner{}, physical_versions{};
+    std::array<std::uint32_t, render_data::kGeometryPageCapacity> physical_owner{}, physical_versions{};
     std::uint32_t generation{}, first_physical_slot{};
     std::uint64_t epoch{}, requests{}, uploads{}, publications{}, evictions{};
     std::string content_generation;

@@ -45,11 +45,6 @@
             "ssr_samples",
             "ssr_max_steps",
             "ssr_refine_steps",
-            "rt_axis_ratio",
-            "rt_diffuse_samples",
-            "rt_specular_samples",
-            "rt_spatial_radius",
-            "rt_diffuse_bounces",
             "froxel_stride",
             "froxel_slices",
             "volumetric_area_samples",
@@ -60,10 +55,6 @@
             "local_shadow_resolution",
             "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "rtao_samples",
-            "ray_shadow_max_lights",
-            "ray_shadow_samples",
-            "ray_shadow_spatial_radius",
             "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
@@ -159,31 +150,6 @@
               "minimum": 1,
               "maximum": 8
             },
-            "rt_axis_ratio": {
-              "type": "number",
-              "minimum": 0.01,
-              "maximum": 1
-            },
-            "rt_diffuse_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_specular_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_diffuse_bounces": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
             "froxel_stride": {
               "type": "integer",
               "minimum": 4,
@@ -238,26 +204,6 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "rtao_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_max_lights": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4
-            },
-            "ray_shadow_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
             },
             "lighting_cluster_capacity": {
               "type": "integer",
@@ -332,11 +278,6 @@
             "ssr_samples",
             "ssr_max_steps",
             "ssr_refine_steps",
-            "rt_axis_ratio",
-            "rt_diffuse_samples",
-            "rt_specular_samples",
-            "rt_spatial_radius",
-            "rt_diffuse_bounces",
             "froxel_stride",
             "froxel_slices",
             "volumetric_area_samples",
@@ -347,10 +288,6 @@
             "local_shadow_resolution",
             "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "rtao_samples",
-            "ray_shadow_max_lights",
-            "ray_shadow_samples",
-            "ray_shadow_spatial_radius",
             "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
@@ -446,31 +383,6 @@
               "minimum": 1,
               "maximum": 8
             },
-            "rt_axis_ratio": {
-              "type": "number",
-              "minimum": 0.01,
-              "maximum": 1
-            },
-            "rt_diffuse_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_specular_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_diffuse_bounces": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
             "froxel_stride": {
               "type": "integer",
               "minimum": 4,
@@ -525,26 +437,6 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "rtao_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_max_lights": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4
-            },
-            "ray_shadow_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
             },
             "lighting_cluster_capacity": {
               "type": "integer",
@@ -619,11 +511,6 @@
             "ssr_samples",
             "ssr_max_steps",
             "ssr_refine_steps",
-            "rt_axis_ratio",
-            "rt_diffuse_samples",
-            "rt_specular_samples",
-            "rt_spatial_radius",
-            "rt_diffuse_bounces",
             "froxel_stride",
             "froxel_slices",
             "volumetric_area_samples",
@@ -634,10 +521,6 @@
             "local_shadow_resolution",
             "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "rtao_samples",
-            "ray_shadow_max_lights",
-            "ray_shadow_samples",
-            "ray_shadow_spatial_radius",
             "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
@@ -733,31 +616,6 @@
               "minimum": 1,
               "maximum": 8
             },
-            "rt_axis_ratio": {
-              "type": "number",
-              "minimum": 0.01,
-              "maximum": 1
-            },
-            "rt_diffuse_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_specular_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_diffuse_bounces": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
             "froxel_stride": {
               "type": "integer",
               "minimum": 4,
@@ -812,26 +670,6 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "rtao_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_max_lights": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4
-            },
-            "ray_shadow_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
             },
             "lighting_cluster_capacity": {
               "type": "integer",
@@ -906,11 +744,6 @@
             "ssr_samples",
             "ssr_max_steps",
             "ssr_refine_steps",
-            "rt_axis_ratio",
-            "rt_diffuse_samples",
-            "rt_specular_samples",
-            "rt_spatial_radius",
-            "rt_diffuse_bounces",
             "froxel_stride",
             "froxel_slices",
             "volumetric_area_samples",
@@ -921,10 +754,6 @@
             "local_shadow_resolution",
             "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "rtao_samples",
-            "ray_shadow_max_lights",
-            "ray_shadow_samples",
-            "ray_shadow_spatial_radius",
             "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
@@ -1020,31 +849,6 @@
               "minimum": 1,
               "maximum": 8
             },
-            "rt_axis_ratio": {
-              "type": "number",
-              "minimum": 0.01,
-              "maximum": 1
-            },
-            "rt_diffuse_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_specular_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
-            "rt_diffuse_bounces": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
-            },
             "froxel_stride": {
               "type": "integer",
               "minimum": 4,
@@ -1099,26 +903,6 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "rtao_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_max_lights": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4
-            },
-            "ray_shadow_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
-            "ray_shadow_spatial_radius": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 8
             },
             "lighting_cluster_capacity": {
               "type": "integer",

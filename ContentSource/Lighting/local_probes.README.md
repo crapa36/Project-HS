@@ -89,7 +89,7 @@ Use dedicated per-face FrameConstants storage so the main view is preserved.
 The callback receives RGBA32F raw-radiance RTV, R32F radial-distance RTV and
 D32 depth DSV and uses the same eligible static material/opacity path. Render
 global sky at depth far with the same environment orientation, without exposure.
-The native raster producer does not require or enable DXR.
+The native producer uses raster rendering.
 
 Pass IDs are 180..185 for cube views, 186 for immutable package/record upload,
 187 for cosine SH, and 188 for GGX. Environment upload retains pass 80. Shader

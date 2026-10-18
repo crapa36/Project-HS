@@ -151,7 +151,7 @@ void ValidateParameterProduct(const std::string &product_id, const fs::path &pac
 }
 
 constexpr std::string_view kTerrainMaterialName = "terrain";
-constexpr std::string_view kTerrainProductId = "render/material/terrain.rpkg";
+
 
 rd::MaterialSurfaceLayout SurfaceLayout(const rd::MaterialGraph &graph)
 {
@@ -170,7 +170,8 @@ bool MatchesSurfaceLayout(const rd::PackageView &package, rd::MaterialSurfaceLay
         rd::DecodeMaterialSurfaceLayout(chunk->bytes) == expected;
 }
 
-bool CurrentTerrain(const fs::path &build_root, const ap::ActionSpec &spec,
+bool CurrentStandaloneMaterial(const fs::path &build_root, const ap::ActionSpec &spec,
+                    std::string_view product_id,
                     std::span<const std::string> dependencies,
                     std::span<const rd::MaterialParameterDefinition> parameters,
                     rd::MaterialSurfaceLayout surface_layout)
@@ -186,17 +187,17 @@ bool CurrentTerrain(const fs::path &build_root, const ap::ActionSpec &spec,
         if (result.at("action_id") != spec.action_id ||
             result.at("action_key") != ap::ActionKey(spec) ||
             !products.is_array() || products.size() != 1 ||
-            products.at(0).at("logical_id") != std::string(kTerrainProductId) ||
+            products.at(0).at("logical_id") != std::string(product_id) ||
             products.at(0).at("dependencies") != expected_dependencies)
             return false;
         ap::UpstreamProduct ignored;
         fs::path package_path;
         (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                   kTerrainProductId, ignored, package_path);
+                                   product_id, ignored, package_path);
         const auto contents = ap::ReadBytes(package_path);
         const auto view = rd::ReadPackage(
             std::as_bytes(std::span(contents.data(), contents.size())),
-            hs::MakeAssetId(kTerrainProductId));
+            hs::MakeAssetId(product_id));
         if (view.dependencies != expected_dependencies || view.chunks.size() != 5 ||
             !MatchesSurfaceLayout(view, surface_layout))
             return false;
@@ -232,14 +233,15 @@ bool CurrentTerrain(const fs::path &build_root, const ap::ActionSpec &spec,
     catch (const std::exception &) { return false; }
 }
 
-void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
+void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_root, const fs::path &build_root)
 {
     Require(source_root.is_absolute() && build_root.is_absolute(),
             "source and build roots must be absolute");
     ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
 
-    const auto material_relative = "ContentSource/Materials/terrain.json";
+    const std::string product_id = "render/material/" + std::string(name) + ".rpkg";
+    const auto material_relative = "ContentSource/Materials/" + std::string(name) + ".json";
     const auto material_path = source_root / material_relative;
     const auto schema_relative = "Schemas/material_graph.schema.json";
     const auto schema_path = source_root / schema_relative;
@@ -247,23 +249,24 @@ void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
     ap::RequireRegularFile(schema_path);
     const auto material_text = ap::ReadBytes(material_path);
     const auto definition = hs::material_content::ParseMaterialDefinition(
-        kTerrainMaterialName, material_text);
-    Require(definition.graph.textures.size() == rd::kMaterialTextureSlots,
-            "terrain material must declare six textures");
+        name, material_text);
+    Require(definition.graph.textures.size() == (name == kTerrainMaterialName ? rd::kMaterialTextureSlots : 3u),
+            "standalone material texture count mismatch");
 
     ap::ActionSpec spec;
-    spec.action_id = "render.terrain";
+    spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.material";
     spec.recipe_version = 4;
-    spec.namespace_path = "render/terrain";
-    spec.inputs.push_back(StructuralMaterialInput("material/terrain/package-structure",
+    spec.namespace_path = "render/" + std::string(name);
+    spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) + "/package-structure",
                                                   material_path, material_text));
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
 
-    const std::string parameter_id = "render/material/terrain/parameters.rpkg";
+    const std::string parameter_namespace = "render/material/" + std::string(name) + "/parameters";
+    const std::string parameter_id = parameter_namespace + ".rpkg";
     ap::UpstreamProduct parameter_dependency;
     fs::path parameter_result_path;
-    (void)ap::ReadActionResult(build_root, "render/material/terrain/parameters",
+    (void)ap::ReadActionResult(build_root, parameter_namespace,
                                parameter_id, parameter_dependency, parameter_result_path);
     ValidateParameterProduct(parameter_id, parameter_result_path, definition.graph.parameters);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
@@ -283,12 +286,12 @@ void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
         const auto view = rd::ReadTexturePackage(
             std::as_bytes(std::span(contents.data(), contents.size())),
             hs::MakeAssetId(texture.product_id));
-        rd::ValidateMaterialTexturePackage(texture, view.description, 3);
+        rd::ValidateMaterialTexturePackage(texture, view.description, name == kTerrainMaterialName ? 3u : 0u);
         spec.upstream.push_back(std::move(upstream));
         dependencies.push_back(texture.product_id);
     }
 
-    const auto shader_namespace = "render/shader/terrain";
+    const auto shader_namespace = "render/shader/" + std::string(name);
     const std::string shader_id = std::string(shader_namespace) + "_scene.dxil";
     ap::UpstreamProduct shader_upstream;
     fs::path shader_path;
@@ -306,7 +309,7 @@ void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
         }), spec.upstream.end());
 
     const auto surface_layout = SurfaceLayout(definition.graph);
-    if (CurrentTerrain(build_root, spec, dependencies, definition.graph.parameters, surface_layout))
+    if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies, definition.graph.parameters, surface_layout))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         std::cout << spec.action_id << " current\n";
@@ -317,7 +320,7 @@ void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
     try
     {
         const auto metadata = rd::EncodeRockMaterial(NeutralMaterial(definition.material), dependencies);
-        // Terrain uses one opaque scene program in the frozen material ABI;
+        // Standalone materials use one opaque scene program in the frozen material ABI;
         // visibility and resolve products remain shader action outputs.
         const std::array programs{
             rd::MaterialProgramSource{shader_id, rd::MaterialProgramKind::OpaqueScenePS}};
@@ -341,24 +344,24 @@ void ProduceTerrain(const fs::path &source_root, const fs::path &build_root)
                             1, true, parameter_layout, 1, 32},
             rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialSurfaceLayout),
                             1, true, surface_bytes, 1, rd::kMaterialSurfaceLayoutStride}};
-        const auto package = rd::BuildPackage(hs::MakeAssetId(kTerrainProductId),
+        const auto package = rd::BuildPackage(hs::MakeAssetId(product_id),
                                                dependencies, chunks);
-        const auto verified = rd::ReadPackage(package, hs::MakeAssetId(kTerrainProductId));
+        const auto verified = rd::ReadPackage(package, hs::MakeAssetId(product_id));
         Require(verified.dependencies == dependencies && verified.chunks.size() == 5 &&
                 MatchesSurfaceLayout(verified, surface_layout),
-                "terrain material package self-validation failed");
+                "standalone material package self-validation failed");
         const auto verified_layout = std::ranges::find(verified.chunks,
             rd::ChunkType::MaterialParameterLayout, &rd::ChunkView::type);
         Require(verified_layout != verified.chunks.end() && verified_layout->required &&
                 verified_layout->version == 1 && verified_layout->count == 1 &&
                 verified_layout->stride == 32,
-                "terrain parameter layout chunk missing");
+                "standalone parameter layout chunk missing");
         rd::ValidateMaterialParameterLayout(verified_layout->bytes,
                                             definition.graph.parameters);
-        const auto filename = fs::path(kTerrainProductId).filename().string();
+        const auto filename = fs::path(product_id).filename().string();
         const auto output = stage / filename;
         ap::WriteBytes(output, package);
-        auto product = ap::HashProduct(std::string(kTerrainProductId), filename, output);
+        auto product = ap::HashProduct(std::string(product_id), filename, output);
         product.dependencies = dependencies;
         ap::Publish(build_root, spec, stage, {std::move(product)});
     }
@@ -406,9 +409,9 @@ ap::Input HierarchyContractInput(const fs::path &source_root, std::string_view n
         source_root / "Source/Apps/Content/geometry_hierarchy_cooker.hpp", bytes);
 }
 
-bool CurrentHierarchy(const fs::path &build_root, const ap::ActionSpec &spec,
+bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
     const PackageInput &input, const rd::PackageView &main_package,
-    std::uint32_t flags, const ap::Json &products, std::set<std::string> &expected_products)
+    std::uint32_t flags, std::set<std::string> &expected_products)
 {
     const auto reference = std::ranges::find(main_package.chunks,
         rd::ChunkType::GeometryHierarchyReference, &rd::ChunkView::type);
@@ -420,7 +423,7 @@ bool CurrentHierarchy(const fs::path &build_root, const ap::ActionSpec &spec,
     if (main_package.dependencies[dependency_index] != input.hierarchy_id) return false;
     ap::UpstreamProduct ignored;
     fs::path hierarchy_path;
-    (void)ap::ReadActionResult(build_root, spec.namespace_path, input.hierarchy_id, ignored, hierarchy_path);
+    result.ReadProduct(input.hierarchy_id, ignored, hierarchy_path);
     const auto contents = ap::ReadBytes(hierarchy_path);
     const auto hierarchy = rd::DecodeGeometryHierarchy(std::as_bytes(std::span(contents.data(), contents.size())));
     if (hierarchy.geometry_flags != flags || hierarchy.source_triangle_count != input.vertices.size() / 3 ||
@@ -429,21 +432,15 @@ bool CurrentHierarchy(const fs::path &build_root, const ap::ActionSpec &spec,
     std::vector<std::string> page_ids;
     for (const auto &page : hierarchy.pages) page_ids.push_back(page.logical_id);
     std::ranges::sort(page_ids);
-    const auto product = std::ranges::find_if(products, [&](const ap::Json &entry) {
-        return entry.at("logical_id") == input.hierarchy_id;
-    });
-    if (product == products.end() || product->at("dependencies") != page_ids) return false;
+    if (result.ProductMetadata(input.hierarchy_id).at("dependencies") != page_ids) return false;
     expected_products.insert(input.hierarchy_id);
     for (std::size_t index = 0; index < hierarchy.pages.size(); ++index)
     {
         const auto &page_id = hierarchy.pages[index].logical_id;
-        const auto page_product = std::ranges::find_if(products, [&](const ap::Json &entry) {
-            return entry.at("logical_id") == page_id;
-        });
         const std::vector<std::string> dependencies{input.mesh_id};
-        if (page_product == products.end() || page_product->at("dependencies") != dependencies) return false;
+        if (result.ProductMetadata(page_id).at("dependencies") != dependencies) return false;
         fs::path page_path;
-        (void)ap::ReadActionResult(build_root, spec.namespace_path, page_id, ignored, page_path);
+        result.ReadProduct(page_id, ignored, page_path);
         const auto page_contents = ap::ReadBytes(page_path);
         const auto bytes = std::as_bytes(std::span(page_contents.data(), page_contents.size()));
         if (rd::ReadPackage(bytes, hs::MakeAssetId(page_id)).dependencies != dependencies) return false;
@@ -464,23 +461,17 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
         return false;
     try
     {
-        const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-        if (result.at("action_id") != spec.action_id ||
-            result.at("action_key") != ap::ActionKey(spec)) return false;
-        const auto &products = result.at("products");
-        if (!products.is_array()) return false;
+        const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
+        if (result.ActionId() != spec.action_id ||
+            result.ActionKeyValue() != ap::ActionKey(spec)) return false;
         std::set<std::string> expected_products;
         for (const auto &package : packages)
         {
-            const auto found = std::ranges::find_if(products, [&](const ap::Json &product) {
-                return product.at("logical_id") == package.logical_id;
-            });
-            if (found == products.end() || found->at("dependencies") != package.dependencies)
+            if (result.ProductMetadata(package.logical_id).at("dependencies") != package.dependencies)
                 return false;
             ap::UpstreamProduct ignored;
             fs::path path;
-            (void)ap::ReadActionResult(build_root, spec.namespace_path,
-                                       package.logical_id, ignored, path);
+            result.ReadProduct(package.logical_id, ignored, path);
             const auto contents = ap::ReadBytes(path);
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto view = rd::ReadPackage(bytes, hs::MakeAssetId(package.logical_id));
@@ -519,7 +510,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
                 return false;
             rd::ValidateMaterialParameterLayout(layout->bytes, parameters);
             fs::path page_path;
-            (void)ap::ReadActionResult(build_root,spec.namespace_path,package.page_id,ignored,page_path);
+            result.ReadProduct(package.page_id,ignored,page_path);
             const auto page_contents=ap::ReadBytes(page_path);
             const auto page_bytes=std::as_bytes(std::span(page_contents.data(),page_contents.size()));
             const auto page_view=rd::ReadPackage(page_bytes,hs::MakeAssetId(package.page_id));
@@ -527,14 +518,12 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
             (void)rd::DecodeGeometryPage(page_bytes,hs::MakeAssetId(package.page_id),geometry);
             expected_products.insert(package.logical_id);
             expected_products.insert(package.page_id);
-            if (package.lod == 0 && !CurrentHierarchy(build_root, spec, package, view,
-                    geometry.flags, products, expected_products))
+            if (package.lod == 0 && !CurrentHierarchy(result, package, view,
+                    geometry.flags, expected_products))
                 return false;
         }
-        return products.size() == expected_products.size() &&
-            std::ranges::all_of(products, [&](const ap::Json &product) {
-                return expected_products.contains(product.at("logical_id").get<std::string>());
-            });
+        // Every expected ID was found in the snapshot's unique-ID index above.
+        return result.ProductCount() == expected_products.size();
     }
     catch (const std::exception &) { return false; }
 }
@@ -542,9 +531,9 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
 void Produce(std::string_view name, const fs::path &source_root,
              const fs::path &build_root)
 {
-    if (name == kTerrainMaterialName)
+    if (name == kTerrainMaterialName || name == "ground_detail")
     {
-        ProduceTerrain(source_root, build_root);
+        ProduceStandaloneMaterial(name, source_root, build_root);
         return;
     }
     Require(hs::material_content::IsEnvironmentMaterialName(name),
@@ -553,6 +542,9 @@ void Produce(std::string_view name, const fs::path &source_root,
             "source and build roots must be absolute");
     ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
+    const auto geometry_ordinal = static_cast<std::uint32_t>(
+        std::ranges::find(rd::kEnvironmentMaterialNames, name) - rd::kEnvironmentMaterialNames.begin());
+    const auto material_name = rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)];
     const bool masked = hs::material_content::IsMaskedEnvironmentMaterial(name);
     const auto schema_relative = "Schemas/material_graph.schema.json";
     const auto schema_path = source_root / schema_relative;
@@ -560,28 +552,28 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.environment";
-    spec.recipe_version = 12;
+    spec.recipe_version = 14;
     spec.namespace_path = "render/" + std::string(name);
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
     const hs::geometry_content::GeometryHierarchyCookOptions hierarchy_options;
     spec.inputs.push_back(HierarchyContractInput(source_root, name, hierarchy_options));
     std::vector<PackageInput> packages;
     packages.reserve(3);
-    const auto material_relative = "ContentSource/Materials/" + std::string(name) + ".json";
+    const auto material_relative = "ContentSource/Materials/" + std::string(material_name) + ".json";
     const auto material_path = source_root / material_relative;
     const auto material_text = ap::ReadBytes(material_path);
-    const auto definition = hs::material_content::ParseMaterialDefinition(name, material_text);
+    const auto definition = hs::material_content::ParseMaterialDefinition(material_name, material_text);
     const auto surface_layout = SurfaceLayout(definition.graph);
     const auto material = NeutralMaterial(definition.material);
-    spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) +
+    spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(material_name) +
                                                   "/package-structure",
                                                   material_path, material_text));
-    const std::string parameter_id = "render/material/" + std::string(name) +
+    const std::string parameter_id = "render/material/" + std::string(material_name) +
                                      "/parameters.rpkg";
     ap::UpstreamProduct parameter_dependency;
     fs::path parameter_result_path;
     (void)ap::ReadActionResult(build_root,
-                               "render/material/" + std::string(name) + "/parameters",
+                               "render/material/" + std::string(material_name) + "/parameters",
                                parameter_id, parameter_dependency, parameter_result_path);
     ValidateParameterProduct(parameter_id, parameter_result_path, definition.graph.parameters);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
@@ -599,7 +591,7 @@ void Produce(std::string_view name, const fs::path &source_root,
         texture_descriptions.push_back(view.description);
         spec.upstream.push_back(upstream);
     }
-    const auto shader_namespace = "render/shader/" + std::string(name);
+    const auto shader_namespace = "render/shader/" + std::string(material_name);
     const auto scene_id = shader_namespace + "_scene.dxil";
     const auto shadow_id = shader_namespace + "_shadow.dxil";
     for (const auto &shader_id : masked ? std::vector<std::string>{scene_id, shadow_id}
@@ -691,7 +683,9 @@ void Produce(std::string_view name, const fs::path &source_root,
         std::vector<ap::Product> products;
         products.reserve(packages.size()*2 + 1);
         const auto geometry_flags = (masked ? rd::kGeometryFlagTwoSided : 0u) |
-            (std::string_view(name).starts_with("grass_") ? rd::kGeometryFlagWind : 0u);
+            (hs::HasEnvironmentWind(rd::EnvironmentMeshForOrdinal(geometry_ordinal),
+                geometry_ordinal >= rd::kGroundDetailGeometryBegin ? geometry_ordinal - rd::kGroundDetailGeometryBegin : 0u)
+                ? rd::kGeometryFlagWind : 0u);
         const auto hierarchy_mapping = MaterialPartitionMapping(packages.front().vertices, packages.front().vertices);
         const auto cooked_hierarchy = hs::geometry_content::CookGeometryHierarchy(
             packages.front().vertices, geometry_flags, "render/hierarchy/" + std::string(name),
@@ -839,8 +833,8 @@ int wmain(int argc, wchar_t **argv)
         }
         Require(!name.empty() && !source_root.empty() && !build_root.empty(),
                 "usage: hs_render_package --name <archetype> --source-root <absolute> --build-root <absolute>");
-        if (name == kTerrainMaterialName)
-            action_id = "render.terrain";
+        if (name == kTerrainMaterialName || name == "ground_detail")
+            action_id = "render." + name;
         else if (hs::material_content::IsEnvironmentMaterialName(name))
             action_id = "render." + name;
         Produce(name, source_root.lexically_normal(), build_root.lexically_normal());

@@ -1908,23 +1908,22 @@ void GameSimulation::SimulationWorld::RecordHit(ProjectileActor &projectile, std
 
 std::uint8_t GameSimulation::SimulationWorld::IncrementCastHit(std::uint64_t cast, std::uint64_t target)
 {
-    const auto iterator = std::ranges::find_if(combat_state->cast_hits, [=](const CastHitRecord &record) {
-        return record.cast_id == cast && record.target == target;
-    });
-    if (iterator != combat_state->cast_hits.end())
-    {
-        return ++iterator->count;
-    }
+    const auto key = std::pair{cast, target};
+    if (const auto found = combat_state->cast_hit_index.find(key);
+        found != combat_state->cast_hit_index.end())
+        return ++combat_state->cast_hits[found->second].count;
+    combat_state->cast_hit_index.emplace(key, combat_state->cast_hits.size());
     combat_state->cast_hits.push_back({cast, target, 1});
     return 1;
 }
 
 std::uint8_t GameSimulation::SimulationWorld::IncrementAreaHit(std::uint64_t area, std::uint64_t target)
 {
-    const auto iterator = std::ranges::find_if(combat_state->area_hits, [=](const AreaHitRecord &record) {
-        return record.area_id == area && record.target == target;
-    });
-    if (iterator != combat_state->area_hits.end()) return ++iterator->count;
+    const auto key = std::pair{area, target};
+    if (const auto found = combat_state->area_hit_index.find(key);
+        found != combat_state->area_hit_index.end())
+        return ++combat_state->area_hits[found->second].count;
+    combat_state->area_hit_index.emplace(key, combat_state->area_hits.size());
     combat_state->area_hits.push_back({area, target, 1});
     return 1;
 }
@@ -2805,23 +2804,24 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     {std::max(segment_start.x, reachable_end.x) + margin,
                      std::max(segment_start.y, reachable_end.y) + margin},
                     rules.arena_half_extent, combat_state->collision_candidates);
-                std::ranges::sort(combat_state->collision_candidates, [&](std::size_t left,
-                                                                          std::size_t right) {
-                    const auto hit_time = [&](std::size_t index) {
-                        const auto &enemy = actors->enemies[index];
-                        const auto radius = enemy.boss ? rules.boss_common.collision_radius
-                            : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
-                        return MovingDiscHitTime(segment_start, segment_end,
-                                                  enemy.tick_motion, projectile.radius + radius,
-                                                  elapsed_fraction);
-                    };
-                    const auto left_time = hit_time(left), right_time = hit_time(right);
-                    if (left_time != right_time) return left_time < right_time;
+                auto &candidates = combat_state->collision_candidates;
+                std::ranges::sort(candidates);
+                candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+                auto &hit_times = combat_state->collision_hit_times;
+                hit_times.resize(actors->enemies.size());
+                for (const auto index : candidates)
+                {
+                    const auto &enemy = actors->enemies[index];
+                    const auto radius = enemy.boss ? rules.boss_common.collision_radius
+                        : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
+                    hit_times[index] = MovingDiscHitTime(segment_start, segment_end,
+                        enemy.tick_motion, projectile.radius + radius, elapsed_fraction);
+                }
+                std::ranges::sort(candidates, [&](std::size_t left, std::size_t right) {
+                    if (hit_times[left] != hit_times[right]) return hit_times[left] < hit_times[right];
                     return actors->enemies[left].id.value < actors->enemies[right].id.value;
                 });
-                combat_state->collision_candidates.erase(std::unique(
-                    combat_state->collision_candidates.begin(), combat_state->collision_candidates.end()),
-                    combat_state->collision_candidates.end());
+                // Hits can displace actors; only the sort keys are cached for this segment.
                 for (const auto enemy_index : combat_state->collision_candidates)
                 {
                     auto &enemy = actors->enemies[enemy_index];

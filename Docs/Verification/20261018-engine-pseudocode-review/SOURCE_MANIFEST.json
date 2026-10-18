@@ -1,0 +1,29 @@
+{
+  "date": "2026-10-18",
+  "worktree": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS",
+  "head": "bc7bd6024fe5a84456e785c81731a127ec339b6b",
+  "basis": "working files including uncommitted changes",
+  "files": {
+    "Content/Shaders/material_terrain.hlsli": "365def52e7e59c7901a6a617085a55eafcfab2321435726c8af7965017e3d016",
+    "Content/Shaders/ambient_occlusion.hlsl": "6b33013683114fed08a30807b4cdb0939ce6054546ee089c66d4bfa5784f630b",
+    "Content/Shaders/adaptive_gtao.hlsl": "5509fc2a467df2e1b2f488664813c7ff315ac8e4616f4f0f5bb565439e36d1b2",
+    "Content/Shaders/cluster_refinement.hlsl": "8391a4bee62ff15ac272ecc2ce97b30377b7e22dd3677284f5d5e55709f48732",
+    "Content/Shaders/project_hs.hlsl": "20b929d0e38e7a4d9155a70dc5b9275608b99c3ae70c99d19296ed88718028a7",
+    "Content/Shaders/hdr_post.hlsl": "da018d7597e6125d6c5359c735319805885f8affb8a84191b6a227ff99078e9a",
+    "Source/RendererD3D12/Private/renderer_frame.cpp": "bff028608d1a21f22091a53f459e41a87d461cf42ae603e87772ae6abd012207",
+    "Source/RendererD3D12/Private/render_graph.cpp": "92987e9da20f9b4d23097e2a07fc58d08e5e39b16dcc1cf23a35eea67bf03f83",
+    "Source/RendererD3D12/Private/render_features.cpp": "2f634ed6e79d75e2b33b7a2d5ae3c09e02b8b262f835d4d938a067b7f8a8a912",
+    "Source/RendererD3D12/Private/renderer_post_subgraphs.cpp": "e8ead12dce0e28491062398afba397945f9ffe4ed858787eb061d0d7ee010e59",
+    "Source/RendererD3D12/Private/renderer_cluster_graph.cpp": "f01889c1195e22a7e05e4e4034eec8af0878f2ea95fe0259905bb7e94c7829ec",
+    "Source/RendererD3D12/Private/renderer_environment_mesh.cpp": "90257686fcefb609d91e5bc3516bd3922712cb73c40d792e247f91b5c010444a",
+    "Source/RendererD3D12/Private/renderer_virtual_shadow.cpp": "df655c611465843ccf10032a50d68eb1ca197ef66cc3888af9d2de7501e466d0",
+    "tools/art/meadow/generate_surface.py": "bc4f0c4fe3ce31e6d03aa92036e67383546c376f46d665e70c8833835f7c037b"
+  },
+  "external_parent_snapshots": {
+    "o3de-FrameGraphExecuter.cpp": "444e5bea77b6cb3823fda0807966a92390979e5278f4a6357bcd58991fd6b33f",
+    "wicked-tonemapCS.hlsl": "029928fbbe76e62ac9516447a4431316d68234a3250fb9dc988756c8ac4010fb",
+    "wicked-wiRenderPath3D.cpp": "f86bd654e6a5af3208fb98ec66f1b5eba49754485e5893dd6504711c241df8a8"
+  },
+  "timing_source": "Build/play-captures/20261018-pass-fusion-01",
+  "cpu_reanalysis": "Build/engine-pseudocode-review/cpu-audit.json"
+}

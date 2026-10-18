@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://project-hs.local/schemas/decal_material_graph.schema.json",
   "title": "Project HS typed MaterialIR decal domain v1",
-  "description": "Projected masked decals evaluate validated MaterialIR and modify the common resolved Surface before lighting and guide consumers. Each material packages explicit Surface receiver classifications and RasterOnly secondary-ray policy. Geometry material ordinals remain independent.",
+  "description": "Projected masked decals evaluate validated MaterialIR and modify the common resolved Surface before lighting and guide consumers. Each material packages explicit Surface receiver classifications. Geometry material ordinals remain independent.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -223,15 +223,11 @@
       "type": "object",
       "required": [
         "alpha_mode",
-        "rt_policy",
         "receivers"
       ],
       "properties": {
         "alpha_mode": {
           "const": "mask"
-        },
-        "rt_policy": {
-          "const": "raster_only"
         },
         "receivers": {
           "additionalProperties": false,

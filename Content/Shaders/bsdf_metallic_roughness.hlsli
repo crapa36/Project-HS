@@ -220,20 +220,7 @@ float3 HsBsdfSampleCosineHemisphere(float2 sample, float3 tangent, float3 bitang
     return normalize(HsBsdfToWorld(local, tangent, bitangent, normal));
 }
 
-// Conditional GGX proposal density used only by independent NRD primary
-// component traces. Same VNDF/Jacobian as BasePdf, without its diffuse mixture.
-float HsBsdfNrdBaseSpecularPdf(HsSurfaceClosure surface,float3 wo,float3 wi)
-{
-    float3 normal=normalize(surface.normal),view=normalize(wo),light=normalize(wi);
-    float noV=dot(normal,view),noL=dot(normal,light);float3 halfSum=view+light;
-    float halfLength=dot(halfSum,halfSum);
-    if(noV<=0.0||noL<=0.0||halfLength<=0.0)return 0.0;
-    float3 halfVector=halfSum*rsqrt(halfLength);
-    if(dot(normal,halfVector)<=0.0||dot(view,halfVector)<=0.0)return 0.0;
-    float alpha=HsBsdfAlpha(surface),alphaSquared=alpha*alpha;
-    float denominator=noV+sqrt(alphaSquared+(1.0-alphaSquared)*noV*noV);
-    return HsBsdfD(saturate(dot(normal,halfVector)),alpha)/(2.0*denominator);
-}
+
 
 HsBsdfSampleResult HsBsdfBaseSample(HsSurfaceClosure surface, float3 wo, float u_lobe, float2 u_dir)
 {

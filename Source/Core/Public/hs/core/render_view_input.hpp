@@ -24,7 +24,7 @@ struct RenderWorldPosition
 enum class RenderViewRole : std::uint8_t { Main, Preview, Capture };
 
 // Position and target are global doubles. Snapshot, static scene, VFX, lights,
-// probes and ray geometry use the common scene-relative coordinate convention.
+// probes and geometry use the common scene-relative coordinate convention.
 // Conversion to float happens only after subtracting scene_origin in double.
 struct RenderCameraInput
 {

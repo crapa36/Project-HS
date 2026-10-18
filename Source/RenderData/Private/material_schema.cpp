@@ -755,15 +755,14 @@ DecalMaterialPackageData ReadDecalMaterialPackage(std::span<const std::byte> byt
     };
     const auto metadata = find(ChunkType::DecalMaterialMetadata).bytes;
     Require(Get(metadata, 0, 4) == kDecalShaderBindingAbi &&
-            Get(metadata, 4, 4) == static_cast<std::uint32_t>(DecalRayPolicy::RasterOnly) &&
-            Get(metadata, 26, 2) == 0 && Get(metadata, 28, 4) == 0,
-            "decal material shader ABI, ray policy or reserved fields are invalid");
+            Get(metadata, 22, 2) == 0 && Get(metadata, 24, 4) == 0,
+            "decal material shader ABI or reserved fields are invalid");
     DecalMaterialPackageData result;
     result.dependencies = package.dependencies;
-    result.receivers = {Get(metadata, 8, 4), Get(metadata, 12, 4), Get(metadata, 16, 4),
-        static_cast<DecalReceiverNormalFilter>(Get(metadata, 20, 4))};
+    result.receivers = {Get(metadata, 4, 4), Get(metadata, 8, 4), Get(metadata, 12, 4),
+        static_cast<DecalReceiverNormalFilter>(Get(metadata, 16, 4))};
     ValidateDecalReceiverPolicy(result.receivers);
-    result.texture_dependency_index = static_cast<std::uint16_t>(Get(metadata, 24, 2));
+    result.texture_dependency_index = static_cast<std::uint16_t>(Get(metadata, 20, 2));
     Require(result.texture_dependency_index < package.dependencies.size() &&
             DecalTextureProductId(package.dependencies[result.texture_dependency_index]), "invalid decal texture dependency");
     result.parameter_layout_hash = DecodeMaterialParameterLayout(find(ChunkType::MaterialParameterLayout).bytes);
@@ -791,18 +790,17 @@ std::vector<std::byte> BuildDecalMaterialPackage(std::string_view name,
     const std::array programs{MaterialProgramSource{shader_id, MaterialProgramKind::DecalSurfaceCS}};
     const auto program_bytes = EncodeMaterialPrograms(dependencies, programs);
     const auto layout = EncodeMaterialParameterLayout(parameters);
-    std::vector<std::byte> metadata(32);
+    std::vector<std::byte> metadata(28);
     Put(metadata, 0, kDecalShaderBindingAbi, 4);
-    Put(metadata, 4, static_cast<std::uint32_t>(DecalRayPolicy::RasterOnly), 4);
-    Put(metadata, 8, receivers.model_mask, 4);
-    Put(metadata, 12, receivers.required_surface_flags, 4);
-    Put(metadata, 16, receivers.forbidden_surface_flags, 4);
-    Put(metadata, 20, static_cast<std::uint32_t>(receivers.normal_filter), 4);
-    Put(metadata, 24, static_cast<std::uint32_t>(std::ranges::find(dependencies, texture_id) - dependencies.begin()), 2);
+    Put(metadata, 4, receivers.model_mask, 4);
+    Put(metadata, 8, receivers.required_surface_flags, 4);
+    Put(metadata, 12, receivers.forbidden_surface_flags, 4);
+    Put(metadata, 16, static_cast<std::uint32_t>(receivers.normal_filter), 4);
+    Put(metadata, 20, static_cast<std::uint32_t>(std::ranges::find(dependencies, texture_id) - dependencies.begin()), 2);
     const std::array chunks{
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialProgram), 1, true, program_bytes, 1, kMaterialProgramStride},
         ChunkSource{static_cast<std::uint32_t>(ChunkType::MaterialParameterLayout), 1, true, layout, 1, 32},
-        ChunkSource{static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata), 1, true, metadata, 1, 32}};
+        ChunkSource{static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata), 2, true, metadata, 1, 28}};
     const auto package = BuildPackage(MakeAssetId("render/material/" + std::string(name) + "/material.rpkg"), dependencies, chunks);
     (void)ReadDecalMaterialPackage(package, name);
     return package;

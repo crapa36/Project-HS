@@ -97,10 +97,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
     options.transparency_quality = graphics.transparency_quality;
     options.refraction_quality = graphics.refraction_quality;
     options.volumetric_quality = graphics.volumetric_quality;
-    options.ray_tracing_enabled = graphics.ray_tracing_enabled;
-    options.opacity_micromaps = legacy_defaults.opacity_micromaps;
-    options.shader_execution_reordering = legacy_defaults.shader_execution_reordering;
-    options.rt_trace_distance_m = graphics.rt_trace_distance_m;
     options.gi_mode = graphics.gi_mode;
     options.gi_quality = graphics.gi_quality;
     options.shadow_mode = graphics.shadow_mode;
@@ -112,8 +108,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
     options.presentation_request = {graphics.frame_generation_provider,
         graphics.frame_generation_mode, graphics.frame_generation_multiplier,
         graphics.low_latency, graphics.frame_limit_fps};
-    options.ray_reconstruction_provider = graphics.ray_reconstruction_provider;
-    options.neural_ray_reconstruction = graphics.neural_ray_reconstruction;
     options.sharpening = graphics.sharpening;
     options.hdr_mode = graphics.hdr_mode;
     options.hdr_paper_white_nits = graphics.hdr_paper_white_nits;
@@ -164,10 +158,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
     config.transparency_quality = options.transparency_quality;
     config.refraction_quality = options.refraction_quality;
     config.volumetric_quality = options.volumetric_quality;
-    config.ray_tracing_enabled = options.ray_tracing_enabled;
-    config.opacity_micromaps = options.opacity_micromaps;
-    config.shader_execution_reordering = options.shader_execution_reordering;
-    config.rt_trace_distance_m = options.rt_trace_distance_m;
     config.gi_mode = options.gi_mode;
     config.gi_quality = options.gi_quality;
     config.shadow_mode = options.shadow_mode;
@@ -175,8 +165,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
     config.temporal_reconstruction = options.temporal_reconstruction;
     config.reconstruction_request = options.reconstruction_request;
     config.presentation_request = options.presentation_request;
-    config.ray_reconstruction_provider = options.ray_reconstruction_provider;
-    config.neural_ray_reconstruction = options.neural_ray_reconstruction;
     config.sharpening = options.sharpening;
     config.hdr_mode = options.hdr_mode;
     config.hdr_paper_white_nits = options.hdr_paper_white_nits;
@@ -270,8 +258,7 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
                                        const DisplayState &display,
                                        const RendererLightingStatus &lighting,
                                        const RendererReconstructionStatus &reconstruction,
-                                       const RendererPresentationStatus &presentation,
-                                       const RayReconstructionSystem &ray_reconstruction)
+                                       const RendererPresentationStatus &presentation)
 {
     auto actual = requested;
     actual.vsync = config.vsync;
@@ -305,25 +292,6 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.gi_quality = config.gi_quality;
     actual.reflection_mode = lighting.active.reflection_mode;
     actual.reflection_quality = config.reflection_quality;
-    actual.ray_tracing_enabled = lighting.active.ray_tracing_enabled;
-    actual.rt_trace_distance_m = config.rt_trace_distance_m;
-    const auto active_nrd = [](const RendererDenoiserStatus &status) {
-        return status.availability == "available" &&
-            (status.active_method == "nrd_reblur" || status.active_method == "nrd_relax");
-    };
-    const auto *nrd = active_nrd(lighting.radiance_denoiser) ? &lighting.radiance_denoiser
-        : active_nrd(lighting.ao_denoiser) ? &lighting.ao_denoiser : nullptr;
-    const bool nrd_shadow = lighting.ray_shadows.enabled && lighting.ray_shadows.native_sigma;
-    actual.neural_ray_reconstruction = ray_reconstruction.Mode() != RayReconstructionMode::Off || nrd || nrd_shadow
-        ? GraphicsAutoToggle::On : GraphicsAutoToggle::Off;
-    actual.ray_reconstruction_provider = ray_reconstruction.Mode() == RayReconstructionMode::FsrStandalone
-        ? GraphicsProviderId{"fsr_rr"}
-        : ray_reconstruction.Mode() == RayReconstructionMode::DlssFused
-            ? GraphicsProviderId{"dlss_rr"} : nrd
-                ? GraphicsProviderId{nrd->active_method} : nrd_shadow
-                    ? config.ray_reconstruction_provider.value == "auto"
-                        ? GraphicsProviderId{"nrd"} : config.ray_reconstruction_provider
-                    : GraphicsProviderId{"off"};
     actual.transparency_quality = config.transparency_quality;
     actual.refraction_quality = config.refraction_quality;
     actual.volumetric_quality = config.volumetric_quality;
@@ -390,8 +358,7 @@ Result D3D12Renderer::InitializeGraphicsSettings(const GraphicsSettings &request
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
         const auto actual = ActualAppliedGraphics(requested, impl_->config,
-            impl_->display_state, lighting, reconstruction, presentation,
-            impl_->ray_reconstruction);
+            impl_->display_state, lighting, reconstruction, presentation);
         SettingsApplyResult status;
         status.generation = 0;
         status.state = SettingsApplyState::Applied;
@@ -523,8 +490,7 @@ SettingsApplyResult D3D12Renderer::GetGraphicsSettingsStatus() const
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
         status.actual_applied = ActualAppliedGraphics(requested, impl_->config,
-            impl_->display_state, lighting, reconstruction, presentation,
-            impl_->ray_reconstruction);
+            impl_->display_state, lighting, reconstruction, presentation);
         status.actual_applied_available = true;
         status.resolution = ResolveSummary(requested, reconstruction, presentation);
         return status;
@@ -550,8 +516,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         std::to_string(output.width) + "x" + std::to_string(output.height) + "|" +
         std::string(GraphicsEnumToken(cfg.presentation_request.mode)) + "|" +
         std::string(GraphicsEnumToken(cfg.presentation_request.low_latency)) + "|" +
-        std::string(GraphicsEnumToken(cfg.ray_reconstruction_provider.value == "off" ? GraphicsAutoToggle::Off :
-            cfg.neural_ray_reconstruction)) + "|" + cfg.ray_reconstruction_provider.value + "|" +
         (cfg.vsync ? "vsync" : "immediate");
     if (impl_->graphics_capabilities_key != key)
     {
@@ -563,7 +527,7 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         constexpr CapabilityAdmission incompatible{false, GraphicsCapabilityReason::Incompatible};
         constexpr std::array<std::string_view, 7> qualities{
             "native", "ultra_quality_plus", "ultra_quality", "quality", "balanced", "performance", "ultra_performance"};
-        std::array<CapabilityAdmission, qualities.size()> dlss_quality{}, dlss_rr_quality{}, fsr_quality{}, xess_quality{}, dsr_quality{};
+        std::array<CapabilityAdmission, qualities.size()> dlss_quality{}, fsr_quality{}, xess_quality{}, dsr_quality{};
         auto &sl = impl_->streamline_session;
         const auto sl_admission = [&](StreamlineFeature feature) {
             return sl ? Admission(sl->Availability(feature), sl->FailureReason(feature)) :
@@ -574,8 +538,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
             &hdr_format, sizeof(hdr_format))) && (hdr_format.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)
             ? available : unsupported;
         auto dlss_sr = Both(sl_admission(StreamlineFeature::SuperResolution), hdr_store);
-        const auto ray_hardware = impl_->feature_capabilities.hardware.inline_ray_queries ? available : unsupported;
-        auto dlss_rr = Both(Both(sl_admission(StreamlineFeature::RayReconstruction), hdr_store), ray_hardware);
         for (std::size_t index = 0; index < qualities.size(); ++index)
         {
             StreamlineInputExtent range;
@@ -583,14 +545,8 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
             dlss_quality[index] = dlss_sr;
             if (dlss_sr.available)
             {
-                const auto result = sl->QueryInputExtent(quality, output, false, range);
+                const auto result = sl->QueryInputExtent(quality, output, range);
                 dlss_quality[index] = QueryAdmission(result, ReconstructionAvailability::Available, result.Message());
-            }
-            dlss_rr_quality[index] = dlss_rr;
-            if (dlss_rr.available)
-            {
-                const auto result = sl->QueryInputExtent(quality, output, true, range);
-                dlss_rr_quality[index] = QueryAdmission(result, ReconstructionAvailability::Available, result.Message());
             }
         }
 
@@ -602,7 +558,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
             return QueryAdmission(result, fsr.Availability(effect), fsr.FailureReason(effect));
         };
         auto fsr_sr = Both(fsr_effect(FsrEffect::SuperResolution), hdr_store);
-        auto fsr_rr = Both(Both(fsr_effect(FsrEffect::RayRegeneration), hdr_store), ray_hardware);
         auto fsr_fg = Both(fsr_effect(FsrEffect::FrameGeneration), fsr_effect(FsrEffect::Presentation));
         for (std::size_t index = 0; index < qualities.size(); ++index)
         {
@@ -616,7 +571,7 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         }
         if (const auto released = fsr.ShutdownAfterCompletion(true); !released)
         {
-            fsr_sr = fsr_rr = fsr_fg = {false, CapabilityReason("unavailable", released.Message())};
+            fsr_sr = fsr_fg = {false, CapabilityReason("unavailable", released.Message())};
             fsr_quality.fill(fsr_sr);
         }
 
@@ -689,7 +644,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         };
         for (const auto token : {"auto", "off", "native_taa", "internal_taau"}) provider("sr_provider", token, available);
         for (const auto token : {"dlss", "dlss_sr"}) provider("sr_provider", token, dlss_sr);
-        provider("sr_provider", "dlss_rr", dlss_rr);
         for (const auto token : {"fsr", "fsr_sr"}) provider("sr_provider", token, fsr_sr);
         for (const auto token : {"xess", "xess_sr"}) provider("sr_provider", token, xess_sr);
         provider("sr_provider", "directsr", directsr);
@@ -698,21 +652,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         provider("fg_provider", "dlss", dlss_fg);
         provider("fg_provider", "fsr", fsr_fg);
         provider("fg_provider", "xess", intel_fg);
-        provider("rr_provider", "off", available);
-        provider("rr_provider", "internal", available);
-        provider("rr_provider", "auto", available);
-        provider("rr_provider", "dlss_rr", dlss_rr);
-        provider("rr_provider", "fsr_rr", fsr_rr);
-        CapabilityAdmission nrd_reblur, nrd_relax;
-        for (const auto method : {NrdRadianceMethod::Reblur, NrdRadianceMethod::Relax})
-        {
-            const auto nrd = QueryNrdCapability(impl_->device.Get(), {NrdSignal::DiffuseSpecular, method});
-            const auto admission = Both(Admission(nrd.availability, nrd.reason), ray_hardware);
-            provider("rr_provider", nrd.requested_provider.value, admission);
-            if (method == NrdRadianceMethod::Reblur)
-            { nrd_reblur = admission; provider("rr_provider", "nrd", admission); }
-            else nrd_relax = admission;
-        }
         AddProvider(view, GraphicsProviderId{"reflex"}, reflex.available, reflex.reason);
         AddProvider(view, GraphicsProviderId{"xell"}, xell_fg.available, xell_fg.reason);
 
@@ -723,7 +662,6 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         {
             CapabilityAdmission admission = unsupported;
             if (sr_selected == "dlss" || sr_selected == "dlss_sr") admission = dlss_quality[index];
-            else if (sr_selected == "dlss_rr") admission = dlss_rr_quality[index];
             else if (sr_selected == "fsr" || sr_selected == "fsr_sr") admission = fsr_quality[index];
             else if (sr_selected == "xess" || sr_selected == "xess_sr") admission = xess_quality[index];
             else if (sr_selected == "directsr") admission = dsr_quality[index];
@@ -756,41 +694,23 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         option("latency", "on", fg_requested == "xess" ?
             cfg.presentation_request.mode == GraphicsFrameGenerationMode::Off ? xell_standalone : xell_fg :
             fg_requested == "auto" ? Either(reflex, xell_standalone) : reflex);
-        const auto ray = [&](bool inline_queries, bool consumer) {
-            return !impl_->feature_capabilities.hardware.ray_scene ||
-                (inline_queries && !impl_->feature_capabilities.hardware.inline_ray_queries) ? unsupported :
-                consumer ? available : CapabilityAdmission{false, GraphicsCapabilityReason::Unavailable};
-        };
-        option("ray_tracing", "false", available);
-        option("ray_tracing", "true", ray_hardware);
         for (const auto token : {"off", "auto", "gtao"}) option("ao", token, available);
-        option("ao", "rtao", ray(true, impl_->feature_capabilities.rtao_consumer));
         for (const auto token : {"off", "probe"}) option("gi", token, available);
         const auto brixelizer = QueryBrixelizerNativeSupport(impl_->device.Get());
         const auto software_gi = brixelizer.supported ? available :
             brixelizer.compiled ? unsupported : CapabilityAdmission{false, GraphicsCapabilityReason::Unavailable};
         option("gi", "software_hybrid", software_gi);
         AddProvider(view, GraphicsProviderId{"brixelizer"}, software_gi.available, software_gi.reason);
-        option("gi", "ray_traced", ray(true, impl_->feature_capabilities.rtgi_consumer));
         for (const auto token : {"off", "probe", "screen_space"}) option("reflection", token, available);
-        option("reflection", "hybrid_rt", ray(true, impl_->feature_capabilities.rt_reflection_consumer));
         option("shadow", "raster", available);
-        option("shadow", "hybrid_rt", ray(false, impl_->feature_capabilities.rt_shadow_consumer));
         option("adaptive_shading", "off", available);
         option("adaptive_shading", "auto", available);
         option("adaptive_shading", "on", ((impl_->feature_capabilities.hardware.vrs_tier >= 2 &&
             impl_->feature_capabilities.hardware.vrs_tile_size && impl_->feature_capabilities.adaptive_raster_consumer) ||
             (impl_->feature_capabilities.hardware.compute_shader60 && impl_->feature_capabilities.adaptive_compute_consumer)) ? available : unsupported);
-        option("neural_rr", "off", available);
-        option("neural_rr", "auto", available);
-        option("neural_rr", "on", cfg.ray_reconstruction_provider.value == "dlss_rr" || sr_selected == "dlss_rr" ? dlss_rr :
-            cfg.ray_reconstruction_provider.value == "fsr_rr" ? fsr_rr :
-            cfg.ray_reconstruction_provider.value == "auto" || cfg.ray_reconstruction_provider.value == "nrd" ||
-                cfg.ray_reconstruction_provider.value == "nrd_reblur" ? nrd_reblur :
-            cfg.ray_reconstruction_provider.value == "nrd_relax" ? nrd_relax : incompatible);
         // Preserve unknown persisted selections as explicitly unavailable choices.
         for (const auto &[category, token] : {std::pair<std::string_view, std::string_view>{"sr_provider", sr_requested},
-            {"fg_provider", fg_requested}, {"rr_provider", cfg.ray_reconstruction_provider.value}})
+            {"fg_provider", fg_requested}})
             provider(category, token, {false, GraphicsCapabilityReason::MissingProvider});
         impl_->graphics_capabilities = view;
         impl_->graphics_capabilities_key = key;

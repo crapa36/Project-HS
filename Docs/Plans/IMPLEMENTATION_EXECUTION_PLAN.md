@@ -1,5 +1,7 @@
 # Project HS execution plan
 
+> 2026-10-16 현재 범위: 레이트레이싱은 제거되었다. 아래 날짜별 구현·검증 기록은 당시 상태를 보존한 이력이며 재구현 요구가 아니다. 현재 계약은 ARCHITECTURE.md, 현재 코드와 Docs/Verification/20261016-rt-removal/REPORT.md를 따른다.
+
 This plan turns `ENGINE_RENDERER_V7.md` and `CONTENT_GENERATION_DIRECTIVE.md` into
 connected implementation batches. The two source directives are requirements,
 not evidence that the engine already has these capabilities. Current code and

@@ -4,7 +4,7 @@
 #include "renderer_light_list.hpp"
 #include "renderer_virtual_shadow.hpp"
 #include "renderer_local_shadow.hpp"
-#include "renderer_ray_geometry.hpp"
+#include "renderer_scene_geometry.hpp"
 #include <hs/core/graphics_settings.hpp>
 #include <hs/renderer/vfx_volume_input.hpp>
 
@@ -105,7 +105,7 @@ struct VolumetricInputs
     CompletionSet completed;
     VolumetricRevisions revisions;
     bool reset_history{};
-    RayFrameTableBuilder make_bindings; // Copies27 descriptors; retains frame/light/shadow table leases.
+    SceneFrameTableBuilder make_bindings; // Copies27 descriptors; retains frame/light/shadow table leases.
 };
 struct VolumetricTexture
 {
@@ -144,7 +144,7 @@ class VolumetricSystem
     // Off performs no native allocations, shader reads, or PSO creation.
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ID3D12RootSignature *,
         GraphicsOptionalQuality,const render_data::QualityProfile &,ViewExtent capacity,std::uint32_t frame_slots,std::uint32_t max_volumes,
-        const RayShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
+        const SceneShaderReader &,VolumetricCandidate &,RendererPipelineCache *cache=nullptr,
         bool hero_enabled=false) const;
     [[nodiscard]] Result Commit(VolumetricCandidate &&,const CompletionSet &completed);
     [[nodiscard]] Result Register(RenderGraphBuilder &,const VolumetricInputs &,VolumetricOutputs &);

@@ -44,6 +44,9 @@ constexpr TextureSpec kSpecs[] = {
     {"leaf_basecolor", {2048, 2048, 3, 6, rd::kTextureFormatBc7Srgb}},
     {"leaf_normal", {2048, 2048, 3, 6, rd::kTextureFormatBc5}},
     {"leaf_roughness", {2048, 2048, 3, 6, rd::kTextureFormatBc4}},
+    {"ground_detail_basecolor", {2048, 2048, 1, 12, rd::kTextureFormatBc7Srgb}},
+    {"ground_detail_surface", {2048, 2048, 1, 12, rd::kTextureFormatBc5}},
+    {"ground_detail_normal", {2048, 2048, 1, 12, rd::kTextureFormatBc5}},
 };
 
 std::string SourceId(const TextureSpec &texture)
@@ -60,7 +63,7 @@ std::string SourceNamespace(const TextureSpec &texture)
 {
     if (texture.name == "terrain_gaussian" || texture.name == "terrain_histogram")
         return "environment/histogram";
-    const auto separator = texture.name.find('_');
+    const auto separator = texture.name.rfind('_');
     const auto group = texture.name.substr(0, separator);
     const auto suffix = texture.name.substr(separator + 1);
     const auto role = suffix == "basecolor" ? "base_color" :

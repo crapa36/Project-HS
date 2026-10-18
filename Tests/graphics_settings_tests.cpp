@@ -33,7 +33,7 @@ int main()
     const hs::GraphicsSettings defaults;
     Check(hs::ValidateGraphicsSettings(defaults).empty(), "defaults");
     Check(hs::GraphicsSettingDescriptors().size() == hs::kGraphicsSettingCount, "count");
-    Check(hs::kGraphicsSettingCount == 56, "table length");
+    Check(hs::kGraphicsSettingCount == 52, "table length");
     for (const auto &descriptor : hs::GraphicsSettingDescriptors())
     {
         Check(!descriptor.key.empty(), "key");
@@ -43,6 +43,23 @@ int main()
         Check(hs::ParseGraphicsSettingKey(descriptor.key) == descriptor.id, "id by key");
     }
     Check(!hs::ParseGraphicsSettingKey("missing").has_value(), "unknown key");
+    Check(static_cast<unsigned>(hs::SettingId::AdaptiveShading) == 56,
+          "retained persistence IDs are not renumbered around removed settings");
+    for (const auto key : {"ray_tracing_enabled", "rt_trace_distance_m",
+                           "neural_ray_reconstruction", "ray_reconstruction_provider"})
+        Check(!hs::ParseGraphicsSettingKey(key), "removed settings have no current descriptor");
+    Check(!hs::ParseGraphicsEnumToken<hs::GraphicsPreset>("ultra_rt") &&
+              !hs::ParseGraphicsEnumToken<hs::GraphicsAoMode>("rtao") &&
+              !hs::ParseGraphicsEnumToken<hs::GraphicsGiMode>("ray_traced") &&
+              !hs::ParseGraphicsEnumToken<hs::GraphicsReflectionMode>("hybrid_rt") &&
+              !hs::ParseGraphicsEnumToken<hs::GraphicsShadowMode>("hybrid_rt"),
+          "legacy modes are read migration only, never current UI/API tokens");
+    auto rejected = defaults;
+    Check(!hs::SetGraphicsSettingToken(rejected, hs::SettingId::Preset, "ultra_rt"),
+          "removed preset cannot be reactivated");
+    for (unsigned id = 41; id <= 44; ++id)
+        Check(!hs::SetGraphicsSettingToken(rejected, static_cast<hs::SettingId>(id), "true"),
+              "removed persisted IDs reject live edits");
     Check(hs::ParseGraphicsEnumToken<hs::GraphicsResolutionMode>("provider_quality") ==
           hs::GraphicsResolutionMode::ProviderQuality, "mode parse");
     Check(!hs::ParseGraphicsEnumToken<hs::GraphicsResolutionMode>("unknown"), "unknown mode");

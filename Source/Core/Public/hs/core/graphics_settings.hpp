@@ -11,17 +11,17 @@
 namespace hs
 {
 
-enum class GraphicsPreset : std::uint8_t { Low, Medium, High, Ultra, UltraRT, Custom };
+enum class GraphicsPreset : std::uint8_t { Low, Medium, High, Ultra, Custom };
 enum class GraphicsDisplayMode : std::uint8_t { Windowed, BorderlessFullscreen };
 enum class GraphicsHdrMode : std::uint8_t { Off, On, Auto };
 enum class GraphicsResolutionMode : std::uint8_t { Manual, ProviderQuality };
 enum class GraphicsFrameGenerationMode : std::uint8_t { Off, Auto, Fixed, Dynamic };
 enum class GraphicsQuality : std::uint8_t { Low, Medium, High, Ultra };
 enum class GraphicsOptionalQuality : std::uint8_t { Off, Low, Medium, High, Ultra };
-enum class GraphicsShadowMode : std::uint8_t { Raster, HybridRT };
-enum class GraphicsAoMode : std::uint8_t { Off, Auto, GTAO, RTAO };
-enum class GraphicsGiMode : std::uint8_t { Off, Probe, SoftwareHybrid, RayTraced };
-enum class GraphicsReflectionMode : std::uint8_t { Off, Probe, ScreenSpace, HybridRT };
+enum class GraphicsShadowMode : std::uint8_t { Raster };
+enum class GraphicsAoMode : std::uint8_t { Off, Auto, GTAO };
+enum class GraphicsGiMode : std::uint8_t { Off, Probe, SoftwareHybrid };
+enum class GraphicsReflectionMode : std::uint8_t { Off, Probe, ScreenSpace };
 enum class GraphicsAutoToggle : std::uint8_t { Off, Auto, On };
 enum class GraphicsMotionBlur : std::uint8_t { Off, Low, High };
 

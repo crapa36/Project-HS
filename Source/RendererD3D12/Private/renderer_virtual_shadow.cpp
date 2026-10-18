@@ -458,7 +458,8 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     for (const auto &receiver : in.receivers)
     {
-        if (!Finite(receiver.minimum) || !Finite(receiver.maximum) || receiver.minimum.x > receiver.maximum.x ||
+        if (!Finite(receiver.minimum) || !Finite(receiver.maximum) ||
+            (receiver.minimum.w != 0.0f && receiver.minimum.w != 1.0f) || receiver.minimum.x > receiver.maximum.x ||
             receiver.minimum.y > receiver.maximum.y || receiver.minimum.z > receiver.maximum.z)
             return Invalid("Virtual shadow receiver has invalid world bounds.");
         for (std::uint32_t corner = 0; corner < 8; ++corner)
@@ -633,17 +634,19 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     {
         auto pass = graph.AddPass(224, "VirtualShadow.CountPageDraws", QueueHint::Compute);
+        pass.Read(requests, Access::UnorderedRead);
         pass.Read(casters, Access::ComputeRead); pass.Read(pages, Access::UnorderedRead);
         page_draw_counts = pass.ReadWrite(page_draw_counts, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot, caster_count=std::uint32_t(in.casters.size())](RenderPassContext &ctx)
         {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
-            if (caster_count) list->Dispatch((caster_count+63)/64, t->entries, 1);
+            if (caster_count) list->Dispatch((caster_count+63)/64, t->words, 1);
         });
     }
     {
         auto pass = graph.AddPass(225, "VirtualShadow.AdmitCompletePages", QueueHint::Compute);
+        pass.Read(requests, Access::UnorderedRead);
         pass.Read(page_draw_counts, Access::UnorderedRead);
         pages = pass.ReadWrite(pages, Access::UnorderedWrite);
         pass.SetExecute([t, slot=in.frame_slot, segment_count](RenderPassContext &ctx)
@@ -656,6 +659,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     {
         auto pass = graph.AddPass(151, "VirtualShadow.CullAndCommands", QueueHint::Compute);
+        pass.Read(requests, Access::UnorderedRead);
         pass.Read(casters, Access::ComputeRead); pages = pass.ReadWrite(pages, Access::UnorderedWrite);
         counts = pass.ReadWrite(counts, Access::UnorderedWrite); draws = pass.Write(draws, Access::UnorderedWrite);
         indexed = pass.Write(indexed, Access::UnorderedWrite); mesh = pass.Write(mesh, Access::UnorderedWrite);
@@ -664,7 +668,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
             list->SetComputeRoot32BitConstant(3, 2, 0);
-            if (caster_count) list->Dispatch((caster_count+63)/64, t->entries, 1);
+            if (caster_count) list->Dispatch((caster_count+63)/64, t->words, 1);
         });
     }
     out.metadata = metadata; out.page_table = pages; out.draw_records = draws;

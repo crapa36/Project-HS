@@ -54,23 +54,9 @@ Result D3D12Renderer::Impl::PrepareResidentServices(Impl &next)
     LightListCandidate lights;
     HS_PREPARE(next.PrepareLightList(cfg, capacity, lights));
     HS_PREPARE(next.light_list.Commit(std::move(lights), unused));
-    RayOmmCandidate omm;
-    HS_PREPARE(next.PrepareRayOmm(cfg, omm));
-    HS_PREPARE(next.ray_omm.Commit(std::move(omm), unused));
-    RaySceneCandidate scene;
-    HS_PREPARE(next.PrepareRayScene(cfg, scene));
-    HS_PREPARE(next.ray_scene.Commit(std::move(scene), unused));
-    RayGeometryCandidate geometry;
-    RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate transport;
-    HS_PREPARE(next.PrepareRayEffects(cfg, capacity, geometry, ray_ambient, transport, RayReconstructionModeFor(cfg)));
-    RayReconstructionCandidate rr;
-    HS_PREPARE(next.PrepareRayReconstruction(cfg, capacity, {width, height}, rr, streamline_session.get(), fsr_session.get()));
-    HS_PREPARE(ValidateRayReconstructionBudget(rr));
-    HS_PREPARE(next.ray_reconstruction.Commit(std::move(rr), unused));
-    HS_PREPARE(next.ray_geometry.Commit(std::move(geometry), unused));
-    HS_PREPARE(next.ray_ambient_occlusion.Commit(std::move(ray_ambient), unused));
-    HS_PREPARE(next.ray_transport.Commit(std::move(transport), unused));
+    SceneGeometryCandidate geometry;
+    HS_PREPARE(next.PrepareSceneGeometry(cfg, geometry));
+    HS_PREPARE(next.scene_geometry.Commit(std::move(geometry), unused));
     BrixelizerCandidate brixelizer;
     HS_PREPARE(next.PrepareBrixelizerGi(cfg, view_state.render_active, brixelizer));
     HS_PREPARE(next.brixelizer_gi.Commit(std::move(brixelizer), unused));
@@ -130,21 +116,11 @@ void D3D12Renderer::Impl::SwapResidentServices(Impl &next) noexcept
     decal_parameter_counts.swap(next.decal_parameter_counts);
     decal_parameter_layouts.swap(next.decal_parameter_layouts);
     HS_SWAP_SERVICE(light_list);
-    HS_SWAP_SERVICE(ray_omm);
-    std::swap(native_ray_requested_omm, next.native_ray_requested_omm);
-    std::swap(native_ray_requested_ser, next.native_ray_requested_ser);
-    native_ray_omm_request_failure.swap(next.native_ray_omm_request_failure);
-    native_ray_ser_request_failure.swap(next.native_ray_ser_request_failure);
-    HS_SWAP_SERVICE(ray_scene);
-    HS_SWAP_SERVICE(ray_geometry);
-    HS_SWAP_SERVICE(ray_ambient_occlusion);
-    HS_SWAP_SERVICE(ray_transport);
-    HS_SWAP_SERVICE(ray_reconstruction);
+    HS_SWAP_SERVICE(scene_geometry);
     HS_SWAP_SERVICE(brixelizer_gi);
     std::swap(brixelizer_history_valid, next.brixelizer_history_valid);
     HS_SWAP_SERVICE(virtual_shadows);
     HS_SWAP_SERVICE(local_shadows);
-    HS_SWAP_SERVICE(ray_shadows);
     HS_SWAP_SERVICE(volumetrics);
     HS_SWAP_SERVICE(local_probes);
     if (reconstruction_provider) HS_SWAP_SERVICE(reconstruction_guides);
@@ -160,10 +136,7 @@ void D3D12Renderer::Impl::SwapResidentPipelines(Impl &next) noexcept
     HS_SWAP_PIPELINE(root_signature);
     HS_SWAP_PIPELINE(scene_pipeline);
     HS_SWAP_PIPELINE(shadow_pipeline);
-    HS_SWAP_PIPELINE(environment_opaque_scene_pipeline);
-    HS_SWAP_PIPELINE(environment_masked_scene_pipeline);
     HS_SWAP_PIPELINE(environment_opaque_shadow_pipeline);
-    HS_SWAP_PIPELINE(environment_masked_shadow_pipeline);
     HS_SWAP_PIPELINE(environment_material_scene_pipelines);
     HS_SWAP_PIPELINE(environment_material_shadow_pipelines);
     HS_SWAP_PIPELINE(hero_scene_pipeline);
@@ -246,12 +219,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
         for (auto &retained : unresolved_resident_candidates)
         {
             if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return drained;
-            if (auto retired = retained->ray_omm.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->ray_scene.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->ray_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->ray_ambient_occlusion.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->ray_transport.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
-            if (auto retired = retained->ray_reconstruction.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
+            if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
             if (auto retired = retained->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
             if (auto retired = retained->screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
             if (auto retired = retained->decal_surface.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return retired;
@@ -326,12 +294,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     for (auto &retained : unresolved_resident_candidates)
     {
         if (auto drained = retained->asset_io.DrainSubmitted(retained->streaming, retained->residency); !drained) return reject(drained);
-        if (auto retired = retained->ray_omm.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->ray_scene.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->ray_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->ray_ambient_occlusion.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->ray_transport.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
-        if (auto retired = retained->ray_reconstruction.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
+        if (auto retired = retained->scene_geometry.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
         if (auto retired = retained->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
         if (auto retired = retained->screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
         if (auto retired = retained->decal_surface.ResetAfterCompletion(graph_queue_executor.Completed()); !retired) return reject(retired);
@@ -377,11 +340,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     adopted = true;
     // Old futures/assets live inside next, with their original reader lease,
     // until destruction finishes after the already-proved queue drain.
-    if (auto retired = next->ray_reconstruction.ResetAfterCompletion(graph_queue_executor.Completed()); !retired)
-    {
-        OutputDebugStringA("Adopted resident generation; old native cleanup retained.\n");
-        unresolved_resident_candidates.push_back(std::move(next));
-    }
     if (next)
         if (auto retired = next->brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !retired)
         {
@@ -397,16 +355,8 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
             unresolved_resident_candidates.push_back(std::move(next));
             return false;
         };
-        if (!retain_on_failure(next->ray_omm.ResetAfterCompletion(completed),
-                "Adopted resident generation; old OMM cleanup retained.\n")) return Result::Success();
-        if (!retain_on_failure(next->ray_scene.ResetAfterCompletion(completed),
-                "Adopted resident generation; old ray scene cleanup retained.\n")) return Result::Success();
-        if (!retain_on_failure(next->ray_geometry.ResetAfterCompletion(completed),
-                "Adopted resident generation; old ray geometry cleanup retained.\n")) return Result::Success();
-        if (!retain_on_failure(next->ray_ambient_occlusion.ResetAfterCompletion(completed),
-                "Adopted resident generation; old ray AO cleanup retained.\n")) return Result::Success();
-        if (!retain_on_failure(next->ray_transport.ResetAfterCompletion(completed),
-                "Adopted resident generation; old ray transport cleanup retained.\n")) return Result::Success();
+        if (!retain_on_failure(next->scene_geometry.ResetAfterCompletion(completed),
+                "Adopted resident generation; old scene geometry cleanup retained.\n")) return Result::Success();
         if (!retain_on_failure(next->decal_surface.ResetAfterCompletion(completed),
                 "Adopted resident generation; old decal Surface cleanup retained.\n")) return Result::Success();
     }

@@ -1,4 +1,5 @@
 #include "renderer_streamline.hpp"
+#include "renderer_diagnostics.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,7 +22,6 @@
 #include <Windows.h>
 #include <sl.h>
 #include <sl_dlss.h>
-#include <sl_dlss_d.h>
 #include <sl_dlss_g.h>
 #include <sl_reflex.h>
 #include <sl_security.h>
@@ -41,8 +41,8 @@ Result StreamlineFailure(ErrorCode code, std::string message)
 }
 #if HS_WITH_STREAMLINE
 using Microsoft::WRL::ComPtr;
-constexpr std::array<sl::Feature, 4> kNativeFeatures{
-    sl::kFeatureDLSS, sl::kFeatureDLSS_RR, sl::kFeatureDLSS_G, sl::kFeatureReflex};
+constexpr std::array<sl::Feature, 3> kNativeFeatures{
+    sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex};
 constexpr std::size_t Index(StreamlineFeature feature) { return static_cast<std::size_t>(feature); }
 std::atomic<long> gStreamlinePresentError{};
 
@@ -123,10 +123,6 @@ bool FloatColor(ID3D12Resource *resource)
 {
     return Format(resource, {DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT});
 }
-bool ScalarFloat(ID3D12Resource *resource)
-{
-    return Format(resource, {DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R32_FLOAT});
-}
 bool MotionFormat(ID3D12Resource *resource)
 {
     return Format(resource, {DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32_FLOAT});
@@ -169,17 +165,11 @@ struct StreamlineSession::Impl
         std::string reason{"Streamline feature was not requested."};
         bool requested{};
     };
-    std::array<FeatureState, 4> feature;
+    std::array<FeatureState, 3> feature;
     HMODULE module{};
     DWORD owner_thread{};
-    bool started{}, reconstruction_configured{}, reconstruction_evaluated{}, ray_reconstruction{}, force_reset{true};
-    bool sr_viewport_owned{}, rr_viewport_owned{}, rr_allocation_owned{};
-    bool rr_allocation_tags_pending{}, rr_memory_query_pending{}, rr_memory_cached{};
-    std::uint64_t rr_memory_bytes{};
-    GraphicsModeId rr_memory_quality;
-    ViewExtent rr_memory_output, rr_memory_input;
-    bool rr_memory_ray{};
-    sl::FrameToken *rr_allocation_frame_token{};
+    bool started{}, reconstruction_configured{}, reconstruction_evaluated{}, force_reset{true};
+    bool sr_viewport_owned{};
     bool reflex_enabled{}, presentation_prepared{}, presentation_recreate_required{}, presented_without_fence{};
     bool has_frame{};
     SdkFrameIdentity identity;
@@ -191,27 +181,18 @@ struct StreamlineSession::Impl
     std::uint64_t evaluated_frame{std::numeric_limits<std::uint64_t>::max()};
     std::uint32_t viewport{};
     GraphicsModeId quality;
-    ViewExtent output, rr_input, fg_input;
+    ViewExtent output, fg_input;
     StreamlineInputExtent input_range;
     ComPtr<ID3D12Device> device;
     ComPtr<IDXGISwapChain4> swapchain;
     ComPtr<ID3D12CommandQueue> presenting_queue;
     std::wstring plugin_directory;
     sl::DLSSOptions sr_options;
-    sl::DLSSDOptions rr_options;
     struct ReconstructionView
     {
         bool reconstruction_configured{};
         bool reconstruction_evaluated{};
         bool sr_viewport_owned{};
-        bool rr_viewport_owned{}, rr_allocation_owned{};
-        bool rr_allocation_tags_pending{}, rr_memory_query_pending{}, rr_memory_cached{};
-        std::uint64_t rr_memory_bytes{};
-        GraphicsModeId rr_memory_quality;
-        ViewExtent rr_memory_output, rr_memory_input;
-        bool rr_memory_ray{};
-        sl::FrameToken *rr_allocation_frame_token{};
-        bool ray_reconstruction{};
         bool force_reset{true};
         bool has_frame{};
         SdkFrameIdentity identity{};
@@ -220,14 +201,13 @@ struct StreamlineSession::Impl
         std::uint64_t evaluated_frame{std::numeric_limits<std::uint64_t>::max()};
         GraphicsModeId quality;
         ViewExtent output;
-        ViewExtent rr_input;
         StreamlineInputExtent input_range;
         sl::DLSSOptions sr_options;
-        sl::DLSSDOptions rr_options;
     };
     std::map<std::uint32_t, ReconstructionView> reconstruction_views;
     sl::DLSSGOptions fg_options;
     StreamlineFrameGenerationCapabilities fg_capabilities;
+    std::uint64_t fg_last_state_query_qpc{};
     ComPtr<ID3D12Fence> presentation_fence;
     std::uint64_t presentation_fence_value{};
     struct PresentationLease
@@ -252,15 +232,11 @@ struct StreamlineSession::Impl
     PFun_slSetConstants *set_constants{};
     PFun_slSetTagForFrame *set_tags{};
     PFun_slEvaluateFeature *evaluate{};
-    PFun_slAllocateResources *allocate_resources{};
     PFun_slFreeResources *free_resources{};
     PFun_slUpgradeInterface *upgrade{};
     PFun_slGetNativeInterface *get_native{};
     PFun_slDLSSGetOptimalSettings *sr_optimal{};
     PFun_slDLSSSetOptions *sr_set_options{};
-    PFun_slDLSSDGetOptimalSettings *rr_optimal{};
-    PFun_slDLSSDSetOptions *rr_set_options{};
-    PFun_slDLSSDGetState *rr_get_state{};
     PFun_slDLSSGGetState *fg_get_state{};
     PFun_slDLSSGSetOptions *fg_set_options{};
     PFun_slReflexGetState *reflex_get_state{};
@@ -401,12 +377,12 @@ struct StreamlineSession::Impl
         constants_frame = identity.render_id;
         return Result::Success();
     }
-    Result ValidateReconstruction(const SdkReconstructionFrame &frame, bool ray)
+    Result ValidateReconstruction(const SdkReconstructionFrame &frame)
     {
-        if (auto required = RequireFeature(ray ? StreamlineFeature::RayReconstruction : StreamlineFeature::SuperResolution); !required)
+        if (auto required = RequireFeature(StreamlineFeature::SuperResolution); !required)
             return required;
-        if (!reconstruction_configured || ray_reconstruction != ray || frame.identity.viewport_id != viewport)
-            return StreamlineFailure(ErrorCode::InvalidState, "Streamline reconstruction call does not match its configured SR/RR path or viewport.");
+        if (!reconstruction_configured || frame.identity.viewport_id != viewport)
+            return StreamlineFailure(ErrorCode::InvalidState, "Streamline reconstruction call does not match its configured SR path or viewport.");
         if (!FitsRect(frame.color, frame.active) || !FitsRect(frame.depth, frame.active) || !FitsRect(frame.motion, frame.active) ||
             !FitsRect(frame.output, frame.output_rect) || !FloatColor(frame.color) || !FloatColor(frame.output) ||
             !DepthFormat(frame.depth) || !MotionFormat(frame.motion) ||
@@ -428,8 +404,6 @@ struct StreamlineSession::Impl
         if (frame.responsive && (!FitsRect(frame.responsive, frame.active) ||
             !Format(frame.responsive, {DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R32_FLOAT})))
             return StreamlineFailure(ErrorCode::InvalidArgument, "Streamline responsive mask must be a scalar mask at input extent.");
-        if (ray && rr_input.width && (frame.active.width != rr_input.width || frame.active.height != rr_input.height))
-            return StreamlineFailure(ErrorCode::InvalidState, "DLSS-RR does not support live dynamic input resolution. Drain and reconfigure its resources.");
         return Result::Success();
     }
     Result WaitLease(PresentationLease &lease)
@@ -464,12 +438,6 @@ struct StreamlineSession::Impl
             retired.pop_front();
         }
     }
-    bool RrMemoryMatchesConfiguration() const noexcept
-    {
-        return rr_memory_cached && rr_memory_ray == ray_reconstruction &&
-            rr_memory_quality == quality && rr_memory_output == output &&
-            rr_memory_input == input_range.optimal;
-    }
 #endif
 };
 
@@ -495,13 +463,13 @@ StreamlineSession::~StreamlineSession()
 #if HS_WITH_STREAMLINE
 Result StreamlineSession::InitializeBeforeDevice(StreamlineFeatures requested)
 {
-    if (!requested.super_resolution && !requested.ray_reconstruction && !requested.frame_generation && !requested.reflex)
+    if (!requested.super_resolution && !requested.frame_generation && !requested.reflex)
         return Result::Success();
     if (impl_) return StreamlineFailure(ErrorCode::InvalidState, "Shut down the old Streamline session before initializing another.");
     impl_ = std::make_unique<Impl>();
     auto &state = *impl_;
     state.owner_thread = GetCurrentThreadId();
-    const std::array<bool, 4> features{requested.super_resolution || requested.ray_reconstruction, requested.ray_reconstruction,
+    const std::array<bool, 3> features{requested.super_resolution,
         requested.frame_generation, requested.reflex || requested.frame_generation};
     std::vector<sl::Feature> native_features;
     for (std::size_t index = 0; index != features.size(); ++index) if (features[index])
@@ -531,7 +499,7 @@ Result StreamlineSession::InitializeBeforeDevice(StreamlineFeatures requested)
         !state.Load(state.is_supported, "slIsFeatureSupported") || !state.Load(state.is_loaded, "slIsFeatureLoaded") ||
         !state.Load(state.get_function, "slGetFeatureFunction") || !state.Load(state.get_frame_token, "slGetNewFrameToken") ||
         !state.Load(state.set_constants, "slSetConstants") || !state.Load(state.set_tags, "slSetTagForFrame") ||
-        !state.Load(state.evaluate, "slEvaluateFeature") || !state.Load(state.allocate_resources, "slAllocateResources") ||
+        !state.Load(state.evaluate, "slEvaluateFeature") ||
         !state.Load(state.free_resources, "slFreeResources") ||
         !state.Load(state.upgrade, "slUpgradeInterface") || !state.Load(state.get_native, "slGetNativeInterface"))
         return state.FailAll("Pinned Streamline interposer is missing a required official core export.");
@@ -597,14 +565,6 @@ Result StreamlineSession::BindDevice(ID3D12Device *device)
     {
         static_cast<void>(load(StreamlineFeature::SuperResolution, state.sr_optimal, "slDLSSGetOptimalSettings"));
         static_cast<void>(load(StreamlineFeature::SuperResolution, state.sr_set_options, "slDLSSSetOptions"));
-    }
-    if (Availability(StreamlineFeature::RayReconstruction) == ReconstructionAvailability::Available)
-    {
-        static_cast<void>(load(StreamlineFeature::RayReconstruction, state.rr_optimal, "slDLSSDGetOptimalSettings"));
-        static_cast<void>(load(StreamlineFeature::RayReconstruction, state.rr_set_options, "slDLSSDSetOptions"));
-        static_cast<void>(load(StreamlineFeature::RayReconstruction, state.rr_get_state, "slDLSSDGetState"));
-        if (Availability(StreamlineFeature::SuperResolution) != ReconstructionAvailability::Available)
-            static_cast<void>(state.Fail(StreamlineFeature::RayReconstruction, "DLSS-RR requires compatible DLSS options", sl::Result::eErrorFeatureMissingDependency));
     }
     if (Availability(StreamlineFeature::Reflex) == ReconstructionAvailability::Available)
     {
@@ -708,37 +668,22 @@ Result StreamlineSession::AttachPresentation(IDXGISwapChain4 *proxy, ID3D12Comma
     return Result::Success();
 }
 
-Result StreamlineSession::QueryInputExtent(const GraphicsModeId &quality, ViewExtent output, bool ray,
+Result StreamlineSession::QueryInputExtent(const GraphicsModeId &quality, ViewExtent output,
                                          StreamlineInputExtent &range)
 {
     if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
     auto &state = *impl_;
-    const auto selected = ray ? StreamlineFeature::RayReconstruction : StreamlineFeature::SuperResolution;
-    if (auto required = state.RequireFeature(selected); !required) return required;
+    if (auto required = state.RequireFeature(StreamlineFeature::SuperResolution); !required) return required;
     sl::DLSSMode mode;
     if (!output.width || !output.height || !Quality(quality.value, mode))
         return StreamlineFailure(ErrorCode::InvalidArgument, "Invalid DLSS output extent or unsupported quality ID: " + quality.value);
-    sl::Result native;
-    StreamlineInputExtent candidate;
-    if (ray)
-    {
-        sl::DLSSDOptions options;
-        options.mode = mode; options.outputWidth = output.width; options.outputHeight = output.height;
-        sl::DLSSDOptimalSettings settings;
-        native = state.rr_optimal(options, settings);
-        candidate = {{settings.optimalRenderWidth, settings.optimalRenderHeight}, {settings.renderWidthMin, settings.renderHeightMin},
-            {settings.renderWidthMax, settings.renderHeightMax}};
-    }
-    else
-    {
-        sl::DLSSOptions options;
-        options.mode = mode; options.outputWidth = output.width; options.outputHeight = output.height;
-        sl::DLSSOptimalSettings settings;
-        native = state.sr_optimal(options, settings);
-        candidate = {{settings.optimalRenderWidth, settings.optimalRenderHeight}, {settings.renderWidthMin, settings.renderHeightMin},
-            {settings.renderWidthMax, settings.renderHeightMax}};
-    }
-    if (native != sl::Result::eOk) return CandidateFailure(ray ? "slDLSSDGetOptimalSettings" : "slDLSSGetOptimalSettings", native);
+    sl::DLSSOptions options;
+    options.mode = mode; options.outputWidth = output.width; options.outputHeight = output.height;
+    sl::DLSSOptimalSettings settings;
+    const auto native = state.sr_optimal(options, settings);
+    if (native != sl::Result::eOk) return CandidateFailure("slDLSSGetOptimalSettings", native);
+    const StreamlineInputExtent candidate{{settings.optimalRenderWidth, settings.optimalRenderHeight},
+        {settings.renderWidthMin, settings.renderHeightMin}, {settings.renderWidthMax, settings.renderHeightMax}};
     if (!candidate.optimal.width || !candidate.optimal.height || !candidate.minimum.width || !candidate.minimum.height ||
         candidate.minimum.width > candidate.optimal.width || candidate.minimum.height > candidate.optimal.height ||
         candidate.maximum.width < candidate.optimal.width || candidate.maximum.height < candidate.optimal.height)
@@ -747,59 +692,16 @@ Result StreamlineSession::QueryInputExtent(const GraphicsModeId &quality, ViewEx
     return Result::Success();
 }
 
-Result StreamlineSession::QueryRayReconstructionMemory(std::uint64_t &bytes)
-{
-    bytes = 0;
-    if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
-    auto &state = *impl_;
-    if (auto r = state.RequireFeature(StreamlineFeature::RayReconstruction); !r) return r;
-    if (!state.reconstruction_configured)
-        return StreamlineFailure(ErrorCode::InvalidState, "Configure the adopted RR viewport before querying its native memory estimate.");
-    if (state.rr_memory_query_pending)
-    {
-        if (!state.rr_allocation_owned || state.rr_allocation_tags_pending || state.reconstruction_evaluated || !state.rr_get_state)
-            return StreamlineFailure(ErrorCode::InvalidState, "DLSS RR memory state is queryable only after a drained native allocation and before evaluation.");
-        sl::DLSSDState native;
-        const auto result = state.rr_get_state(sl::ViewportHandle(state.viewport), native);
-        if (result != sl::Result::eOk) return CandidateFailure("slDLSSDGetState(memory)", result);
-        if (!native.estimatedVRAMUsageInBytes)
-            return StreamlineFailure(ErrorCode::TaskFailed, "DLSS RR returned no positive native resident memory estimate.");
-        state.rr_memory_bytes = native.estimatedVRAMUsageInBytes;
-        state.rr_memory_quality = state.quality;
-        state.rr_memory_output = state.output;
-        state.rr_memory_input = state.input_range.optimal;
-        state.rr_memory_ray = state.ray_reconstruction;
-        state.rr_memory_cached = true;
-        state.rr_memory_query_pending = false;
-        bytes = state.rr_memory_bytes;
-        return Result::Success();
-    }
-    if (!state.rr_memory_cached || !state.RrMemoryMatchesConfiguration() ||
-        (!state.rr_allocation_owned && !state.rr_viewport_owned))
-        return StreamlineFailure(ErrorCode::InvalidState, "DLSS RR memory estimate requires a cached receipt from this owned configured viewport.");
-    bytes = state.rr_memory_bytes;
-    return Result::Success();
-}
-
-Result StreamlineSession::ConfigureReconstruction(const GraphicsModeId &quality, ViewExtent output, bool ray,
+Result StreamlineSession::ConfigureReconstruction(const GraphicsModeId &quality, ViewExtent output,
                                                 std::uint32_t viewport)
 {
     if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
     if (auto selected = SelectReconstructionViewAfterCompletion(viewport); !selected) return selected;
     auto &state = *impl_;
-    if (state.reconstruction_configured || state.reconstruction_evaluated ||
-        state.sr_viewport_owned || state.rr_viewport_owned || state.rr_allocation_owned)
+    if (state.reconstruction_configured || state.reconstruction_evaluated || state.sr_viewport_owned)
         return StreamlineFailure(ErrorCode::InvalidState, "Drain old DLSS graph uses and release reconstruction before reconfiguration.");
-    state.rr_memory_query_pending = false;
-    state.rr_memory_cached = false;
-    state.rr_memory_bytes = 0;
-    state.rr_memory_quality = {};
-    state.rr_memory_output = {};
-    state.rr_memory_input = {};
-    state.rr_memory_ray = false;
-    state.rr_allocation_frame_token = nullptr;
     StreamlineInputExtent range;
-    if (auto queried = QueryInputExtent(quality, output, ray, range); !queried) return queried;
+    if (auto queried = QueryInputExtent(quality, output, range); !queried) return queried;
     sl::DLSSMode mode;
     if (!Quality(quality.value, mode)) return StreamlineFailure(ErrorCode::InvalidArgument, "Unknown DLSS quality.");
     state.sr_options = sl::DLSSOptions{};
@@ -808,30 +710,15 @@ Result StreamlineSession::ConfigureReconstruction(const GraphicsModeId &quality,
     state.sr_options.outputHeight = output.height;
     state.sr_options.colorBuffersHDR = sl::Boolean::eTrue;
     state.sr_options.useAutoExposure = sl::Boolean::eFalse;
-    auto native = state.sr_set_options(sl::ViewportHandle(viewport), state.sr_options);
+    const auto native = state.sr_set_options(sl::ViewportHandle(viewport), state.sr_options);
     if (native != sl::Result::eOk) return CandidateFailure("slDLSSSetOptions", native);
-    // SR options have mutated the shared viewport even if the following RR
-    // options fail. Make the partial configuration explicitly releasable.
+    // Native options have changed; retain a releasable viewport if later allocation fails.
     state.viewport = viewport;
     state.reconstruction_configured = true;
-    if (state.rr_set_options)
-    {
-        state.rr_options = sl::DLSSDOptions{};
-        state.rr_options.mode = ray ? mode : sl::DLSSMode::eOff;
-        state.rr_options.outputWidth = output.width;
-        state.rr_options.outputHeight = output.height;
-        state.rr_options.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
-        native = state.rr_set_options(sl::ViewportHandle(viewport), state.rr_options);
-        if (native != sl::Result::eOk) return CandidateFailure("slDLSSDSetOptions", native);
-    }
     state.output = output;
     state.quality = quality;
-    state.ray_reconstruction = ray;
-    state.viewport = viewport;
     state.input_range = range;
-    state.rr_input = {};
     state.force_reset = true;
-    state.reconstruction_configured = true;
     return Result::Success();
 }
 
@@ -840,7 +727,7 @@ Result StreamlineSession::ExecuteSuperResolution(ID3D12GraphicsCommandList *comm
     if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
     auto &state = *impl_;
     if (!commands) return StreamlineFailure(ErrorCode::InvalidArgument, "DLSS-SR requires a recording Direct command list.");
-    if (auto valid = state.ValidateReconstruction(frame, false); !valid) return valid;
+    if (auto valid = state.ValidateReconstruction(frame); !valid) return valid;
     if (auto begun = BeginFrame(frame.identity); !begun) return begun;
     if (state.evaluated_frame == frame.identity.render_id)
         return StreamlineFailure(ErrorCode::InvalidState, "DLSS reconstruction has already evaluated this rendered frame.");
@@ -883,230 +770,6 @@ Result StreamlineSession::ExecuteSuperResolution(ID3D12GraphicsCommandList *comm
     return Result::Success();
 }
 
-Result StreamlineSession::AllocateRayReconstructionResources(ID3D12GraphicsCommandList *commands,
-                                                            const SdkReconstructionFrame &metadata,
-                                                            bool &created)
-{
-    created = false;
-    if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
-    auto &state = *impl_;
-    if (!commands) return StreamlineFailure(ErrorCode::InvalidArgument, "DLSS-RR allocation requires a recording Direct command list.");
-    if (auto required = state.RequireFeature(StreamlineFeature::RayReconstruction); !required) return required;
-    if (!state.reconstruction_configured || !state.ray_reconstruction || !state.rr_set_options || !state.allocate_resources)
-        return StreamlineFailure(ErrorCode::InvalidState, "Configure DLSS-RR before allocating its native resources.");
-    if (state.rr_allocation_tags_pending)
-        return StreamlineFailure(ErrorCode::InvalidState, "Complete the previous DLSS-RR allocation command list before allocating again.");
-    const auto optimal = state.input_range.optimal;
-    if (!optimal.width || !optimal.height || !state.output.width || !state.output.height ||
-        metadata.active.width != optimal.width || metadata.active.height != optimal.height ||
-        metadata.output_rect.width != state.output.width || metadata.output_rect.height != state.output.height ||
-        !FitsRect(metadata.color, metadata.active) || !FitsRect(metadata.depth, metadata.active) ||
-        !FitsRect(metadata.motion, metadata.active) || !FitsRect(metadata.output, metadata.output_rect) ||
-        metadata.color == metadata.output ||
-        !Format(metadata.color, {DXGI_FORMAT_R16G16B16A16_FLOAT}) ||
-        !Format(metadata.output, {DXGI_FORMAT_R16G16B16A16_FLOAT}) ||
-        !Format(metadata.depth, {DXGI_FORMAT_R32_FLOAT}) ||
-        !Format(metadata.motion, {DXGI_FORMAT_R16G16_FLOAT}) ||
-        !(metadata.output->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) ||
-        metadata.color_state != D3D12_RESOURCE_STATE_COMMON ||
-        metadata.depth_state != D3D12_RESOURCE_STATE_COMMON ||
-        metadata.motion_state != D3D12_RESOURCE_STATE_COMMON ||
-        metadata.output_state != D3D12_RESOURCE_STATE_COMMON)
-        return StreamlineFailure(ErrorCode::InvalidArgument,
-            "DLSS-RR allocation requires separate RGBA16F input/output, R32F depth, RG16F motion, optimal extents, and COMMON metadata states.");
-    if (state.rr_allocation_owned || state.rr_viewport_owned)
-        return Result::Success();
-
-    const std::uint32_t allocation_frame = 0;
-    sl::FrameToken *token{};
-    auto native = state.get_frame_token(token, &allocation_frame);
-    if (native != sl::Result::eOk || !token)
-        return StreamlineFailure(ErrorCode::TaskFailed, NativeFailure("slGetNewFrameToken(RR allocation frame 0)", native));
-    // Native creation consumes the depth/MV flags, never a rendered camera.
-    // Keep unused allocation metadata finite; real evaluation publishes its
-    // strict camera constants with the actual rendered-frame token later.
-    sl::Constants allocation_constants;
-    const auto unused_matrix = NativeMatrix(DirectX::XMFLOAT4X4{});
-    allocation_constants.cameraViewToClip = unused_matrix;
-    allocation_constants.clipToCameraView = unused_matrix;
-    allocation_constants.clipToPrevClip = unused_matrix;
-    allocation_constants.prevClipToClip = unused_matrix;
-    allocation_constants.jitterOffset = {0, 0};
-    allocation_constants.mvecScale = {1, 1};
-    allocation_constants.cameraPinholeOffset = {0, 0};
-    allocation_constants.cameraPos = allocation_constants.cameraUp =
-        allocation_constants.cameraRight = allocation_constants.cameraFwd = sl::float3{0, 0, 0};
-    allocation_constants.cameraNear = allocation_constants.cameraFar = allocation_constants.cameraFOV = 0;
-    allocation_constants.cameraAspectRatio = float(optimal.width) / float(optimal.height);
-    allocation_constants.depthInverted = sl::Boolean::eTrue;
-    allocation_constants.cameraMotionIncluded = sl::Boolean::eTrue;
-    allocation_constants.motionVectors3D = sl::Boolean::eFalse;
-    allocation_constants.reset = sl::Boolean::eTrue;
-    allocation_constants.orthographicProjection = sl::Boolean::eFalse;
-    allocation_constants.motionVectorsDilated = sl::Boolean::eFalse;
-    allocation_constants.motionVectorsJittered = sl::Boolean::eFalse;
-    native = state.set_constants(allocation_constants, *token, sl::ViewportHandle(state.viewport));
-    if (native != sl::Result::eOk)
-        return StreamlineFailure(ErrorCode::TaskFailed, NativeFailure("slSetConstants(RR allocation)", native));
-
-    const sl::ViewportHandle viewport(state.viewport);
-    const sl::Extent input{0, 0, optimal.width, optimal.height};
-    const sl::Extent output{0, 0, state.output.width, state.output.height};
-    std::array<sl::Resource, 4> resources{
-        NativeResource(metadata.color, metadata.color_state),
-        NativeResource(metadata.output, metadata.output_state),
-        NativeResource(metadata.depth, metadata.depth_state),
-        NativeResource(metadata.motion, metadata.motion_state)};
-    std::array<sl::ResourceTag, 4> tags{
-        sl::ResourceTag(&resources[0], sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent, &input),
-        sl::ResourceTag(&resources[1], sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent, &output),
-        sl::ResourceTag(&resources[2], sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &input),
-        sl::ResourceTag(&resources[3], sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &input)};
-    native = state.set_tags(*token, viewport, tags.data(), static_cast<std::uint32_t>(tags.size()), commands);
-    if (native != sl::Result::eOk)
-        return state.Fail(StreamlineFeature::RayReconstruction, "slSetTagForFrame(DLSS-RR allocation)", native);
-    state.rr_allocation_frame_token = token;
-    state.rr_allocation_tags_pending = true;
-    // slAllocateResources may record initialization work before reporting a
-    // failure. Keep the viewport owned so the caller can drain, clear tags,
-    // and perform the normal native rollback path.
-    state.rr_allocation_owned = true;
-    created = true;
-    native = state.allocate_resources(commands, sl::kFeatureDLSS_RR, viewport);
-    if (native != sl::Result::eOk)
-        return state.Fail(StreamlineFeature::RayReconstruction, "slAllocateResources(DLSS-RR)", native);
-    state.rr_memory_query_pending = true;
-    return Result::Success();
-}
-
-Result StreamlineSession::CompleteRayReconstructionAllocationAfterCompletion()
-{
-    if (!impl_) return Result::Success();
-    auto &state = *impl_;
-    if (auto owner = state.RequireOwner(); !owner) return owner;
-    if (!state.rr_allocation_tags_pending) return Result::Success();
-    if (!state.rr_allocation_frame_token)
-        return StreamlineFailure(ErrorCode::InvalidState, "DLSS-RR allocation tags have no retained frame-0 token.");
-    const sl::ViewportHandle viewport(state.viewport);
-    const std::array tags{
-        sl::ResourceTag(nullptr, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent)};
-    const auto native = state.set_tags(*state.rr_allocation_frame_token, viewport, tags.data(),
-                                       static_cast<std::uint32_t>(tags.size()), nullptr);
-    if (native != sl::Result::eOk)
-        return state.Fail(StreamlineFeature::RayReconstruction, "slSetTagForFrame(clear RR allocation)", native);
-    state.rr_allocation_tags_pending = false;
-    state.rr_allocation_frame_token = nullptr;
-    return Result::Success();
-}
-
-Result StreamlineSession::ExecuteRayReconstruction(ID3D12GraphicsCommandList *commands, const SdkRayReconstructionFrame &ray)
-{
-    if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
-    auto &state = *impl_;
-    const auto &frame = ray.reconstruction;
-    if (!commands) return StreamlineFailure(ErrorCode::InvalidArgument, "DLSS-RR requires a recording Direct command list.");
-    if (auto valid = state.ValidateReconstruction(frame, true); !valid) return valid;
-    if (!FitsRect(ray.diffuse_albedo, frame.active) || !FitsRect(ray.specular_albedo, frame.active) ||
-        !FitsRect(ray.normal_roughness, frame.active) || !FitsRect(ray.specular_hit_distance, frame.active) ||
-        !FloatColor(ray.diffuse_albedo) || !FloatColor(ray.specular_albedo) || !FloatColor(ray.normal_roughness) ||
-        !ScalarFloat(ray.specular_hit_distance) ||
-        (ray.diffuse_hit_distance && (!FitsRect(ray.diffuse_hit_distance, frame.active) || !ScalarFloat(ray.diffuse_hit_distance))) ||
-        !FiniteMatrix(frame.camera.view) || !FiniteMatrix(frame.camera.inverse_view))
-        return StreamlineFailure(ErrorCode::InvalidArgument, "DLSS-RR requires actual noisy color, linear diffuse/specular albedo, normalized world normals + linear roughness, specular hit distance and absolute view transforms.");
-    if (!ShaderReadable(ray.diffuse_albedo_state) || !ShaderReadable(ray.specular_albedo_state) ||
-        !ShaderReadable(ray.normal_roughness_state) || !ShaderReadable(ray.specular_hit_distance_state) ||
-        (ray.diffuse_hit_distance && !ShaderReadable(ray.diffuse_hit_distance_state)))
-        return StreamlineFailure(ErrorCode::InvalidArgument, "DLSS-RR explicit guide states must be shader-readable in the graph.");
-    for(const auto optional:std::array{
-        std::pair{frame.transparency_overlay,frame.transparency_overlay_state},
-        std::pair{frame.color_before_transparency,frame.color_before_transparency_state}})
-        if(optional.first&&(!FitsRect(optional.first,frame.active)||!FloatColor(optional.first)||
-            optional.first->GetDesc().Format!=frame.color->GetDesc().Format||!ShaderReadable(optional.second)))
-            return StreamlineFailure(ErrorCode::InvalidArgument,"DLSS-RR transparency tags require actual matching-format input images and readable states.");
-    if(frame.sss_luminance&&(!FitsRect(frame.sss_luminance,frame.active)||!ScalarFloat(frame.sss_luminance)||!ShaderReadable(frame.sss_luminance_state)))
-        return StreamlineFailure(ErrorCode::InvalidArgument,"DLSS-RR SSS guide requires actual luminosity difference at the input extent.");
-    if(frame.transparency_overlay&&frame.transparency_overlay->GetDesc().Format!=DXGI_FORMAT_R16G16B16A16_FLOAT&&
-        frame.transparency_overlay->GetDesc().Format!=DXGI_FORMAT_R32G32B32A32_FLOAT)
-        return StreamlineFailure(ErrorCode::InvalidArgument,"DLSS-RR premultiplied transparency overlay requires actual RGB and alpha channels.");
-    // The noisy integrated ray-traced color is reconstruction.color. Separate
-    // diffuse/specular radiance and NRD-specific depth/motion guides do not have
-    // that meaning and are never substituted for the RR inputs.
-    if (auto begun = BeginFrame(frame.identity); !begun) return begun;
-    if (state.evaluated_frame == frame.identity.render_id)
-        return StreamlineFailure(ErrorCode::InvalidState, "DLSS-RR replaces SR; this rendered frame was already reconstructed.");
-    if (auto constants = state.Constants(frame.camera, frame.active); !constants) return constants;
-    state.sr_options.preExposure = frame.input_pre_exposure;
-    state.sr_options.exposureScale = frame.exposure_scale;
-    auto native = state.sr_set_options(sl::ViewportHandle(state.viewport), state.sr_options);
-    if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::SuperResolution, "slDLSSSetOptions(RR companion)", native);
-    state.rr_options.preExposure = frame.input_pre_exposure;
-    state.rr_options.exposureScale = frame.exposure_scale;
-    state.rr_options.worldToCameraView = NativeMatrix(frame.camera.view);
-    state.rr_options.cameraViewToWorld = NativeMatrix(frame.camera.inverse_view);
-    native = state.rr_set_options(sl::ViewportHandle(state.viewport), state.rr_options);
-    if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::RayReconstruction, "slDLSSDSetOptions", native);
-    const auto input = NativeRect(frame.active), output = NativeRect(frame.output_rect);
-    const sl::Extent exposure_extent{0, 0, 1, 1};
-    std::array<sl::Resource, 14> resources;
-    std::array<sl::ResourceTag, 14> tags;
-    std::uint32_t count{};
-    auto add = [&](ID3D12Resource *resource, sl::BufferType type, const sl::Extent &extent,
-                   D3D12_RESOURCE_STATES resource_state,
-                   sl::ResourceLifecycle lifecycle = sl::ResourceLifecycle::eValidUntilEvaluate)
-    {
-        resources[count] = NativeResource(resource, resource_state);
-        tags[count] = sl::ResourceTag(resource ? &resources[count] : nullptr, type, lifecycle, &extent);
-        ++count;
-    };
-    add(frame.color, sl::kBufferTypeScalingInputColor, input, frame.color_state, sl::ResourceLifecycle::eValidUntilPresent);
-    add(frame.output, sl::kBufferTypeScalingOutputColor, output, frame.output_state, sl::ResourceLifecycle::eValidUntilPresent);
-    add(frame.depth, sl::kBufferTypeDepth, input, frame.depth_state, sl::ResourceLifecycle::eValidUntilPresent);
-    add(frame.motion, sl::kBufferTypeMotionVectors, input, frame.motion_state, sl::ResourceLifecycle::eValidUntilPresent);
-    add(frame.exposure, sl::kBufferTypeExposure, exposure_extent, frame.exposure_state);
-    add(frame.responsive, sl::kBufferTypeResponsivityMask, input, frame.responsive_state);
-    add(ray.diffuse_albedo, sl::kBufferTypeAlbedo, input, ray.diffuse_albedo_state);
-    add(ray.specular_albedo, sl::kBufferTypeSpecularAlbedo, input, ray.specular_albedo_state);
-    add(ray.normal_roughness, sl::kBufferTypeNormalRoughness, input, ray.normal_roughness_state);
-    add(ray.specular_hit_distance, sl::kBufferTypeSpecularHitDistance, input, ray.specular_hit_distance_state);
-    add(ray.diffuse_hit_distance, sl::kBufferTypeDiffuseHitDistance, input, ray.diffuse_hit_distance_state);
-    add(frame.transparency_overlay,sl::kBufferTypeTransparencyLayer,input,frame.transparency_overlay_state);
-    add(frame.color_before_transparency,sl::kBufferTypeColorBeforeTransparency,input,frame.color_before_transparency_state);
-    add(frame.sss_luminance,sl::kBufferTypeScreenSpaceSubsurfaceScatteringGuide,input,frame.sss_luminance_state);
-    native = state.set_tags(*state.frame_token, sl::ViewportHandle(state.viewport), tags.data(), count, commands);
-    if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::RayReconstruction, "slSetTagForFrame(DLSS-RR)", native);
-    const sl::ViewportHandle viewport(state.viewport);
-    const sl::BaseStructure *inputs[]{&viewport};
-    // Evaluation may create the native viewport before reporting a failure;
-    // retain ownership through cleanup once this call is entered.
-    state.reconstruction_evaluated = true;
-    state.rr_viewport_owned = true;
-    native = state.evaluate(sl::kFeatureDLSS_RR, *state.frame_token, inputs, 1, commands);
-    const auto evaluation = native;
-    // Explicit allocation and EvaluateUntilEvaluate tags otherwise leave the
-    // four mandatory resources pinned until Present, which makes the provider
-    // clone them. The renderer retains the graph owners through GPU completion;
-    // release the SDK's Present-lifetime references immediately after recording
-    // the synchronous evaluation, including when evaluation reports failure.
-    const std::array clear_present_tags{
-        sl::ResourceTag(nullptr, sl::kBufferTypeScalingInputColor, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeScalingOutputColor, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent),
-        sl::ResourceTag(nullptr, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent)};
-    const auto cleared = state.set_tags(*state.frame_token, viewport, clear_present_tags.data(),
-                                        static_cast<std::uint32_t>(clear_present_tags.size()), nullptr);
-    if (evaluation != sl::Result::eOk)
-        return state.Fail(StreamlineFeature::RayReconstruction, "slEvaluateFeature(DLSS-RR)", evaluation);
-    if (cleared != sl::Result::eOk)
-        return state.Fail(StreamlineFeature::RayReconstruction, "slSetTagForFrame(clear RR inputs)", cleared);
-    state.rr_input = {frame.active.width, frame.active.height};
-    state.evaluated_frame = frame.identity.render_id;
-    state.force_reset = false;
-    return Result::Success();
-}
-
 Result StreamlineSession::SelectReconstructionViewAfterCompletion(std::uint32_t viewport)
 {
     if (!impl_ || !impl_->started || impl_->viewport == viewport) return Result::Success();
@@ -1117,30 +780,16 @@ Result StreamlineSession::SelectReconstructionViewAfterCompletion(std::uint32_t 
         swap(state.reconstruction_configured, view.reconstruction_configured);
         swap(state.reconstruction_evaluated, view.reconstruction_evaluated);
         swap(state.sr_viewport_owned, view.sr_viewport_owned);
-        swap(state.rr_viewport_owned, view.rr_viewport_owned);
-        swap(state.ray_reconstruction, view.ray_reconstruction);
         swap(state.force_reset, view.force_reset);
         swap(state.has_frame, view.has_frame);
         swap(state.identity, view.identity);
         swap(state.frame_token, view.frame_token);
-        swap(state.rr_allocation_frame_token, view.rr_allocation_frame_token);
         swap(state.constants_frame, view.constants_frame);
         swap(state.evaluated_frame, view.evaluated_frame);
         swap(state.quality, view.quality);
         swap(state.output, view.output);
-        swap(state.rr_input, view.rr_input);
         swap(state.input_range, view.input_range);
         swap(state.sr_options, view.sr_options);
-        swap(state.rr_options, view.rr_options);
-        swap(state.rr_allocation_owned, view.rr_allocation_owned);
-        swap(state.rr_allocation_tags_pending, view.rr_allocation_tags_pending);
-        swap(state.rr_memory_query_pending, view.rr_memory_query_pending);
-        swap(state.rr_memory_cached, view.rr_memory_cached);
-        swap(state.rr_memory_bytes, view.rr_memory_bytes);
-        swap(state.rr_memory_quality, view.rr_memory_quality);
-        swap(state.rr_memory_output, view.rr_memory_output);
-        swap(state.rr_memory_input, view.rr_memory_input);
-        swap(state.rr_memory_ray, view.rr_memory_ray);
     };
     exchange(state.reconstruction_views[state.viewport]);
     exchange(state.reconstruction_views[viewport]);
@@ -1153,38 +802,14 @@ Result StreamlineSession::ReleaseReconstructionAfterCompletion()
     if (!impl_) return Result::Success();
     auto &state = *impl_;
     if (auto owner = state.RequireOwner(); !owner) return owner;
-    if (!state.device || (!state.reconstruction_configured && !state.reconstruction_evaluated &&
-                          !state.sr_viewport_owned && !state.rr_viewport_owned && !state.rr_allocation_owned))
+    if (!state.device || (!state.reconstruction_configured && !state.reconstruction_evaluated && !state.sr_viewport_owned))
         return Result::Success();
-    if (state.rr_allocation_tags_pending)
-        if (auto cleared = CompleteRayReconstructionAllocationAfterCompletion(); !cleared) return cleared;
     const sl::ViewportHandle viewport(state.viewport);
-    if (state.rr_set_options)
-    {
-        auto options = state.rr_options;
-        options.mode = sl::DLSSMode::eOff;
-        auto native = state.rr_set_options(viewport, options);
-        if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::RayReconstruction, "slDLSSDSetOptions(Off)", native);
-    }
-    if (state.rr_viewport_owned || state.rr_allocation_owned)
-    {
-        const auto native = state.free_resources(sl::kFeatureDLSS_RR, viewport);
-        if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::RayReconstruction, "slFreeResources(DLSS-RR)", native);
-        state.rr_viewport_owned = false;
-        state.rr_allocation_owned = false;
-        state.rr_memory_query_pending = false;
-        state.rr_memory_cached = false;
-        state.rr_memory_bytes = 0;
-        state.rr_memory_quality = {};
-        state.rr_memory_output = {};
-        state.rr_memory_input = {};
-        state.rr_memory_ray = false;
-    }
     if (state.sr_set_options)
     {
         auto options = state.sr_options;
         options.mode = sl::DLSSMode::eOff;
-        auto native = state.sr_set_options(viewport, options);
+        const auto native = state.sr_set_options(viewport, options);
         if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::SuperResolution, "slDLSSSetOptions(Off)", native);
     }
     if (state.sr_viewport_owned)
@@ -1195,15 +820,6 @@ Result StreamlineSession::ReleaseReconstructionAfterCompletion()
     }
     state.reconstruction_configured = false;
     state.reconstruction_evaluated = false;
-    state.rr_input = {};
-    state.rr_memory_query_pending = false;
-    state.rr_memory_cached = false;
-    state.rr_memory_bytes = 0;
-    state.rr_memory_quality = {};
-    state.rr_memory_output = {};
-    state.rr_memory_input = {};
-    state.rr_memory_ray = false;
-    state.rr_allocation_frame_token = nullptr;
     state.force_reset = true;
     return Result::Success();
 }
@@ -1327,7 +943,9 @@ Result StreamlineSession::QueryFrameGenerationCapabilities(StreamlineFrameGenera
     if (auto required = state.RequireFeature(StreamlineFeature::FrameGeneration); !required) return required;
     sl::DLSSGState native_state;
     const auto native = state.fg_get_state(sl::ViewportHandle(0u), native_state, nullptr);
-    if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::FrameGeneration, "slDLSSGGetState", native);
+    if (native != sl::Result::eOk) { state.fg_last_state_query_qpc = 0; return state.Fail(StreamlineFeature::FrameGeneration, "slDLSSGGetState", native); }
+    // Capability queries consume the same SDK counter; the next interval starts here.
+    state.fg_last_state_query_qpc = RendererDiagnosticsCounter();
     capabilities = {native_state.numFramesToGenerateMax ? native_state.numFramesToGenerateMax + 1 : 0,
         native_state.minWidthOrHeight, native_state.numFramesActuallyPresented,
         native_state.bIsDynamicMFGSupported == sl::Boolean::eTrue, native_state.bIsVsyncSupportAvailable == sl::Boolean::eTrue};
@@ -1388,6 +1006,7 @@ Result StreamlineSession::ConfigureFrameGeneration(GraphicsFrameGenerationMode m
     const auto native = state.fg_set_options(sl::ViewportHandle(0u), options);
     if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::FrameGeneration, "slDLSSGSetOptions", native);
     state.fg_options = options;
+    state.fg_last_state_query_qpc = 0; // Do not bridge mode changes with an old counter window.
     state.fg_input = {};
     state.presentation_recreate_required = true;
     return Result::Success();
@@ -1465,8 +1084,10 @@ Result StreamlineSession::PreparePresent(const SdkPresentationFrame &frame)
     return Result::Success();
 }
 
-Result StreamlineSession::PresentCompleted(SdkFrameIdentity identity, std::uint32_t *frames_actually_presented)
+Result StreamlineSession::PresentCompleted(SdkFrameIdentity identity, std::uint32_t *frames_actually_presented,
+                                          RendererStreamlinePresentCount *observation)
 {
+    if (observation) *observation = {};
     if (!impl_) return StreamlineFailure(ErrorCode::InvalidState, std::string(kNotStarted));
     auto &state = *impl_;
     if (auto owner = state.RequireOwner(); !owner) return owner;
@@ -1481,7 +1102,22 @@ Result StreamlineSession::PresentCompleted(SdkFrameIdentity identity, std::uint3
     state.presented_without_fence = true;
     sl::DLSSGState native_state;
     auto native = state.fg_get_state(sl::ViewportHandle(0u), native_state, nullptr);
-    if (native != sl::Result::eOk) return state.Fail(StreamlineFeature::FrameGeneration, "slDLSSGGetState(after Present)", native);
+    const auto observed_qpc = RendererDiagnosticsCounter();
+    const auto previous_query_qpc = std::exchange(state.fg_last_state_query_qpc, observed_qpc);
+    if (native != sl::Result::eOk)
+    {
+        state.fg_last_state_query_qpc = 0;
+        return state.Fail(StreamlineFeature::FrameGeneration, "slDLSSGGetState(after Present)", native);
+    }
+    if (observation)
+    {
+        LARGE_INTEGER frequency{};
+        const bool frequency_valid = QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0;
+        *observation = {previous_query_qpc, observed_qpc,
+            frequency_valid ? static_cast<std::uint64_t>(frequency.QuadPart) : 0,
+            native_state.numFramesActuallyPresented,
+            frequency_valid && previous_query_qpc > 0 && observed_qpc > previous_query_qpc};
+    }
     if (frames_actually_presented) *frames_actually_presented = native_state.numFramesActuallyPresented;
     if (!state.presenting_queue || !state.presentation_fence)
     {
@@ -1679,7 +1315,7 @@ bool StreamlineSession::ReconstructionConfigured() const noexcept
 #else
 Result StreamlineSession::InitializeBeforeDevice(StreamlineFeatures features)
 {
-    if (!features.super_resolution && !features.ray_reconstruction && !features.frame_generation && !features.reflex)
+    if (!features.super_resolution && !features.frame_generation && !features.reflex)
         return Result::Success();
     return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded));
 }
@@ -1691,17 +1327,11 @@ Result StreamlineSession::UpgradeSwapChain(void **) { return StreamlineFailure(E
 Result StreamlineSession::GetNativeInterface(void *, void **) { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 Result StreamlineSession::AttachPresentation(IDXGISwapChain4 *, ID3D12CommandQueue *)
 { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::QueryInputExtent(const GraphicsModeId &, ViewExtent, bool, StreamlineInputExtent &)
+Result StreamlineSession::QueryInputExtent(const GraphicsModeId &, ViewExtent, StreamlineInputExtent &)
 { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::ConfigureReconstruction(const GraphicsModeId &, ViewExtent, bool, std::uint32_t)
+Result StreamlineSession::ConfigureReconstruction(const GraphicsModeId &, ViewExtent, std::uint32_t)
 { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 Result StreamlineSession::ExecuteSuperResolution(ID3D12GraphicsCommandList *, const SdkReconstructionFrame &)
-{ return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::AllocateRayReconstructionResources(ID3D12GraphicsCommandList *, const SdkReconstructionFrame &, bool &created)
-{ created = false; return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::CompleteRayReconstructionAllocationAfterCompletion()
-{ return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::ExecuteRayReconstruction(ID3D12GraphicsCommandList *, const SdkRayReconstructionFrame &)
 { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 std::optional<std::uint64_t> StreamlineSession::NativeFrameToken(SdkFrameIdentity) const noexcept { return std::nullopt; }
 Result StreamlineSession::BeginFrame(SdkFrameIdentity) { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
@@ -1714,13 +1344,12 @@ Result StreamlineSession::QueryFrameGenerationCapabilities(StreamlineFrameGenera
 Result StreamlineSession::ConfigureFrameGeneration(GraphicsFrameGenerationMode, std::uint32_t, float, ViewExtent)
 { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 Result StreamlineSession::PreparePresent(const SdkPresentationFrame &) { return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
-Result StreamlineSession::PresentCompleted(SdkFrameIdentity, std::uint32_t *)
-{ return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
+Result StreamlineSession::PresentCompleted(SdkFrameIdentity, std::uint32_t *, RendererStreamlinePresentCount *observation)
+{ if (observation) *observation = {}; return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 Result StreamlineSession::WaitForPresentationInputs(ID3D12CommandQueue *) { return Result::Success(); }
 Result StreamlineSession::DrainPresentation() { return Result::Success(); }
 Result StreamlineSession::SelectReconstructionViewAfterCompletion(std::uint32_t) { return Result::Success(); }
 Result StreamlineSession::ReleaseReconstructionAfterCompletion() { return Result::Success(); }
-Result StreamlineSession::QueryRayReconstructionMemory(std::uint64_t &bytes) { bytes = 0; return StreamlineFailure(ErrorCode::InvalidState, std::string(kExcluded)); }
 Result StreamlineSession::DetachPresentationAfterCompletion() { return Result::Success(); }
 Result StreamlineSession::ShutdownAfterCompletion() { return Result::Success(); }
 Result StreamlineSession::UnloadAfterProxyRelease() { return Result::Success(); }

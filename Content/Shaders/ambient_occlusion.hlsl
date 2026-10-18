@@ -2,7 +2,7 @@
 // to the active rectangle, independently of texture allocation capacity.
 cbuffer AmbientOcclusionConstants : register(b0, space12)
 {
-    row_major float4x4 AoInverseViewProjection;
+    row_major float4x4 AoInverseProjection;
     row_major float4x4 AoWorldToView;
     row_major float4x4 AoProjection;
     float4 AoRenderSize;
@@ -60,10 +60,9 @@ int2 AoClampPixel(int2 p, float2 size) { return clamp(p, int2(0, 0), int2(size) 
 float3 AoViewPosition(int2 pixel, float depth)
 {
     float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
-    float4 world = mul(float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), depth, 1.0),
-                       AoInverseViewProjection);
-    float3 relative = world.xyz / world.w;
-    return mul(float4(relative, 0.0), AoWorldToView).xyz;
+    float4 view = mul(float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), depth, 1.0),
+                       AoInverseProjection);
+    return view.xyz / view.w;
 }
 struct AoGuide
 {
@@ -115,6 +114,9 @@ float AoArcIntegral(float h, float n)
 float AoHorizonVisibility(AoGuide g, uint2 pixel)
 {
     float radius = max(AoParameters.x, 1e-4);
+    float radiusSquared = radius * radius;
+    float falloffStart = radius * saturate(AoParameters.z);
+    float falloffRange = max(radius - falloffStart, 1e-4);
     float3 view = normalize(-g.position);
     float3 normal = normalize(mul(float4(g.normal, 0.0), AoWorldToView).xyz);
     float2 radiusPixels = abs(float2(AoProjection[0][0], AoProjection[1][1])) *
@@ -149,10 +151,9 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
                 if (!other.valid) continue;
                 float3 delta = other.position - g.position;
                 float distanceSquared = dot(delta, delta);
-                if (distanceSquared < 1e-8 || distanceSquared >= radius * radius) continue;
+                if (distanceSquared < 1e-8 || distanceSquared >= radiusSquared) continue;
                 float distance = sqrt(distanceSquared);
-                float falloffStart = radius * saturate(AoParameters.z);
-                float weight = 1.0 - saturate((distance - falloffStart) / max(radius - falloffStart, 1e-4));
+                float weight = 1.0 - saturate((distance - falloffStart) / falloffRange);
                 float cosHorizon = lerp(-1.0, dot(delta / distance, view), weight);
                 horizon[side] = max(horizon[side], cosHorizon);
             }

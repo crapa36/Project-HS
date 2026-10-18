@@ -1,0 +1,105 @@
+{
+  "complete": true,
+  "script_ast": true,
+  "normal_RGB8_2048": true,
+  "runtime_Blender_green_basis_exact": true,
+  "base_surface_RGBA8_opaque": true,
+  "surface_R_equals_exported_roughness": true,
+  "material_graph_three_maps_opaque_no_detail": true,
+  "baseline42_independently_matches_bc7bd60": true,
+  "no_task_blend1_backups": true,
+  "native_game_validation": "Not run by asset authoring agent; parent owns runtime integration.",
+  "files": [
+    {
+      "path": "tools/art/create_ground_detail_blender.py",
+      "bytes": 45959,
+      "sha256": "19bc9b3918e5a10e74ecba931c17f7c3fcad79234ed47baabc5314f5b6764a05"
+    },
+    {
+      "path": "ContentSource/Materials/ground_detail.json",
+      "bytes": 9753,
+      "sha256": "f885d03de74900a675ccd495057af158929372dd348362d72c1420f4b8f984de"
+    },
+    {
+      "path": "ContentSource/Models/Environment/environment_meshes.json",
+      "bytes": 100408352,
+      "sha256": "578e81bd6ed78cdbeb917775a6926d150164ba76c0d55a0d409f1b0ba4fed52d"
+    },
+    {
+      "path": "ContentSource/Textures/Environment/project_hs_environment_materials_v9_LEAN.json",
+      "bytes": 23756,
+      "sha256": "0ac1203116201c81aac831dbd47bd3f6e29704e6f87e6aa12bd4a29441076030"
+    },
+    {
+      "path": "ContentSource/Textures/Environment/baked_materials.json",
+      "bytes": 2055,
+      "sha256": "2506197c6a3440b6888c1ff13baa17a3feb5305c4fb4ba4c21a1a0ba7dd8136c"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/ground_detail_v001.blend",
+      "bytes": 16637398,
+      "sha256": "22d2a533ae28a0a7014ed7bad1a31e391f0f71ed78def9b6b8e7028b4bf555f2"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/ground_detail_v001.glb",
+      "bytes": 18192136,
+      "sha256": "52d7e3fcd2942827a83ce149e4fcfd43ef60980a6c3eae9c72aaffe0770f1eb6"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/preview/mcp_final.png",
+      "bytes": 1210388,
+      "sha256": "0654008e5563f5fe7cb8aaefaf9fd45d653b2141778f9d8a41547e4448a0a6de"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/clover_patch.fbx",
+      "bytes": 481084,
+      "sha256": "b946562d1828567b916abca0ec40807453165816163d8218e5046e92c8107902"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/fence_short.fbx",
+      "bytes": 127148,
+      "sha256": "2e5e34338ab02d89bd81e5e2aa2a1f511a3803a0ea62f922589a0ff7c0b3aeab"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/flower_buttercup.fbx",
+      "bytes": 642172,
+      "sha256": "b93cbff4c33aef7aed96dbcea5dbaec1678ec30a58926099c42622850932d0e2"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/flower_daisy.fbx",
+      "bytes": 947500,
+      "sha256": "1596fd983c855bfac8e9541501635090010ebdb97d8e8d257cd0f6cadcbc0069"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/flower_violet.fbx",
+      "bytes": 704556,
+      "sha256": "5ebf79e172c72caf3080a171a14eb51dc854956c740cf858f0e04da7a882a00c"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/ground_leaves.fbx",
+      "bytes": 186844,
+      "sha256": "434dc27e04a07b0210415948912978bddee3c21aa22dfc01e080126bf592c8d6"
+    },
+    {
+      "path": "ContentSource/Models/Environment/GroundDetail/FBX/twig_cluster.fbx",
+      "bytes": 154684,
+      "sha256": "47a9b4e704fff61ac2c8050da037c7c5413a27385ab4b4e212204975d1badb69"
+    },
+    {
+      "path": "ContentSource/Textures/Environment/textures/ground_detail_basecolor.png",
+      "bytes": 5401161,
+      "sha256": "a7b8b4cdf44d67301cba87e9aecc3de0f084114298794e212a52bd63528cd8f4"
+    },
+    {
+      "path": "ContentSource/Textures/Environment/textures/ground_detail_surface_ra.png",
+      "bytes": 3248705,
+      "sha256": "a29077e9462acbb1e0bdfce9ca81e3a026246ee66d02438125c5d7cf11573a81"
+    },
+    {
+      "path": "ContentSource/Textures/Environment/textures/ground_detail_normal.png",
+      "bytes": 7554463,
+      "sha256": "d69548a5d536f510bf81d9113e4dcd9aaf9ae5a3c4abe005db574f008310168a"
+    }
+  ],
+  "GLB_embedded_three_PNG_maps_and_one_opaque_PBR_material": true
+}

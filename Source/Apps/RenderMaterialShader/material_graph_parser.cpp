@@ -504,9 +504,8 @@ rd::MaterialGraph ParseMaterialGraph(std::string_view name, std::string_view jso
     if (decal)
     {
         Require(root.at("version") == 7, "decal requires typed material version7");
-        ExactKeys(flags, {"alpha_mode", "rt_policy", "receivers"});
-        Require(flags.at("alpha_mode") == "mask" && flags.at("rt_policy") == "raster_only",
-                "decal profile requires masked RasterOnly evaluation");
+        ExactKeys(flags, {"alpha_mode", "receivers"});
+        Require(flags.at("alpha_mode") == "mask", "decal profile requires masked evaluation");
         const auto &policy = flags.at("receivers");
         ExactKeys(policy, {"models", "required_surface_flags", "forbidden_surface_flags", "normal_filter"});
         Require(policy.at("models").is_array(), "decal receiver models must be an array");

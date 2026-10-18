@@ -8,6 +8,7 @@
 #include "runtime_channels.hpp"
 #include "session_music.hpp"
 #include "camera_pose.hpp"
+#include "recording_io.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
 #include "test_generation_paths.hpp"
@@ -813,6 +814,16 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     Check(recorder.Record(menu_input, 3234, probe, {}).Succeeded(),
           "record post-run menu tick");
     Check(recorder.Finish(true).Succeeded(), "finish playtest recorder");
+    Check(recorder.Finish(true).Succeeded() && !recorder.Active(),
+          "successful finalization remains complete on repetition");
+    for (const auto name : {"metadata.json", "inputs.ndjson", "timeline.csv",
+                            "events.ndjson", "analysis.md", "result.json"})
+    {
+        const auto file = CreateFileW((directory / name).c_str(), GENERIC_READ, 0,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "finalized recording releases every file handle");
+        CloseHandle(file);
+    }
     Check(std::filesystem::is_regular_file(directory / "result.json") &&
               std::filesystem::is_regular_file(directory / "analysis.md"),
           "playtest reports exist");
@@ -931,6 +942,72 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     reject_edge("\"action\":6", "\"action\":1.5");
     reject_edge("\"kind\":0", "\"kind\":2");
     reject_edge("\"kind\":0", "\"kind\":256");
+}
+
+void TestRecordingFileFinalization(const std::filesystem::path &root)
+{
+    const auto path = root / "recording-finalize.txt";
+    std::filesystem::create_directories(root);
+    std::ofstream normal(path);
+    normal << "last partial batch";
+    Check(hs::runtime_detail::FinishRecordingFile(normal) && !normal.is_open(),
+          "normal finalization flushes and closes the real file");
+    std::ifstream saved(path);
+    const std::string text((std::istreambuf_iterator<char>(saved)), {});
+    Check(text == "last partial batch", "partial buffered data survives finalization");
+    saved.close();
+
+    struct FailedFlush : std::streambuf { int sync() override { return -1; } } failed;
+    for (bool exceptions : {false, true})
+    {
+        std::ofstream file(path);
+        std::ostream &stream = file;
+        auto *original = stream.rdbuf(&failed);
+        if (exceptions) stream.exceptions(std::ios::badbit | std::ios::failbit);
+        Check(!hs::runtime_detail::FinishRecordingFile(file) && !file.is_open(),
+              "flush failure propagates while the owned file still closes");
+        stream.rdbuf(original);
+
+        std::ofstream closed(path);
+        closed.close();
+        if (exceptions) closed.exceptions(std::ios::badbit | std::ios::failbit);
+        Check(!hs::runtime_detail::FinishRecordingFile(closed),
+              "close failure cannot return success");
+    }
+}
+
+void TestPlaytestFinalizationFailures(const std::filesystem::path &root)
+{
+    // An occupied report path is a real file-open failure, independent of ACLs.
+    for (const auto blocked : {"analysis.md", "result.json"})
+    {
+        const auto directory = root / (std::string("playtest-failure-") + blocked);
+        hs::PlaytestRecorder recorder;
+        Check(recorder.Start({directory, 42, 99, 101}).Succeeded(),
+              "start recorder for report failure");
+        hs::SimulationObservation probe;
+        probe.tick = 1;
+        probe.phase = hs::SessionPhase::Playing;
+        Check(recorder.Record({1, {}, {}}, 1234, probe, {}).Succeeded(),
+              "buffer a partial batch before finalization");
+        std::filesystem::create_directory(directory / blocked);
+        Check(!recorder.Finish(true), "report file-open failure rejects finalization");
+        if (std::string_view(blocked) == "analysis.md")
+        {
+            std::ifstream input(directory / "result.json");
+            const std::string receipt((std::istreambuf_iterator<char>(input)), {});
+            Check(receipt.contains("\"execution_valid\": false"),
+                  "failed analysis cannot publish a valid recording receipt");
+        }
+        Check(!recorder.Finish(true), "failed finalization cannot later return success");
+        Check(!recorder.Active(), "failed finalization ends recording admission");
+    }
+    const auto directory = root / "playtest-metadata-failure";
+    std::filesystem::create_directories(directory / "metadata.json");
+    hs::PlaytestRecorder recorder;
+    Check(!recorder.Start({directory, 42, 99, 101}),
+          "metadata file-open failure rejects recording admission");
+    Check(!recorder.Active(), "missing metadata never admits recording");
 }
 
 void TestSessionMusicTransitions()
@@ -1320,6 +1397,8 @@ int main(int argc, char **argv)
         TestNamedPipeCommandRoundTrip();
         TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
+        TestRecordingFileFinalization(root);
+        TestPlaytestFinalizationFailures(root);
         TestSessionMusicTransitions();
         TestSessionProbeUiBridge();
         TestVfxSessionReset();

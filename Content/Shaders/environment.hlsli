@@ -66,7 +66,7 @@ EnvMaterial EnvOpaque(float2 uv,float2 dx,float2 dy,uint layer,bool rock,float d
 }
 void EnvironmentLodClip(SceneOutput input)
 {
-    if(input.Mesh<16 || input.Mesh>19 || (input.EnvironmentFlags&0x10000)==0) return;
+    if(((input.Mesh<16 || input.Mesh>19) && input.Mesh!=21) || (input.EnvironmentFlags&0x10000)==0) return;
     // Both LOD surfaces use the same coverage decision at a raster sample,
     // even when decimation changes their interpolated world positions.
     uint2 cell=(uint2)input.Position.xy;

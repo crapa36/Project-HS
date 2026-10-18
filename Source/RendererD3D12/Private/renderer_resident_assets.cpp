@@ -37,6 +37,7 @@ Result ResolveResidentClosure(const RendererConfig &config,
                 pending.push_back("render/" + std::string(name) +
                     (lod ? "_lod" + std::to_string(lod) : std::string{}) + ".rpkg");
         pending.emplace_back("render/material/terrain.rpkg");
+        pending.emplace_back("render/material/ground_detail.rpkg");
         for (const auto name : kAuthoredMaterialNames)
             pending.push_back("render/material/" + std::string(name) + "/parameters.rpkg");
         for (const auto name : kHeroMaterialNames)
@@ -171,10 +172,6 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
     next.mesh_shader_supported = mesh_shader_supported;
     next.mesh_shader_enabled = mesh_shader_enabled;
     next.feature_capabilities = feature_capabilities;
-    next.native_ray_requested_omm = native_ray_requested_omm;
-    next.native_ray_requested_ser = native_ray_requested_ser;
-    next.native_ray_omm_request_failure = native_ray_omm_request_failure;
-    next.native_ray_ser_request_failure = native_ray_ser_request_failure;
     next.display_state = display_state;
     next.view_state = view_state;
     next.width = width; next.height = height;

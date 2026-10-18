@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 namespace hs
 {
 
@@ -27,6 +29,8 @@ struct CombatState
     std::vector<BossAction> boss_actions;
     std::vector<CastHitRecord> cast_hits;
     std::vector<AreaHitRecord> area_hits;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> cast_hit_index, area_hit_index;
+    std::vector<std::uint64_t> live_area_ids;
     std::vector<CastRuntime> cast_runtimes;
     std::vector<DomainSignal> domain_signals;
     // Presentation metadata only; intentionally excluded from the checksum.
@@ -37,6 +41,7 @@ struct CombatState
     std::size_t boss_death_visual_count{};
     EnemySpatialGrid enemy_grid;
     std::vector<std::size_t> collision_candidates;
+    std::vector<float> collision_hit_times;
 };
 
 struct NavigationState

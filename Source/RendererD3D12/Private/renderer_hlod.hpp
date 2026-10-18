@@ -52,7 +52,7 @@ static_assert(sizeof(GpuHlodBucket) == 16);
 // Main root export: t0/space25, 16B StructuredBuffer. A consumer suppresses a
 // leaf only when generation matches its own static ref. An absent/mismatched
 // entry means complete leaf fallback. Bit0=camera; bits1..3=conventional
-// cascades. World-query shadow/RT consumers retain their independent demand.
+// cascades. World-query shadow consumers retain their independent demand.
 struct GpuHlodLeafMask
 {
     std::uint32_t generation{}, view_mask{15}, history_flags{}, reserved{};

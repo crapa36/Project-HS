@@ -83,7 +83,7 @@ Result ReconstructionProvider::Prepare(std::string_view provider, ID3D12Device *
             }
             return ProviderFailure(ErrorCode::InvalidState, failure_);
         }
-        result = streamline->QueryInputExtent(quality, output, false, input_);
+        result = streamline->QueryInputExtent(quality, output, input_);
         availability_ = streamline->Availability(StreamlineFeature::SuperResolution);
         failure_ = streamline->FailureReason(StreamlineFeature::SuperResolution);
     }
@@ -139,7 +139,7 @@ Result ReconstructionProvider::ConfigureAfterCompletion(ViewExtent capacity)
     if (!configured_)
     {
         configuration_attempted_ = true;
-        if (kind_ == Kind::Dlss) result = streamline_->ConfigureReconstruction(quality_, output_, false, viewport_id_);
+        if (kind_ == Kind::Dlss) result = streamline_->ConfigureReconstruction(quality_, output_, viewport_id_);
         else if (kind_ == Kind::Fsr) result = fsr_->ConfigureUpscaling(capacity, output_);
         else if (kind_ == Kind::Xess) result = xess_->Initialize(device_.Get(), output_, quality_, {true, true, true});
         else if (kind_ == Kind::DirectSr) result = directsr_->ConfigureAfterCompletion(capacity);

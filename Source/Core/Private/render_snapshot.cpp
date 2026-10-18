@@ -52,6 +52,12 @@ AssetId PackagedRenderAsset(RenderMesh mesh, std::uint32_t variant) noexcept
     constexpr std::array<std::string_view, 4> grasses{
         "render/grass_0.rpkg", "render/grass_1.rpkg", "render/grass_2.rpkg",
         "render/grass_3.rpkg"};
+    constexpr std::array<std::string_view, kGroundDetailVariantCount> details{
+        "render/flower_daisy.rpkg", "render/flower_buttercup.rpkg", "render/flower_violet.rpkg",
+        "render/clover_patch.rpkg", "render/ground_leaves.rpkg", "render/twig_cluster.rpkg",
+        "render/fence_short.rpkg",
+        "render/shrub_low.rpkg", "render/stump_roots.rpkg", "render/crate_intact.rpkg",
+        "render/crate_broken.rpkg", "render/barrel_intact.rpkg", "render/barrel_broken.rpkg", "render/cart_broken.rpkg"};
     switch (mesh)
     {
     case RenderMesh::Archer:
@@ -78,6 +84,10 @@ AssetId PackagedRenderAsset(RenderMesh mesh, std::uint32_t variant) noexcept
         return MakeAssetId(rocks[variant % rocks.size()]);
     case RenderMesh::Grass:
         return MakeAssetId(grasses[variant % grasses.size()]);
+    case RenderMesh::GroundDetail:
+        return MakeAssetId(details[variant % details.size()]);
+    case RenderMesh::MeadowSurface:
+        return MakeAssetId(variant == 0 ? "render/meadow_ground.rpkg" : "render/meadow_water.rpkg");
     default:
         return {};
     }
@@ -92,7 +102,9 @@ void PopulateRenderInstanceIdentity(RenderInstance &instance) noexcept
     // Keep that real product identity instead of inventing a separate material
     // asset before Generation publishes one.
     if (instance.material_id.value == 0 && instance.asset_id.value != 0)
-        instance.material_id = instance.asset_id;
+        instance.material_id = instance.mesh == RenderMesh::GroundDetail
+            ? MakeAssetId("render/material/ground_detail.rpkg") : instance.mesh == RenderMesh::MeadowSurface
+            ? MakeAssetId(instance.environment_variant == 0 ? "render/material/terrain.rpkg" : "render/material/ground_detail.rpkg") : instance.asset_id;
 }
 
 RenderInstance::Revisions DeriveRenderInstanceRevisions(

@@ -70,7 +70,9 @@ struct VirtualShadowCaster
 };
 struct VirtualShadowReceiver
 {
-    DirectX::XMFLOAT4 minimum{}, maximum{}; // World AABB, also used for volume ranges.
+    // World AABB. minimum.w: 0 requests pages and extends depth; 1 extends depth only.
+    // maximum.w remains finite reserved padding. Keep the 32-byte GPU payload.
+    DirectX::XMFLOAT4 minimum{}, maximum{};
 };
 struct alignas(16) GpuShadowPageEntry
 {

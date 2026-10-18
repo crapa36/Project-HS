@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 namespace hs::render_graph
 {
@@ -18,7 +19,7 @@ bool Contains(std::uint64_t first, std::uint64_t count, std::uint64_t capacity)
     return count && first < capacity && count <= capacity - first;
 }
 
-bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &ranges)
+bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &ranges, bool collect = true)
 {
     if (resource.kind == ResourceKind::Buffer)
     {
@@ -26,7 +27,7 @@ bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &
         const auto range = std::holds_alternative<BufferRange>(use.range)
             ? std::get<BufferRange>(use.range) : BufferRange{0, resource.buffer_size};
         if (!Contains(range.offset, range.size, resource.buffer_size)) return false;
-        ranges.push_back({range.offset, range.offset + range.size});
+        if (collect) ranges.push_back({range.offset, range.offset + range.size});
         return true;
     }
     if (std::holds_alternative<BufferRange>(use.range)) return false;
@@ -36,12 +37,27 @@ bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &
     if (!Contains(range.first_mip, range.mip_count, resource.mip_count) ||
         !Contains(range.first_array_slice, range.array_slice_count, resource.array_count) ||
         !Contains(range.first_plane, range.plane_count, resource.plane_count)) return false;
+    if (!collect) return true;
+    const auto plane_size = std::uint64_t(resource.array_count) * resource.mip_count;
+    if (range.mip_count == resource.mip_count && range.array_slice_count == resource.array_count)
+    {
+        const auto first = std::uint64_t(range.first_plane) * plane_size;
+        ranges.push_back({first, first + std::uint64_t(range.plane_count) * plane_size});
+        return true;
+    }
     for (std::uint64_t plane = range.first_plane; plane < std::uint64_t(range.first_plane) + range.plane_count; ++plane)
-        for (std::uint64_t array = range.first_array_slice; array < std::uint64_t(range.first_array_slice) + range.array_slice_count; ++array)
+    {
+        if (range.mip_count == resource.mip_count)
+        {
+            const auto first = plane * plane_size + std::uint64_t(range.first_array_slice) * resource.mip_count;
+            ranges.push_back({first, first + std::uint64_t(range.array_slice_count) * resource.mip_count});
+        }
+        else for (std::uint64_t array = range.first_array_slice; array < std::uint64_t(range.first_array_slice) + range.array_slice_count; ++array)
         {
             const auto first = (plane * resource.array_count + array) * resource.mip_count + range.first_mip;
             ranges.push_back({first, first + range.mip_count});
         }
+    }
     return true;
 }
 
@@ -90,10 +106,7 @@ bool QueueAccessCompatible(QueueHint queue, Access access)
         return access == Access::Common || access == Access::ComputeRead ||
                access == Access::UnorderedRead || access == Access::UnorderedWrite ||
                access == Access::CopySource || access == Access::CopyDest ||
-               access == Access::IndirectArgs || access == Access::ASBuildWrite ||
-               access == Access::ASRead || access == Access::ASBuildRead ||
-               access == Access::ASCopyRead || access == Access::ASCopyWrite ||
-               access == Access::ASBuildInput || access == Access::ASBuildScratch;
+               access == Access::IndirectArgs;
     case QueueHint::Copy:
         return access == Access::Common || access == Access::CopySource ||
                access == Access::CopyDest;
@@ -106,8 +119,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                CompiledSchedule &schedule)
 {
     schedule.Clear();
-    const auto fail = [](const char *message) {
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", message);
+    const auto fail = [](std::string message) {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
     if (passes.size() >= UINT32_MAX) return fail("RenderGraph has too many passes.");
     const auto pass_count = static_cast<std::uint32_t>(passes.size());
@@ -122,7 +135,9 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         Intervals written;
         std::vector<UseInfo> readers;
     };
-    std::vector<std::vector<VersionInfo>> versions(resources.size(), std::vector<VersionInfo>(pass_count + 1));
+    std::vector<std::vector<VersionInfo>> versions(resources.size());
+    std::unordered_set<std::uintptr_t> imported_identities;
+    imported_identities.reserve(resources.size());
     for (std::size_t i = 0; i < resources.size(); ++i)
     {
         const auto &r = resources[i];
@@ -132,10 +147,17 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             (!r.mip_count || !r.array_count || !r.plane_count ||
              std::uint64_t(r.mip_count) * r.array_count > UINT32_MAX / r.plane_count))
             return fail("RenderGraph resource range extent is invalid.");
-        for (std::size_t previous = 0; previous < i; ++previous)
-            if (r.imported_identity && r.imported_identity == resources[previous].imported_identity)
-                return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
+        if (r.imported_identity && !imported_identities.insert(r.imported_identity).second)
+            return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
     }
+    std::vector<bool> has_writes(resources.size());
+    for (const auto &pass : passes)
+        for (const auto &use : pass.uses)
+            if (use.writes && use.predecessor.resource && use.predecessor.resource.value <= resources.size())
+                has_writes[use.predecessor.resource.value - 1] = true;
+    Intervals ranges;
+    std::vector<std::uint32_t> seen_pass(resources.size(), UINT32_MAX);
+    std::vector<std::size_t> first_use(resources.size());
     for (std::uint32_t index = 0; index < pass_count; ++index)
     {
         const auto &pass = passes[index];
@@ -156,10 +178,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 std::uint64_t(use.successor.ordinal) != std::uint64_t(use.predecessor.ordinal) + (use.writes ? 1u : 0u))
                 return fail("RenderGraph names an invalid or nonexistent resource version.");
             const bool write_access = use.access == Access::RenderTarget || use.access == Access::DepthWrite ||
-                use.access == Access::UnorderedWrite || use.access == Access::RayTracingWrite || use.access == Access::CopyDest ||
-                use.access == Access::ASBuildWrite || use.access == Access::ASCopyWrite ||
-                use.access == Access::ASBuildScratch;
-            if (use.access == Access::Undefined || static_cast<unsigned>(use.access) > static_cast<unsigned>(Access::RayTracingWrite) ||
+                use.access == Access::UnorderedWrite || use.access == Access::CopyDest;
+            if (use.access == Access::Undefined || static_cast<unsigned>(use.access) > static_cast<unsigned>(Access::ShadingRateSource) ||
                 use.writes != write_access || (!use.writes && !use.reads))
                 return fail("RenderGraph read/write declaration disagrees with its access.");
             if (!QueueAccessCompatible(pass.queue, use.access))
@@ -171,18 +191,26 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             if ((use.access == Access::IndexBuffer || use.access == Access::VertexShaderRead) &&
                 handle.kind != ResourceKind::Buffer)
                 return fail("RenderGraph geometry input requires a buffer.");
-            if (use.access >= Access::ASBuildWrite && use.access <= Access::ASBuildScratch &&
-                handle.kind != ResourceKind::Buffer)
-                return fail("RenderGraph acceleration structure access requires a buffer.");
             // One callback has one access/state for each physical resource. A
             // disjoint range does not authorize simultaneous physical writers.
-            for (std::size_t j = 0; j < i; ++j)
-                if (pass.uses[j].predecessor.resource.value == handle.value)
-                    return fail("RenderGraph pass declares one physical resource twice.");
-            Intervals ranges;
-            if (!Normalize(resources[handle.value - 1], use, ranges))
+            const auto resource_index = handle.value - 1;
+            if (seen_pass[resource_index] == index)
+                return fail("RenderGraph pass " + std::to_string(pass.id) + " declares resource " +
+                    std::to_string(handle.value) + " (" + std::string(resources[resource_index].name) +
+                    ") twice; accesses " + std::to_string(static_cast<unsigned>(pass.uses[first_use[resource_index]].access)) +
+                    " and " + std::to_string(static_cast<unsigned>(use.access)) + ".");
+            seen_pass[resource_index] = index;
+            first_use[resource_index] = i;
+            const bool immutable = resources[resource_index].initialized && !has_writes[resource_index] &&
+                use.predecessor.ordinal == 0;
+            ranges.clear();
+            if (!Normalize(resources[resource_index], use, ranges, !immutable))
                 return fail("RenderGraph resource range is empty, out of bounds, or the wrong kind.");
+            // Initialized resources with no writers have no version hazards; range/access validation still applies.
+            if (immutable) continue;
             auto &chain = versions[handle.value - 1];
+            if (chain.size() <= use.successor.ordinal)
+                chain.resize(std::size_t(use.successor.ordinal) + 1);
             if (use.reads) chain[use.predecessor.ordinal].readers.push_back({index, ranges});
             if (use.writes)
             {
@@ -214,10 +242,10 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         const auto &chain = versions[resource_index];
         const auto extent = r.kind == ResourceKind::Buffer ? r.buffer_size :
             std::uint64_t(r.mip_count) * r.array_count * r.plane_count;
+        // Initially complete resources retain full coverage across later writes.
         Intervals initialized;
-        if (r.initialized) initialized.push_back({0, extent});
         std::uint32_t latest{};
-        for (std::uint32_t ordinal = 0; ordinal <= pass_count; ++ordinal)
+        for (std::uint32_t ordinal = 0; ordinal < chain.size(); ++ordinal)
         {
             const auto &version = chain[ordinal];
             if (ordinal && version.producer >= 0)
@@ -225,7 +253,7 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 if (ordinal > 1 && chain[ordinal - 1].producer < 0)
                     return fail("RenderGraph writes from a nonexistent predecessor version.");
                 latest = ordinal;
-                Include(initialized, version.written);
+                if (!r.initialized) Include(initialized, version.written);
                 // Physical resource writes remain ordered even when their
                 // logical ranges do not overlap (both barrier backends).
                 edge(chain[ordinal - 1].producer, version.producer);
@@ -234,19 +262,27 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 return fail("RenderGraph reads a nonexistent resource version.");
             for (const auto &reader : version.readers)
             {
-                if (!Covered(initialized, reader.ranges))
+                if (!r.initialized && !Covered(initialized, reader.ranges))
                     return fail("RenderGraph reads an undefined resource range.");
-                for (std::uint32_t writer = 1; writer <= pass_count; ++writer)
+                // Physical writes already form a chain; the nearest overlapping
+                // predecessor/successor orders every more distant writer too.
+                for (std::uint32_t writer = ordinal; writer > 0; --writer)
                 {
                     if (chain[writer].producer < 0 || !Overlaps(reader.ranges, chain[writer].written)) continue;
-                    if (writer <= ordinal) edge(chain[writer].producer, reader.pass); // RAW, including inherited ranges
-                    else edge(reader.pass, chain[writer].producer); // WAR, including nonadjacent overwrites
+                    edge(chain[writer].producer, reader.pass);
+                    break;
+                }
+                for (std::uint32_t writer = ordinal + 1; writer < chain.size(); ++writer)
+                {
+                    if (chain[writer].producer < 0 || !Overlaps(reader.ranges, chain[writer].written)) continue;
+                    edge(reader.pass, chain[writer].producer);
+                    break;
                 }
             }
         }
         if (r.final_set && (r.final_version.resource.value != resource_index + 1 ||
                             r.final_version.resource.kind != r.kind || r.final_version.ordinal != latest ||
-                            !Covered(initialized, Intervals{{0, extent}})))
+                            (!r.initialized && !Covered(initialized, Intervals{{0, extent}}))))
             return fail("RenderGraph final access requires the latest fully initialized version.");
     }
     std::vector<std::uint32_t> order;
@@ -340,8 +376,8 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
 {
     plan.Clear();
     plan.resource_groups.assign(resources.size(), AliasPlan::kExcluded);
-    const auto fail = [](const char *message) {
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", message);
+    const auto fail = [](std::string message) {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
     if (schedule.execution_order.size() != passes.size())
         return fail("RenderGraph alias planner requires a complete compiled schedule.");
@@ -366,22 +402,24 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
     for (const auto &dependency : schedule.cross_queue_dependencies)
         add_edge(dependency.producer, dependency.consumer);
 
+    // Alias pairs query the same producer repeatedly; traverse each producer at most once.
+    std::vector<std::vector<std::uint8_t>> reachable_from(passes.size());
+    std::vector<std::uint32_t> stack;
     const auto reachable = [&](std::uint32_t from, std::uint32_t to) {
         if (from == to || from >= successors.size() || to >= successors.size()) return false;
-        std::vector<std::uint32_t> stack{from};
-        std::vector<std::uint8_t> seen(passes.size());
-        seen[from] = 1;
-        while (!stack.empty())
+        auto &seen = reachable_from[from];
+        if (seen.empty())
         {
-            const auto current = stack.back();
-            stack.pop_back();
-            for (const auto next : successors[current])
+            seen.resize(passes.size());
+            stack.clear(); stack.push_back(from); seen[from] = 1;
+            while (!stack.empty())
             {
-                if (next == to) return true;
-                if (!seen[next]) { seen[next] = 1; stack.push_back(next); }
+                const auto current = stack.back(); stack.pop_back();
+                for (const auto next : successors[current])
+                    if (!seen[next]) { seen[next] = 1; stack.push_back(next); }
             }
         }
-        return false;
+        return seen[to] != 0;
     };
 
     std::vector<std::vector<std::uint32_t>> users(resources.size());
@@ -391,7 +429,7 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
             if (!use.predecessor.resource || use.predecessor.resource.value > resources.size())
                 return fail("RenderGraph alias planner received an invalid resource use.");
             auto &resource_users = users[use.predecessor.resource.value - 1];
-            if (std::find(resource_users.begin(), resource_users.end(), pass) == resource_users.end())
+            if (resource_users.empty() || resource_users.back() != pass)
                 resource_users.push_back(pass);
         }
 

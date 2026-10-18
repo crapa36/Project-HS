@@ -38,6 +38,13 @@ std::string ProductDigest(const RendererConfig &config, const std::string &id)
 std::uint32_t MaterialOrdinal(const render_data::SceneHlod &scene, const render_data::SceneHlodProxy &proxy)
 {
     const auto &id = scene.dependencies.at(proxy.material_dependency);
+    if (id == "render/material/ground_detail.rpkg")
+    {
+        if (proxy.mesh_semantic != static_cast<std::uint32_t>(RenderMesh::GroundDetail) ||
+            proxy.variant >= kGroundDetailVariantCount)
+            throw std::runtime_error("HLOD ground-detail material differs from its mesh/variant binding");
+        return render_data::kGroundDetailMaterialOrdinal;
+    }
     for (std::uint32_t i = 0; i < 10; ++i)
         if (id == "render/" + std::string(kEnvironmentMaterialNames[i]) + ".rpkg")
         {

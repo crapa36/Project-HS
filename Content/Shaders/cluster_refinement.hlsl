@@ -1,3 +1,4 @@
+#include "render_binding_contract.hlsli"
 #include "hzb_region.hlsli"
 // Runtime hierarchy cut transaction. ABI: renderer_cluster_catalog.hpp.
 // Inputs and page residency stay immutable across Count/Prefix/Emit. One cut is
@@ -257,7 +258,7 @@ bool ClusterValid(uint id, uint group_id, ClusterGroup group, out ClusterRecord 
 bool Resident(uint page_slot)
 {
     const ClusterPage page = Pages[page_slot];
-    if (page.Resident != 0u && (page.Resident != 1u || page.PhysicalPageSlot >= 128u ||
+    if (page.Resident != 0u && (page.Resident != 1u || page.PhysicalPageSlot >= HsGeometryPageCapacity ||
         page.PageVersion == 0u || page.Reserved != 0u || (page.DrawFlags & ~31u) != 0u))
     {
         Fault(FailureCatalog); return false;
@@ -556,6 +557,9 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
+    const uint2 expected = CutCounts[candidate_index];
+    // Count validated the immutable cut; an empty cut has no records or history to emit.
+    if (all(expected == uint2(0u, 0u))) return;
     uint count = 0u;
     uint3 cascade_suffix = uint3(0u, 0u, 0u);
     uint node = candidate.FirstRoot;
@@ -586,7 +590,7 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
         if ((mask & 8u) != 0u) cascade_suffix.z = max(cascade_suffix.z, end);
     }
     if (node != Invalid) { Fault(FailureAncestorRange); return; }
-    if (CutCounts[candidate_index].y != 0u || count != CutCounts[candidate_index].x)
+    if (expected.y != 0u || count != expected.x)
     {
         Fault(FailureCatalog); return;
     }

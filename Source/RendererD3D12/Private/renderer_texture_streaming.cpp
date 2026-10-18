@@ -211,7 +211,7 @@ Result RendererTextureStreaming::Initialize(ID3D12Device *device, D3D12MA::Alloc
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &shader_model, sizeof(shader_model))) &&
         shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
     // Reserved resources are sampled only by the actual feedback PSO variants.
-    // This authored feedback ABI exposes 90 UAV bindings, beyond tier2's 64.
+    // This authored feedback ABI exposes 96 UAV bindings, beyond tier2's 64.
     capabilities.tiled_resources = capabilities.tiled_resources && capabilities.sampler_feedback &&
         options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3;
     capabilities.packed_mip_arrays = capabilities.tiled_resources &&

@@ -39,7 +39,7 @@ class PresentationGuidesCandidate
     std::shared_ptr<PresentationGuidesTargets> targets_;
     friend class PresentationGuides;
 };
-// Created only for active FG. Native guide conversion is separate from SR/RR:
+// Created only for active FG. Native guide conversion is separate from SR:
 // undilated reversed device Z and PreviousUV-CurrentUV are copied exactly at the
 // render extent. Motion scaling remains the native adapter's responsibility.
 class PresentationGuides

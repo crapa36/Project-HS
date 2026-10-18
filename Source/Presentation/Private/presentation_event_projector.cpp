@@ -1,4 +1,5 @@
 #include <hs/presentation/projector.hpp>
+#include <hs/presentation/meadow_surface.hpp>
 
 #include <array>
 #include <cstdint>
@@ -99,8 +100,20 @@ void AddVfx(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t
 }
 }
 
-std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEvent> out) noexcept
+std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<PresentationEvent> out,
+                                float arena_half_extent) noexcept
 {
+    auto s = source;
+    if (arena_half_extent >= 14.0f)
+    {
+        s.position.y += MeadowGroundHeight({s.position.x, s.position.z});
+        if ((s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0)
+            s.target.y += MeadowGroundHeight({s.target.x, s.target.z});
+        if (s.geometry.kind == DomainSignalGeometryKind::Line ||
+            s.geometry.kind == DomainSignalGeometryKind::Projectile)
+            s.geometry.end_position.y += MeadowGroundHeight(
+                {s.geometry.end_position.x, s.geometry.end_position.z});
+    }
     if (out.empty()) return 0;
     std::size_t n = 0;
     if (s.kind == DomainSignalKind::BossSpawnWarning || s.kind == DomainSignalKind::EnemySpawnWarning)

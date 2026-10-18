@@ -64,6 +64,34 @@ void TestPauseDoesNotAdvance()
           "paused simulation does not advance");
 }
 
+void TestQueuedResumePreservesQuit()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({7}).Succeeded(), "queued UI simulation initialize");
+    const std::array pause{hs::ActionEdge{1, hs::GameAction::Pause, hs::EdgeKind::Pressed}};
+    const auto paused = simulation.TickFixed({1, {}, pause}, hs::FixedStepClock::kFixedStep);
+    const std::array resume{hs::UiAction{hs::UiActionKind::Resume}};
+    const auto playing = simulation.TickFixed({1, {}, {}, resume}, hs::FixedStepClock::kFixedStep);
+    Check(playing.phase == hs::SessionPhase::Playing && playing.tick == paused.tick + 1,
+          "legitimate UI resume advances one fixed tick");
+    const auto paused_again = simulation.TickFixed({2, {}, pause}, hs::FixedStepClock::kFixedStep);
+    const std::array queued{hs::UiAction{hs::UiActionKind::Quit},
+                            hs::UiAction{hs::UiActionKind::Resume}};
+    const auto quit = simulation.TickFixed({2, {}, {}, queued}, hs::FixedStepClock::kFixedStep);
+    Check(quit.phase == hs::SessionPhase::QuitRequested && quit.tick == paused_again.tick,
+          "queued Resume cannot cancel QuitRequested or advance gameplay");
+    simulation.ApplyUiAction({hs::UiActionKind::Resume});
+    Check(simulation.GetSessionProbe().phase == hs::SessionPhase::QuitRequested,
+          "stale direct Resume preserves terminal quit");
+    hs::GameSimulation menu;
+    Check(menu.Initialize({9, false, true}).Succeeded(), "menu UI simulation initialize");
+    const auto before = menu.ComputeChecksum();
+    const auto unchanged = menu.TickFixed({1, {}, {}, resume}, hs::FixedStepClock::kFixedStep);
+    Check(unchanged.phase == hs::SessionPhase::MainMenu && unchanged.tick == 0 &&
+              unchanged.checksum == before,
+          "stale Resume cannot start a session from MainMenu");
+}
+
 void TestRulesHashAndAbilityMapping()
 {
     const auto rules = hs::SimulationRules::Defaults();
@@ -427,6 +455,7 @@ int main()
     try
     {
         TestPauseDoesNotAdvance();
+        TestQueuedResumePreservesQuit();
         TestRulesHashAndAbilityMapping();
         TestSameTickFinalBossVictory();
         TestTerminalPhaseKeepsPickups();

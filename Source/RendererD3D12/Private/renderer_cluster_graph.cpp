@@ -484,19 +484,19 @@ Result D3D12Renderer::Impl::DrawClusterGeometry(ID3D12GraphicsCommandList *list,
         if (!cut.candidate_count) continue;
         if (!ClusterHierarchyReady(ordinal))
             return GraphFailure("Unqualified dynamic geometry cannot enter the static hierarchy draw path.");
-        list->SetGraphicsRoot32BitConstant(6, (material_parameter_bases[ordinal] << 1u) | 1u, 1);
+        list->SetGraphicsRoot32BitConstant(6, (material_parameter_bases[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] << 1u) | 1u, 1);
         const bool mesh = cut.geometry_frontend_flags == kGeometryMeshEligible;
         ID3D12PipelineState *pipeline{};
         if (mesh)
         {
-            auto *indexed = view ? environment_material_shadow_pipelines[ordinal].Get()
-                : visibility ? environment_material_visibility_pipelines[ordinal].Get()
-                : environment_material_scene_pipelines[ordinal].Get();
+            auto *indexed = view ? environment_material_shadow_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get()
+                : visibility ? environment_material_visibility_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get()
+                : environment_material_scene_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get();
             for (const auto &pair : mesh_pipeline_pairs)
                 if (pair.indexed == indexed) { pipeline = pair.mesh.Get(); break; }
         }
-        else pipeline = view ? cluster_shadow_pipelines[ordinal].Get()
-            : visibility ? cluster_visibility_pipelines[ordinal].Get() : cluster_scene_pipelines[ordinal].Get();
+        else pipeline = view ? cluster_shadow_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get()
+            : visibility ? cluster_visibility_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get() : cluster_scene_pipelines[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)].Get();
         auto *signature = mesh ? cluster_mesh_signature.Get() : cluster_draw_signature.Get();
         if (!pipeline || !signature)
             return GraphFailure("Cluster material/frontend has no compatible pipeline/indirect signature.");

@@ -1,4 +1,5 @@
 #include "hzb_region.hlsli"
+#include "environment_wind.hlsli"
 #include "scene_hlod_sampling.hlsli"
 cbuffer FrameConstants : register(b0)
 {
@@ -193,7 +194,7 @@ uint ResolveFamilyLod(VisibilityRange range, uint view, LodPage pages[3],
         float world_error = pages[bucket].ErrorLocal * world_scale;
         // Coarse grass does not preserve every deformed fine vertex. The
         // deformation amplitude is already in world units.
-        if ((instance.Mesh & 255u) == 19u && pages[bucket].PhysicalLod != 0u)
+        if (HsEnvironmentWind(instance.Mesh) && pages[bucket].PhysicalLod != 0u)
             world_error += 2.0 * abs(GrassDeformationRadius);
         if (view == 0u)
         {
@@ -339,7 +340,7 @@ void ResolveVisibilitySphere(InstanceData instance, StaticDrawRef draw,
             max(abs(instance.Scale.x),
                 max(abs(instance.Scale.y), abs(instance.Scale.z)));
     }
-    if ((instance.Mesh & 255u) == 19u)
+    if (HsEnvironmentWind(instance.Mesh))
         radius += abs(GrassDeformationRadius);
 }
 

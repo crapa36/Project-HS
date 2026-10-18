@@ -156,8 +156,9 @@ try {
     $sourcePointerPath = (Resolve-Path -LiteralPath $GenerationPointer).Path
     $sourcePointerBytes = [System.IO.File]::ReadAllBytes($sourcePointerPath)
     $selectedBuildRoot = Split-Path -Parent (Split-Path -Parent $sourcePointerPath)
+    # Leave room for hashed payloads and their temporary .pending suffix under MAX_PATH.
     $fixtureRoot = Join-Path (Split-Path -Parent $selectedBuildRoot) `
-        (".reload-" + [Guid]::NewGuid().ToString("N"))
+        (".r-" + [Guid]::NewGuid().ToString("N").Substring(0, 12))
     $fixtureArguments = @(
         $FixtureScript,
         "prepare",

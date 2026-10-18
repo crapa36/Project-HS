@@ -85,12 +85,11 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input) co
             const bool active = view.id == active_view_id;
             const auto &plan = active ? reconstruction_plan : found->second->reconstruction_plan;
             const auto *provider = active ? reconstruction_provider.get() : found->second->reconstruction_provider.get();
-            const auto ray_mode = active ? ray_reconstruction.Mode() : found->second->ray_reconstruction.Mode();
             const bool same_configuration = active || (found->second->state.output_extent == view.output_extent &&
                 found->second->state.render_capacity == view.render_capacity &&
                 found->second->configuration_revision == view_configuration_revision &&
                 found->second->content_generation == resource_generation_id && found->second->pipeline_revision == pipeline_revision);
-            if (same_configuration && ((provider && provider->Initialized()) || ray_mode == RayReconstructionMode::DlssFused))
+            if (same_configuration && provider && provider->Initialized())
                 if (view.render_active.width < plan.input_minimum.width || view.render_active.height < plan.input_minimum.height ||
                     view.render_active.width > plan.input_maximum.width || view.render_active.height > plan.input_maximum.height)
                     return ViewFailure("Requested active extent is outside this view's selected native reconstruction domain.");
@@ -567,7 +566,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         std::uint64_t output_count{};
         for (const auto &instance : snapshot.static_scene->instances)
         {
-            const bool environment = instance.mesh >= RenderMesh::TreeTrunk && instance.mesh <= RenderMesh::Grass;
+            const bool environment = render_data::IsEnvironmentMesh(instance.mesh);
             if (!environment && instance.mesh != RenderMesh::Ground && instance.mesh != RenderMesh::DirtPatch)
                 return ViewFailure("Unsupported mesh in static scene.");
             output_count += environment ? 3u : 1u;
@@ -687,13 +686,9 @@ void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
     hero_transparency.SwapState(view.hero_transparency);
     hdr_post.SwapState(view.hdr_post);
     screen_overlay.SwapState(view.screen_overlay);
-    ray_ambient_occlusion.SwapState(view.ray_ambient_occlusion);
-    ray_transport.SwapState(view.ray_transport);
-    ray_reconstruction.SwapState(view.ray_reconstruction);
     brixelizer_gi.SwapState(view.brixelizer_gi);
     virtual_shadows.SwapState(view.virtual_shadows);
     local_shadows.SwapState(view.local_shadows);
-    ray_shadows.SwapState(view.ray_shadows);
     volumetrics.SwapState(view.volumetrics);
     light_list.SwapState(view.light_list);
     decal_surface.SwapState(view.decal_surface);
@@ -831,8 +826,7 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     SubsurfaceCandidate diffusion; ScreenReflectionsCandidate reflections;
     HeroTransparencyCandidate transparency; HdrPostCandidate hdr; ScreenOverlayCandidate overlay;
     DecalSurfaceCandidate decals;
-    LightListCandidate lights; RayGeometryCandidate geometry; RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate transport; RayReconstructionCandidate rr; BrixelizerCandidate brixelizer;
+    LightListCandidate lights; BrixelizerCandidate brixelizer;
     VirtualShadowCandidate shadows; AdditionalShadowPrepared additional; VolumetricPrepared volume;
     if (auto r = PrepareAdaptiveShading(config, capacity, adaptive); !r) return r;
     if (auto r = PrepareAmbientOcclusion(config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
@@ -842,8 +836,6 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = PrepareScreenOverlay(config, capacity, overlay); !r) return r;
     if (auto r = PrepareLightList(config, capacity, lights); !r) return r;
     if (auto r = PrepareDecalSurface(config, capacity, decal_work, decals); !r) return r;
-    if (auto r = PrepareRayEffects(config, capacity, geometry, ray_ambient, transport, RayReconstructionModeFor(config)); !r) return r;
-    if (auto r = PrepareRayReconstruction(config, capacity, input.output_extent, rr); !r) return r;
     if (auto r = PrepareBrixelizerGi(config, input.render_active, brixelizer); !r) return r;
     if (auto r = PrepareVirtualShadows(config, capacity, shadows); !r) return r;
     if (auto r = PrepareAdditionalShadows(config, capacity, additional); !r) return r;
@@ -857,13 +849,9 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = v.screen_overlay.Commit(std::move(overlay), completed); !r) return r;
     if (auto r = v.light_list.Commit(std::move(lights), completed); !r) return r;
     if (auto r = v.decal_surface.Commit(std::move(decals), completed); !r) return r;
-    if (auto r = v.ray_ambient_occlusion.Commit(std::move(ray_ambient), completed); !r) return r;
-    if (auto r = v.ray_transport.Commit(std::move(transport), completed); !r) return r;
-    if (auto r = v.ray_reconstruction.Commit(std::move(rr), completed); !r) return r;
     if (auto r = v.brixelizer_gi.Commit(std::move(brixelizer), completed); !r) return r;
     if (auto r = v.virtual_shadows.Commit(std::move(shadows), completed); !r) return r;
     if (auto r = v.local_shadows.Commit(std::move(additional.local), completed); !r) return r;
-    if (auto r = v.ray_shadows.Commit(std::move(additional.ray), completed); !r) return r;
     if (auto r = v.volumetrics.Commit(std::move(volume.service), completed); !r) return r;
     if (v.reconstruction_provider && (native_capacity.width > capacity.width || native_capacity.height > capacity.height ||
         input.render_active.width < v.reconstruction_plan.input_minimum.width ||
@@ -944,11 +932,6 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     ResetClusterViewResources(view.cluster_view);
     if (view.reconstruction_provider)
         if (auto r = view.reconstruction_provider->ResetAfterCompletion(); !r) return r;
-    if (streamline_session && view.ray_reconstruction.Mode() == RayReconstructionMode::DlssFused)
-    {
-        if (auto r = streamline_session->SelectReconstructionViewAfterCompletion(view.native_viewport_id); !r) return r;
-        if (auto r = streamline_session->ReleaseReconstructionAfterCompletion(); !r) return r;
-    }
     if (auto r = view.ambient_occlusion.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.subsurface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
@@ -956,13 +939,9 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = view.hero_transparency.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = view.ray_ambient_occlusion.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = view.ray_transport.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = view.ray_reconstruction.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.brixelizer_gi.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.virtual_shadows.Commit(VirtualShadowCandidate{}, graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.local_shadows.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
-    if (auto r = view.ray_shadows.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.volumetrics.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.light_list.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.decal_surface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
@@ -1034,6 +1013,8 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
 
 Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult &frame_result)
 {
+    const auto wrapper_start = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::duration view_render_time{};
     if (!impl_->initialized || impl_->frame_submission_faulted)
         return Result::Failure(ErrorCode::InvalidState, "hs_render_view", "Renderer is not available for frame submission.");
     if (auto r = impl_->ValidateFrameInput(input); !r) return r;
@@ -1094,12 +1075,6 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
                 if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(candidate->native_viewport_id); !r) return reject_candidates(r);
             if (candidate->reconstruction_provider)
                 if (auto r = candidate->reconstruction_provider->ConfigureAfterCompletion(candidate->state.render_capacity); !r) return reject_candidates(r);
-            if (candidate->ray_reconstruction.Mode() == RayReconstructionMode::DlssFused)
-            {
-                if (auto r = impl_->streamline_session->ConfigureReconstruction(candidate->reconstruction_plan.effective_quality,
-                        candidate->state.output_extent, true, candidate->native_viewport_id); !r) return reject_candidates(r);
-                if (auto r = impl_->ValidateRayReconstructionBudget(candidate->ray_reconstruction); !r) return reject_candidates(r);
-            }
         }
         if (impl_->streamline_session)
             if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(impl_->active_native_viewport_id); !r) return reject_candidates(r);
@@ -1163,8 +1138,7 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
             impl_->exposure_initialized = false; impl_->previous_origins_valid = false;
             impl_->previous_skin_deformation.reset(); impl_->previous_instances.reset(); impl_->skin_cache.Clear();
             impl_->ambient_occlusion.ResetHistory(); impl_->screen_reflections.ResetHistory();
-            impl_->ray_ambient_occlusion.ResetHistory(); impl_->ray_transport.ResetHistory();
-            impl_->ray_shadows.ResetHistory(); impl_->volumetrics.ResetHistory();
+            impl_->volumetrics.ResetHistory();
         }
         auto snapshots = input.snapshots;
         if (input.scene) { snapshots.current.static_scene = input.scene->lease; snapshots.has_current = true; }
@@ -1176,9 +1150,11 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         // retained particles/ribbons are shared by every sequential view.
         const bool first = view_pointer == execution_views.front();
         impl_->render_scene_inputs = first;
+        const auto view_render_start = std::chrono::steady_clock::now();
         result = Render(snapshots, input.events, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
             v.effect_lines, v.events, v.persistent, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
             v.lights, v.distortions, v.decals, input.devtools, rendered, v.volumes, v.screen, v.entity_surfaces);
+        view_render_time += std::chrono::steady_clock::now() - view_render_start;
         if (!result) break;
         rendered_any = true;
         if (view.camera_cut)
@@ -1213,6 +1189,9 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
     if (!rendered_main) { impl_->native_input_phase = saved_input_phase; impl_->sdk_frame_identity = saved_identity; }
     if (rendered_main) frame_result = main_result;
     frame_result.views = std::move(view_results);
+    frame_result.cpu_timings.wrapper_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - wrapper_start - view_render_time).count());
     if (!result)
     {
         // Successfully rendered views retain their histories. The failed view

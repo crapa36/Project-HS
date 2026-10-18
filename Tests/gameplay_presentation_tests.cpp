@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include <hs/presentation/meadow_surface.hpp>
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace gameplay_test
@@ -30,8 +32,7 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
     Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Vsync, "true") == "켜짐" &&
               hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "0") == "제한 없음" &&
               hs::GraphicsSettingDisplayValue(hs::SettingId::ManualScalePercent, "75") == "75%" &&
-              hs::GraphicsSettingDisplayValue(hs::SettingId::ReconstructionProvider, "internal_taau") == "기본 TAA 업스케일링" &&
-              hs::GraphicsSettingDisplayValue(hs::SettingId::RayReconstructionProvider, "internal") == "기본 광선 노이즈 제거",
+              hs::GraphicsSettingDisplayValue(hs::SettingId::ReconstructionProvider, "internal_taau") == "기본 TAA 업스케일링",
           "settings localize values and show meaningful units");
     Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Sharpening, "0.200000003") == "0.2" &&
               hs::GraphicsSettingDisplayValue(hs::SettingId::BloomStrength, "0.100000001") == "0.1" &&
@@ -83,9 +84,8 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
         {hs::SettingId::FrameGenerationMode, "auto", "auto", "프레임 생성 미지원", false}};
     Check(!hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
               !hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", nullptr) &&
-              !hs::GraphicsSettingTokenAvailable(hs::SettingId::ReconstructionProvider, "dlss", &receipt) &&
-              !hs::GraphicsSettingTokenAvailable(hs::SettingId::Preset, "ultra_rt", &receipt),
-          "unsupported features and RT presets cannot be enabled before or after capability discovery");
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::ReconstructionProvider, "dlss", &receipt),
+          "unsupported features cannot be enabled before or after capability discovery");
     receipt.requested.hdr_mode = hs::GraphicsHdrMode::Off;
     receipt.requested.frame_generation_mode = hs::GraphicsFrameGenerationMode::Off;
     Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "auto" &&
@@ -118,15 +118,9 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
     Check(hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
               hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "dlss",
           "capability changes immediately restore supported choices");
-    for (const auto choice : std::array{
-             hs::GraphicsUiChoice{hs::SettingId::RayTracingEnabled, "true", "", "", true},
-             hs::GraphicsUiChoice{hs::SettingId::AoMode, "auto", "", "", true},
-             hs::GraphicsUiChoice{hs::SettingId::GiMode, "ray_traced", "", "", true},
-             hs::GraphicsUiChoice{hs::SettingId::ReflectionMode, "hybrid_rt", "", "", true},
-             hs::GraphicsUiChoice{hs::SettingId::ShadowMode, "hybrid_rt", "", "", true}})
-        receipt.choices.push_back(choice);
-    Check(hs::GraphicsSettingTokenAvailable(hs::SettingId::Preset, "ultra_rt", &receipt),
-          "the RT preset requires the exact modes it applies, including automatic AO");
+    receipt.requested.preset = hs::GraphicsPreset::Ultra;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::Preset, 1, &receipt) == "custom",
+          "preset controls cycle directly from Ultra to Custom");
     receipt.telemetry_status = {
         "Monitor fixture | Refresh 59.94 Hz | Monitor HDR active | Renderer HDR10",
         "Render 1280x720 / output 1920x1080 | Render FPS 61.5 | Display FPS unavailable",
@@ -986,17 +980,27 @@ void TestAuthoredEnvironmentProjection()
         if (item.mesh == hs::RenderMesh::Grass)
         {
             ++grass;
+            const bool meadow = hs::MeadowContains({item.position.x, item.position.z});
             Check(item.environment_variant < 4 && item.scale.x == item.scale.z &&
-                      item.scale.x >= 0.55f && item.scale.x <= 1.2f &&
-                      item.scale.y >= 0.18f && item.scale.y <= 0.4f,
+                      item.scale.x >= (meadow ? .45f : .55f) && item.scale.x <= 1.2f &&
+                      item.scale.y >= (meadow ? .07f : (hs::MeadowRoadCoverage({item.position.x, item.position.z}, -.25f) > .02f ? .09f : .18f)) && item.scale.y <= 0.4f,
                   "grass retains dense horizontal coverage at the reduced meter-scale height");
         }
     }
     Check(trees > 0 && grass > 0 && ground > 0, "authored environment is present in normal gameplay");
-    Check(ground == 1, "exterior environment uses one continuous floor");
-    const auto &floor = std::ranges::find_if(instances, [](const auto &item) { return item.mesh == hs::RenderMesh::Ground; });
-    Check(floor != instances.end() && floor->scale.x >= 52.0f && floor->scale.z >= 52.0f,
-          "continuous floor covers exterior tree rows");
+    Check(ground == 4, "exterior ground must leave the authored meadow interior uncovered");
+    for (const auto &floor : instances) {
+        if (floor.mesh != hs::RenderMesh::Ground) continue;
+        Check(std::abs(floor.position.x) - floor.scale.x * .5f >= 12.0f - 1e-5f ||
+              std::abs(floor.position.z) - floor.scale.z * .5f >= 12.0f - 1e-5f,
+              "flat exterior slab overlaps a meadow depression");
+        Check(floor.scale.x >= 52.0f || floor.scale.z >= 24.0f,
+              "exterior slab no longer covers border trees");
+    }
+    for (std::uint32_t variant = 0; variant < 2; ++variant)
+        Check(std::ranges::count_if(instances, [=](const auto &item) {
+            return item.mesh == hs::RenderMesh::MeadowSurface && item.environment_variant == variant;
+        }) == 1, "representative meadow needs exactly one ground and one water surface");
 }
 
 void TestDenseGrassProjection()
@@ -1025,7 +1029,7 @@ void TestDenseGrassProjection()
     const auto repeated = project_grass();
     Check(grass.size() > 600 && grass.size() == repeated.size(), "grass forms dense patches within allowed terrain");
     std::array<bool, 4> variants{};
-    std::size_t grouped{};
+    std::size_t grouped{}, central_grass{}, pressed_grass{};
     for (std::size_t i = 0; i < grass.size(); ++i)
     {
         const auto &item = grass[i];
@@ -1033,9 +1037,19 @@ void TestDenseGrassProjection()
                   item.yaw == repeated[i].yaw && item.scale.x == repeated[i].scale.x &&
                   item.environment_variant == repeated[i].environment_variant,
               "grass placement is deterministic for the map seed");
+        const hs::Float2 position{item.position.x, item.position.z};
+        const bool meadow = hs::MeadowContains(position);
+        const auto across = std::abs(item.position.x - hs::MeadowCartCenter(item.position.z));
         Check(std::abs(item.position.x) <= 14 && std::abs(item.position.z) <= 14 &&
-                  std::abs(item.position.x - std::sin(item.position.z * 0.085f) * 6.5f) >= 4.8f,
-              "dense grass preserves arena inset and open path");
+                  (hs::MeadowRoadCoverage(position) == 0.0f || across <= .35f) &&
+                  (!meadow || (hs::MeadowPressed(position) <= .2f && !std::isfinite(hs::MeadowWaterLevel(position)))),
+              "grass preserves arena inset, worn wheel/foot paths and actual water");
+        if (meadow && across < .4f) ++central_grass;
+        if (meadow && hs::MeadowPressed(position) > .02f) {
+            ++pressed_grass;
+            Check(item.scale.y >= .07f && item.scale.y <= .11f,
+                  "worn path edge must retain shorter pressed grass");
+        }
         const auto dx = item.position.x - 9.0f;
         Check(dx * dx + item.position.z * item.position.z >= 2.45f * 2.45f,
               "dense grass preserves obstacle clearance");
@@ -1050,6 +1064,8 @@ void TestDenseGrassProjection()
         }
         if (neighbours >= 3) ++grouped;
     }
+    Check(pressed_grass > 0, "representative route omits all pressed-grass transitions");
+    Check(central_grass > 0, "cart route must retain grass between its worn wheel tracks");
     Check(grouped * 4 > grass.size() * 3, "most grass has several nearby neighbours instead of isolated tufts");
     Check(std::ranges::all_of(variants, [](bool present) { return present; }), "all four grass variants populate patches");
     model.seed ^= 1ull << 40;
@@ -1091,6 +1107,104 @@ void TestProjectileProjectionCarriesAuthoritativeOwner()
           "projectile head dropped authoritative owner fields");
 }
 
+void TestMeadowPresentationGrounding()
+{
+    for (int step = -48; step <= 48; ++step) {
+        const float along = float(step) * .25f;
+        for (const hs::Float2 point : {hs::Float2{-12,along}, {12,along}, {along,-12}, {along,12}}) {
+            Check(hs::MeadowGroundHeight(point) == 0.0f, "meadow perimeter must meet the flat outer slab");
+            constexpr float e=.002f;
+            const float dx=(hs::MeadowGroundHeight({point.x+e,point.y})-hs::MeadowGroundHeight({point.x-e,point.y}))/(2*e);
+            const float dz=(hs::MeadowGroundHeight({point.x,point.y+e})-hs::MeadowGroundHeight({point.x,point.y-e}))/(2*e);
+            Check(std::hypot(dx,dz)<1e-4f, "meadow edge slope must meet the horizontal slab normal");
+        }
+    }
+    hs::Float2 low{};
+    for (int z = -44; z <= 44; ++z)
+        for (int x = -44; x <= 44; ++x) {
+            const hs::Float2 point{float(x) * .25f, float(z) * .25f};
+            if (hs::MeadowGroundHeight(point) < hs::MeadowGroundHeight(low)) low = point;
+        }
+    Check(hs::MeadowGroundHeight(low) < -.005f, "meadow grounding test requires a real depression");
+    hs::DomainSignal signal{};
+    signal.kind = hs::DomainSignalKind::ExperienceCollected;
+    signal.position = {low.x, .3f, low.y};
+    signal.target = {low.x + .5f, .55f, low.y};
+    signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
+    for (const float extent : {0.0f, 8.0f, 16.0f}) {
+        std::array<hs::PresentationEvent, 3> events{};
+        const auto count = extent == 0 ? hs::ProjectDomainSignal(signal, events) :
+            hs::ProjectDomainSignal(signal, events, extent);
+        const auto h = extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
+        const auto target_h = extent >= 14 ? hs::MeadowGroundHeight({signal.target.x, signal.target.z}) : 0.0f;
+        const auto parameters = hs::DecodeVfxParameters(events[0].parameters);
+        Check(count == 2 && std::abs(events[0].position.y - (.3f + h)) < 1e-6f &&
+              events[1].position.y == events[0].position.y &&
+              std::abs(parameters.target.y - (.55f + target_h)) < 1e-6f,
+              "one-shot VFX/audio/target grounding must be explicit and independently sampled");
+        auto line = signal;
+        line.kind = hs::DomainSignalKind::RangedEnemyTelegraphed;
+        line.geometry.kind = hs::DomainSignalGeometryKind::Line;
+        line.geometry.end_position = signal.target;
+        Check(hs::ProjectDomainSignal(line, events, extent) == 1 &&
+              std::abs(events[0].geometry.end_position.y - (.55f + target_h)) < 1e-6f,
+              "line endpoint grounding must match its own world location");
+    }
+    Check(signal.position.y == .3f && signal.target.y == .55f, "one-shot projection mutated its source signal");
+
+    hs::GameReadModelStorage model;
+    model.arena_half_extent = 16;
+    model.arena_boundary.count = 4;
+    model.arena_boundary.points[0] = {-16,-16}; model.arena_boundary.points[1] = {-16,16};
+    model.arena_boundary.points[2] = {16,16}; model.arena_boundary.points[3] = {16,-16};
+    model.player.position = low;
+    hs::ProjectileView projectile{};
+    projectile.id = {42}; projectile.player_owned = true; projectile.radius = .15f;
+    projectile.position = low; projectile.previous_position = {low.x + .5f, low.y};
+    model.AddProjectile(projectile);
+    const auto project = [&] {
+        hs::RenderSnapshotStorage snapshot(16, 4, 4, 16);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+            test_ui, hs::SettingsData{}, snapshot), "meadow grounded projection");
+        const auto view = snapshot.View();
+        const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
+        const auto head = std::ranges::find_if(view.persistent_vfx, [](const auto &v) { return v.kind == hs::PersistentVfxKind::ProjectileHead; });
+        const auto height = model.arena_half_extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
+        Check(actor != view.instances.end() && std::abs(actor->position.y - height) < 1e-6f &&
+              std::abs(snapshot.camera.target.y - height) < 1e-6f, "actor/camera lost terrain contact or double-offset");
+        Check(head != view.persistent_vfx.end() && std::abs(head->position.y - (1.05f + height)) < 1e-6f &&
+              head->projectile_current_position.y == head->position.y &&
+              std::abs(head->projectile_previous_position.y - (1.05f + (model.arena_half_extent >= 14 ?
+                  hs::MeadowGroundHeight(projectile.previous_position) : 0.0f))) < 1e-6f,
+              "projectile endpoints must independently follow their sampled ground heights");
+        Check(model.player.position.x == low.x && model.player.position.y == low.y,
+              "terrain presentation mutated 2D simulation coordinates");
+        if (model.arena_half_extent >= 14) {
+            std::size_t slabs=0;
+            for (const auto &ground : view.static_scene->instances) {
+                if (ground.mesh != hs::RenderMesh::Ground) continue;
+                ++slabs;
+                const float raster_top=ground.position.y + ground.scale.y * .5f + .5f * .1f * ground.scale.y;
+                Check(std::abs(raster_top)<1e-7f, "outer ground raster surface must meet meadow at height zero");
+            }
+            Check(slabs==4, "meadow perimeter requires exactly four non-overlapping outer slabs");
+            for (const auto &grass : view.static_scene->instances) {
+                if (grass.mesh != hs::RenderMesh::Grass) continue;
+                for (const auto &prop : view.static_scene->instances) {
+                    if (prop.mesh != hs::RenderMesh::GroundDetail || prop.environment_variant < 7) continue;
+                    constexpr std::array<float, 7> radii{1,1.3f,.75f,.75f,.65f,.65f,2};
+                    const auto required = radii[prop.environment_variant - 7] + .45f;
+                    Check(std::hypot(grass.position.x-prop.position.x, grass.position.z-prop.position.z) >= required - 1e-5f,
+                          "grass intersects an authored prop footprint");
+                }
+            }
+        }
+    };
+    project();
+    model.arena_half_extent = 8;
+    project();
+}
+
 void TestStaticEnvironmentSceneLease()
 {
     hs::GameReadModelStorage model;
@@ -1113,6 +1227,46 @@ void TestStaticEnvironmentSceneLease()
               snapshot.View().poses.size() == 1 &&
               snapshot.View().poses[0].instance_index == 0,
           "static scene lease preserves dynamic pose indices and content identity");
+    std::array<bool, hs::kGroundDetailVariantCount> detail_variants{};
+    std::unordered_set<std::uint64_t> identities;
+    std::size_t details{}, pebbles{}, short_tufts{};
+    for (const auto &instance : first->instances)
+    {
+        Check(instance.stable_id && identities.insert(instance.stable_id).second,
+              "appended ground details collide with existing placement provenance");
+        if (instance.mesh == hs::RenderMesh::GroundDetail)
+        {
+            ++details;
+            Check(instance.environment_variant < detail_variants.size() &&
+                  instance.asset_id.value && instance.material_id.value == hs::MakeAssetId("render/material/ground_detail.rpkg").value,
+                  "detail geometry is not bound to the actual shared material product");
+            detail_variants[instance.environment_variant] = true;
+            const auto variant = instance.environment_variant;
+            constexpr std::array<float, hs::kGroundDetailVariantCount> minimum_scale{1.2f, 1.2f, 1.6f, .8f, .8f, 1.2f, 1.35f, 1,1,1,1,1,1,1};
+            constexpr std::array<float, hs::kGroundDetailVariantCount> maximum_scale{1.725f, 1.725f, 2.3f, 1.15f, 1.1f, 1.65f, 1.575f, 1,1,1,1,1,1,1};
+            Check(instance.scale.x >= minimum_scale[variant] - 1e-5f &&
+                  instance.scale.x <= maximum_scale[variant] + 1e-5f,
+                  "ground-detail species lost its player-relative placement scale");
+            constexpr std::array<float, hs::kGroundDetailVariantCount> footprint{.58f,.58f,.58f,.58f,.58f,.58f,1.05f,1,1.3f,.75f,.75f,.65f,.65f,2};
+            const auto radius = footprint[variant] * instance.scale.x;
+            Check((variant == 13u || hs::MeadowRoadCoverage({instance.position.x, instance.position.z}, -radius) == 0.0f) &&
+                  instance.scale.x == instance.scale.y && instance.scale.y == instance.scale.z,
+                  "scaled static detail enters the clear path or loses uniform transforms");
+        }
+        if (instance.mesh == hs::RenderMesh::Rock && instance.scale.x <= .1f) ++pebbles;
+        if (instance.mesh == hs::RenderMesh::Grass && instance.scale.y == .18f) ++short_tufts;
+    }
+    Check(details > 0 && details <= 320 && pebbles > 0 && pebbles <= 64 && short_tufts > 0 && short_tufts <= 64,
+          "new detail, small-rock, or short-grass population escaped its explicit budget");
+    for (std::size_t variant = 0; variant < detail_variants.size(); ++variant)
+        Check(detail_variants[variant], std::format("normal play scene omits ground-detail variant {}", variant));
+    auto cook_model = model;
+    cook_model.seed = 0;
+    hs::StaticEnvironmentSceneCache cook_cache("test-generation");
+    const auto cook_scene = cook_cache.Resolve(cook_model.View());
+    Check(cook_scene->eligible_layout_digest == first->eligible_layout_digest &&
+          cook_scene->eligible_static_members.size() == first->eligible_static_members.size(),
+          "seed-zero scene cooking differs from runtime detail/HLOD placement");
     snapshot.Clear();
     Check(!snapshot.View().static_scene && first->instances.size() > 1,
           "clearing a slot releases only its own scene lease");
@@ -1938,6 +2092,7 @@ void RunGameplayPresentationTests()
     TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();
     TestStaticEnvironmentSceneLease();
+    TestMeadowPresentationGrounding();
     TestArrowReleaseProjectsVfxAndAudio();
     TestBossTelegraphProjectsGeometryAndAudio();
     TestDenseGrassProjection();

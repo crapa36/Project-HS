@@ -86,12 +86,13 @@ function Assert-FiniteFloatPayload {
         $stream.Dispose()
     }
 }
-$sets=@(@('terrain',4,12,@('basecolor','surface','normal','detail','height')),@('rock',4,12,@('basecolor','surface','normal','detail')),@('bark',3,12,@('basecolor','surface','normal','detail')),@('grass',2,6,@('basecolor','normal','roughness')),@('leaf',3,6,@('basecolor','normal','roughness')))
+$sets=@(@('terrain',4,12,@('basecolor','surface','normal','detail','height')),@('rock',4,12,@('basecolor','surface','normal','detail')),@('bark',3,12,@('basecolor','surface','normal','detail')),@('grass',2,6,@('basecolor','normal','roughness')),@('leaf',3,6,@('basecolor','normal','roughness')),@('ground_detail',1,12,@('basecolor','surface','normal')))
 $renderTextureNames=@('terrain_gaussian','terrain_surface','terrain_normal','terrain_detail','terrain_height',
     'rock_basecolor','rock_surface','rock_normal','rock_detail',
     'bark_basecolor','bark_surface','bark_normal','bark_detail',
     'grass_basecolor','grass_normal','grass_roughness',
-    'leaf_basecolor','leaf_normal','leaf_roughness')
+    'leaf_basecolor','leaf_normal','leaf_roughness',
+    'ground_detail_basecolor','ground_detail_surface','ground_detail_normal')
 foreach($name in $renderTextureNames){
     $logicalId="render/texture/environment_$name.rpkg"
     if(!$generationProducts.ContainsKey($logicalId)){
@@ -133,14 +134,17 @@ foreach($special in @(@('gaussian',2048,2048,12,98),@('histogram',256,16,1,2))){
     ++$count
 }
 $meshes=0
-foreach($set in @(@('trunk',3),@('leaf',3),@('rock',4),@('grass',4))){for($variant=0;$variant -lt $set[1];++$variant){
+$meshNames=@()
+foreach($set in @(@('trunk',3),@('leaf',3),@('rock',4),@('grass',4))){for($variant=0;$variant -lt $set[1];++$variant){$meshNames+="$($set[0])_$variant"}}
+$meshNames+=@('flower_daisy','flower_buttercup','flower_violet','clover_patch','ground_leaves','twig_cluster','fence_short')
+foreach($name in $meshNames){
     [long]$previous=3000001
     for($lod=0;$lod -lt 3;++$lod){
-        $suffix=if($lod -eq 0){''}else{"_lod$lod"};$file=Resolve-EnvironmentProduct "environment_$($set[0])_$variant$suffix.meshbin"
+        $suffix=if($lod -eq 0){''}else{"_lod$lod"};$file=Resolve-EnvironmentProduct "environment_$name$suffix.meshbin"
         $asset=Read-FilePrefix $file 16;$bytes=$asset.Bytes;if($asset.Length -lt 16 -or $asset.BytesRead -lt 16){throw "Truncated mesh: $file"}
         $vertices=[BitConverter]::ToUInt32($bytes,8)
         if([BitConverter]::ToUInt32($bytes,0) -ne 0x4d455348 -or [BitConverter]::ToUInt32($bytes,4) -ne 1 -or [BitConverter]::ToUInt32($bytes,12) -ne 76 -or $vertices -eq 0 -or $vertices%3 -ne 0 -or $asset.Length -ne 16+[long]$vertices*76 -or $vertices -ge $previous){throw "Invalid LOD mesh payload: $file"}
         $previous=$vertices;++$meshes
     }
-}}
+}
 Write-Output "environment.assets DDS=$count render-texture-packages=$($renderTextureNames.Count) meshes=$meshes all payloads and LOD reductions valid"

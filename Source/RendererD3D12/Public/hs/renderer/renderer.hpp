@@ -124,30 +124,27 @@ struct RendererPresentationStatus
     std::uint64_t allocated_bytes{};
 };
 
+// Streamline's actual-present count since the preceding native GetState query.
+// This is SDK-reported presentation throughput, not physical display cadence.
+// FSR generated frames and XeSS queued frames are not interchangeable with it.
+struct RendererStreamlinePresentCount
+{
+    std::uint64_t begin_qpc{}, end_qpc{}, qpc_frequency{};
+    std::uint32_t frames{};
+    bool valid{};
+};
+
 struct RendererLightingModes
 {
-    bool ray_tracing_enabled{};
     GraphicsAoMode ao_mode{GraphicsAoMode::Off};
     GraphicsGiMode gi_mode{GraphicsGiMode::Off};
     GraphicsReflectionMode reflection_mode{GraphicsReflectionMode::Off};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
 };
-struct RendererDenoiserStatus
-{
-    GraphicsProviderId requested_provider;
-    std::string active_method, availability, reason;
-};
 struct RendererLocalShadowStatus
 {
     bool enabled{};
     std::uint32_t requested_lights{}, selected_lights{}, unsupported_lights{}, budget_lights{}, overflow_lights{};
-    std::uint64_t allocated_bytes{};
-    std::string reason;
-};
-struct RendererRayShadowStatus
-{
-    bool enabled{}, native_sigma{};
-    std::uint32_t requested_lights{}, selected_lights{}, unsupported_lights{}, budget_lights{}, rays_per_pixel{};
     std::uint64_t allocated_bytes{};
     std::string reason;
 };
@@ -162,12 +159,8 @@ struct RendererCharacterAnimationClip
 struct RendererLightingStatus
 {
     RendererLightingModes requested, active;
-    bool ray_scene_supported{}, inline_ray_queries_supported{};
     std::string ao_fallback_reason, gi_fallback_reason, reflection_fallback_reason, shadow_fallback_reason;
-    std::uint64_t ray_scene_allocated_bytes{};
-    RendererDenoiserStatus ao_denoiser, radiance_denoiser;
     RendererLocalShadowStatus local_shadows;
-    RendererRayShadowStatus ray_shadows;
     struct SoftwareGiStatus
     {
         bool compiled{}, supported{}, enabled{}, native_ready{}, faulted{};
@@ -185,14 +178,6 @@ struct RendererLightingStatus
         std::uint64_t allocated_bytes{};
         std::string raster_reason, compute_reason;
     } adaptive_shading;
-    struct NativeRayStatus
-    {
-        GraphicsAutoToggle requested{GraphicsAutoToggle::Auto};
-        bool hardware_supported{}, resolved{}, native_ready{}, applied{}, usable{true};
-        std::uint64_t budget_bytes{}, allocated_bytes{}, linked_triangles{}, known_cells{}, unknown_cells{};
-        std::uint32_t unavailable_geometries{};
-        std::string reason;
-    } opacity_micromaps, shader_execution_reordering;
     struct ShadowCacheStatus
     {
         std::uint64_t requested_bytes{}, admitted_bytes{};
@@ -240,6 +225,8 @@ struct RendererConfig
     bool warp{};
     bool validation{};
     bool gpu_validation{};
+    // Capture-only completed timing stream; ordinary rendering retains only the latest sample.
+    bool capture_timing_stream{};
     bool vsync{true};
     bool bloom{true};
     bool outline{true};
@@ -292,10 +279,6 @@ struct RendererConfig
     GraphicsQuality transparency_quality{GraphicsQuality::Medium};
     GraphicsOptionalQuality refraction_quality{GraphicsOptionalQuality::Medium};
     GraphicsOptionalQuality volumetric_quality{GraphicsOptionalQuality::Medium};
-    bool ray_tracing_enabled{};
-    GraphicsAutoToggle opacity_micromaps{GraphicsAutoToggle::Auto};
-    GraphicsAutoToggle shader_execution_reordering{GraphicsAutoToggle::Auto};
-    float rt_trace_distance_m{60.0f};
     GraphicsGiMode gi_mode{GraphicsGiMode::Probe};
     GraphicsQuality gi_quality{GraphicsQuality::Medium};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
@@ -303,8 +286,8 @@ struct RendererConfig
     bool temporal_reconstruction{true};
     std::optional<RendererReconstructionRequest> reconstruction_request;
     RendererPresentationRequest presentation_request;
-    GraphicsProviderId ray_reconstruction_provider{"auto"};
-    GraphicsAutoToggle neural_ray_reconstruction{GraphicsAutoToggle::Auto};
+    // Composition may suppress FG outside gameplay while retaining the requested setting.
+    bool frame_generation_allowed{true};
     float sharpening{0.2f};
     GraphicsHdrMode hdr_mode{GraphicsHdrMode::Auto};
     float hdr_paper_white_nits{200.0f};
@@ -350,6 +333,22 @@ struct RenderViewFrameResult
     std::array<float, 16> unjittered_view_projection{};
 };
 
+// Sequential wall-clock stages in microseconds, not CPU busy time. Per-view stages
+// exclude wrapper_us, which is package overhead outside all view Render calls.
+struct RendererCpuTimings
+{
+    std::uint64_t wait_us{}, streaming_us{}, scene_prepare_us{}, ui_us{};
+    std::uint64_t constants_upload_us{}, graph_build_us{}, graph_prepare_us{}, descriptors_us{};
+    std::uint64_t graph_plan_us{}, graph_record_us{}, graph_submit_us{};
+    std::uint64_t post_submit_us{}, present_us{}, diagnostics_us{}, wrapper_us{};
+    // Capture-only QPC interval around frame-slot completion admission.
+    std::uint64_t frame_slot_wait_begin_qpc{}, frame_slot_wait_end_qpc{};
+    // Capture-only nested Prepare scopes are included in graph_prepare_us, with cleanup left as residual.
+    // Do not add these values to the outer stage totals.
+    std::uint64_t graph_prepare_validation_us{}, graph_prepare_info_key_us{};
+    std::uint64_t graph_prepare_compile_us{}, graph_prepare_transient_us{};
+};
+
 struct RendererFrameResult
 {
     std::uint64_t frame{};
@@ -377,6 +376,8 @@ struct RendererFrameResult
     std::uint64_t view_history_generation{};
     std::array<float, 16> unjittered_view_projection{};
     std::vector<RenderViewFrameResult> views;
+    RendererCpuTimings cpu_timings;
+    RendererStreamlinePresentCount streamline_present;
 };
 
 struct RendererOptions;
@@ -412,6 +413,11 @@ struct GpuPassTiming
     std::uint64_t begin_ticks{}, end_ticks{}, timestamp_frequency{};
     std::uint64_t begin_qpc{}, end_qpc{}, qpc_frequency{};
     bool clock_calibrated{};
+    // Capture-only host wall intervals; parallel recording intervals may overlap.
+    // Recording includes command-list reset/barriers/close; provider submission is its callback only.
+    std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
+    std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
+    bool cpu_record_valid{}, cpu_provider_submit_valid{};
 };
 
 struct GpuPassTimings
@@ -426,6 +432,7 @@ struct GpuPassTimings
     bool cpu_recording_valid{};
     bool gpu_limited{};
     bool fence_completed{};
+    std::uint64_t cpu_qpc_frequency{};
 };
 
 struct RendererQueueStats
@@ -467,7 +474,7 @@ inline constexpr std::size_t kRendererDiagnosticsPassCapacity = 512;
 // independently reported from the process-wide DXGI usage/budget observation.
 enum class RendererDiagnosticsMemoryCategory : std::uint8_t
 {
-    Texture, Geometry, Skin, RayTracing, Shadow, Gi, History, Transient, Sdk, Staging, Count
+    Texture, Geometry, Skin, Shadow, Gi, History, Transient, Sdk, Staging, Count
 };
 struct RendererDiagnosticsMemory
 {
@@ -476,10 +483,10 @@ struct RendererDiagnosticsMemory
     std::array<std::uint64_t, static_cast<std::size_t>(RendererDiagnosticsMemoryCategory::Count)> live_bytes{}, retiring_bytes{};
     std::uint64_t tracked_live_bytes{}, tracked_retiring_bytes{}, tracked_reclaimed_bytes{}, tracked_gpu_bytes{};
     std::uint64_t host_staging_bytes{}, host_reserved_bytes{}, gpu_reserved_bytes{}, gpu_growth_since_budget_bytes{};
-    std::uint64_t host_staging_budget_bytes{}, texture_physical_bytes{}, acceleration_structure_bytes{};
+    std::uint64_t host_staging_budget_bytes{}, texture_physical_bytes{};
     // Known provider allocations and renderer-owned guide resources are separate;
     // opaque native SR/SDK allocations are not claimed to be fully accounted.
-    std::uint64_t presentation_provider_bytes{}, reconstruction_guide_bytes{}, ray_reconstruction_bytes{};
+    std::uint64_t presentation_provider_bytes{}, reconstruction_guide_bytes{};
     std::uint64_t renderer_view_bytes{}, shared_deformation_bytes{};
 };
 struct RendererDiagnosticsFrame
@@ -513,7 +520,7 @@ struct RendererDiagnosticsPass
     std::uint32_t pass_id{};
     std::string name;
     RenderQueue queue{};
-    bool measured{}, clock_calibrated{}, name_truncated{}, acceleration_structure_work{};
+    bool measured{}, clock_calibrated{}, name_truncated{};
     std::uint64_t nanoseconds{}, begin_ticks{}, end_ticks{}, timestamp_frequency{};
     // Aligned passes use CPU QPC and a shared origin. Otherwise offsets are
     // relative to the first timestamp in this queue, with no cross-queue claim.
@@ -553,7 +560,7 @@ struct RendererDiagnosticsSnapshot
     std::string transition_memory_peak_source, transition_memory_peak_reason;
     std::string memory_source{"dxgi_process_budget_and_partial_renderer_residency_accounting"};
     bool complete_provider_memory_available{}, stream_misses_available{};
-    std::string provider_memory_reason{"Only reported presentation allocations, reconstruction guides and ray-reconstruction allocations are known."};
+    std::string provider_memory_reason{"Only reported presentation allocations and reconstruction guides are known."};
     std::string stream_misses_reason{"Demand miss counters are not exposed; request/publication counters are reported separately."};
     RendererResidencyStats streaming;
     RendererPresentationStatus presentation;
@@ -614,10 +621,24 @@ class D3D12Renderer
     [[nodiscard]] std::uint32_t LastParticleCount() const noexcept;
     [[nodiscard]] float DecorativeParticleFraction() const noexcept;
     [[nodiscard]] GpuPassTimings LastGpuPassTimings() const;
+    // Owner thread only; cached data remains valid until the next renderer mutation.
+    // No query readback, clock calibration, allocation or copy occurs here.
+    [[nodiscard]] const GpuPassTimings &LastCompletedGpuPassTimings() const noexcept;
+    // Owner-thread capture stream. Consume performs no native query or GPU wait.
+    // Drain waits existing work and collects every remaining timestamp-bearing frame slot.
+    // Both replace output, sort by completed frame/view, and explicitly fail on bounded-stream overflow.
+    [[nodiscard]] Result ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings> &output);
+    [[nodiscard]] Result DrainGpuPassTimings(std::vector<GpuPassTimings> &output);
+    // Cached latest rendered view; reference remains valid until the next renderer mutation.
+    [[nodiscard]] const RendererDiagnosticsFrame &LastRenderedFrameDiagnostics() const noexcept;
     [[nodiscard]] RendererQueueStats LastQueueStats() const noexcept;
     [[nodiscard]] RendererResidencyStats ResidencyStats() const noexcept;
     [[nodiscard]] RendererReconstructionStatus GetReconstructionStatus() const;
     [[nodiscard]] RendererPresentationStatus GetPresentationStatus() const;
+    // Call on the renderer owner thread before input begins. A completed
+    // simulation token may also disable FG before its first paused/menu frame.
+    // Changes drain/recreate the native presentation chain; requested settings survive.
+    [[nodiscard]] Result SetFrameGenerationAllowed(bool allowed);
     [[nodiscard]] Result BeginInputFrame(std::uint64_t &identity);
     [[nodiscard]] Result InputSampled(std::uint64_t identity);
     [[nodiscard]] Result SimulationCompleted(std::uint64_t identity);

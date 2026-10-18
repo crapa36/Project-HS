@@ -4,7 +4,9 @@
 #include <hs/render_data/character_package.hpp>
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/quality_profiles.hpp>
 #include "../Source/Apps/RenderMaterialShader/material_graph_parser.hpp"
+#include "../Source/Apps/AssetPipeline/render_shader_bindings.hpp"
 #include <nlohmann/json.hpp>
 
 #include <array>
@@ -245,6 +247,99 @@ void TestPackage()
     const auto required_package = rd::BuildPackage(asset, dependencies, optional);
     Reject([&] { (void)rd::ReadPackage(required_package, asset); },
            "unknown required chunk accepted");
+}
+
+void TestQualityProfiles()
+{
+    rd::QualityProfiles table;
+    for (std::size_t i = 0; i < table.profiles.size(); ++i)
+    {
+        auto &p = table.profiles[i];
+        p = {4.0f, .35f, 2, .5f, 32, 4, 1024, .5f, 2, 4, 8, 1,
+             .5f, 1, 16, 1, 16, 32, 1, 0, 8, 2, 4, 128, 1, 48,
+             4, 3, 25, 0, 0, .25f, 12, 20, 2};
+        p.geometry_screen_error_px += static_cast<float>(i);
+        p.subsurface_half_samples += static_cast<std::uint32_t>(i);
+    }
+    table.auto_fg_cadence = {30, 40, 8};
+    const auto encoded = rd::EncodeQualityProfiles(table);
+    const auto decoded = rd::DecodeQualityProfiles(encoded);
+    Require(rd::EncodeQualityProfiles(decoded) == encoded,
+            "quality profile fields or cadence failed byte-exact roundtrip");
+    const auto asset = hs::MakeAssetId(rd::kQualityProfilesProduct);
+    const auto package = rd::ReadPackage(encoded, asset);
+    const auto rows = std::ranges::find(package.chunks, rd::ChunkType::QualityProfiles, &rd::ChunkView::type);
+    Require(rows != package.chunks.end() && rows->version == 2 && rows->count == 4 &&
+            rows->stride == 140 && rows->bytes.size() == 560,
+            "non-RT quality profiles must use version 2 and 140-byte records");
+    auto legacy = encoded;
+    const auto directory = static_cast<std::size_t>(Get64(legacy, 56));
+    const auto row_index = static_cast<std::size_t>(rows - package.chunks.begin());
+    legacy[directory + row_index * 80 + 4] = std::byte{1};
+    const auto hash = rd::Sha256(std::span<const std::byte>(legacy).subspan(96));
+    std::copy(hash.begin(), hash.end(), legacy.begin() + 24);
+    Reject([&] { (void)rd::DecodeQualityProfiles(legacy); },
+           "legacy RT quality profile version accepted as current layout");
+    std::vector<std::byte> old_rows(4 * 176);
+    const std::array old_chunks{rd::ChunkSource{
+        static_cast<std::uint32_t>(rd::ChunkType::QualityProfiles), 1, true, old_rows, 4, 176}};
+    Reject([&] { (void)rd::BuildPackage(asset, {}, old_chunks); },
+           "legacy RT quality profile producer layout accepted");
+}
+
+void TestDecalMaterialPackages()
+{
+    const auto directory = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                           "ContentSource/Materials";
+    for (const auto name : rd::kDecalMaterialNames)
+    {
+        std::ifstream file(directory / (std::string(name) + ".json"));
+        Require(file.is_open(), "authored decal material source missing");
+        const std::string source{std::istreambuf_iterator<char>(file), {}};
+        const auto graph = hs::material_content::ParseDecalMaterialGraph(name, source);
+        const auto encoded = rd::BuildDecalMaterialPackage(name, graph.parameters,
+            graph.textures.front().product_id, "render/shader/decal_surface_cs.dxil", graph.decal_receivers);
+        const auto decoded = rd::ReadDecalMaterialPackage(encoded, name);
+        Require(decoded.receivers == graph.decal_receivers &&
+                decoded.dependencies[decoded.texture_dependency_index] == graph.textures.front().product_id &&
+                decoded.parameter_layout_hash == rd::MaterialParameterLayoutHash(graph.parameters),
+                "decal material receiver, texture or parameter layout failed roundtrip");
+        const auto asset = hs::MakeAssetId("render/material/" + std::string(name) + "/material.rpkg");
+        const auto package = rd::ReadPackage(encoded, asset);
+        const auto metadata = std::ranges::find(package.chunks, rd::ChunkType::DecalMaterialMetadata, &rd::ChunkView::type);
+        Require(metadata != package.chunks.end() && metadata->version == 2 &&
+                metadata->count == 1 && metadata->stride == 28 && metadata->bytes.size() == 28,
+                "decal metadata must use version 2 and 28-byte records");
+        const auto directory_offset = static_cast<std::size_t>(Get64(encoded, 56));
+        const auto entry = directory_offset + static_cast<std::size_t>(metadata - package.chunks.begin()) * 80;
+        auto legacy = encoded;
+        legacy[entry + 4] = std::byte{1};
+        auto hash = rd::Sha256(std::span<const std::byte>(legacy).subspan(96));
+        std::copy(hash.begin(), hash.end(), legacy.begin() + 24);
+        Reject([&] { (void)rd::ReadDecalMaterialPackage(legacy, name); },
+               "legacy decal metadata version accepted as current layout");
+        std::vector<std::byte> old_metadata(32);
+        const std::array old_chunks{rd::ChunkSource{
+            static_cast<std::uint32_t>(rd::ChunkType::DecalMaterialMetadata), 1, true, old_metadata, 1, 32}};
+        Reject([&] { (void)rd::BuildPackage(asset, {}, old_chunks); },
+               "legacy decal metadata producer layout accepted");
+        for (const auto offset : {22u, 24u})
+        {
+            auto invalid = encoded;
+            const auto payload = static_cast<std::size_t>(Get64(invalid, entry + 8));
+            invalid[payload + offset] = std::byte{1};
+            hash = rd::Sha256(std::span<const std::byte>(invalid).subspan(payload, 28));
+            std::copy(hash.begin(), hash.end(), invalid.begin() + entry + 48);
+            hash = rd::Sha256(std::span<const std::byte>(invalid).subspan(96));
+            std::copy(hash.begin(), hash.end(), invalid.begin() + 24);
+            Reject([&] { (void)rd::ReadDecalMaterialPackage(invalid, name); },
+                   "nonzero decal metadata reserved field accepted");
+        }
+        auto invalid = nlohmann::json::parse(source);
+        invalid["render_flags"]["rt_policy"] = "raster_only";
+        Reject([&] { (void)hs::material_content::ParseDecalMaterialGraph(name, invalid.dump()); },
+               "removed decal authoring policy accepted");
+    }
 }
 
 void TestMaterialParameters()
@@ -1034,6 +1129,80 @@ void TestUnsafeMaterialGraphs()
     library_graph.base_color_output = bad_fresnel;
     library_graph.nodes[bad_fresnel].inputs[1] = 0;
     reject(library_graph);
+}
+
+void TestRenderBindingCompilerContract()
+{
+    namespace sc = hs::shader_content;
+    std::vector<std::wstring> arguments{L"-WX"};
+    sc::AppendRenderBindingArguments(arguments);
+    Require(arguments.front()==L"-WX" && arguments.size()==sc::kRenderBindingDefines.size()+1,
+            "binding definitions replaced compiler options");
+    std::string canonical;
+    for(std::size_t i=0;i<sc::kRenderBindingDefines.size();++i)
+    {
+        const auto &[name,value]=sc::kRenderBindingDefines[i];
+        Require(std::ranges::count(sc::kRenderBindingDefines,name,
+                    [](const auto &definition) { return definition.first; })==1,
+                "duplicate compiler binding definition");
+        const std::string definition=std::string(name)+"="+std::to_string(value);
+        Require(arguments[i+1]==L"-D"+std::wstring(definition.begin(),definition.end()),
+                "compiler definitions differ from the action identity");
+        canonical+=definition+"\n";
+    }
+    Require(canonical==sc::RenderBindingContract(), "binding action identity is not canonical");
+    const auto value=[&](std::string_view name) {
+        const auto found=std::ranges::find(sc::kRenderBindingDefines,name,
+            [](const auto &definition) { return definition.first; });
+        Require(found!=sc::kRenderBindingDefines.end(),"required compiler binding missing");
+        return found->second;
+    };
+    Require(value("HS_RENDER_GEOMETRY_PAGE_CAPACITY")==rd::kGeometryPageCapacity &&
+            value("HS_RENDER_GEOMETRY_BUFFERS_PER_PAGE")==rd::kGeometryBuffersPerPage &&
+            rd::kGeometryDescriptorCount==1+rd::kGeometryPageCapacity*rd::kGeometryBuffersPerPage &&
+            value("HS_RENDER_AUTHORED_MATERIAL_COUNT")==rd::kAuthoredMaterialNames.size() &&
+            value("HS_RENDER_HERO_MATERIAL_COUNT")==rd::kHeroMaterialNames.size() &&
+            value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")==rd::kEnvironmentMaterialNames.size() &&
+            value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==rd::kEnvironmentGeometryLodCount &&
+            value("HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT")==rd::kMaterialTextureSlots &&
+            value("HS_RENDER_GROUND_DETAIL_GEOMETRY_BEGIN")==rd::kGroundDetailGeometryBegin &&
+            value("HS_RENDER_GROUND_DETAIL_MATERIAL_ORDINAL")==rd::kGroundDetailMaterialOrdinal,
+            "compiler binding definitions diverged from the public catalog");
+    Require(value("HS_RENDER_ENVIRONMENT_GEOMETRY_COUNT")*value("HS_RENDER_ENVIRONMENT_GEOMETRY_LOD_COUNT")==90 &&
+            value("HS_RENDER_AUTHORED_MATERIAL_COUNT")*value("HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT")==96 &&
+            1+value("HS_RENDER_AUTHORED_MATERIAL_COUNT")+value("HS_RENDER_HERO_MATERIAL_COUNT")==24,
+            "existing geometry, feedback or visibility ABI changed");
+}
+
+void TestGroundDetailCatalogMapping()
+{
+    Require(static_cast<std::uint32_t>(hs::RenderMesh::DirtPatch)==20u &&
+            static_cast<std::uint32_t>(hs::RenderMesh::GroundDetail)==21u &&
+            static_cast<std::uint32_t>(hs::RenderMesh::MeadowSurface)==22u &&
+            rd::kEnvironmentMaterialNames[28]=="meadow_ground" && rd::kEnvironmentMaterialNames[29]=="meadow_water",
+            "existing render mesh ordinals changed");
+    Require(rd::kEnvironmentMaterialNames.size()==30 && rd::kAuthoredMaterialNames.size()==16 &&
+            rd::kAuthoredMaterialNames[14]=="terrain" && rd::kAuthoredMaterialNames[15]=="ground_detail",
+            "geometry append changed fixed terrain/material ordinals");
+    for(std::uint32_t ordinal=0;ordinal<rd::kEnvironmentMaterialNames.size();++ordinal)
+    {
+        const auto mesh=rd::EnvironmentMeshForOrdinal(ordinal);
+        const auto variant=ordinal<3?ordinal:ordinal<6?ordinal-3:ordinal<10?ordinal-6:
+            ordinal<14?ordinal-10:ordinal<28?ordinal-14:ordinal-28;
+        Require(rd::IsEnvironmentMesh(mesh) && rd::EnvironmentGeometryOrdinal(mesh,variant)==ordinal,
+                "geometry family/variant mapping is not reversible");
+        Require(rd::EnvironmentGeometryMaterialOrdinal(ordinal)==(ordinal<14?ordinal:ordinal==28?14u:15u),
+                "ground geometry ordinal leaked into the shared material table");
+        hs::RenderInstance instance{};instance.mesh=mesh;instance.environment_variant=variant;
+        hs::PopulateRenderInstanceRevisions(instance);
+        Require(instance.asset_id.value==hs::MakeAssetId("render/"+std::string(rd::kEnvironmentMaterialNames[ordinal])+".rpkg").value,
+                "core geometry asset identity differs from the cooked catalog");
+        Require(instance.material_id.value==(ordinal<14?instance.asset_id.value:ordinal==28?hs::MakeAssetId("render/material/terrain.rpkg").value:hs::MakeAssetId("render/material/ground_detail.rpkg").value),
+                "detail material identity differs from the actual standalone product");
+    }
+    Require(!rd::IsEnvironmentMesh(hs::RenderMesh::DirtPatch) &&
+            rd::EnvironmentGeometryOrdinal(hs::RenderMesh::Ground,0)==UINT32_MAX,
+            "terrain was mistaken for an environment geometry family");
 }
 
 void TestAuthoredEnvironmentMaterials()
@@ -1939,6 +2108,8 @@ int main(int argc, char **argv)
         }
         RunNamed("TestExpandedVertexFields", TestExpandedVertexFields);
         RunNamed("TestPackage", TestPackage);
+        RunNamed("TestQualityProfiles", TestQualityProfiles);
+        RunNamed("TestDecalMaterialPackages", TestDecalMaterialPackages);
         RunNamed("TestMaterialParameters", TestMaterialParameters);
         RunNamed("TestMaterialGraph", TestMaterialGraph);
         RunNamed("TestGenericMaterialOutputInputs", TestGenericMaterialOutputInputs);
@@ -1946,6 +2117,8 @@ int main(int argc, char **argv)
         RunNamed("TestMaterialLogicAndOptimizer", TestMaterialLogicAndOptimizer);
         RunNamed("TestUnsafeMaterialGraphs", TestUnsafeMaterialGraphs);
         RunNamed("TestMaterialPrograms", TestMaterialPrograms);
+        RunNamed("TestRenderBindingCompilerContract", TestRenderBindingCompilerContract);
+        RunNamed("TestGroundDetailCatalogMapping", TestGroundDetailCatalogMapping);
         RunNamed("TestAuthoredEnvironmentMaterials", TestAuthoredEnvironmentMaterials);
         RunNamed("TestSurfaceClosure", TestSurfaceClosure);
         RunNamed("TestAuthoredTerrainMaterial", TestAuthoredTerrainMaterial);

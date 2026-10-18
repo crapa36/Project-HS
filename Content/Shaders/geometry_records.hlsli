@@ -1,11 +1,12 @@
 #ifndef HS_GEOMETRY_RECORDS_HLSLI
 #define HS_GEOMETRY_RECORDS_HLSLI
+#include "render_binding_contract.hlsli"
 #include "shadow_data.hlsli"
 #include "scene_hlod_sampling.hlsli"
 
 // Descriptor zero is the frame's records. Each immutable page owns four raw
 // descriptors: canonical vertices, indices, meshlets and packed auxiliary.
-ByteAddressBuffer GeometryBuffers[513] : register(t0, space5);
+ByteAddressBuffer GeometryBuffers[HsGeometryDescriptorCount] : register(t0, space5);
 
 struct GeometryDrawRecord
 {

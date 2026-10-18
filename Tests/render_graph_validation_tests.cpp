@@ -100,6 +100,16 @@ void Initialization()
     covered_load.Add(0, {Write(0, BufferRange{0, 16})});
     covered_load.Add(1, {Write(1, BufferRange{0, 16}, true)});
     Check(covered_load.Compile(), "ReadWrite consumes covered partial predecessor");
+    Graph imported;
+    imported.resources[0].initialized = true;
+    imported.Add(20, {Write(0, BufferRange{0, 16}, true)});
+    imported.Add(10, {Read(1)});
+    imported.resources[0].final_set = true;
+    imported.resources[0].final_version = {buffer, 1};
+    Check(imported.Compile() && imported.Order({20, 10}),
+          "partial ReadWrite preserves the whole initialized import and RAW order");
+    imported.resources[0].final_version.ordinal = 0;
+    Check(!imported.Compile(), "initialized import still rejects an old final version");
 }
 
 void Dependencies()
@@ -166,6 +176,116 @@ void VersionAndIdentityValidation()
     Check(imported.Compile() && imported.Order({0, 2, 1}), "imported version zero has distant WAR protection");
 }
 
+void LargeImportAndPassUseValidation()
+{
+    constexpr std::uint32_t count = 2048;
+    Graph graph;
+    graph.resources.assign(count, {ResourceKind::Buffer, true, 64});
+    graph.resources[0].name = "first imported buffer";
+    for (std::uint32_t index = 2; index < count; ++index)
+        graph.resources[index].imported_identity = std::uintptr_t{0x10000} + std::uintptr_t{index} * 4096;
+    graph.Add(100, {});
+    graph.Add(200, {});
+    for (std::uint32_t index = 0; index < count; ++index)
+    {
+        graph.passes[0].uses.push_back(Read(0, {}, {index + 1, ResourceKind::Buffer}));
+        graph.passes[1].uses.push_back(Read(0, {}, {count - index, ResourceKind::Buffer}));
+    }
+    const auto compile = [&] {
+        std::vector<PassInfo> passes;
+        for (const auto &pass : graph.passes) passes.push_back({pass.id, pass.queue, pass.callback, pass.uses});
+        return hs::render_graph::Compile(graph.resources, passes, graph.schedule);
+    };
+    Check(compile().Succeeded(), "large unique imports and read sets compile; zero identities remain unspecified");
+    graph.resources.back().imported_identity = graph.resources[512].imported_identity;
+    auto result = compile();
+    Check(!result && result.Message() == "RenderGraph imports one physical resource more than once; reuse its handle." &&
+              graph.schedule.execution_order.empty(), "distant duplicate import preserves the diagnostic and clears the schedule");
+    graph.resources.back().imported_identity += 1;
+    Check(compile().Succeeded(), "changed frame import identities are revalidated after a prior failure");
+    auto duplicate = Read(0, BufferRange{64, 1});
+    duplicate.access = Access::CopySource;
+    graph.passes[1].uses.push_back(duplicate);
+    result = compile();
+    Check(!result && result.Message() == "RenderGraph pass 200 declares resource 1 (first imported buffer) twice; accesses " +
+              std::to_string(static_cast<unsigned>(Access::ComputeRead)) + " and " +
+              std::to_string(static_cast<unsigned>(Access::CopySource)) + ".",
+          "distant duplicate retains first-use access and takes precedence over invalid range");
+    for (const auto handle : {ResourceHandle{}, ResourceHandle{UINT32_MAX, ResourceKind::Buffer}})
+    {
+        graph.passes[1].uses.back() = Read(0, {}, handle);
+        result = compile();
+        Check(!result && result.Message() == "RenderGraph names an invalid or nonexistent resource version.",
+            "invalid handles fail before indexing the duplicate-use table");
+    }
+    graph.passes[1].uses.pop_back();
+    Check(compile().Succeeded(), "per-pass use tracking resets between passes and compile invocations");
+}
+
+void ReadOnlyImports()
+{
+    Graph graph;
+    graph.resources[0].initialized = true;
+    graph.Add(20, {Read(0)});
+    graph.Add(10, {Read(0, BufferRange{63, 1})});
+    graph.passes[1].queue = QueueHint::Compute;
+    graph.resources[0].final_set = true;
+    graph.resources[0].final_version = {buffer, 0};
+    Check(graph.Compile() && graph.Order({10, 20}) && graph.schedule.cross_queue_dependencies.empty(),
+          "read-only imports need no version hazards and may export version zero");
+    graph.passes[1].uses[0] = Read(1);
+    Check(!graph.Compile(), "read-only import cannot reference an unwritten version");
+    graph.passes[1].uses[0] = Read(0, BufferRange{63, 2});
+    Check(!graph.Compile(), "read-only import still validates bounds");
+    graph.passes[1].uses[0] = Read(0);
+    graph.resources[0].initialized = false;
+    Check(!graph.Compile(), "read-only resource must be initialized");
+    graph.resources[0].initialized = true;
+    graph.resources[0].final_version.ordinal = 1;
+    Check(!graph.Compile(), "read-only export cannot reference an unwritten version");
+    graph.Add(1, {Write(0)});
+    Check(graph.Compile() && graph.Order({10, 20, 1}),
+          "a later declared writer retains both version-zero read-before-write hazards");
+}
+
+void SparseVersionExtents()
+{
+    Graph sparse;
+    sparse.resources = {{ResourceKind::Buffer, true, 64}, {ResourceKind::Buffer, true, 64},
+                        {ResourceKind::Buffer, false, 64}};
+    sparse.resources[1].final_set = true;
+    sparse.resources[1].final_version = {{2, ResourceKind::Buffer}, 0};
+    for (std::uint32_t index = 0; index < 128; ++index) sparse.Add(index, {});
+    sparse.passes[0].uses.push_back(Read(0));
+    Check(sparse.Compile(), "unused imported version zero may export while unused transient needs no version storage");
+    sparse.resources[2].final_set = true;
+    sparse.resources[2].final_version = {{3, ResourceKind::Buffer}, 0};
+    Check(!sparse.Compile(), "unused transient export still requires fully initialized version zero");
+    sparse.resources[2].final_set = false;
+    sparse.passes.back().uses.push_back(Read(128));
+    Check(!sparse.Compile(), "high read ordinal inside pass bound rejects missing writer across sparse holes");
+    sparse.passes.back().uses[0] = Write(127);
+    Check(!sparse.Compile(), "high write ordinal rejects nonexistent predecessor across sparse holes");
+    sparse.passes.back().uses[0] = Read(129);
+    Check(!sparse.Compile(), "ordinal beyond pass count is rejected before sparse chain growth");
+    sparse.passes.back().uses.clear();
+    Check(sparse.Compile(), "sparse chains are rebuilt after invalid high ordinals");
+
+    Graph high;
+    for (std::uint32_t ordinal = 0; ordinal < 64; ++ordinal)
+        high.Add(ordinal, {Write(ordinal, BufferRange{0, 32})});
+    high.resources[0].final_set = true;
+    high.resources[0].final_version = {buffer, 64};
+    Check(!high.Compile(), "high latest version cannot export an inherited initialization hole");
+    high.passes.back().uses[0] = Write(63);
+    Check(high.Compile(), "high contiguous version chain exports once the full range is initialized");
+    high.resources[0].final_version.ordinal = 63;
+    Check(!high.Compile(), "high stale final version remains rejected");
+    high.resources[0].final_version.ordinal = 64;
+    high.passes[31].uses.clear();
+    Check(!high.Compile(), "interior missing writer remains invalid even with a fully initialized final range");
+}
+
 void TextureBounds()
 {
     Graph g; g.resources[0] = {ResourceKind::Texture, true, 0, 4, 3, 2};
@@ -200,6 +320,16 @@ void TextureBounds()
     mips.Add(0, {Write(0, TextureSubresourceRange{0, 1, 0, 2, 0, 1}, false, texture)});
     mips.Add(1, {Read(1, TextureSubresourceRange{1, 1, 0, 1, 0, 1}, texture)});
     Check(!mips.Compile(), "multi-array mip selection preserves holes between subresources");
+    Graph arrays; arrays.resources[0] = {ResourceKind::Texture, false, 0, 8, 256, 2};
+    const TextureSubresourceRange selected_arrays{0, 8, 64, 128, 0, 2};
+    arrays.Add(0, {Write(0, selected_arrays, false, texture)});
+    arrays.Add(1, {Read(1, selected_arrays, texture)});
+    Check(arrays.Compile(), "full mip chains coalesce selected arrays within each plane");
+    arrays.passes[1].uses[0] = Read(1, TextureSubresourceRange{0, 1, 0, 1, 1, 1}, texture);
+    Check(!arrays.Compile(), "coalesced arrays preserve the hole between selected planes");
+    arrays.passes[0].uses[0] = Write(0, {}, false, texture);
+    arrays.passes[1].uses[0] = Read(1, {}, texture);
+    Check(arrays.Compile(), "whole texture coalesces all contiguous mips arrays and planes");
 }
 
 void RandomizedVersionReplay()
@@ -241,8 +371,43 @@ void RandomizedVersionReplay()
             g.Add(ids[writer_count + reader], {Read(ordinal, BufferRange{first, count})});
         }
         std::shuffle(g.passes.begin(), g.passes.end(), random);
+        for (auto &pass : g.passes)
+        {
+            auto &use = pass.uses[0];
+            pass.queue = static_cast<QueueHint>(random() % 3);
+            if (pass.queue == QueueHint::Copy)
+            {
+                if (use.writes && use.reads) pass.queue = QueueHint::Compute;
+                else use.access = use.writes ? Access::CopyDest : Access::CopySource;
+            }
+        }
         Check(g.Compile() == valid, "randomized compile agrees with initialized-version snapshots");
         if (!valid) continue;
+        const auto count = g.passes.size();
+        std::vector<std::vector<bool>> reachable(count, std::vector<bool>(count));
+        for (const auto &queue : g.schedule.queue_orders)
+            for (std::size_t i = 1; i < queue.size(); ++i) reachable[queue[i - 1]][queue[i]] = true;
+        for (const auto &dependency : g.schedule.cross_queue_dependencies)
+            reachable[dependency.producer][dependency.consumer] = true;
+        for (std::size_t via = 0; via < count; ++via)
+            for (std::size_t from = 0; from < count; ++from)
+                for (std::size_t to = 0; to < count; ++to)
+                    reachable[from][to] = reachable[from][to] || (reachable[from][via] && reachable[via][to]);
+        // Independently require every old RAW/WAR edge, including distant
+        // partial overlaps, to remain ordered by actual queue execution/waits.
+        for (std::size_t reader = 0; reader < count; ++reader)
+            for (std::size_t writer = 0; writer < count; ++writer)
+            {
+                if (reader == writer) continue;
+                const auto &a = g.passes[reader].uses[0], &b = g.passes[writer].uses[0];
+                if (!b.writes) continue;
+                if (a.writes && a.successor.ordinal < b.successor.ordinal)
+                    Check(reachable[reader][writer], "queue schedule preserves physical writer chain");
+                const auto ar = std::get<BufferRange>(a.range), br = std::get<BufferRange>(b.range);
+                if (!a.reads || ar.offset >= br.offset + br.size || br.offset >= ar.offset + ar.size) continue;
+                Check(b.successor.ordinal <= a.predecessor.ordinal ? reachable[writer][reader] : reachable[reader][writer],
+                      "queue schedule preserves every overlapping RAW/WAR hazard");
+            }
         auto physical = snapshots[0];
         for (const auto index : g.schedule.execution_order)
         {
@@ -531,36 +696,14 @@ void MaterialTextureReadContract()
     }
 }
 
-void NativeRayTracingAccessContract()
-{
-    Graph graph;
-    auto output = Write(0); output.access = Access::RayTracingWrite;
-    auto sample = Read(1); sample.access = Access::RayTracingRead;
-    graph.Add(10, {output});
-    graph.Add(20, {sample});
-    Check(graph.Compile() && graph.Order({10, 20}),
-          "native ray shader reads depend on ray UAV writes");
-    for (const auto queue : {QueueHint::Compute, QueueHint::Copy})
-    {
-        graph.passes[0].queue = queue;
-        Check(!graph.Compile(), "native ray UAV writes require Direct");
-        graph.passes[0].queue = QueueHint::Direct;
-        graph.passes[1].queue = queue;
-        Check(!graph.Compile(), "native ray shader reads require Direct");
-        graph.passes[1].queue = QueueHint::Direct;
-    }
-    graph.passes[0].uses[0].writes = false;
-    graph.passes[0].uses[0].reads = true;
-    Check(!graph.Compile(), "ray UAV write cannot be declared as read-only");
-}
 } // namespace
 
 int main()
 {
     try
     {
-        BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); TextureBounds();
-        PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); NativeRayTracingAccessContract(); RandomizedVersionReplay();
+        BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
+        PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();
         std::puts("Render graph CPU range/version validation passed.");
         return 0;
     }

@@ -72,6 +72,7 @@ class ActionResultSnapshot
     [[nodiscard]] std::string_view ActionId() const;
     [[nodiscard]] std::string_view ActionKeyValue() const;
     [[nodiscard]] std::size_t ProductCount() const;
+    [[nodiscard]] const Json &ProductMetadata(std::string_view product_id) const;
     void ReadProduct(std::string_view product_id, UpstreamProduct &dependency,
                      fs::path &product_path,
                      ProductReadPolicy policy = ProductReadPolicy::VerifyIntegrity) const;

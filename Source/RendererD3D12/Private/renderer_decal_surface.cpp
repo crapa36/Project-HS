@@ -165,10 +165,10 @@ Result DecalSurfaceSystem::Register(RenderGraphBuilder &graph, const DecalSurfac
         const auto &m = input.materials[index]; const auto &p = m.package;
         try { render_data::ValidateDecalReceiverPolicy(p.receivers); }
         catch (const std::exception &) { return Failure(ErrorCode::InvalidArgument, "Decal package receiver policy is invalid."); }
-        if (p.ray_policy != render_data::DecalRayPolicy::RasterOnly || p.program.kind != render_data::MaterialProgramKind::DecalSurfaceCS ||
+        if (p.program.kind != render_data::MaterialProgramKind::DecalSurfaceCS ||
             m.parameter_base > input.parameter_slot_count || !m.parameter_count ||
             m.parameter_count > input.parameter_slot_count - m.parameter_base)
-            return Failure(ErrorCode::InvalidArgument, "Decal package program, RasterOnly policy or parameter range is invalid.");
+            return Failure(ErrorCode::InvalidArgument, "Decal package program or parameter range is invalid.");
         const auto texture = input.textures[index].resource->GetDesc();
         if (texture.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || texture.SampleDesc.Count != 1 ||
             !texture.Width || !texture.Height || texture.DepthOrArraySize < (index == 0 ? 4u : 8u) ||

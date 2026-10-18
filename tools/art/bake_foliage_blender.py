@@ -1,6 +1,6 @@
 import bpy, math, json
 from pathlib import Path
-ROOT=Path(r'C:/Users/crapa/Documents/GitHub/Project HS')
+ROOT=Path(__file__).resolve().parents[2]
 PACK=ROOT/'ContentSource/Textures/Environment'
 SPEC=json.loads((PACK/'project_hs_environment_materials_v9_LEAN.json').read_text())
 def bake_foliage_page(group,page):

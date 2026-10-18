@@ -424,7 +424,8 @@ void GameSimulation::ApplyUiAction(const UiAction &action)
             impl_->AssignStat(static_cast<StatKind>(action.value));
         break;
     case UiActionKind::Resume:
-        impl_->session_phase = SessionPhase::Playing;
+        if (impl_->session_phase == SessionPhase::Paused)
+            impl_->session_phase = SessionPhase::Playing;
         break;
     case UiActionKind::SwapLoadoutSlots:
         if (action.value < impl_->actors->player.loadout.size() &&

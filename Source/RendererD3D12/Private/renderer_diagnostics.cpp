@@ -43,8 +43,8 @@ void MergeMemoryPeak(RendererDiagnosticsMemory &peak, const RendererDiagnosticsM
     HS_DIAGNOSTICS_PEAK(host_staging_bytes); HS_DIAGNOSTICS_PEAK(host_reserved_bytes);
     HS_DIAGNOSTICS_PEAK(gpu_reserved_bytes); HS_DIAGNOSTICS_PEAK(gpu_growth_since_budget_bytes);
     HS_DIAGNOSTICS_PEAK(host_staging_budget_bytes); HS_DIAGNOSTICS_PEAK(texture_physical_bytes);
-    HS_DIAGNOSTICS_PEAK(acceleration_structure_bytes); HS_DIAGNOSTICS_PEAK(presentation_provider_bytes);
-    HS_DIAGNOSTICS_PEAK(reconstruction_guide_bytes); HS_DIAGNOSTICS_PEAK(ray_reconstruction_bytes);
+    HS_DIAGNOSTICS_PEAK(presentation_provider_bytes);
+    HS_DIAGNOSTICS_PEAK(reconstruction_guide_bytes);
     HS_DIAGNOSTICS_PEAK(renderer_view_bytes); HS_DIAGNOSTICS_PEAK(shared_deformation_bytes);
 #undef HS_DIAGNOSTICS_PEAK
     for (std::size_t index = 0; index < peak.live_bytes.size(); ++index)
@@ -316,7 +316,6 @@ RendererDiagnosticsSnapshot RendererDiagnosticsRecorder::Snapshot() const
         result.pass_id = pass.pass_id; result.name = pass.name.data(); result.queue = pass.queue;
         result.measured = pass.measured; result.clock_calibrated = pass.clock_calibrated;
         result.name_truncated = pass.name_truncated;
-        result.acceleration_structure_work = pass.pass_id >= 120 && pass.pass_id <= 125;
         result.nanoseconds = pass.nanoseconds; result.begin_ticks = pass.begin_ticks;
         result.end_ticks = pass.end_ticks; result.timestamp_frequency = pass.timestamp_frequency;
         result.clock_domain = "unavailable";
@@ -368,10 +367,8 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
         output.nonlocal_usage_bytes = nonlocal.CurrentUsage; output.nonlocal_budget_bytes = nonlocal.Budget;
     }
     output.texture_physical_bytes = texture_streaming.PhysicalBytes();
-    output.acceleration_structure_bytes = ray_scene.AllocatedBytes();
     output.presentation_provider_bytes = sdk_presentation.Status().allocated_bytes + presentation_guides.AllocatedBytes();
     output.reconstruction_guide_bytes = reconstruction_guides.AllocatedBytes();
-    output.ray_reconstruction_bytes = ray_reconstruction.AllocatedBytes();
     // Known renderer allocations are independent of ResidencyManager's partial
     // tracking and of opaque native SDK allocations. Shared deformation leases
     // retain allocation identities, so count those allocations only once.
@@ -409,9 +406,8 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
         HS_VIEW_SERVICE(ambient_occlusion); HS_VIEW_SERVICE(adaptive_shading);
         HS_VIEW_SERVICE(subsurface); HS_VIEW_SERVICE(screen_reflections);
         HS_VIEW_SERVICE(hero_transparency); HS_VIEW_SERVICE(hdr_post); HS_VIEW_SERVICE(screen_overlay);
-        HS_VIEW_SERVICE(ray_ambient_occlusion); HS_VIEW_SERVICE(ray_transport);
-        HS_VIEW_SERVICE(ray_reconstruction); HS_VIEW_SERVICE(brixelizer_gi);
-        HS_VIEW_SERVICE(virtual_shadows); HS_VIEW_SERVICE(local_shadows); HS_VIEW_SERVICE(ray_shadows);
+        HS_VIEW_SERVICE(brixelizer_gi);
+        HS_VIEW_SERVICE(virtual_shadows); HS_VIEW_SERVICE(local_shadows);
         HS_VIEW_SERVICE(volumetrics); HS_VIEW_SERVICE(light_list); HS_VIEW_SERVICE(decal_surface);
         HS_VIEW_SERVICE(reconstruction_guides);
 #undef HS_VIEW_SERVICE
@@ -439,7 +435,6 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
         for (const auto &resource : view->ui.textures) output.renderer_view_bytes += bytes(resource);
         for (const auto &resource : view->ui.uploads) output.renderer_view_bytes += bytes(resource);
         output.reconstruction_guide_bytes += view->reconstruction_guides.AllocatedBytes();
-        output.ray_reconstruction_bytes += view->ray_reconstruction.AllocatedBytes();
         output.renderer_view_bytes += target_bytes(view->targets) + auxiliary_bytes(*view);
         output.renderer_view_bytes += bytes(view->static_lod_states.states) + bytes(view->static_lod_states.zero_upload)
             + bytes(view->static_lod_states.prefix_source);

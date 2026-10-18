@@ -63,7 +63,8 @@ class SdkPresentation
     [[nodiscard]] Result InputSleep(const SdkFrameIdentity &);
     [[nodiscard]] Result Marker(const SdkFrameIdentity &, SdkLatencyMarker);
     [[nodiscard]] const RendererPresentationStatus &Status() const noexcept;
-    void ReportAutoCadenceResolution(const RendererPresentationRequest &requested, bool suppressed);
+    void ReportFrameGenerationPolicy(const RendererPresentationRequest &requested, bool cadence_suppressed, bool allowed);
+    [[nodiscard]] const RendererStreamlinePresentCount &ActualPresentCount() const noexcept;
     [[nodiscard]] SdkPresentationOwner PresentationOwner() const noexcept;
     [[nodiscard]] SdkLatencyOwner LatencyOwner() const noexcept;
     [[nodiscard]] bool IsEnabled() const noexcept;
@@ -72,5 +73,6 @@ class SdkPresentation
     struct Impl;
     std::unique_ptr<Impl> impl_;
     RendererPresentationStatus status_;
+    RendererStreamlinePresentCount actual_present_count_;
 };
 } // namespace hs

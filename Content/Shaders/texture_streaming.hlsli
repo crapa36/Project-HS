@@ -1,12 +1,14 @@
 #ifndef HS_TEXTURE_STREAMING_HLSLI
 #define HS_TEXTURE_STREAMING_HLSLI
 
+#include "render_binding_contract.hlsli"
+
 // One immutable uint4 per actual material binding, in the waited frame bank.
 // x=physical mip base, y=published logical resident MinMip, z=logical mip count,
 // w=the physical target has its paired native feedback map in this bank.
 StructuredBuffer<uint4> HsTextureMipMetadata : register(t0, space32);
 #if defined(HS_SAMPLER_FEEDBACK) && HS_SAMPLER_FEEDBACK
-FeedbackTexture2DArray<SAMPLER_FEEDBACK_MIN_MIP> HsTextureFeedback[90] : register(u0, space32);
+FeedbackTexture2DArray<SAMPLER_FEEDBACK_MIN_MIP> HsTextureFeedback[HS_RENDER_AUTHORED_MATERIAL_COUNT * HS_RENDER_MATERIAL_TEXTURE_SLOT_COUNT] : register(u0, space32);
 #endif
 
 float4 HsTextureSampleGrad(Texture2DArray<float4> texture, uint binding,

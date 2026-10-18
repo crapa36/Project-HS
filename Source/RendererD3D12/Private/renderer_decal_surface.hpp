@@ -66,7 +66,6 @@ struct DecalSurfaceOutputs
 {
     DecalSurfaceGuide base, normal, material, emission;
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> export_srvs{};
-    render_data::DecalRayPolicy ray_policy{render_data::DecalRayPolicy::RasterOnly};
     bool active{};
 };
 struct DecalSurfaceTargets;

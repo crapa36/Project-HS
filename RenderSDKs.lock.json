@@ -1,33 +1,6 @@
 {
   "schema_version": 1,
   "sdks": {
-    "dxc69": {
-      "release": "1.9.2602.24",
-      "repository": "https://github.com/microsoft/DirectXShaderCompiler",
-      "distribution_kind": "release_archive",
-      "archive_uri": "https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/dxc_2026_05_27.zip",
-      "archive_filename": "dxc69-1.9.2602.24.zip",
-      "archive_sha256": "cf658aacf070d3045e31b8f1f8a696c2945f37c1095019481ef7c513368db3b4",
-      "platform": "windows-x64",
-      "minimum_shader_model": "6.9",
-      "headers": [],
-      "libraries": [],
-      "runtime": [],
-      "tools": ["bin/x64/dxc.exe", "bin/x64/dxcompiler.dll", "bin/x64/dxil.dll", "bin/x64/dxv.exe"],
-      "notices": ["LICENSE-LLVM.txt", "LICENSE-MIT.txt", "LICENSE-MS.txt", "inc/hlsl/LICENSE.txt"],
-      "documents": [],
-      "components": [
-        {"path": "bin/x64/dxc.exe", "sha256": "1367fd29d0ebba5bf10d1041a9deff85396d30090b3651d872ec65d11a476ea4"},
-        {"path": "bin/x64/dxcompiler.dll", "sha256": "9b5e10ed756c461b4ec2c83a99f1d6ace20e97826e9c0b0e966b7b1cd6f2aec6"},
-        {"path": "bin/x64/dxil.dll", "sha256": "cbcfe883a09fd0ca1f98abdf3a9553b560895e3283a136da82a8381253a169df"},
-        {"path": "bin/x64/dxv.exe", "sha256": "f26242efb0197ffefa51eb5cb14603207d1d81fa547394020a5767bf65979f61"},
-        {"path": "LICENSE-LLVM.txt", "sha256": "729615317e28dd03907e46f0fc3b5e88f7853cee61d1a1471d2749335516b46f"},
-        {"path": "LICENSE-MIT.txt", "sha256": "903df5512f7d02609fed0c780a9b704f5a3eeb6e4d84ebe42a29845c81899a3c"},
-        {"path": "LICENSE-MS.txt", "sha256": "734f72f239fe7b07b4c7203f294c1a7ce27095687278bab7e56d630d7c672963"},
-        {"path": "inc/hlsl/LICENSE.txt", "sha256": "f47b94fc51b04f4354a6c6f41fb84b0bd22a8ebfcde9f93c1b4d9abd7f6d14c2"}
-      ],
-      "redistribution": "Developer prerequisite only; preserve all pinned notices locally. Only selected compiled DXIL products enter runtime distribution."
-    },
     "directstorage": {
       "release": "1.3.0",
       "package_id": "Microsoft.Direct3D.DirectStorage",
@@ -38,11 +11,25 @@
       "archive_sha256": "8ab6c1082537565388b79050d94fdd7f5f437cd0f1d909e7b19f786042b97177",
       "archive_sha256_verification": "downloaded exact stable official NuGet archive; installed required bytes are compared with the authenticated archive entries",
       "platform": "windows-x64",
-      "headers": ["native/include/dstorage.h", "native/include/dstorageerr.h"],
-      "libraries": ["native/lib/x64/dstorage.lib"],
-      "runtime": ["native/bin/x64/dstorage.dll", "native/bin/x64/dstoragecore.dll"],
-      "notices": ["LICENSE.txt", "LICENSE-CODE.txt", "NOTICES.txt"],
-      "documents": ["Microsoft.Direct3D.DirectStorage.nuspec"],
+      "headers": [
+        "native/include/dstorage.h",
+        "native/include/dstorageerr.h"
+      ],
+      "libraries": [
+        "native/lib/x64/dstorage.lib"
+      ],
+      "runtime": [
+        "native/bin/x64/dstorage.dll",
+        "native/bin/x64/dstoragecore.dll"
+      ],
+      "notices": [
+        "LICENSE.txt",
+        "LICENSE-CODE.txt",
+        "NOTICES.txt"
+      ],
+      "documents": [
+        "Microsoft.Direct3D.DirectStorage.nuspec"
+      ],
       "redistribution": "Deploy the selected x64 runtime DLLs together with all pinned license and notice files; the SDK archive remains a development prerequisite."
     },
     "brixelizer": {
@@ -58,7 +45,10 @@
       "archive_sha256_verification": "cached exact-commit source archive and deterministic complete SDK file manifest; native shader products are derived by the pinned SDK compiler",
       "platform": "windows-x64",
       "minimum_shader_model": "6.6",
-      "effect_versions": { "brixelizer": "1.0.0", "brixelizer_gi": "1.0.1" },
+      "effect_versions": {
+        "brixelizer": "1.0.0",
+        "brixelizer_gi": "1.0.1"
+      },
       "native_shader_configuration": {
         "raw_passes": 31,
         "raw_permutation_keys": 4,
@@ -74,10 +64,15 @@
         "license_path": "ContentSource/Textures/BrixelizerNoise/FidelityFX-LICENSE.txt",
         "license_sha256": "82cf74fc23885107c7f69249ac3f1dac55898ff68320eb2c753984cae6b2d78a"
       },
-      "headers": ["sdk/include/FidelityFX/host/ffx_brixelizer.h", "sdk/include/FidelityFX/host/ffx_brixelizergi.h"],
+      "headers": [
+        "sdk/include/FidelityFX/host/ffx_brixelizer.h",
+        "sdk/include/FidelityFX/host/ffx_brixelizergi.h"
+      ],
       "libraries": [],
       "runtime": [],
-      "notices": ["LICENSE.txt"],
+      "notices": [
+        "LICENSE.txt"
+      ],
       "documents": [],
       "redistribution": "Only selected compiled DXIL products and the SDK license enter Generation distribution; source archives and developer compiler inputs remain local prerequisites."
     },
@@ -94,64 +89,23 @@
       "abi_document": "https://devblogs.microsoft.com/directx/directsr-preview/",
       "platform": "windows-x64",
       "sdk_version": 715,
-      "headers": ["build/native/include/directsr.h"],
-      "libraries": [],
-      "runtime": ["build/native/bin/x64/DirectSR.dll", "build/native/bin/x64/D3D12Core.dll", "build/native/bin/x64/d3d12SDKLayers.dll"],
-      "notices": ["LICENSE.txt", "LICENSE-CODE.txt"],
-      "documents": ["Microsoft.Direct3D.D3D12.nuspec"],
-      "redistribution": "Prerelease Microsoft DirectX license has distribution and time-sensitive restrictions; this optional package supports local Windows development only, and is not established redistributable.",
-      "bootstrap_executed": true
-    },
-    "nrd": {
-      "release": "4.17.3",
-      "commit": "792eff196afdd350fd9c3f862119017ccb438a0e",
-      "repository": "https://github.com/NVIDIA-RTX/NRD",
-      "distribution_kind": "source_build",
-      "archive_uri": "https://codeload.github.com/NVIDIA-RTX/NRD/zip/792eff196afdd350fd9c3f862119017ccb438a0e",
-      "archive_prefix": "NRD-792eff196afdd350fd9c3f862119017ccb438a0e/",
-      "archive_sha256": "ad148d3653e7e4a149af0d1608ec662eeb522144cf34f6a29f9dfd333933baa8",
-      "archive_sha256_verification": "cached exact-commit source archive; native DLL is derived locally and identified separately by native-build-receipt.json",
-      "abi_document": "https://github.com/NVIDIA-RTX/NRD/blob/792eff196afdd350fd9c3f862119017ccb438a0e/README.md",
-      "platform": "windows-x64",
-      "minimum_shader_model": "6.0",
-      "headers": ["Include/NRD.h", "Include/NRDDescs.h", "Include/NRDSettings.h"],
-      "libraries": [],
-      "runtime": ["bin/NRD.dll"],
-      "notices": ["LICENSE.txt", "ShaderMake-LICENSE.txt", "MathLib-LICENSE.txt"],
-      "documents": ["Shaders/NRD.hlsli"],
-      "generated": ["generated/NRDConfig.hlsli"],
-      "native_configuration": {
-        "NRD_NRI": false,
-        "NRD_STATIC_LIBRARY": false,
-        "NRD_NORMAL_ENCODING": 2,
-        "NRD_ROUGHNESS_ENCODING": 1,
-        "NRD_EMBEDS_DXIL_SHADERS": true,
-        "NRD_EMBEDS_DXBC_SHADERS": false,
-        "NRD_EMBEDS_SPIRV_SHADERS": false,
-        "NRD_SUPPORTS_VIEWPORT_OFFSET": false,
-        "NRD_SUPPORTS_CHECKERBOARD": true,
-        "NRD_SUPPORTS_HISTORY_CONFIDENCE": true,
-        "NRD_SUPPORTS_DISOCCLUSION_THRESHOLD_MIX": true,
-        "NRD_SUPPORTS_ANTIFIREFLY": true,
-        "REBLUR_PERFORMANCE_MODE": false
-      },
-      "dependencies": [
-        {
-          "name": "shadermake",
-          "commit": "18f5a344e7ca8fa65daaf079d07bc8ce38453e05",
-          "archive_uri": "https://codeload.github.com/NVIDIA-RTX/ShaderMake/zip/18f5a344e7ca8fa65daaf079d07bc8ce38453e05",
-          "archive_prefix": "ShaderMake-18f5a344e7ca8fa65daaf079d07bc8ce38453e05/",
-          "archive_sha256": "35de2547e28cf10f18a0e2782cf154a3d1610212d00d829fa8e73a18210623b6"
-        },
-        {
-          "name": "mathlib",
-          "release": "v11",
-          "commit": "e3eee9362880b708a315b9946df51dae332bb46f",
-          "archive_uri": "https://codeload.github.com/NVIDIA-RTX/MathLib/zip/e3eee9362880b708a315b9946df51dae332bb46f",
-          "archive_prefix": "MathLib-e3eee9362880b708a315b9946df51dae332bb46f/",
-          "archive_sha256": "fe941fa2805879d657dc7a689a716662034d40b67c0aa4f6c9812a6ccdea791c"
-        }
+      "headers": [
+        "build/native/include/directsr.h"
       ],
+      "libraries": [],
+      "runtime": [
+        "build/native/bin/x64/DirectSR.dll",
+        "build/native/bin/x64/D3D12Core.dll",
+        "build/native/bin/x64/d3d12SDKLayers.dll"
+      ],
+      "notices": [
+        "LICENSE.txt",
+        "LICENSE-CODE.txt"
+      ],
+      "documents": [
+        "Microsoft.Direct3D.D3D12.nuspec"
+      ],
+      "redistribution": "Prerelease Microsoft DirectX license has distribution and time-sensitive restrictions; this optional package supports local Windows development only, and is not established redistributable.",
       "bootstrap_executed": true
     },
     "xess": {
@@ -213,7 +167,6 @@
         "include/sl_core_types.h",
         "include/sl_device_wrappers.h",
         "include/sl_dlss.h",
-        "include/sl_dlss_d.h",
         "include/sl_dlss_g.h",
         "include/sl_helpers.h",
         "include/sl_hooks.h",
@@ -231,8 +184,6 @@
         "bin/x64/sl.common.dll",
         "bin/x64/sl.dlss.dll",
         "bin/x64/nvngx_dlss.dll",
-        "bin/x64/sl.dlss_d.dll",
-        "bin/x64/nvngx_dlssd.dll",
         "bin/x64/sl.dlss_g.dll",
         "bin/x64/nvngx_dlssg.dll",
         "bin/x64/sl.reflex.dll",
@@ -247,7 +198,6 @@
       "documents": [
         "docs/ProgrammingGuide.md",
         "docs/ProgrammingGuideManualHooking.md",
-        "docs/ProgrammingGuideDLSS_RR.md",
         "docs/ProgrammingGuideDLSS_G.md",
         "docs/ProgrammingGuideReflex.md"
       ],
@@ -267,8 +217,6 @@
         "Kits/FidelityFX/api/include/ffx_api.hpp",
         "Kits/FidelityFX/api/include/ffx_api_loader.h",
         "Kits/FidelityFX/api/include/ffx_api_types.h",
-        "Kits/FidelityFX/denoisers/include/ffx_denoiser.h",
-        "Kits/FidelityFX/denoisers/include/ffx_denoiser.hpp",
         "Kits/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.h",
         "Kits/FidelityFX/framegeneration/include/dx12/ffx_api_framegeneration_dx12.hpp",
         "Kits/FidelityFX/framegeneration/include/ffx_framegeneration.h",
@@ -279,7 +227,6 @@
       ],
       "libraries": [],
       "runtime": [
-        "Kits/FidelityFX/signedbin/amd_fidelityfx_denoiser_dx12.dll",
         "Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll",
         "Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll"
       ],
@@ -319,16 +266,6 @@
           "sha256": "cc0adc0ffc804dd7cd03c39c15581b575e416383177ffe95060201d52cc0fc49"
         },
         {
-          "path": "Kits/FidelityFX/denoisers/include/ffx_denoiser.h",
-          "blob_sha1": "12ee4bb5e2dd329b9c5a38b51aab029a13a81bcd",
-          "sha256": "bdfde56568543abe5fef75debc141f0199bc84e8733a8e151b40b4b5cda3008c"
-        },
-        {
-          "path": "Kits/FidelityFX/denoisers/include/ffx_denoiser.hpp",
-          "blob_sha1": "c69ec50d3e85b766485454ce16c912b15fe81fe1",
-          "sha256": "875a1f7a79ce10a0b203a3da34a83b102158775e64b4bdabd129dc9d5a70bc21"
-        },
-        {
           "path": "Kits/FidelityFX/docs/license.md",
           "blob_sha1": "a80304f4edb2a86ae349e39872ea9c87a39c6f97",
           "sha256": "6757f2fec461238da6f84f83536ec195e8c036b1773a06f6f34301b9ed8c0963"
@@ -357,11 +294,6 @@
           "path": "Kits/FidelityFX/framegeneration/include/ffx_framegeneration_api_types.h",
           "blob_sha1": "e7e514ddb6666753de3b14f720d8e6774339b0b9",
           "sha256": "396596af3df63310674e8036abd2ad0fcd061e61334e7a2c76653a2be3c686b4"
-        },
-        {
-          "path": "Kits/FidelityFX/signedbin/amd_fidelityfx_denoiser_dx12.dll",
-          "blob_sha1": "40aabaae229139298d1858b4310bae9b22f36d94",
-          "sha256": "48f1e5888ba6a0a3d59a98b9751e37c392b0f7b8c223d0082d5c1f40642879d3"
         },
         {
           "path": "Kits/FidelityFX/signedbin/amd_fidelityfx_framegeneration_dx12.dll",

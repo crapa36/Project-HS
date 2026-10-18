@@ -1,5 +1,6 @@
 #include "renderer_cluster_catalog.hpp"
 #include <hs/core/cooked_format.hpp>
+#include <hs/render_data/material_schema.hpp>
 
 #include <algorithm>
 #include <limits>
@@ -163,7 +164,7 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
 {
     try
     {
-        Require(!generation_.empty() && catalog_ordinal < 14 && generation_tag != 0, "GPU catalog identity is invalid");
+        Require(!generation_.empty() && catalog_ordinal < rd::kEnvironmentMaterialNames.size() && generation_tag != 0, "GPU catalog identity is invalid");
         rd::ValidateGeometryHierarchy(hierarchy_);
         RebasedRange(group_base, hierarchy_.groups.size()); RebasedRange(child_base, hierarchy_.child_groups.size());
         RebasedRange(cluster_base, hierarchy_.clusters.size()); RebasedRange(page_base, hierarchy_.pages.size());

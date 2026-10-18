@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://project-hs.local/schemas/material_graph.schema.json",
   "title": "Project HS typed material graph v7",
-  "description": "Bounded typed MaterialIR with numeric parameters, explicit samples, context adapters and typed closure layers. Skin subsurface and solid dielectric transmission use uniform optical profiles in metres; unsupported varying optical inputs fail compiler validation. Thin, subsurface and solid transport are mutually exclusive in this single-profile representation. Hero sampled-context adapters use no graph texture/sampler declarations. Environment ordinals remain fixed. Advanced tangent/coat/sheen/thin/emission families use requested sidecars. Arbitrary HLSL, bindless resources and ray gradients remain unsupported.",
+  "description": "Bounded typed MaterialIR with numeric parameters, explicit samples, context adapters and typed closure layers. Skin subsurface and solid dielectric transmission use uniform optical profiles in metres; unsupported varying optical inputs fail compiler validation. Thin, subsurface and solid transport are mutually exclusive in this single-profile representation. Hero sampled-context adapters use no graph texture/sampler declarations. Environment ordinals remain fixed. Advanced tangent/coat/sheen/thin/emission families use requested sidecars. Arbitrary HLSL and bindless resources remain unsupported.",
   "type": "object",
   "additionalProperties": false,
   "required": [

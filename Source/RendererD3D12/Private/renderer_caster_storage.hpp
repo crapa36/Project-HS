@@ -141,6 +141,36 @@ void PruneShadowCasterStorage(Map &current, std::uint64_t epoch, std::size_t pre
         std::erase_if(current, [&](const auto &entry) { return entry.second.prepared_epoch != epoch; });
 }
 
+// Independent Debug membership oracle. Only keys/attempt epochs are retained;
+// submitted caster records and cached node addresses never enter this map.
+template <typename Map>
+void BeginShadowCasterKeyOracle(Map &oracle, std::uint64_t epoch, bool &prepared)
+{
+    assert(epoch != 0);
+    // A failed attempt owns no reusable membership; wrap cannot reuse an ancient epoch 1.
+    if (!prepared || epoch == 1) oracle.clear();
+    prepared = false;
+}
+
+template <typename Map>
+[[nodiscard]] bool MarkShadowCasterKeyOracle(Map &oracle,
+    const typename Map::key_type &key, std::uint64_t epoch)
+{
+    const auto [entry, allocated] = oracle.try_emplace(key, epoch);
+    const bool first = allocated || entry->second != epoch;
+    entry->second = epoch;
+    return first;
+}
+
+template <typename Map>
+void PruneShadowCasterKeyOracle(Map &oracle, std::uint64_t epoch, std::size_t prepared_count,
+    bool &prepared)
+{
+    if (oracle.size() != prepared_count)
+        std::erase_if(oracle, [&](const auto &entry) { return entry.second != epoch; });
+    prepared = true;
+}
+
 template <typename Map>
 void CommitShadowCasterStorage(Map &previous, Map &scratch, Map &current)
 {

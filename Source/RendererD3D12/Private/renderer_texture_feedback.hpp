@@ -1,11 +1,12 @@
 #pragma once
 
 #include "renderer_texture_streaming.hpp"
+#include <hs/render_data/material_schema.hpp>
 #include <span>
 
 namespace hs
 {
-inline constexpr std::uint32_t kTextureFeedbackBindingCount = 90;
+inline constexpr std::uint32_t kTextureFeedbackBindingCount = static_cast<std::uint32_t>(render_data::kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots);
 inline constexpr std::uint32_t kTextureFeedbackDescriptorCount = 1 + kTextureFeedbackBindingCount;
 struct TextureFeedbackGraphBinding
 {

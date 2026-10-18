@@ -37,7 +37,7 @@ struct alignas(16) HdrPostConstants
     DirectX::XMFLOAT4 lens{}; // Focus distance, focal length, f-number, sensor width, all metres except f-number.
     DirectX::XMFLOAT4 grade_lift{}, grade_contrast{}, grade_gain{};
     DirectX::XMFLOAT4 effect_parameters{}; // Max CoC radius pixels, log shaper range, reference frame dt, shutter degrees.
-    DirectX::XMUINT4 options{}; // Motion taps, transparent guides enabled, LUT edge, reserved.
+    DirectX::XMUINT4 options{}; // Motion taps, transparent guides enabled, LUT edge, DoF enabled.
     DirectX::XMFLOAT4X4 previous_unjittered_view_projection{}; // Absolute-world VP; sky projects directions with w=0.
 };
 static_assert(sizeof(HdrPostConstants) == 320);

@@ -46,10 +46,6 @@ struct RendererOptions
     GraphicsQuality transparency_quality{GraphicsQuality::Medium};
     GraphicsOptionalQuality refraction_quality{GraphicsOptionalQuality::Medium};
     GraphicsOptionalQuality volumetric_quality{GraphicsOptionalQuality::Medium};
-    bool ray_tracing_enabled{};
-    GraphicsAutoToggle opacity_micromaps{GraphicsAutoToggle::Auto};
-    GraphicsAutoToggle shader_execution_reordering{GraphicsAutoToggle::Auto};
-    float rt_trace_distance_m{60.0f};
     GraphicsGiMode gi_mode{GraphicsGiMode::Probe};
     GraphicsQuality gi_quality{GraphicsQuality::Medium};
     GraphicsShadowMode shadow_mode{GraphicsShadowMode::Raster};
@@ -57,8 +53,6 @@ struct RendererOptions
     bool temporal_reconstruction{true};
     std::optional<RendererReconstructionRequest> reconstruction_request;
     RendererPresentationRequest presentation_request;
-    GraphicsProviderId ray_reconstruction_provider{"auto"};
-    GraphicsAutoToggle neural_ray_reconstruction{GraphicsAutoToggle::Auto};
     float sharpening{0.2f};
     GraphicsHdrMode hdr_mode{GraphicsHdrMode::Auto};
     float hdr_paper_white_nits{200.0f};

@@ -1,8 +1,111 @@
 # DEV_STATE
 
-Record only information the AI needs to implement or resume work: current code state, contracts, verified test receipts, unresolved technical causes, and next implementation steps. Never add tasks for the user to inspect, approve, playtest, listen, assess visuals, or measure hardware. The AI owns executable validation. Replace superseded state instead of appending history.
+Implementation continuity only: current contracts, verified receipts and unresolved technical work.
 
 ## Current technical state
+### Lossless authored mesh indexing (2026-10-18)
+
+Canonical90 source meshes:1747431 stored vertices ->447489,1299942 duplicate records removed.
+Complete13-component binary64 keys preserve signed zero, source precision and seams;
+no unused or duplicate complete records remain. Expanded triangle streams unchanged.
+EnvironmentJSON145007856->59680125bytes, meadowJSON108392164->24467775bytes;
+props authoring copy44599516->22805246bytes. No LFS attribute/config/workflow changes.
+Reader accepts legacy v1 triangle lists plus optional integer indices; existing trust
+checks and76B expanded meshbin ABI retained.5 authoring writers share mesh_indexing.py.
+New CPU cooker target/test passes legacy/indexed/mixed and malformed-input cases.
+Actual old/new production cooks90/90 meshbin SHA/size identical. Meadow structural and
+indexing-helper regression passed. Existing native proof reused for identical meshbin;
+GPU topology/count/FPS unchanged. Native runtime-full still uses prior verified dad74... snapshot.
+Historical100408352byte preimage preserved under Build/asset-authoring-backups/meadow-props;
+registration path fixed; original FBX proof reused with explicit format-migration evidence.
+Report Docs/Verification/20261018-mesh-dedup/REPORT.md; exact SHA receipts alongside.
+
+### Pass costs and meadow integration (2026-10-18)
+
+Active worktree cpu-gpu-utilization; backup checkpoint codex/renderer-meadow-backup-20261018.
+Current runtime-full Generation dad74bbf3d350c55d400ac36767e72e232c02de1320a11c86b6797188f62dc91.
+Validation/Release/Debug ProjectHS built; Release/Debug snapshots exported and 2892 products verified.
+AO invariant hoist retained; RTX4080 GBV oracle192 cases/39936 texel pairs bitdiff0.
+Cluster Emit zero/zero skip retains existing admission/fault guards; cluster-retest passed.
+VSM probe bounds now depth-only; all58 actual capture/feedback DXIL have no VSM binding.
+Probe Z contribution retained; water/gel conservative union receivers added (at most2 entries).
+32B payload,256 receiver limit, capture reads, roots, queues, barriers preserved.
+Shader reconstruction38 tests passed. Final runtime180frame Legacy/resize errors0;
+world7 Enhanced GBV errors0 and required passes complete, VSM feedback frames1/5/6/7.
+GBV255.609s render is correctness evidence, excluded from performance measurements.
+
+Foreground03 tick599-1380 matched380frames:29.157 baseFPS,58.305 SDK presentFPS,
+GPU31.470ms; baseline01:28.978/57.956/31.652ms. +0.617% single run proves no clear gain.
+Runtime diagnostics1378/1378 GPU frames complete, invalid/drop0, drain succeeded.
+PDH1error partial, valid matched coverage94.459%; CPUmachine3.857%, PID busiestGPU61.755%,
+whole-deviceNVIDIA95.385%.52 requested/native settings same; policy FG1->2 display differs,
+native SDK multiplier2 both. Inputs/simulation checksum14666118289919368357 same.
+Exe changed for CPU VSM code;5 shader products + local_probes.spkg changed. Probe payload
+semantic equivalence not established. Preserve raw incomplete/foreground_verified:false receipt.
+Terrain shared-preparation candidate rejected: GBuffer7.068->8.442ms; original shader restored
+SHA1AC5BB26C387EC5874461E7DE194DA36E72BC8E3F3636B78B476D611CFD90E4E. Final7.066ms.
+Current heaviest individual passes: GBuffer7.066, CSM4.238, AO horizon3.063,
+Count1.499, Emit1.468ms. Group shadows7.300, surface7.077, geometry3.826, AO3.678ms.
+Option-linked groups overlap and are not isolated option deltas; SDK FPS is not display cadence.
+
+HDR guide/CoC fusion and SSR spatial/compose fusion retained. Experimental command-list
+record merging remains withdrawn after prior validation1003/driver crashes.
+SoftwareHybrid GI currently falls back to Probe, BrixelizerOFF. Pinned SDK865 files verified;
+ON native host/permutation build and real SDF/GI execution remain unverified. No hardwareRT.
+Safe CSM skip still needs current-frame receiver completeness/publication proof and graph ordering.
+Plane-length sqrt removal is research only:24 per Count/Emit; tangent view-mask parity unproven.
+
+Meadow road generated CPU/HLSL coverage shared (halfwidth1.15-1.65m), spur end padding,
+soil gain .58/.43/.30 and common seam seed/outer slab0/1.5m trace fade retained.
+24x24m offline adaptive terrain; GPU hull/domain tessellation absent. LOD triangles
+122944/108422/106078; water5843. Rut depth .061-.078m, bank .019-.025m, wet43 cells.
+310790-sample/LOD shape oracle passed3.70/14.70/25.55um; analytic versus LOD0 centroids max8.98mm.
+Presentation/scene-HLOD prior2/2 gates still cover unchanged terrain/layout inputs.
+Remaining renderer/art issues: high pass costs; weak far terrain simplification;
+sparse vegetation volumes and bright puddle strips. No AAA quality or144FPS completion claim.
+Reports Docs/Verification/20261018-next-bottleneck/REPORT.md and
+Docs/Verification/20261018-meadow-ground/{REPORT.md,TERRAIN_ENGINE_COMPARISON.md}.
+
+### Structural review and targeted corrections (2026-10-16)
+
+`Docs/Verification/20261016-structure-review/REPORT.md` is the scope/result index.
+The 669-file structural inventory and pre-turn source snapshots are in
+`Build/structure-review/`; focused reviews do not imply exhaustive semantic proof.
+Existing renderer/terrain/character changes remain uncommitted and preserved.
+
+Nine corrections are integrated: release result_mutex and signal simulation_done
+before joining on startup failure; admit Resume only from Paused; propagate
+recording flush/close/report failures with sticky finalization and final receipt
+publication; iterative sorted dependency DFS; shared public-catalog DXC defines;
+remove three unbound generic environment PSOs/products; reuse a call-scoped
+ActionResultSnapshot metadata index; remove the already-covered final Generation
+rehash; resolve four art tools from __file__ and use runpy for nested export.
+
+Binding defines enter real compilation, dependency scans and ActionKey; semantic
+input `shader/render-binding-defines-ir` participates in producer identity. Numeric IDs/ranges and authenticated Content/Shaders snapshot boundaries
+remain unchanged. All 335 remaining DXIL digests equal the pre-turn products.
+The used opaque shadow PSO and per-material HLSL entry points remain. 60 Hz,
+deterministic order, Public API module boundaries and OFF/OFF builds are retained.
+
+Pre-RT-removal runtime-full Generation:
+`8c5527e9b37e6eb4d6e3c71dd04110e02437022569bd7cc00f08d44c4ec193d8`
+(4219 products), exported and verified in Debug/Release; both apps linked.
+Pre-RT-removal receipts under `Build/structure-review/`: native and native-rt
+16 frames, checksum4930774313638502297, validation_errors0; native-visibility
+16 frames/execution_valid/validation_errors0; multi-queue-tests.xml1/1 pass.
+Startup failure previously hung for108.08s and now returns the expected IO error
+exit1 after18.34s (`startup-failure-after/run.json`). No owned game/test process
+is intentionally left running. These are correctness checks, not FPS claims.
+
+Core gate19/19: `Build/verification/verify-core-20261015T154349816Z-29012.json`.
+Runtime2/2: `Build/verification/verify-20261015T154350777Z-3432.json`.
+Content fixture7/7, renderer CPU6/6, material actions1/1 and art-path syntax/root
+checks are in the same structure-review directory. The final startup signal line
+is covered by the later native failure reproduction. Full verify/GBV/hot reload,
+Linux CI and asset rebakes were not repeated. Build warnings remain documented.
+Material product-path branch consolidation is a deferred candidate; current
+legacy/terrain/shared GroundDetail/hero branches agree. No general renderer
+interface, new cache framework or schema migration was introduced.
 
 ### Elin supplied-base part modeling (2026-10-01)
 
@@ -167,48 +270,173 @@ review, independently review the separate hair study, then continue layered part
 Do not import a hair candidate without inspecting front/side/back/three-quarter
 renders. Engine/runtime files were not changed by this part-modeling work.
 
-### Backup correctness and structural implementation (2026-10-14)
+### Non-RT renderer and performance work (2026-10-16)
 
-Current authorized engine work is on `codex/engine-v7-backup-20261009`, based on
-`a0d98d477099509fe7eb0db379de537d2cbf8ac9`, in an isolated clean Linux checkout.
-This supersedes the historical main/staged-tree instructions below for this task;
-no user-PC worktree was accessed. The current plan is the backup-branch follow-up section of
-`Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md`. First C01/C02A/C02B/C03/C04 source
-batch is implemented. Original jobs failure timeouts reproduced; Linux core16,
-Windows core17 and portable31 passed. MSVC Debug string-proxy OOM termination
-was diagnosed with stacks and corrected without disabling injection. The native
-compile gate built the renderer and found a missing SimulationPorts UI rejection
-reference; that reference is now wired. Production runtime and renderer
-libraries compile successfully with MSVC RelWithDebInfo and validation enabled.
-Seven production HLSL entries plus the new HZB probe compile with Linux DXC.
-The compiled helper readback harness replays CPU oracle inputs and has separate
-hardware and explicit WARP tests, both requiring debug layer and GBV. CI WARP
-passed with Debug layer and GBV; hardware scenes/DRS/cluster and full native verify remain open.
-LSan cannot read /proc here; the sanitizer attempt failed, not passed.
-S01 shares pure scene keys/hash/revision comparison while preserving distinct publication
-and successful-submission histories. Named occlusion encoding preserves shader bits.
-S02 groups decoded retention and uses one optional terminal clock; catalog publication
-cannot reset semantic session state. Existing typed-frame tests now run portably.
-Linux portable checks pass33/33, including scene-delta, VFX session/typed-frame,
-architecture, deterministic simulation and real asset publication. Linux recipe identity
-now preserves compiler include subdirectories and records the actual executable link.
-Final source505272f CI38577118658 passes all3 jobs: Linux core18/portable33,
-Windows core and portable35, production Runtime/Renderer compile and explicit WARP
-with Debug layer/GBV. These results do not qualify unexecuted hardware scenes.
-C05 remains unresolved: HLOD baking explicitly supports reflections and rejects zero
-scale, while raster normals clamp signed scales and ray inverse divides directly;
-static capture requires positive scale. Read-only audit of390 FBX files found8729
-Model records/536 explicit scale properties with no nonfinite or <=0.0001 component;
-animation/composed transforms and five Blend files remain unevaluated. Do not impose a
-blanket rejection or claim mirror support without reconciling those boundaries.
-Next S03/S04 work requires the real frame-call graph and submission-failure invariants;
-retain existing successful-view history and once-per-package event consumption. Full
-hardware scene/DRS/cluster, reload-to-Render, native disk/close and full verify remain
-unavailable through the disconnected PC tunnel. S03+ and P/D packages remain pending.
-Do not treat unavailable hardware as a blanket dependency for independent CPU work.
-No performance, visual quality or whole-plan completion claim.
-Current evidence: `Docs/Verification/20261014-backup-structure/REPORT.md`.
-Prior C01-C04 contracts: `Docs/Verification/20261013-backup-correctness/REPORT.md`.
+The user removed ray tracing from the product scope. Delete DXR AO/GI/reflections/
+shadows, OMM, SER, NRD and Ray Reconstruction; retain raster shadows, GTAO, SSR,
+probes, Brixelizer software GI, ordinary super resolution and frame generation.
+Removal and focused integration verification are complete; removal
+receipts belong under `Build/rt-removal/` and the final report under
+`Docs/Verification/20261016-rt-removal/REPORT.md`.
+
+Active uncommitted worktree: `codex/cpu-gpu-utilization`, base
+`bc7bd6024fe5a84456e785c81731a127ec339b6b`, at
+`C:/Users/crapa/.codex/worktrees/cpu-gpu-utilization/Project-HS`.
+Preserve unrelated terrain/character/structural changes and raw captures.
+The monitor target remains 1920x1080, highest remaining graphics, FG allowed,
+144 FPS remains unachieved. Post-removal foreground replay01 records742 Playing
+frames,32.943 base/65.859 SDK-present FPS, GPU27.101ms and CPU-render28.784ms.
+Input SHA256 and simulation checksum match the original; all Playing frames are
+foreground. This is stationary early combat. Brixelizer is compiled OFF and
+software GI falls back to probes, so highest remaining GI is not validated.
+Runtime/GPU diagnostics1571frames are complete; PDH2counter errors keep analysis
+partial and final session incomplete. Preserve raw receipts; the report contains
+a separate measurement-audit.json with foreground evidence and actual fallbacks.
+Debug/Release builds and final2712-product generation export/verify pass:
+`db3d307553e8cde6480fbb52771ced35d246160c7319919520c636d94484f223`.
+Core19/19, targeted6/6, native180-frame smoke and8-frame enhanced-barrier GBV
+surface-motion-resize pass (validation_errors0). GBV is not a performance run.
+Next technical candidates: GBuffer4.985ms, GTAO3.894ms, directional shadows3.576ms,
+VSM scheduling, graph_build4.807ms and graph_submit3.568ms; preserve quality and
+verify actual software-GI availability before any highest-feature performance claim.
+
+Settings retain stable IDs1..40,45..56 (52 current options). Store migration maps
+old RT selections to non-RT settings and removes the four obsolete keys on save.
+Offline analyzers accept exact current52 or historical56 option catalogs, reject
+partial catalogs and preserve base FPS versus SDK-present-count distinctions.
+Runtime CPU CSV removes acceleration structure bytes and three RT-registration
+columns (78 to74); old optional columns remain readable by offline analyzers.
+QualityProfiles chunk version2 uses140-byte rows; old version1/176-byte rows
+must be rejected and regenerated. AutoFgCadence remains version1/12-byte rows.
+Software GI retains shared scene geometry/deformation under non-DXR names.
+Follow-up remnant cleanup: DecalRayPolicy/authoring rt_policy removed; decal
+metadata is now v2/28B and v1 rejects. Shared geometry records80->56B and deformed
+positions24->12B; CPU/HLSL and Brixelizer stride contracts checked, with shader
+ABI regression. Unused transport/denoising enums and duplicate feature gate removed.
+Current analyzer catalog excludes legacy groups; historical52/56 schemas still read.
+Latest runtime-full generation is
+`8c5ff7f80b358bd9227d03539409b18051dfe493f23f208b49b2530a9c27d9d1` (2712products),
+exported and verified in Debug/Release. Both deployed decal packages are v2/28B.
+Debug/Release/validation builds pass; targeted6/6 and native smoke180frames1/1
+pass (22.52s), analyzer selftests pass. Receipts: `Build/rt-removal/remnants/`;
+report: `Docs/Verification/20261016-rt-removal/REMNANTS.md`.
+665file source audit has0unclassified/hardware-RT hits.90obsolete SDK/build items
+removed and obsolete CMake keys cleared. Saved-setting migration, historical
+capture readers and regression strings remain intentionally. Prior raw evidence
+and immutable generations stay preserved. No new FPS run or GBV run; Brixelizer
+remains compiled OFF, so software-GI native execution is still unverified.
+
+Current follow-up (2026-10-16): VSM count/scatter and admission traverse the
+existing request bitset; native multi-queue regression and production CullCS DXC
+compile pass. Full-frame speedup is NOT established: before01 overlaps a test,
+before02 loses foreground for727/729 Playing frames, after01 has669foreground
+frames at29.662base/59.279SDK FPS. Preserve all captures and comparison exclusions
+in Build/vsm-request-walk/comparison.json. Current options52, historical56 retained.
+GroundDetail common placement now scales daisy/buttercup/twigs/fence1.5x and
+violets2x; clover/leaves unchanged. Clearance uses the final uniform scale.
+Presentation-contract and scene-hlod-cooker tests2/2 pass; receipt
+Build/verification/verify-20261016T020358002Z-20708.json. Runtime HLOD/probe recook and Debug/Release export/verify pass; latest generation
+`b1f5d33dd42e1bcee3d7b908e6dd461d66d9785efed5b11ec0a62c2ef5f46a06` (2699products), including the AO direct-view reconstruction follow-up. Native180-frame resize/exit smoke1/1 passes22.26s.
+Receipts: Build/engine-comparison/; retained scale checks: Build/ground-detail-scale/.
+Latest public Godot/Wicked/O3DE development source comparison is recorded in
+Docs/Verification/20261016-public-engine-comparison/REPORT.md. AO now directly
+inverts the jittered projection, retaining normal/light rotation, sample counts,
+resolution, history rejection and the368B constant layout. Existing shader
+contracts pass31tests including384coordinate cases;6AO entrypoints compile.
+Adaptive horizon static DXIL SSA4859->4187 is compiler evidence, not measured
+GPU time/FPS. Debug/Release builds and runtime-full export/verify pass.
+Small-pass command recording merge remains a candidate; preserve failure-before-
+submit, owner callbacks, per-pass timestamps and queue/fence boundaries. No
+unconditional depth prepass or early submission was introduced.
+Next: same-foreground VSM performance and
+production GPU validation; highest GI remains unavailable with Brixelizer OFF.
+
+Retained non-RT optimization contracts:
+- Instance lookup preserves first duplicate IDs, excludes0, refreshes snapshot
+  storage and invalidates incomplete allocation-failure rebuilds. The24-bucket
+  target layout and empty compatibility-VFX input guards remain.
+- Grass selection uses nearest31 actual sources with unchanged player order,
+  radii and motion history. Shadows consume current deformation; main Surface
+  keeps previous Skin/Grass history. Culling remains conservative.
+- Worker recording dispatch precedes owner callbacks with mandatory join and
+  failure-before-submit. Successful queue waits remain destination-specific.
+- Graph resource/version/range validation, partial failure publication, physical
+  alias COMMON handling, export overrides and legacy decay remain mandatory.
+  Initialized-import fast paths preserve partial ReadWrite and old-final checks.
+- VSM request coalescing retains all-lane barriers and fallback; probes retain
+  face culling, contiguous instancing and explicit source base for SV_InstanceID.
+- DOF radius bounds retain exact circle coverage and zero-radius center result.
+- Fixed-step simulation drains elapsed debt in at-most4-tick batches at60Hz;
+  worker parked flags reflect actual state during rapid native-input toggles.
+- FG remains Playing-only with drain/recreate/rollback and actual SDK counts.
+  Counters with missing coverage remain N/A, never estimated as zero.
+
+The latest pre-removal replay03 is historical RT evidence only:
+`Build/play-captures/20261016-structure-ultra-replay-03` and
+`Docs/Verification/20261016-foreground-ultra/replay03-comparison.json`.
+It used identical input/settings with valid replay checksums, 199 foreground
+Playing frames, 8.964base/18.182SDK-present FPS, CPU111.293ms/GPU86.342ms.
+Stationary early combat is not full movement coverage. PDH40errors and interrupted
+worker finalization make utilization evidence partial. Sampler finalization now
+waits5s and validates terminal metadata/exit/ownership; selfchecks passed under
+`Build/structure-review/sampler-finalization/`. Raw57files remain unchanged.
+Old RT native checks and 56-option reports do not validate the non-RT build.
+The in-flight TLAS test was cancelled by the scope change, not recorded as a pass.
+No owned game, native test or Computer Use session is left active at this checkpoint.
+
+### Ground detail models and integration (2026-10-16)
+
+Seven opaque ground-detail archetypes ×3LOD append21 mesh records; original42
+values independently matchbc7bd60. Source/exports/receipts are under
+ContentSource/Models/Environment/GroundDetail; reproducible authoring is
+ tools/art/create_ground_detail_blender.py. One shared2048²/3map atlas, material15;
+terrain14 unchanged, geometry catalog21, authored materials16, feedback96,
+visibility variants24, probe pages22. RT/OMM/HLOD/visibility mappings distinguish
+geometry from material. Sparse cached placement appends to existing instances:
+max320patches +64smallrocks +64shortgrass, outside path/obstacle clearances.
+HLOD metadata alone is stable-ID sorted before digest; actual insertion order
+and IDs are retained. Tiny real-layout/cook regression failed before, passes5.13s.
+Static mud/wet rims/ruts/footprints/moss add material/normal relief without a pass.
+
+Final generation 99a3978b877f8522f2f0dfde46de00d3052b336523efd46a1fda393e3b798517,4222products verified in Debug/Release.
+Asset structure/export/reopen/MCP checks pass;18 source receipt hashes match.
+CPU selected7/7, presentation, final shader30/30, OMM3/3, asset-package check pass.
+OFF/OFF low-level targets build. Native isolated1280×720 raster and UltraRT-quality
+16frames each pass,0D3D12errors, checksum4930774313638502297 unchanged; shared
+material visible161/54pixels. ActualRT GI/reflections/shadows/AO confirmed.
+Startup-inclusive84.640/70.717s are not FPS measurements. FG/DOF/motionblur off.
+No dynamic water/foot tracking/collision/wind added; no long-play/GBV/HDR-display
+or144FPS claim. Task-owned Blender and game processes exited; CU not restarted.
+Evidence: Docs/Verification/20261016-ground-detail/REPORT.md, Build/ground-detail/.
+
+### Brightness, terrain mapping and detail correction (2026-10-15)
+
+Non-SDK ImGui encoded-to-linear double conversion fix retained: imported PostA is encoded
+DevTools output after old readers, pass17 decodes and composites. UI source colors roundtrip.
+SDR ACES scene input0.7231708 retained. Runtime exposure target now0.12 (was0.18) so adaptation
+does not undo darker ground; applies to SDR/HDR scene metering, excludes UI.
+Terrain tiles6/4.5m ->12/9m; software demand denominator9m matches shader minimum.
+Removed single-hue luminance palette; per-channel source-to-foliage mean gain preserves
+soil/leaf color differences. Ground albedo factor0.6; four-layer/height/POM/normal retained.
+Grass coverage now gates canopy gain(0.5,0.72,0.08), AO multiplier0.1 and roughness lerp-to-1
+weight0.8. Pure soil/path excluded; transition blends. Daylight lit-appearance calibration.
+Matched16tick ROI ground/grass HDR luminance2.860->0.971, RGB differences0.9/3.5/4.2percent.
+27contracts, Debug/Release3680products and native16frames27.82s/0errors passed.
+56settings/checksum/normals/metadata equal, soil-center base/material and ImGui unchanged.
+Evidence Docs/Verification/20261015-grass-color-match/REPORT.md and Build/grass-match-fix/.
+Inverse histogram LOD clamps to Gaussian resident mip; anisotropic exact LOD is still estimated.
+CaptureSurfaceDiagnostics adds terrain_texture_mips slots/logical extents/mip count/physical
+base/resident min at capture only. Native final confirms all five terrain maps2048²/12mips,
+physical/resident mip0. LUT256x16/1mip. No asset resampling or TAA/AF disabling.
+Prior terrain-detail source contracts27/27, Debug/Release and3680products passed. Prior native
+16frames25.77s,1280x720/Ultra texture/native100%/AF16/InternalTAAU/standardvalidation passes
+0errors,checksum4930774313638502297,diagnosticscomplete. Same56settings/checksum/basealbedo
+exact vs pre-exposure Ultra; final exposure0.9557 tending0.8333 at captured histogram.
+Initial incomplete test profile was quarantined; its Medium/mip1 capture is excluded from
+Ultra evidence. Corrected isolated profile confirms Ultra/mip0; user profile unchanged.
+No CU restart. Owned processes exited. HDR display/highestRT/long play/completed GBV and
+144FPS remain unverified. Evidence: Docs/Verification/20261015-terrain-detail-fix/REPORT.md
+and Build/terrain-detail-fix/. Prior ImGui/GBV-timeout receipts remain in brightness-fix.
 
 ### Engine and content migration (2026-10-10)
 
@@ -260,8 +488,7 @@ checkout; follow the 2026-10-13 correctness section for current engine work.
   receipts do not provide an old-engine before/after speedup baseline.
 - Typed MaterialIR and versioned packages feed common opacity, deformation,
   Surface, BSDF and sidecars. Authored terrain Gaussian/POM/RNM, environment
-  HDR/probes, HLOD membership and actual OMM geometry/material dependencies are
-  source-connected. Decal Surface has independent shader/program/default Actions,
+  HDR/probes, HLOD membership and geometry/material dependencies are source-connected. Decal Surface has independent shader/program/default Actions,
   typed Fracture/Organic graphs, receiver policy and explicit RasterOnly metadata.
   Actual admitted commands lazily allocate view-owned targets; pass295 modifies
   base/normal/roughness/emission before common lighting/AO/reflection/native
@@ -269,7 +496,7 @@ checkout; follow the 2026-10-13 correctness section for current engine work.
 - Public rendering uses explicit RenderFrameInput, Core RenderViewInput and
   RenderSceneRef. Every keyed view owns targets, exposure, TAA/HZB/DRS, services,
   native reconstruction context and successful previous camera/origins/instances/
-  slot generations/poses. GPU scene, assets, TLAS, SDK sessions and canonical
+  slot generations/poses. GPU scene, assets, SDK sessions and canonical
   immutable deformation remain shared. Main alone presents and owns FG/latency.
   Rejected preflight leaves publication/result identities unchanged; actual
   submissions consume package identities even if a later view fails.
@@ -308,12 +535,11 @@ checkout; follow the 2026-10-13 correctness section for current engine work.
   only for Bloom/Outline. Contradictory grid AA-Off/external temporal requests
   are rejected before provider preparation.
 - Runtime UI consumes category-qualified native capability options. Streamline
-  selectable SR/RR/FG/Reflex plugins bootstrap before device creation; evaluation
+  selectable SR/FG/Reflex plugins bootstrap before device creation; evaluation
   and per-view histories remain lazy. Device admission enumerates alternative
   providers/qualities/modes without inactive evaluations. Actual receipts include
-  native HDR output and NRD radiance/AO/SIGMA selection. The current native batch
-  now has zero-error lighting and RR execution; FSR RR remains device-unsupported
-  with internal reconstruction, while DLSS RR is active natively.
+  native HDR output. Ray Reconstruction and NRD were removed from the product;
+  earlier RR receipts are historical and do not validate this build.
 - Source validation belongs to each selected producer. GameData payloads include
   their schema input; simulation uses nine documents and presentation two.
   Portable/lifetime tests prepare actual producer RecipeIdentity manifests.
@@ -323,8 +549,8 @@ checkout; follow the 2026-10-13 correctness section for current engine work.
   Canonical CPU descriptors publish to waited shader-visible frame banks. Native
   feedback uses MIN_MIP reserved resources/tails; software uses reduced mip
   resources. DirectStorage terminal work and all-queue resource retirement are
-  connected. Native SDK/SM6.9 OMM/SER paths are implemented with authenticated
-  pinned inputs; execution remains source-specific and hardware-dependent.
+  connected. Remaining native SDK paths use authenticated pinned inputs;
+  execution remains source-specific and hardware-dependent.
 - Diagnostics stores240 frames/512 passes, reads timestamps only after fence
   completion, separates validation and views, and reports calibrated critical
   paths/percentiles and unavailable native counters honestly. DXGI budget/usage,
@@ -333,7 +559,6 @@ checkout; follow the 2026-10-13 correctness section for current engine work.
 - VFX capture occurs before entity removal and retains actual identity/pose/
   generation closures. Entity Surface uses authored3D noise/STBN/gradient and
   coverage confidence; arrow/thorn geometry and world shell emission are connected.
-  DLSS fused RR receives actual responsive guides and one fused evaluation.
   Static audit reports534 connected source paths and0 pending. Current native
   execution is recorded, while runtime_ready and high-quality admission remain
   gated on the full gate and package acceptance.
@@ -507,7 +732,7 @@ Latest clean Release and validation ProjectHS are built. Runtime-full `fd6ba971f
 
 Final selected integration gate passes 5/5 in 134.88s (`Build/verification/verify-20261010T161204504Z-19116.json`): grass-history, shader-reconstruction-contracts, barriers, local-probe-revisions, cluster-retest. This is a selected gate, not a fresh entire-suite result.
 
-Next: use residual evidence to decide compressed-atlas coverage/resident mip work; validate native SR inputs when an SDK-enabled build exists. Keep normal-gameplay 144FPS and worst-case 32-bender cost separate from the small diagnostic scene. A05 five-frame cold GBV passes; native RT/softwareGI auxiliary combinations and the other conditional review limits remain unverified.
+Next: use residual evidence to decide compressed-atlas coverage/resident mip work; validate native SR inputs when an SDK-enabled build exists. Keep normal-gameplay 144FPS and worst-case 32-bender cost separate from the small diagnostic scene. A05 five-frame cold GBV passes; native softwareGI auxiliary combinations and the other conditional review limits remain unverified.
 
 ### VFX v4 runtime execution (2026-09-27)
 

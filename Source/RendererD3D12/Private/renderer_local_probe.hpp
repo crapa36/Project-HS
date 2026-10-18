@@ -45,8 +45,8 @@ struct LocalProbeCaptureView
 // radial world distance, or far_distance for sky. Render global environment sky
 // once; capture excludes dynamic characters/VFX/UI/post, exposure and recursive
 // local probes. Bind the supplied per-face RTVs/DSV; use the supplied camera.
-// A successful callback must render every eligible static instance even if it
-// was culled from the main view. No DXR capability is required or enabled here.
+// Preserve every eligible static source's contribution even when main-view
+// culled. Only conservative bounds outside this capture view may skip commands.
 using LocalProbeDrawCallback = std::function<Result(RenderPassContext &, const LocalProbeCaptureView &)>;
 
 struct LocalProbeInputs

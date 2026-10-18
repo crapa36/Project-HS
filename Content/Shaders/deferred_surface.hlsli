@@ -42,7 +42,7 @@ HsSurfaceClosure HsReflectionDecodeClosure(uint2 metadata,float4 base,float2 pac
     uint varying_mask = 0u;
     const uint environment = metadata.x - 0x10000000u;
     const uint hero = metadata.x - HsHeroMaterialIdBase;
-    if (environment < 15u)
+    if (environment < HsAuthoredMaterialCount)
     {
         // The diagnostic grid terrain is produced without authored layers.
         if (!((LodClock.w & 1u) != 0u && environment == 14u))

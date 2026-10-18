@@ -1,5 +1,6 @@
 #include "renderer_impl.hpp"
 #include "renderer_reconstruction.hpp"
+#include <new>
 
 namespace hs
 {
@@ -15,28 +16,25 @@ Result ValidateNativeOptions(const Options &options)
     if (options.anisotropic_filtering < 1 || options.anisotropic_filtering > 16 ||
         !within(options.bloom_strength, 0, 2) || !within(options.outline_width_px, 0, 4) ||
         !within(options.sharpening, 0, 1) || !within(options.shadow_distance_m, 20, 500) ||
-        !within(options.rt_trace_distance_m, 5, 500) ||
         !within(options.screen_overlay_intensity, 0, 1) ||
         !quality(options.adaptive_shading, GraphicsAutoToggle::On) ||
-        !quality(options.opacity_micromaps, GraphicsAutoToggle::On) ||
-        !quality(options.shader_execution_reordering, GraphicsAutoToggle::On) ||
         !quality(options.geometry_quality, GraphicsQuality::Ultra) ||
         !quality(options.texture_quality, GraphicsQuality::Ultra) ||
         !quality(options.foliage_quality, GraphicsQuality::Ultra) ||
         !quality(options.material_quality, GraphicsQuality::Ultra) ||
         !quality(options.pom_quality, GraphicsOptionalQuality::Ultra) ||
         !quality(options.lighting_quality, GraphicsQuality::Ultra) ||
-        !quality(options.ao_mode, GraphicsAoMode::RTAO) ||
+        !quality(options.ao_mode, GraphicsAoMode::GTAO) ||
         !quality(options.ao_quality, GraphicsQuality::Ultra) ||
-        !quality(options.reflection_mode, GraphicsReflectionMode::HybridRT) ||
+        !quality(options.reflection_mode, GraphicsReflectionMode::ScreenSpace) ||
         !quality(options.reflection_quality, GraphicsQuality::Ultra) ||
         !quality(options.transparency_quality, GraphicsQuality::Ultra) ||
         !quality(options.refraction_quality, GraphicsOptionalQuality::Ultra) ||
         !quality(options.volumetric_quality, GraphicsOptionalQuality::Ultra) ||
         !quality(options.motion_blur, GraphicsMotionBlur::High) ||
-        !quality(options.gi_mode, GraphicsGiMode::RayTraced) ||
+        !quality(options.gi_mode, GraphicsGiMode::SoftwareHybrid) ||
         !quality(options.gi_quality, GraphicsQuality::Ultra) ||
-        !quality(options.shadow_mode, GraphicsShadowMode::HybridRT) ||
+        !quality(options.shadow_mode, GraphicsShadowMode::Raster) ||
         !quality(options.shadow_quality, GraphicsQuality::Ultra) ||
         options.target_render_fps < 30 || options.target_render_fps > 240 ||
         !within(options.dynamic_min_percent, 25, 100) || !within(options.dynamic_max_percent, 25, 100) ||
@@ -231,45 +229,11 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = impl_->screen_overlay.Commit(std::move(screen_overlay),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    impl_->native_ray_requested_omm = impl_->config.opacity_micromaps;
-    impl_->native_ray_requested_ser = impl_->config.shader_execution_reordering;
-    impl_->native_ray_omm_request_failure.clear();
-    impl_->native_ray_ser_request_failure.clear();
-    Impl::NativeRayPlan native_ray;
-    if (auto resolved = impl_->ResolveNativeRay(impl_->config, native_ray); !resolved)
-    {
-        if (impl_->config.opacity_micromaps == GraphicsAutoToggle::On && !native_ray.omm.resolved)
-            impl_->native_ray_omm_request_failure = native_ray.omm.reason;
-        if (impl_->config.shader_execution_reordering == GraphicsAutoToggle::On && !native_ray.ser.resolved)
-            impl_->native_ray_ser_request_failure = native_ray.ser.reason;
-        return resolved;
-    }
-    RayOmmCandidate ray_omm;
-    if (auto prepared = impl_->PrepareRayOmm(impl_->config, ray_omm); !prepared) return prepared;
-    if (auto committed = impl_->ray_omm.Commit(std::move(ray_omm),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    RaySceneCandidate ray_scene;
-    if (auto prepared = impl_->PrepareRayScene(impl_->config, ray_scene); !prepared) return prepared;
-    if (auto committed = impl_->ray_scene.Commit(std::move(ray_scene),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    RayGeometryCandidate ray_geometry;
-    RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate ray_transport;
-    RayReconstructionCandidate ray_reconstruction;
-    if (auto prepared = impl_->PrepareRayEffects(impl_->config, impl_->view_state.render_capacity,
-            ray_geometry, ray_ambient, ray_transport, impl_->RayReconstructionModeFor(impl_->config)); !prepared) return prepared;
-    if (auto prepared = impl_->PrepareRayReconstruction(impl_->config, impl_->view_state.render_capacity,
-            {impl_->width, impl_->height}, ray_reconstruction); !prepared) return prepared;
-    if (auto prepared = impl_->ValidateRayReconstructionBudget(ray_reconstruction); !prepared) return prepared;
+    SceneGeometryCandidate scene_geometry;
+    if (auto prepared = impl_->PrepareSceneGeometry(impl_->config, scene_geometry); !prepared) return prepared;
     BrixelizerCandidate brixelizer;
     if (auto prepared = impl_->PrepareBrixelizerGi(impl_->config, impl_->view_state.render_active, brixelizer); !prepared) return prepared;
-    if (auto committed = impl_->ray_geometry.Commit(std::move(ray_geometry),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_ambient_occlusion.Commit(std::move(ray_ambient),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_transport.Commit(std::move(ray_transport),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_reconstruction.Commit(std::move(ray_reconstruction),
+    if (auto committed = impl_->scene_geometry.Commit(std::move(scene_geometry),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = impl_->brixelizer_gi.Commit(std::move(brixelizer),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
@@ -348,6 +312,10 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->render_width = impl_->view_state.render_active.width;
     impl_->render_height = impl_->view_state.render_active.height;
     impl_->diagnostics = RendererDiagnosticsRecorder{};
+    impl_->pending_gpu_timings.clear();
+    impl_->pending_gpu_timing_passes = 0;
+    impl_->gpu_timing_stream_overflowed = false;
+    for (auto &frame : impl_->frames) frame.timing_stream_published_frame_id = 0;
     impl_->rendered_submission_count = 0;
     impl_->render_package_id = impl_->active_render_package_id = 0;
     impl_->canonical_skin_current.reset();
@@ -434,18 +402,8 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     if (auto prepared = impl_->PrepareDecalSurface(impl_->config, capacity, false, decal_surface); !prepared) return prepared;
     LightListCandidate light_list;
     if (auto prepared = impl_->PrepareLightList(impl_->config, capacity, light_list); !prepared) return prepared;
-    RayOmmCandidate ray_omm;
-    if (auto prepared = impl_->PrepareRayOmm(impl_->config, ray_omm); !prepared) return prepared;
-    RaySceneCandidate ray_scene;
-    if (auto prepared = impl_->PrepareRayScene(impl_->config, ray_scene); !prepared) return prepared;
-    RayGeometryCandidate ray_geometry;
-    RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate ray_transport;
-    RayReconstructionCandidate ray_reconstruction;
-    if (auto prepared = impl_->PrepareRayEffects(impl_->config, capacity,
-            ray_geometry, ray_ambient, ray_transport, impl_->RayReconstructionModeFor(impl_->config)); !prepared) return prepared;
-    if (auto prepared = impl_->PrepareRayReconstruction(impl_->config, capacity,
-            {width, height}, ray_reconstruction); !prepared) return prepared;
+    SceneGeometryCandidate scene_geometry;
+    if (auto prepared = impl_->PrepareSceneGeometry(impl_->config, scene_geometry); !prepared) return prepared;
     BrixelizerCandidate brixelizer;
     if (auto prepared = impl_->PrepareBrixelizerGi(impl_->config, reconstruction.render_active, brixelizer); !prepared) return prepared;
     VirtualShadowCandidate virtual_shadows;
@@ -575,7 +533,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     impl_->transient_textures_common = impl_->enhanced;
     impl_->width = width;
     impl_->height = height;
-    if (auto committed = impl_->CommitReconstructionProvider(provider, std::move(guides), capacity, &reconstruction, &ray_reconstruction); !committed)
+    if (auto committed = impl_->CommitReconstructionProvider(provider, std::move(guides), capacity); !committed)
     {
         // ResizeBuffers has succeeded; old native output dimensions cannot be
         // restored into this swapchain. Report the failed configuration exactly.
@@ -602,19 +560,8 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
             impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (auto committed = impl_->light_list.Commit(std::move(light_list),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_omm.Commit(std::move(ray_omm),
+    if (auto committed = impl_->scene_geometry.Commit(std::move(scene_geometry),
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_scene.Commit(std::move(ray_scene),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_geometry.Commit(std::move(ray_geometry),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_ambient_occlusion.Commit(std::move(ray_ambient),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_transport.Commit(std::move(ray_transport),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->ray_reconstruction.Commit(std::move(ray_reconstruction),
-            impl_->graph_queue_executor.Completed()); !committed)
-    { impl_->initialized = false; return committed; }
     if (auto committed = impl_->brixelizer_gi.Commit(std::move(brixelizer),
             impl_->graph_queue_executor.Completed()); !committed)
     { impl_->initialized = false; return committed; }
@@ -649,19 +596,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     // commit work.  The final publication can then move this owned snapshot
     // without allocating after a successful commit.
     ApplyProjectedRendererOptions(feature_config, options);
-    impl_->native_ray_requested_omm = options.opacity_micromaps;
-    impl_->native_ray_requested_ser = options.shader_execution_reordering;
-    impl_->native_ray_omm_request_failure.clear();
-    impl_->native_ray_ser_request_failure.clear();
-    Impl::NativeRayPlan next_native;
-    if (auto resolved = impl_->ResolveNativeRay(feature_config, next_native); !resolved)
-    {
-        if (options.opacity_micromaps == GraphicsAutoToggle::On && !next_native.omm.resolved)
-            impl_->native_ray_omm_request_failure = next_native.omm.reason;
-        if (options.shader_execution_reordering == GraphicsAutoToggle::On && !next_native.ser.resolved)
-            impl_->native_ray_ser_request_failure = next_native.ser.reason;
-        return resolved;
-    }
     const auto previous_features = impl_->ResolveFeatures(impl_->config);
     const auto next_features = impl_->ResolveFeatures(feature_config);
 
@@ -677,10 +611,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         options.dynamic_resolution == impl_->config.dynamic_resolution &&
         options.dynamic_min_percent == impl_->config.dynamic_min_percent &&
         options.dynamic_max_percent == impl_->config.dynamic_max_percent &&
-        options.ray_reconstruction_provider == impl_->config.ray_reconstruction_provider &&
-        options.neural_ray_reconstruction == impl_->config.neural_ray_reconstruction &&
-        options.gi_mode == impl_->config.gi_mode && options.reflection_mode == impl_->config.reflection_mode &&
-        options.ray_tracing_enabled == impl_->config.ray_tracing_enabled;
+        options.gi_mode == impl_->config.gi_mode && options.reflection_mode == impl_->config.reflection_mode;
     std::unique_ptr<ReconstructionProvider> provider;
     if (reuse_provider)
     {
@@ -691,9 +622,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
             ? &*options.reconstruction_request : nullptr, options.dynamic_resolution,
             options.dynamic_min_percent, options.dynamic_max_percent, {impl_->width, impl_->height},
             reconstruction, capacity, provider, &feature_config); !prepared) return prepared;
-    const bool replace_provider = !reuse_provider && (impl_->reconstruction_provider || provider ||
-        impl_->ray_reconstruction.Mode() == RayReconstructionMode::DlssFused ||
-        reconstruction.effective_provider.value == "dlss_rr");
+    const bool replace_provider = !reuse_provider && (impl_->reconstruction_provider || provider);
     ReconstructionGuidesCandidate guides;
     if (provider)
         if (auto prepared = impl_->PrepareReconstructionGuides(impl_->config, capacity,
@@ -822,56 +751,10 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LightListCandidate light_list;
     if (recreate_light_list)
         if (auto prepared = impl_->PrepareLightList(feature_config, capacity, light_list); !prepared) return prepared;
-    const auto actual_native = impl_->ray_transport.GetNativeTraceSelection();
-    const bool native_omm_changed = next_native.selection.use_omms != actual_native.use_omms;
-    const bool native_ser_changed = next_native.selection.use_ser != actual_native.use_ser;
-    const bool recreate_ray_scene = next_features.ray_scene_enabled != previous_features.ray_scene_enabled ||
-        native_omm_changed;
-    const auto record_native_prepare_failure = [&](const Result &failure, bool omm, bool ser) {
-        if (omm && options.opacity_micromaps == GraphicsAutoToggle::On && next_native.selection.use_omms)
-            impl_->native_ray_omm_request_failure = std::string(failure.Message());
-        if (ser && options.shader_execution_reordering == GraphicsAutoToggle::On && next_native.selection.use_ser)
-            impl_->native_ray_ser_request_failure = std::string(failure.Message());
-    };
-    RayOmmCandidate ray_omm;
-    RaySceneCandidate ray_scene;
-    if (recreate_ray_scene)
-    {
-        if (auto prepared = impl_->PrepareRayOmm(feature_config, ray_omm); !prepared)
-        {
-            record_native_prepare_failure(prepared, true, false);
-            return prepared;
-        }
-        if (auto prepared = impl_->PrepareRayScene(feature_config, ray_scene); !prepared)
-        {
-            record_native_prepare_failure(prepared, true, false);
-            return prepared;
-        }
-    }
-    const bool recreate_ray_effects = replace_provider || recreate_ray_scene || native_omm_changed || native_ser_changed ||
-        capacity != impl_->view_state.render_capacity ||
-        options.ray_reconstruction_provider != impl_->config.ray_reconstruction_provider ||
-        options.neural_ray_reconstruction != impl_->config.neural_ray_reconstruction ||
-        next_features.ao_mode != previous_features.ao_mode ||
-        next_features.gi_mode != previous_features.gi_mode ||
-        next_features.reflection_mode != previous_features.reflection_mode ||
-        (next_features.gi_mode == GraphicsGiMode::RayTraced && options.gi_quality != impl_->config.gi_quality) ||
-        (next_features.reflection_mode == GraphicsReflectionMode::HybridRT && options.reflection_quality != impl_->config.reflection_quality) ||
-        (next_features.ao_mode == GraphicsAoMode::RTAO && options.ao_quality != impl_->config.ao_quality);
-    RayGeometryCandidate ray_geometry;
-    RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate ray_transport;
-    RayReconstructionCandidate ray_reconstruction;
-    if (recreate_ray_effects)
-        if (auto prepared = impl_->PrepareRayEffects(feature_config, capacity,
-                ray_geometry, ray_ambient, ray_transport, impl_->RayReconstructionModeFor(feature_config)); !prepared)
-        {
-            record_native_prepare_failure(prepared, true, true);
-            return prepared;
-        }
-    if (recreate_ray_effects)
-        if (auto prepared = impl_->PrepareRayReconstruction(feature_config, capacity,
-                {impl_->width, impl_->height}, ray_reconstruction); !prepared) return prepared;
+    const bool recreate_scene_geometry = next_features.software_gi_enabled != previous_features.software_gi_enabled;
+    SceneGeometryCandidate scene_geometry;
+    if (recreate_scene_geometry)
+        if (auto prepared = impl_->PrepareSceneGeometry(feature_config, scene_geometry); !prepared) return prepared;
     const bool recreate_brixelizer = next_features.software_gi_enabled != previous_features.software_gi_enabled ||
         (next_features.software_gi_enabled && (options.gi_quality != impl_->config.gi_quality ||
             reconstruction.render_active != impl_->view_state.render_active || replace_provider));
@@ -884,11 +767,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     const bool recreate_virtual_shadows = capacity != impl_->view_state.render_capacity ||
         options.shadow_quality != impl_->config.shadow_quality ||
         options.shadow_mode != impl_->config.shadow_mode;
-    const bool recreate_additional_shadows = recreate_virtual_shadows ||
-        options.rt_trace_distance_m != impl_->config.rt_trace_distance_m ||
-        options.ray_tracing_enabled != impl_->config.ray_tracing_enabled ||
-        options.ray_reconstruction_provider != impl_->config.ray_reconstruction_provider ||
-        options.neural_ray_reconstruction != impl_->config.neural_ray_reconstruction;
+    const bool recreate_additional_shadows = recreate_virtual_shadows;
     Impl::AdditionalShadowPrepared additional_shadows;
     if (recreate_additional_shadows)
         if (auto prepared = impl_->PrepareAdditionalShadows(feature_config, capacity, additional_shadows); !prepared) return prepared;
@@ -921,11 +800,11 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (!presentation_recreated)
         if (auto display = impl_->ApplyDisplayOptions(options); !display) return display;
     if (previous_hdr != impl_->display_state.hdr_active) impl_->temporal_history_valid = false;
-    if (change_texture_policy || recreate_pools || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_ray_scene || recreate_light_list || recreate_ray_effects || recreate_brixelizer || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface)
+    if (change_texture_policy || recreate_pools || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_scene_geometry || recreate_brixelizer || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface)
         if (auto drained = impl_->WaitForGpu(); !drained) return drained;
     if (replace_provider)
     {
-        if (auto committed = impl_->CommitReconstructionProvider(provider, std::move(guides), capacity, &reconstruction, &ray_reconstruction); !committed)
+        if (auto committed = impl_->CommitReconstructionProvider(provider, std::move(guides), capacity); !committed)
             return committed;
         impl_->temporal_history_valid = false;
     }
@@ -951,12 +830,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (recreate_screen_overlay)
         if (auto committed = impl_->screen_overlay.Commit(std::move(screen_overlay),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_ray_scene)
-        if (auto committed = impl_->ray_omm.Commit(std::move(ray_omm),
-                impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_ray_scene)
-        if (auto committed = impl_->ray_scene.Commit(std::move(ray_scene),
-                impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (recreate_decal_surface)
         if (auto committed = impl_->decal_surface.Commit(std::move(decal_surface),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
@@ -968,18 +841,9 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (recreate_local_probes)
         if (auto committed = impl_->local_probes.Commit(std::move(local_probes),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_ray_effects)
-    {
-        if (auto committed = impl_->ray_geometry.Commit(std::move(ray_geometry),
+    if (recreate_scene_geometry)
+        if (auto committed = impl_->scene_geometry.Commit(std::move(scene_geometry),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
-        if (auto committed = impl_->ray_ambient_occlusion.Commit(std::move(ray_ambient),
-                impl_->graph_queue_executor.Completed()); !committed) return committed;
-        if (auto committed = impl_->ray_transport.Commit(std::move(ray_transport),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-        if (auto committed = impl_->ray_reconstruction.Commit(std::move(ray_reconstruction),
-                impl_->graph_queue_executor.Completed()); !committed)
-        { impl_->initialized = false; return committed; }
-    }
     if (recreate_brixelizer)
     {
         if (auto committed = impl_->brixelizer_gi.Commit(std::move(brixelizer),
@@ -1034,17 +898,10 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
             options.texture_budget_mib); !applied) return applied;
     // Every operation above either fails without touching the active resources
     // or completes before the effective options become visible to Render().
-    if (impl_->config.opacity_micromaps != GraphicsAutoToggle::Off &&
-        options.opacity_micromaps == GraphicsAutoToggle::Off)
-        impl_->ray_omm_request_cache.clear();
-    if (options.rt_trace_distance_m != impl_->config.rt_trace_distance_m ||
-        options.material_quality != impl_->config.material_quality ||
+    if (options.material_quality != impl_->config.material_quality ||
         options.pom_quality != impl_->config.pom_quality)
     {
-        impl_->ray_transport.ResetHistory();
         impl_->temporal_history_valid = false;
-        if (options.rt_trace_distance_m != impl_->config.rt_trace_distance_m)
-            impl_->hzb_history_valid = false;
         impl_->brixelizer_history_valid = false;
     }
     feature_config.temporal_reconstruction = impl_->reconstruction_plan.temporal_enabled;
@@ -1066,12 +923,42 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     return Result::Success();
 }
 
+Result D3D12Renderer::SetFrameGenerationAllowed(bool allowed)
+{
+    if (!impl_->initialized || impl_->native_input_phase == 1 || impl_->native_input_phase == 2 ||
+        (allowed && impl_->native_input_phase))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Frame generation policy changes require an input boundary or a completed simulation disabling FG.");
+    if (impl_->config.frame_generation_allowed == allowed) return Result::Success();
+    if (impl_->config.presentation_request.mode == GraphicsFrameGenerationMode::Off)
+    {
+        impl_->config.frame_generation_allowed = allowed;
+        return Result::Success();
+    }
+    try
+    {
+        auto candidate = impl_->config;
+        candidate.frame_generation_allowed = allowed;
+        auto display = impl_->display_state;
+        if (auto recreated = impl_->RecreatePresentation(candidate, {impl_->width, impl_->height},
+                impl_->view_state.render_capacity, display); !recreated) return recreated;
+        impl_->config.frame_generation_allowed = allowed;
+        return Result::Success();
+    }
+    catch (const std::bad_alloc &)
+    {
+        return Result::Failure(ErrorCode::TaskFailed, "hs_renderer_d3d12",
+            "Frame generation policy transition allocation failed.");
+    }
+}
+
 Result D3D12Renderer::BeginInputFrame(std::uint64_t &identity)
 {
     identity = 0;
     if (!impl_->initialized || impl_->native_input_phase)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Input requires an initialized renderer with no outstanding frame token.");
-    if (impl_->config.presentation_request.mode == GraphicsFrameGenerationMode::Auto &&
+    if (impl_->config.frame_generation_allowed &&
+        impl_->config.presentation_request.mode == GraphicsFrameGenerationMode::Auto &&
         impl_->quality_profiles && impl_->sdk_presentation.Status().availability == "available")
     {
         const auto &policy = impl_->quality_profiles->auto_fg_cadence;
@@ -1089,7 +976,7 @@ Result D3D12Renderer::BeginInputFrame(std::uint64_t &identity)
                 if (auto recreated = impl_->RecreatePresentation(candidate, {impl_->width, impl_->height},
                         impl_->view_state.render_capacity, display, suppress); !recreated) return recreated;
                 impl_->auto_fg_cadence_suppressed = suppress;
-                impl_->sdk_presentation.ReportAutoCadenceResolution(impl_->config.presentation_request, suppress);
+                impl_->sdk_presentation.ReportFrameGenerationPolicy(impl_->config.presentation_request, suppress, true);
             }
         }
     }
@@ -1143,11 +1030,9 @@ RendererReconstructionStatus D3D12Renderer::GetReconstructionStatus() const
         }
         return "unavailable";
     };
-    const auto native_availability = impl_->ray_reconstruction.Mode() == RayReconstructionMode::DlssFused
-        ? impl_->ray_reconstruction.Availability() : impl_->reconstruction_provider
+    const auto native_availability = impl_->reconstruction_provider
         ? impl_->reconstruction_provider->Availability() : plan.requested_availability;
-    const auto native_reason = impl_->ray_reconstruction.Mode() == RayReconstructionMode::DlssFused && native_availability != ReconstructionAvailability::Available
-        ? std::string(impl_->ray_reconstruction.FailureReason()) : impl_->reconstruction_provider && native_availability != ReconstructionAvailability::Available
+    const auto native_reason = impl_->reconstruction_provider && native_availability != ReconstructionAvailability::Available
         ? std::string(impl_->reconstruction_provider->FailureReason()) : plan.fallback_reason;
     return {plan.requested_provider, plan.effective_provider, plan.requested_quality,
         plan.effective_quality, {impl_->render_width, impl_->render_height},
@@ -1188,30 +1073,13 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
         {
         case RendererFeatureFallbackReason::None: return {};
         case RendererFeatureFallbackReason::AutoSelection: return "auto_selection";
-        case RendererFeatureFallbackReason::RayTracingDisabled: return "ray_tracing_disabled";
         case RendererFeatureFallbackReason::UnsupportedHardware: return "unsupported_hardware";
         case RendererFeatureFallbackReason::ConsumerUnavailable: return "consumer_unavailable";
         case RendererFeatureFallbackReason::RequestedOff: return "requested_off";
         }
         return "consumer_unavailable";
     };
-    const auto describe = [](const RayDenoiserStatus &native, bool signal_active) {
-        std::string availability;
-        switch (native.availability)
-        {
-        case ReconstructionAvailability::Available: availability = "available"; break;
-        case ReconstructionAvailability::CompiledOut: availability = "compiled_out"; break;
-        case ReconstructionAvailability::Unsupported: availability = "unsupported"; break;
-        case ReconstructionAvailability::Unavailable: availability = "unavailable"; break;
-        case ReconstructionAvailability::NotIntegrated: availability = "not_integrated"; break;
-        }
-        const std::string method = !signal_active ? "off" :
-            native.active_method == NrdRadianceMethod::Reblur ? "nrd_reblur" :
-            native.active_method == NrdRadianceMethod::Relax ? "nrd_relax" : "internal";
-        return RendererDenoiserStatus{native.requested_provider, method, availability, native.reason};
-    };
     const auto local = impl_->local_shadows.Status();
-    const auto shadow = impl_->ray_shadows.Status();
     const auto software = impl_->brixelizer_gi.Status();
     const auto software_support = QueryBrixelizerNativeSupport(impl_->device.Get());
     const auto adaptive = impl_->adaptive_shading.Status();
@@ -1222,45 +1090,11 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
         if (fallback == RendererFeatureFallbackReason::None) return std::string("native_consumer_unavailable");
         return reason(fallback);
     };
-    auto transport_status = describe(impl_->ray_transport.GetDenoiserStatus(),
-        plan.gi_mode == GraphicsGiMode::RayTraced || plan.reflection_mode == GraphicsReflectionMode::HybridRT);
-    if (impl_->ray_reconstruction.Mode() != RayReconstructionMode::Off)
-    {
-        transport_status.requested_provider.value = impl_->ray_reconstruction.Mode() == RayReconstructionMode::DlssFused ? "dlss_rr" : "fsr_rr";
-        transport_status.active_method = transport_status.requested_provider.value;
-        const auto available = impl_->ray_reconstruction.Availability();
-        transport_status.availability = available == ReconstructionAvailability::Available ? "available" :
-            available == ReconstructionAvailability::CompiledOut ? "compiled_out" :
-            available == ReconstructionAvailability::Unsupported ? "unsupported" : "unavailable";
-        transport_status.reason = impl_->ray_reconstruction.FailureReason();
-    }
-    else if (request.neural_ray_reconstruction != GraphicsAutoToggle::Off &&
-        (request.ray_reconstruction_provider.value == "fsr_rr" || request.ray_reconstruction_provider.value == "dlss_rr" ||
-         (request.reconstruction_request && request.reconstruction_request->provider.value == "dlss_rr")))
-    {
-        const bool dlss = request.ray_reconstruction_provider.value == "dlss_rr" ||
-            (request.reconstruction_request && request.reconstruction_request->provider.value == "dlss_rr");
-        transport_status.requested_provider.value = dlss ? "dlss_rr" : "fsr_rr";
-        const auto available = dlss ? (impl_->streamline_session ? impl_->streamline_session->Availability(StreamlineFeature::RayReconstruction) : ReconstructionAvailability::Unavailable)
-            : impl_->fsr_session ? impl_->fsr_session->Availability(FsrEffect::RayRegeneration) : ReconstructionAvailability::Unavailable;
-        transport_status.availability = available == ReconstructionAvailability::CompiledOut ? "compiled_out" :
-            available == ReconstructionAvailability::Unsupported || available == ReconstructionAvailability::Available ? "unsupported" : "unavailable";
-        transport_status.reason = available == ReconstructionAvailability::Available
-            ? "Requested RR has no admitted active signal set; fused DLSS needs both RT GI and hybrid reflections with temporal reconstruction."
-            : dlss && impl_->streamline_session ? std::string(impl_->streamline_session->FailureReason(StreamlineFeature::RayReconstruction))
-            : !dlss && impl_->fsr_session ? std::string(impl_->fsr_session->FailureReason(FsrEffect::RayRegeneration)) : "Native RR session was not initialized for this request.";
-    }
-    RendererLightingStatus status{{request.ray_tracing_enabled, request.ao_mode, request.gi_mode, request.reflection_mode, request.shadow_mode},
-        {plan.ray_scene_enabled, plan.ao_mode, plan.gi_mode, plan.reflection_mode, plan.shadow_mode},
-        impl_->feature_capabilities.hardware.ray_scene, impl_->feature_capabilities.hardware.inline_ray_queries,
+    RendererLightingStatus status{{request.ao_mode, request.gi_mode, request.reflection_mode, request.shadow_mode},
+        {plan.ao_mode, plan.gi_mode, plan.reflection_mode, plan.shadow_mode},
         reason(plan.ao_reason), reason(plan.gi_reason), reason(plan.reflection_reason), reason(plan.shadow_reason),
-        impl_->ray_scene.AllocatedBytes(),
-        describe(impl_->ray_ambient_occlusion.GetDenoiserStatus(), plan.ao_mode == GraphicsAoMode::RTAO),
-        transport_status,
         {local.enabled, local.requested_lights, local.selected_lights, local.unsupported_lights,
             local.budget_lights, local.overflow_lights, local.allocated_bytes, local.reason},
-        {shadow.enabled, shadow.native_sigma, shadow.requested_lights, shadow.selected_lights, shadow.unsupported_lights,
-            shadow.budget_lights, shadow.rays_per_pixel, shadow.allocated_bytes, shadow.reason},
         {software_support.compiled, software_support.supported, software.enabled, software.native_ready, software.faulted,
             software.static_instances, software.dynamic_instances, software.unsupported_masked, software.unsupported_thin,
             software.excluded_translucent, software.physical_cascades, software.gpu_bytes, software.scratch_bytes,
@@ -1280,54 +1114,6 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
     const auto cache = impl_->virtual_shadows.CacheStatus();
     status.shadow_cache = {UINT64(impl_->QualityProfileFor(request.shadow_quality).shadow_cache_mib) * 1024u * 1024u,
         cache.admitted_bytes, cache.physical_pages};
-    Impl::NativeRayPlan native_plan;
-    (void)impl_->ResolveNativeRay(request, native_plan);
-    const auto actual_native = impl_->ray_transport.GetNativeTraceSelection();
-    const auto omm = impl_->ray_omm.Status();
-    const auto ser = impl_->ray_transport.GetSerStatus();
-    std::uint64_t current_headroom{};
-    const bool query_native_budget = impl_->native_ray_requested_omm != GraphicsAutoToggle::Off ||
-        impl_->native_ray_requested_ser != GraphicsAutoToggle::Off || actual_native.use_omms || actual_native.use_ser;
-    const auto budget_result = query_native_budget ? impl_->NativeRayBudget(current_headroom) : Result::Success();
-    const auto actual_budget = !query_native_budget ? 0 : budget_result ?
-        current_headroom + omm.allocated_bytes + ser.allocated_bytes : omm.allocated_bytes + ser.allocated_bytes;
-    const auto native_reason = [&](const std::string &service_reason,
-        const std::string &failure_reason, const RendererLightingStatus::NativeRayStatus &resolved,
-        bool actual_resolved) {
-        if (!failure_reason.empty()) return failure_reason;
-        if (!actual_resolved && !resolved.reason.empty()) return resolved.reason;
-        return service_reason;
-    };
-    status.opacity_micromaps = {
-        impl_->native_ray_requested_omm,
-        native_plan.omm.hardware_supported,
-        actual_native.use_omms,
-        omm.ready,
-        omm.applied,
-        omm.usable,
-        actual_budget,
-        omm.allocated_bytes,
-        omm.linked_triangles,
-        omm.known_cells,
-        omm.unknown_cells,
-        omm.unavailable_geometries,
-        native_reason(omm.reason, impl_->native_ray_omm_request_failure, native_plan.omm, actual_native.use_omms),
-    };
-    status.shader_execution_reordering = {
-        impl_->native_ray_requested_ser,
-        native_plan.ser.hardware_supported,
-        actual_native.use_ser,
-        ser.ready,
-        ser.applied,
-        ser.usable,
-        actual_budget,
-        ser.allocated_bytes,
-        0,
-        0,
-        0,
-        0,
-        native_reason(ser.reason, impl_->native_ray_ser_request_failure, native_plan.ser, actual_native.use_ser),
-    };
     return status;
 }
 
@@ -1388,16 +1174,11 @@ Result D3D12Renderer::Shutdown()
     impl_->material_parameter_upload_pending = false;
     if (!result) return result;
     if (auto released = impl_->graph_queue_executor.ReleaseRecordersAfterCompletion(); !released) return released;
-    impl_->ray_omm_request_cache.clear();
     impl_->material_parameter_slots.clear();
     impl_->material_parameter_candidate_slots.clear();
     impl_->resident_utility_submissions.clear();
     for (auto &candidate : impl_->unresolved_resident_candidates)
     {
-        if (auto cleared = candidate->ray_omm.ResetAfterCompletion(
-                impl_->graph_queue_executor.Completed()); !cleared) return cleared;
-        if (auto cleared = candidate->ray_reconstruction.ResetAfterCompletion(
-                impl_->graph_queue_executor.Completed()); !cleared) return cleared;
         if (auto cleared = candidate->brixelizer_gi.ResetAfterCompletion(
                 impl_->graph_queue_executor.Completed()); !cleared) return cleared;
     }
@@ -1444,8 +1225,6 @@ Result D3D12Renderer::Shutdown()
         else impl_->reconstruction_provider.reset();
     }
     if (!result) return result;
-    if (auto cleared = impl_->ray_reconstruction.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared) return cleared;
     if (auto cleared = impl_->brixelizer_gi.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared) return cleared;
     if (impl_->fsr_session)
@@ -1470,17 +1249,7 @@ Result D3D12Renderer::Shutdown()
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     if (auto cleared = impl_->screen_overlay.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_omm.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_scene.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_geometry.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_ambient_occlusion.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_transport.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ray_shadows.ResetAfterCompletion(
+    if (auto cleared = impl_->scene_geometry.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     if (auto cleared = impl_->local_shadows.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
@@ -1798,6 +1567,57 @@ GpuPassTimings D3D12Renderer::LastGpuPassTimings() const
     const auto &frame = impl_->frames[impl_->last_presented_index];
     auto timings = impl_->ReadFrameGpuTimings(frame);
     return timings.valid && timings.view_id == impl_->active_view_id.value ? timings : impl_->completed_gpu_timings;
+}
+
+const GpuPassTimings &D3D12Renderer::LastCompletedGpuPassTimings() const noexcept
+{
+    return impl_->completed_gpu_timings;
+}
+
+Result D3D12Renderer::ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings> &output)
+{
+    output.clear();
+    std::ranges::sort(impl_->pending_gpu_timings, [](const auto &left, const auto &right) {
+        return left.completed_frame_id != right.completed_frame_id
+            ? left.completed_frame_id < right.completed_frame_id : left.view_id < right.view_id;
+    });
+    output.swap(impl_->pending_gpu_timings);
+    impl_->pending_gpu_timing_passes = 0;
+    if (impl_->gpu_timing_stream_overflowed)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Completed GPU timing capture overflowed its 240-frame or 262144-pass pending limit.");
+    return Result::Success();
+}
+
+Result D3D12Renderer::DrainGpuPassTimings(std::vector<GpuPassTimings> &output)
+{
+    output.clear();
+    if (!impl_->initialized || !impl_->config.capture_timing_stream)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "GPU timing drain requires an initialized capture_timing_stream renderer.");
+    if (auto drained = impl_->WaitForGpu(); !drained) return drained;
+    for (const auto &frame : impl_->frames)
+    {
+        if (!frame.timestamps_recorded) continue;
+        auto timings = impl_->ReadFrameGpuTimings(frame);
+        if (!timings.valid) continue;
+        if (!impl_->diagnostics.HasCompleted(timings.completed_frame_id, timings.view_id))
+            impl_->diagnostics.RecordCompleted(timings);
+        if (timings.view_id == impl_->active_view_id.value)
+        {
+            if (timings.completed_frame_id > impl_->completed_gpu_timings.completed_frame_id)
+                impl_->completed_gpu_timings = std::move(timings);
+        }
+        else if (const auto found = impl_->owned_views.find(timings.view_id); found != impl_->owned_views.end())
+            if (timings.completed_frame_id > found->second->completed_gpu_timings.completed_frame_id)
+                found->second->completed_gpu_timings = std::move(timings);
+    }
+    return ConsumeCompletedGpuPassTimings(output);
+}
+
+const RendererDiagnosticsFrame &D3D12Renderer::LastRenderedFrameDiagnostics() const noexcept
+{
+    return impl_->diagnostics.LastRenderedFrame();
 }
 
 RendererQueueStats D3D12Renderer::LastQueueStats() const noexcept

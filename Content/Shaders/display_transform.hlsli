@@ -52,9 +52,9 @@ float3 HsPqDecodeNits(float3 encoded)
 
 float3 HsDisplayToneMapSdr(float3 scene)
 {
-    // Preserve the existing ACES fitted scene transform, returning display
-    // linear Rec.709. Encoding is a separate final stage after linear UI.
-    scene = max(scene, 0.0);
+    // Anchor metered 18% grey at display-linear 18%; the unscaled fit lifts it to 26.7%.
+    // UI is composed later and never receives this scene-only exposure compensation.
+    scene = max(scene, 0.0) * 0.7231708;
     return saturate((scene * (2.51 * scene + 0.03)) / (scene * (2.43 * scene + 0.59) + 0.14));
 }
 

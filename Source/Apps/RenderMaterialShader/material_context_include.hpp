@@ -39,42 +39,6 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
     return generated + "    default: return 0.0;\n    }\n}\n";
 }
 
-std::string RayEnvironmentContextInclude(ap::ActionSpec &spec, const fs::path &source_root)
-{
-    std::string generated = "#include \"material_surface.hlsli\"\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kAuthoredMaterialNames.size(); ++ordinal)
-    {
-        const auto name = rd::kAuthoredMaterialNames[ordinal];
-        const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
-        const auto graph = hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path)).graph;
-        auto functions = rd::EmitEnvironmentMaterialContextHlsl(graph, ordinal);
-        const auto rename = [&](std::string_view symbol, const std::string &replacement) {
-            std::size_t position{};
-            while ((position = functions.find(symbol, position)) != std::string::npos)
-            {
-                functions.replace(position, symbol.size(), replacement);
-                position += replacement.size();
-            }
-        };
-        const auto suffix = std::to_string(ordinal) + "_";
-        rename("HsMaterialTexture", "HsRayEnvironmentTexture" + suffix);
-        rename("HsMaterialEvaluateSurface", "HsRayEnvironmentSurface" + suffix);
-        rename("HsMaterialEvaluateOpacity", "HsRayEnvironmentOpacity" + suffix);
-        generated += functions;
-        spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/ray-context-ir", path,
-            std::as_bytes(std::span(functions.data(), functions.size()))));
-    }
-    generated += "float HsRayEnvironmentEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kAuthoredMaterialNames.size(); ++ordinal)
-        generated += "    case " + std::to_string(ordinal) + "u: return HsRayEnvironmentOpacity" +
-            std::to_string(ordinal) + "_(ctx);\n";
-    generated += "    default: return 0.0;\n    }\n}\n";
-    generated += "HsSurfaceClosure HsRayEnvironmentEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kAuthoredMaterialNames.size(); ++ordinal)
-        generated += "    case " + std::to_string(ordinal) + "u: return HsRayEnvironmentSurface" +
-            std::to_string(ordinal) + "_(ctx);\n";
-    return generated + "    default: return (HsSurfaceClosure)0;\n    }\n}\n";
-}
 
 
 std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_root)

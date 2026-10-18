@@ -1,5 +1,7 @@
 #include "geometry_cooker.hpp"
 #include "scene_hlod_cooker.hpp"
+#include <hs/presentation/environment_layout.hpp>
+#include <hs/render_data/material_schema.hpp>
 
 #include <algorithm>
 #include <array>
@@ -52,11 +54,72 @@ void Validate(const gc::CookedSceneHlod &cooked, std::uint32_t page_limit)
         rd::ValidateSceneHlodPage(decoded, static_cast<std::uint32_t>(id), payload);
     }
 }
+void TestGroundDetailCanonicalLayoutDigest()
+{
+    hs::ArenaBoundary boundary{};
+    boundary.count = 4;
+    boundary.points[0] = {-16,-16}; boundary.points[1] = {-16,16};
+    boundary.points[2] = {16,16}; boundary.points[3] = {16,-16};
+    const auto layout = hs::BuildEnvironmentLayout(16, boundary, {}, 0);
+    std::vector<rd::SceneHlodMember> canonical;
+    std::vector<gc::SceneHlodCookMember> members;
+    std::vector<rd::SceneHlodMember> subset;
+    std::uint32_t details{}, pebbles{};
+    for (const auto &eligible : layout.eligible_static_members)
+    {
+        const auto &instance = layout.instances.at(eligible.instance_index);
+        rd::SceneHlodMember record{};
+        record.stable_id = eligible.stable_id; record.object_id = eligible.object_id;
+        record.asset_id = instance.asset_id; record.mesh_semantic = static_cast<std::uint32_t>(instance.mesh);
+        record.variant = instance.environment_variant; record.tint_rgba = instance.color_rgba;
+        record.position = instance.position; record.scale = instance.scale; record.yaw = instance.yaw;
+        canonical.push_back(record);
+        if ((instance.mesh == hs::RenderMesh::GroundDetail && details < 2) ||
+            (instance.mesh == hs::RenderMesh::Rock && instance.scale.x <= .1f && pebbles == 0))
+        {
+            if (instance.mesh == hs::RenderMesh::GroundDetail) ++details; else ++pebbles;
+            members.push_back({instance, eligible.object_id}); subset.push_back(record);
+        }
+    }
+    Check(details == 2 && pebbles == 1, "small fixture must mix appended detail and pebble provenance categories");
+    Check(layout.eligible_digest == rd::ComputeSceneHlodLayoutDigest(layout.abi, canonical),
+          "shared environment digest must follow canonical stable-ID order");
+    // The complete layout digest is checked above without cooking the forest.
+    // Only three instances of a two-triangle source exercise actual HLOD validation.
+    std::vector<rd::ExpandedVertex> vertices;
+    for (const auto position : std::array<std::array<float,3>,6>{{
+            {0,0,0},{0,0,.2f},{.2f,0,0},{.2f,0,0},{0,0,.2f},{.2f,0,.2f}}})
+    {
+        rd::ExpandedVertex vertex{}; vertex.position = position;
+        vertex.normal = {0,1,0}; vertex.tangent = {1,0,0,1}; vertices.push_back(vertex);
+    }
+    const auto geometry = gc::CookGeometry(vertices,0);
+    std::vector<std::array<std::string,1>> materials; materials.reserve(members.size());
+    std::vector<gc::SceneHlodCookSource> sources;
+    std::set<std::uint64_t> assets;
+    for (const auto &member : members)
+    {
+        const auto &instance = member.instance;
+        if (!assets.insert(instance.asset_id.value).second) continue;
+        const auto ordinal = rd::EnvironmentGeometryOrdinal(instance.mesh,instance.environment_variant);
+        const auto id = "render/" + std::string(rd::kEnvironmentMaterialNames[ordinal]) + ".rpkg";
+        materials.push_back({instance.mesh == hs::RenderMesh::GroundDetail
+            ? std::string("render/material/ground_detail.rpkg") : id});
+        sources.push_back({instance.asset_id,id,&geometry,materials.back()});
+    }
+    gc::SceneHlodCookOptions options; options.error_worker_count = 1;
+    const auto digest = rd::ComputeSceneHlodLayoutDigest(layout.abi,subset);
+    const auto cooked = gc::CookSceneHlod(hs::MakeAssetId("render/scene/detail-digest.shlod"),
+        layout.abi,digest,members,sources,"render/hlod/detail-digest",options);
+    Validate(cooked,options.max_group_pages);
+    Check(cooked.scene.members.size() == members.size(),"small detail cook lost source coverage");
+}
 } // namespace
 int main()
 {
     try
     {
+        TestGroundDetailCanonicalLayoutDigest();
         const auto geometry = Grid();
         const auto nonplanar_geometry = Grid(true);
         const std::string source_id = "render/rock_0.rpkg";

@@ -1,4 +1,5 @@
 #include "render_graph.hpp"
+#include "render_graph_membership.hpp"
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
 #include <d3d12.h>
@@ -7,6 +8,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <cstdio>
+#include <chrono>
 #include <stdexcept>
 #include <string_view>
 
@@ -21,6 +23,77 @@ namespace
 {
 void Check(bool condition, const char *message) { if (!condition) throw std::runtime_error(message); }
 void Hr(HRESULT result, const char *message) { Check(SUCCEEDED(result), message); }
+
+struct MembershipWork
+{
+    std::uint64_t hashes{}, equalities{};
+    std::uint64_t Total() const { return hashes + equalities; }
+};
+struct MembershipResource
+{
+    std::uint32_t value{};
+    MembershipWork *work{};
+    bool operator==(const MembershipResource &other) const
+    {
+        ++work->equalities;
+        return value == other.value;
+    }
+};
+struct MembershipHash
+{
+    std::size_t operator()(const MembershipResource &resource) const noexcept
+    {
+        ++resource.work->hashes;
+        return std::hash<std::uint32_t>{}(resource.value);
+    }
+};
+
+std::uint64_t CheckBatchResourceMembership(std::uint32_t count)
+{
+    MembershipWork work;
+    std::vector<MembershipResource> ordered;
+    std::optional<std::unordered_set<MembershipResource, MembershipHash>> membership;
+    std::vector<std::uint32_t> expected;
+    for (std::uint32_t i = 0; i < count; ++i)
+    {
+        const auto value = (i * 17u) % count;
+        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership,
+            MembershipResource{value, &work}), "first batch resource must be appended");
+        expected.push_back(value);
+        if (i + 1 < 1024) Check(!membership, "small batches do not allocate a membership index");
+    }
+    for (std::uint32_t i = count; i > 0; --i)
+        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership,
+            MembershipResource{expected[i - 1], &work}), "duplicate batch resource must be rejected");
+    Check(ordered.size() == expected.size(), "batch membership preserves unique resource count");
+    for (std::size_t i = 0; i < ordered.size(); ++i)
+        Check(ordered[i].value == expected[i], "batch membership preserves first-use order");
+    return work.Total();
+}
+
+void BatchResourceMembership()
+{
+    for (const auto count : {0u, 1u, 31u, 32u, 33u, 1023u, 1024u, 1025u})
+        (void)CheckBatchResourceMembership(count);
+    const auto small_work = CheckBatchResourceMembership(4096);
+    const auto large_work = CheckBatchResourceMembership(8192);
+    Check(large_work <= 8192u * 16u + 1024u * 1024u && large_work <= small_work * 3u + 1024u,
+          "doubling large batch resources must retain linear hash/equality work");
+
+    std::vector<std::uint32_t> first, second;
+    std::optional<std::unordered_set<std::uint32_t>> first_membership, second_membership;
+    for (std::uint32_t i = 0; i < 1040; ++i)
+    {
+        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, i), "first batch insert");
+        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 1039u - i), "second batch insert");
+    }
+    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 0u) &&
+          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 1039u),
+          "returning to an older batch still rejects duplicates after index promotion");
+    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 1040u) &&
+          first.front() == 0 && first.back() == 1040 && second.front() == 1039 && second.back() == 0,
+          "interleaved batch membership remains independent and ordered");
+}
 struct Fixture
 {
     ComPtr<IDXGIFactory4> factory;
@@ -335,7 +408,20 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     (void)write.Write(graph.Version(storage),hs::Access::UnorderedWrite);
     bool called{}; write.SetExecute([&](hs::RenderPassContext &context){called=true;Check(context.Resolve(texture)!=nullptr,"callback resolve");context.UavBarrier(texture);});
     auto read=graph.AddPass(1,"read",hs::QueueHint::Direct); read.Read(texture_v1,hs::Access::ComputeRead); read.SetExecute([](auto &){});
-    Check(graph.Prepare(first).Succeeded(),"prepare valid graph");
+    hs::GraphExecutionStats prepare_cpu;
+    prepare_cpu.cpu_plan_us = 123;
+    prepare_cpu.cpu_prepare_validation_us = prepare_cpu.cpu_prepare_info_key_us = UINT64_MAX;
+    prepare_cpu.cpu_prepare_compile_us = prepare_cpu.cpu_prepare_transient_us = UINT64_MAX;
+    const auto prepare_begin = std::chrono::steady_clock::now();
+    Check(graph.Prepare(first, &prepare_cpu).Succeeded(),"prepare valid graph with optional CPU attribution");
+    const auto prepare_wall_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - prepare_begin).count();
+    const auto attributed_us = prepare_cpu.cpu_prepare_validation_us + prepare_cpu.cpu_prepare_info_key_us +
+        prepare_cpu.cpu_prepare_compile_us + prepare_cpu.cpu_prepare_transient_us;
+    Check(prepare_cpu.cpu_plan_us == 0 && attributed_us <= static_cast<std::uint64_t>(prepare_wall_us),
+          "Prepare clears stale output and reports only nested completed wall intervals");
+    Check(!called && graph.CompiledPassId(0) == 0 && graph.CompiledPassId(1) == 1,
+          "CPU attribution preserves validation-before-recording and compiled order");
     Check(graph.Resolve(storage)!=nullptr,"buffer allocation");
     auto *native=graph.Resolve(texture); Check(native && native!=graph.Resolve(other) && !graph.Resolve(unused),"distinct claims and unused allocation");
     Check(graph.Execute(f.commands.Get(),enhanced,mode).Succeeded()&&called,"execute valid graph"); f.Submit();
@@ -380,7 +466,14 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     first.ResetClaims();
     graph.Reset();texture=graph.CreateTexture(desc,"uninitialized");auto invalid=graph.AddPass(0,"invalid",hs::QueueHint::Direct);
     invalid.Read(graph.Version(texture),hs::Access::ComputeRead);invalid.SetExecute([&](auto &){throw std::runtime_error("invalid callback executed");});
-    Check(!graph.Prepare(first).Succeeded()&&!graph.Resolve(texture),"reject first read");
+    prepare_cpu.cpu_plan_us = 123;
+    prepare_cpu.cpu_prepare_validation_us = prepare_cpu.cpu_prepare_info_key_us = UINT64_MAX;
+    prepare_cpu.cpu_prepare_compile_us = prepare_cpu.cpu_prepare_transient_us = UINT64_MAX;
+    Check(!graph.Prepare(first, &prepare_cpu).Succeeded()&&!graph.Resolve(texture),"reject first read");
+    Check(prepare_cpu.cpu_plan_us == 0 && prepare_cpu.cpu_prepare_validation_us == 0 &&
+          prepare_cpu.cpu_prepare_info_key_us == 0 && prepare_cpu.cpu_prepare_compile_us == 0 &&
+          prepare_cpu.cpu_prepare_transient_us == 0,
+          "failed preparation leaves no stale or partially published CPU timing output");
     Check(!graph.Execute(f.commands.Get(),enhanced,mode).Succeeded(),"execute requires prepared graph");
     graph.Reset();texture=graph.CreateTexture(desc,"uninitialized read write");auto read_write=graph.AddPass(0,"read write",hs::QueueHint::Direct);
     (void)read_write.ReadWrite(graph.Version(texture),hs::Access::UnorderedWrite);read_write.SetExecute([](auto &){});
@@ -533,6 +626,7 @@ int main(int argc, char **argv)
 {
     try
     {
+        BatchResourceMembership();
         const bool hardware = argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware); Run(fixture,hs::BarrierMode::Legacy,nullptr);
         std::puts("Legacy range/readback checks passed.");

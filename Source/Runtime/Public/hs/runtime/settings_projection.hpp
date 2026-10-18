@@ -86,14 +86,10 @@ inline void ApplyGraphicsPreset(GraphicsSettings &graphics)
 #define HS_GRAPHICS_SETTING(id, name, field, type, kind, default_value, default_token, minimum, maximum, group, label_key) ApplyPresetQuality(graphics.field, quality);
 #include <hs/core/graphics_settings.def>
 #undef HS_GRAPHICS_SETTING
-    const bool rt = preset == GraphicsPreset::UltraRT;
-    graphics.ao_mode = rt ? GraphicsAoMode::Auto : GraphicsAoMode::GTAO;
-    graphics.gi_mode = rt ? GraphicsGiMode::RayTraced
-        : preset == GraphicsPreset::Ultra ? GraphicsGiMode::SoftwareHybrid : GraphicsGiMode::Probe;
-    graphics.reflection_mode = rt ? GraphicsReflectionMode::HybridRT
-        : preset == GraphicsPreset::Low ? GraphicsReflectionMode::Probe : GraphicsReflectionMode::ScreenSpace;
-    graphics.shadow_mode = rt ? GraphicsShadowMode::HybridRT : GraphicsShadowMode::Raster;
-    graphics.ray_tracing_enabled = rt;
+    graphics.ao_mode = GraphicsAoMode::GTAO;
+    graphics.gi_mode = preset == GraphicsPreset::Ultra ? GraphicsGiMode::SoftwareHybrid : GraphicsGiMode::Probe;
+    graphics.reflection_mode = preset == GraphicsPreset::Low ? GraphicsReflectionMode::Probe : GraphicsReflectionMode::ScreenSpace;
+    graphics.shadow_mode = GraphicsShadowMode::Raster;
     if (preset == GraphicsPreset::Low) graphics.volumetric_quality = GraphicsOptionalQuality::Off;
 }
 

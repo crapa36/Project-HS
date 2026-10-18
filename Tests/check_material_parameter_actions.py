@@ -23,7 +23,10 @@ def digest(path: Path) -> str:
 
 
 def copy_source_tree(repo: Path, destination: Path, material_names: tuple[str, ...]) -> None:
-    for relative in ("Schemas/material_graph.schema.json",):
+    for relative in ("Schemas/material_graph.schema.json",
+                     "Source/RenderData/Public/hs/render_data/material_schema.hpp",
+                     "Source/Apps/AssetPipeline/render_shader_bindings.hpp",
+                     "Source/Apps/AssetPipeline/render_shader_binding_inputs.hpp"):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(repo / relative, target)
@@ -179,6 +182,28 @@ def assert_default_separation(build: Path, name: str, baseline: dict[str, dict],
                 raise AssertionError(f"{name}: {kind} product changed: {logical_id}")
 
 
+def assert_hierarchy_cache_repairs_corrupt_page(package_exe: Path, source: Path,
+                                              build: Path, expected: dict) -> None:
+    before = snapshot_products(build, expected)
+    page = next(product for product in expected["products"]
+                if product["logical_id"].startswith("render/hierarchy/rock_0/")
+                and product["logical_id"].endswith(".rpage"))
+    path = build / page["locator"]
+    damaged = bytearray(path.read_bytes())
+    damaged[-1] ^= 1
+    # Upstream fixture files may be hard-linked. Replace this path instead of
+    # modifying a shared inode belonging to the authoritative cooked tree.
+    replacement = path.with_name(path.name + ".invalid")
+    replacement.write_bytes(damaged)
+    os.replace(replacement, path)
+    run(package_exe, "--name", "rock_0", "--source-root", str(source), "--build-root", str(build))
+    restored = read_result(build, "render/rock_0")
+    if restored["action_key"] != expected["action_key"] or restored["product_set_id"] != expected["product_set_id"]:
+        raise AssertionError("hierarchy repair changed the unchanged recipe or product identity")
+    if snapshot_products(build, restored) != before:
+        raise AssertionError("hierarchy cache accepted corruption or changed healthy sibling products")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shader-exe", required=True, type=Path)
@@ -235,7 +260,8 @@ def main() -> None:
                 if key not in material_relatives
         }:
             raise AssertionError("producer modified fixture source inputs")
-        print("PASS: terrain and rock_0 defaults changed only parameter products")
+        assert_hierarchy_cache_repairs_corrupt_page(args.package_exe.resolve(), source, build, changed["rock_0"]["package"])
+        print("PASS: terrain/rock_0 default separation and corrupt hierarchy-page cache repair")
     finally:
         if args.keep:
             print(f"fixture retained at {fixture}")

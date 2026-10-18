@@ -42,6 +42,7 @@ SamplerState LinearClamp : register(s0, space17);
 // Prepare limits the radius to32. Cooperative loading keeps foreground dilation
 // from issuing one global texture read for every candidate at every pixel.
 groupshared float CoCTile[72 * 72];
+groupshared uint CoCTileMaximum;
 
 int2 OutputPixel(float2 uv)
 {
@@ -118,6 +119,14 @@ void HdrPostGuidesCS(uint3 dispatch : SV_DispatchThreadID)
         }
     }
     GuideOutput[dispatch.xy] = float4(distance, selected.yzw);
+    if (Options.w != 0u)
+    {
+        // Thin-lens circle diameter = f^2/(N*(focus-f)) * (z-focus)/z.
+        // Store signed radius in display pixels: foreground negative, far positive.
+        const float radius = 0.5 * Lens.y * Lens.y / (Lens.z * (Lens.x - Lens.y)) *
+            (distance - Lens.x) / max(distance, Lens.y) * OutputSize.x / Lens.w;
+        CoCOutput[dispatch.xy] = clamp(radius, -EffectParameters.x, EffectParameters.x);
+    }
     if (Options.x != 0u)
     {
         float2 normal = OpaqueNormal.Load(int3(selected_pixel,0));
@@ -185,34 +194,30 @@ void HdrPostMotionBlurCS(uint3 dispatch : SV_DispatchThreadID)
     ColorOutput[dispatch.xy] = float4(guide.w > 0.0 && normalization > 0.0 ? color / normalization : center, 1);
 }
 [numthreads(8, 8, 1)]
-void HdrPostCoCCS(uint3 dispatch : SV_DispatchThreadID)
-{
-    if (any(dispatch.xy >= uint2(OutputSize.xy))) return;
-    const float distance = DisplayGuide.Load(int3(dispatch.xy, 0)).x;
-    // Thin-lens circle diameter = f^2/(N*(focus-f)) * (z-focus)/z.
-    // Store signed radius in display pixels: foreground negative, far positive.
-    const float radius = 0.5 * Lens.y * Lens.y / (Lens.z * (Lens.x - Lens.y)) *
-        (distance - Lens.x) / max(distance, Lens.y) * OutputSize.x / Lens.w;
-    CoCOutput[dispatch.xy] = clamp(radius, -EffectParameters.x, EffectParameters.x);
-}
-[numthreads(8, 8, 1)]
 void HdrPostDilateCS(uint3 dispatch : SV_DispatchThreadID, uint3 group : SV_GroupID,
                      uint3 local : SV_GroupThreadID)
 {
     const int budget = int(ceil(EffectParameters.x));
     const uint tile_width = 8u + 2u * uint(budget);
     const int2 tile_origin = int2(group.xy * 8u) - budget;
+    if (local.x == 0u && local.y == 0u) CoCTileMaximum = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    float lane_maximum = 0.0;
     [loop] for (uint index = local.y * 8u + local.x; index < tile_width * tile_width; index += 64u)
     {
         const int2 pixel = tile_origin + int2(index % tile_width,index / tile_width);
         CoCTile[index] = any(pixel < 0) || any(pixel >= int2(OutputSize.xy)) ? 0.0 :
             max(-SignedCoC.Load(int3(pixel,0)),0.0);
+        lane_maximum = max(lane_maximum, CoCTile[index]);
     }
+    InterlockedMax(CoCTileMaximum, asuint(lane_maximum));
     GroupMemoryBarrierWithGroupSync();
     if (any(dispatch.xy >= uint2(OutputSize.xy))) return;
     float radius = 0.0;
-    [loop] for (int y = -budget; y <= budget; ++y)
-    [loop] for (int x = -budget; x <= budget; ++x)
+    // No source circle in this tile can reach beyond its largest radius.
+    const int search_budget = min(budget, int(ceil(asfloat(CoCTileMaximum))));
+    [loop] for (int y = -search_budget; y <= search_budget; ++y)
+    [loop] for (int x = -search_budget; x <= search_budget; ++x)
     {
         const int2 tile_pixel = int2(local.xy) + budget + int2(x,y);
         const float near_radius = CoCTile[uint(tile_pixel.y) * tile_width + uint(tile_pixel.x)];
@@ -229,6 +234,7 @@ void HdrPostDoFCS(uint3 dispatch : SV_DispatchThreadID)
     const float center_depth = DisplayGuide.Load(int3(dispatch.xy, 0)).x;
     const float3 center = FiniteRadiance(SourceHdr.Load(int3(dispatch.xy, 0)).rgb);
     const float gather_radius = max(max(center_coc, 0.0), ForegroundRadius.Load(int3(dispatch.xy, 0)));
+    if (gather_radius == 0.0) { ColorOutput[dispatch.xy] = float4(center, 1); return; }
     float3 near_color = 0.0, far_color = 0.0;
     float near_weight = 0.0, far_weight = 0.0, near_coverage = 0.0;
     const uint taps = 32u;

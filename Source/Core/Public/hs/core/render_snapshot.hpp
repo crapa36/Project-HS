@@ -147,7 +147,18 @@ enum class RenderMesh : std::uint8_t
     Rock,
     Grass,
     DirtPatch,
+    GroundDetail,
+    MeadowSurface,
 };
+
+inline constexpr std::uint32_t kGroundDetailVariantCount = 14;
+
+[[nodiscard]] constexpr bool HasEnvironmentWind(RenderMesh mesh, std::uint32_t variant) noexcept
+{
+    return mesh == RenderMesh::Grass ||
+        (mesh == RenderMesh::GroundDetail && (variant <= 3u || variant == 7u));
+}
+
 
 struct RenderInstance
 {

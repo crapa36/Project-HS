@@ -57,11 +57,37 @@ bool Requested(uint entry)
 {
     return entry != 0xffffffffu && (Requests.Load((entry >> 5u) * 4u) & (1u << (entry & 31u))) != 0u;
 }
+// Pop in ascending bit order; callers guard unused bits in the last word.
+uint PopRequestedEntry(uint word, inout uint mask)
+{
+    const uint entry = word * 32u + uint(firstbitlow(mask));
+    mask &= mask - 1u;
+    return entry;
+}
+// Cache the common 36-word map without reserving shared memory for every supported profile.
+groupshared uint FeedbackRequests[64];
+void BeginFeedbackRequests(uint lane)
+{
+    FeedbackRequests[lane] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+}
 void Request(uint entry)
 {
     if (entry == 0xffffffffu) return;
+    const uint word = entry >> 5u, mask = 1u << (entry & 31u);
     uint ignored;
-    Requests.InterlockedOr((entry >> 5u) * 4u, 1u << (entry & 31u), ignored);
+    if (word < 64u) InterlockedOr(FeedbackRequests[word], mask, ignored);
+    else Requests.InterlockedOr(word * 4u, mask, ignored);
+}
+void FlushFeedbackRequests(uint lane)
+{
+    GroupMemoryBarrierWithGroupSync();
+    const uint mask = FeedbackRequests[lane];
+    if (mask != 0u)
+    {
+        uint ignored;
+        Requests.InterlockedOr(lane * 4u, mask, ignored);
+    }
 }
 bool SphereOverlaps(float4 sphere, PageEntry page)
 {
@@ -108,9 +134,10 @@ void InitCS(uint3 tid : SV_DispatchThreadID)
     }
 }
 [numthreads(8, 8, 1)]
-void FeedbackCS(uint3 tid : SV_DispatchThreadID)
+void FeedbackCS(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
 {
     if (Options.y == 0u) return;
+    BeginFeedbackRequests(lane);
     if (tid.x < Limits.z && tid.y < Limits.w)
     {
         const float depth = ReceiverDepth.Load(int3(tid.xy, 0));
@@ -143,25 +170,31 @@ void FeedbackCS(uint3 tid : SV_DispatchThreadID)
     if (receiver < Counts.y)
     {
         const Receiver box = Receivers[receiver];
-        float2 lower = 3.402823e38, upper = -3.402823e38;
-        [unroll] for (uint corner = 0; corner < 8; ++corner)
+        // Depth-only bounds still participate in the CPU's stable Z interval.
+        // Keep all lanes in Begin/FlushFeedbackRequests, including these receivers.
+        if (box.minimum.w == 0.0)
         {
-            const float3 p = float3((corner & 1u) ? box.maximum.x : box.minimum.x,
-                (corner & 2u) ? box.maximum.y : box.minimum.y,
-                (corner & 4u) ? box.maximum.z : box.minimum.z);
-            const float2 projected = LightPosition(p).xy;
-            lower = min(lower, projected); upper = max(upper, projected);
-        }
-        // Request every overlapping level; transparent fragments and froxels can
-        // later select any valid resident level at their own world position.
-        [unroll] for (uint level = 0; level < 3; ++level)
-        {
-            const int2 first = max(int2(floor(lower / Clipmaps[level].x)), Windows[level].xy);
-            const int2 last = min(int2(floor(upper / Clipmaps[level].x)), Windows[level].xy + Windows[level].z - 1);
-            for (int y = first.y; y <= last.y; ++y)
-                for (int x = first.x; x <= last.x; ++x) Request(EntryForKey(int2(x, y), level));
+            float2 lower = 3.402823e38, upper = -3.402823e38;
+            [unroll] for (uint corner = 0; corner < 8; ++corner)
+            {
+                const float3 p = float3((corner & 1u) ? box.maximum.x : box.minimum.x,
+                    (corner & 2u) ? box.maximum.y : box.minimum.y,
+                    (corner & 4u) ? box.maximum.z : box.minimum.z);
+                const float2 projected = LightPosition(p).xy;
+                lower = min(lower, projected); upper = max(upper, projected);
+            }
+            // Request every overlapping level; transparent fragments and froxels can
+            // later select any valid resident level at their own world position.
+            [unroll] for (uint level = 0; level < 3; ++level)
+            {
+                const int2 first = max(int2(floor(lower / Clipmaps[level].x)), Windows[level].xy);
+                const int2 last = min(int2(floor(upper / Clipmaps[level].x)), Windows[level].xy + Windows[level].z - 1);
+                for (int y = first.y; y <= last.y; ++y)
+                    for (int x = first.x; x <= last.x; ++x) Request(EntryForKey(int2(x, y), level));
+            }
         }
     }
+    FlushFeedbackRequests(lane);
 }
 bool KeyEqual(PageEntry a, PageEntry b)
 {
@@ -199,39 +232,46 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
     if (tid.x != 0u) return;
     if (Options.y == 0u) return;
     uint free_cursor = 0u;
-    for (uint entry = 0; entry < Counts.z; ++entry)
+    // Requests are immutable here. Preserve ascending entry/allocation order,
+    // while reading each request word once and skipping its unrequested pages.
+    for (uint word = 0u; word < Frame.z; ++word)
     {
-        if (!Requested(entry)) continue;
-        PageEntry page = PageTable[entry];
-        uint physical = page.physical;
-        if (physical == 0xffffffffu)
+        uint mask = Requests.Load(word * 4u);
+        while (mask != 0u)
         {
-            for (; free_cursor < Counts.w; ++free_cursor)
+            const uint entry = PopRequestedEntry(word, mask);
+            if (entry >= Counts.z) continue;
+            PageEntry page = PageTable[entry];
+            uint physical = page.physical;
+            if (physical == 0xffffffffu)
             {
-                const uint p = free_cursor;
-                const PageEntry old = Residents[p];
-                // Do not evict a resident requested anywhere in this frame.
-                const uint old_entry = old.epoch == Identity.w
-                    ? EntryForKey(int2(old.x, old.y), old.level) : 0xffffffffu;
-                if (!Requested(old_entry)) { physical = p; ++free_cursor; break; }
+                for (; free_cursor < Counts.w; ++free_cursor)
+                {
+                    const uint p = free_cursor;
+                    const PageEntry old = Residents[p];
+                    // Do not evict a resident requested anywhere in this frame.
+                    const uint old_entry = old.epoch == Identity.w
+                        ? EntryForKey(int2(old.x, old.y), old.level) : 0xffffffffu;
+                    if (!Requested(old_entry)) { physical = p; ++free_cursor; break; }
+                }
+                if (physical == 0xffffffffu) continue; // budget: remains invalid
+                PageEntry resident = page; resident.physical = physical; resident.flags = 0u;
+                Residents[physical] = resident;
             }
-            if (physical == 0xffffffffu) continue; // budget: remains invalid
-            PageEntry resident = page; resident.physical = physical; resident.flags = 0u;
-            Residents[physical] = resident;
-        }
-        page.physical = physical;
-        page.flags = 1u | 4u;
-        if ((Residents[physical].flags & 32u) == 0u) page.flags |= 2u;
-        PageTable[entry] = page;
-        for (uint layer = 0; layer < 2; ++layer)
-        {
-            if (layer == 0u && (page.flags & 2u) == 0u) continue;
-            const uint count_offset = (Frame.w + layer) * 4u;
-            const uint slot = CommandCounts.Load(count_offset);
-            CommandCounts.Store(count_offset, slot + 1u);
-            const uint offset = (layer * Counts.w + slot) * 20u;
-            ClearCommands.Store(offset, entry);
-            ClearCommands.Store4(offset + 4u, uint4(3u, 1u, 0u, 0u));
+            page.physical = physical;
+            page.flags = 1u | 4u;
+            if ((Residents[physical].flags & 32u) == 0u) page.flags |= 2u;
+            PageTable[entry] = page;
+            for (uint layer = 0; layer < 2; ++layer)
+            {
+                if (layer == 0u && (page.flags & 2u) == 0u) continue;
+                const uint count_offset = (Frame.w + layer) * 4u;
+                const uint slot = CommandCounts.Load(count_offset);
+                CommandCounts.Store(count_offset, slot + 1u);
+                const uint offset = (layer * Counts.w + slot) * 20u;
+                ClearCommands.Store(offset, entry);
+                ClearCommands.Store4(offset + 4u, uint4(3u, 1u, 0u, 0u));
+            }
         }
     }
 }
@@ -243,31 +283,8 @@ bool DrawCandidate(PageEntry page, Caster caster, out uint layer, out uint segme
         (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
     return SphereOverlaps(caster.current_bounds, page);
 }
-[numthreads(64, 1, 1)]
-void CullCS(uint3 tid : SV_DispatchThreadID)
+void CullPageCaster(uint entry, uint caster_index)
 {
-    // The existing b1 root constant selects count0, admission1, scatter2.
-    if (ClearEntry == 1u)
-    {
-        const uint segment = tid.x;
-        if (segment >= Frame.w) return;
-        uint remaining = Options.z;
-        for (uint entry = 0u; entry < Counts.z; ++entry)
-        {
-            const uint count = PageDrawCounts.Load(PageDrawCountOffset(entry, segment));
-            if (count > remaining)
-            {
-                uint ignored;
-                InterlockedOr(PageTable[entry].flags, 8u, ignored);
-            }
-            else remaining -= count;
-        }
-        // Never read peer-written flags while reserving: every segment's page
-        // decisions depend only on its counts and ascending entry order.
-        return;
-    }
-    if (tid.x >= Counts.x || tid.y >= Counts.z) return;
-    const uint entry = tid.y, caster_index = tid.x;
     const PageEntry page = PageTable[entry];
     // Reject the whole page before fetching its per-caster data.
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u) return;
@@ -306,6 +323,44 @@ void CullCS(uint3 tid : SV_DispatchThreadID)
     }
     else MeshCommands.Store4(record_index * 16u,
         uint4(0x80000000u | record_index, caster.properties.y, 1u, 1u));
+}
+[numthreads(64, 1, 1)]
+void CullCS(uint3 tid : SV_DispatchThreadID)
+{
+    // The existing b1 root constant selects count0, admission1, scatter2.
+    if (ClearEntry == 1u)
+    {
+        const uint segment = tid.x;
+        if (segment >= Frame.w) return;
+        uint remaining = Options.z;
+        for (uint word = 0u; word < Frame.z; ++word)
+        {
+            uint mask = Requests.Load(word * 4u);
+            while (mask != 0u)
+            {
+                const uint entry = PopRequestedEntry(word, mask);
+                if (entry >= Counts.z) continue;
+                const uint count = PageDrawCounts.Load(PageDrawCountOffset(entry, segment));
+                if (count > remaining)
+                {
+                    uint ignored;
+                    InterlockedOr(PageTable[entry].flags, 8u, ignored);
+                }
+                else remaining -= count;
+            }
+        }
+        // Never read peer-written flags while reserving: every segment's page
+        // decisions depend only on its counts and ascending entry order.
+        return;
+    }
+    if (tid.x >= Counts.x || tid.y >= Frame.z) return;
+    // Skip unrequested pages without scheduling a caster grid for each page.
+    uint mask = Requests.Load(tid.y * 4u);
+    while (mask != 0u)
+    {
+        const uint entry = PopRequestedEntry(tid.y, mask);
+        if (entry < Counts.z) CullPageCaster(entry, tid.x);
+    }
 }
 [numthreads(64, 1, 1)]
 void PublishCS(uint3 tid : SV_DispatchThreadID)

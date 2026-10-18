@@ -210,39 +210,27 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     light_range.NumDescriptors = 6;
     light_range.RegisterSpace = 19;
     light_range.OffsetInDescriptorsFromTableStart = kLightListDescriptorOffset - kTemporalTextureDescriptorOffset;
-    const D3D12_DESCRIPTOR_RANGE1 ray_ranges[]{
+    const D3D12_DESCRIPTOR_RANGE1 scene_geometry_ranges[]{
         {D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 20,
             D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kRayDescriptorOffset - kTemporalTextureDescriptorOffset},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 15, 0, 20,
+            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 20,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0, 20,
+            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 14, 20,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayDescriptorOffset - kTemporalTextureDescriptorOffset + 16}};
+            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 2},
+        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 20,
+            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+            kSceneGeometryDescriptorOffset - kTemporalTextureDescriptorOffset + 3}};
     const std::array history_geometry_ranges{
         temporal_input_range, geometry_range, surface_range,
         visibility_srv_range, visibility_uav_range, material_parameter_range,
         view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, monster_skin_range, ambient_range, hero_binding_range, probe_range, light_range,
-        ray_ranges[0], ray_ranges[1], ray_ranges[2],
+        scene_geometry_ranges[0], scene_geometry_ranges[1], scene_geometry_ranges[2], scene_geometry_ranges[3],
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 22,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kRayTransportDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 26, 0, 22,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayTransportDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 11, 0, 22,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayTransportDescriptorOffset - kTemporalTextureDescriptorOffset + 27},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 26,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayTransportDescriptorOffset - kTemporalTextureDescriptorOffset + 38},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 5, 0, 26,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayTransportDescriptorOffset - kTemporalTextureDescriptorOffset + 40},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 23,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kLocalProbeDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -264,30 +252,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLocalShadowDescriptorCount, 0, 27,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kLocalShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 28,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kRayShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 14, 0, 28,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayShadowDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 9, 0, 28,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayShadowDescriptorOffset - kTemporalTextureDescriptorOffset + 15},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 14, 28,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayShadowDescriptorOffset - kTemporalTextureDescriptorOffset + 24},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kRayShadowExportCount, 0, 29,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayShadowExportDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 30,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
-            kRayReconstructionDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 7, 0, 30,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayReconstructionDescriptorOffset - kTemporalTextureDescriptorOffset + 1},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 15, 0, 30,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
-            kRayReconstructionDescriptorOffset - kTemporalTextureDescriptorOffset + 8},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 31,
             D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,
             kBrixelizerDescriptorOffset - kTemporalTextureDescriptorOffset},
@@ -517,7 +481,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> scene_pixel;
     std::vector<std::byte> hero_scene_pixel, hero_visibility_pixel, hero_shadow_pixel;
     std::vector<std::byte> hero_resolve_compute, hero_translucent_pixel;
-    std::vector<std::byte> environment_opaque_pixel;
     std::array<std::vector<std::byte>, kAuthoredMaterialNames.size()> material_scene_pixels;
     std::array<std::vector<std::byte>, kAuthoredMaterialNames.size()> material_shadow_pixels;
     std::vector<std::byte> visibility_pixel;
@@ -526,11 +489,9 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> surface_resolve_compute;
     std::array<std::vector<std::byte>, kAuthoredMaterialNames.size()>
         material_resolve_compute;
-    std::vector<std::byte> environment_masked_pixel;
     std::vector<std::byte> shadow_vertex;
     std::vector<std::byte> shadow_pixel;
     std::vector<std::byte> environment_opaque_shadow_pixel;
-    std::vector<std::byte> environment_masked_shadow_pixel;
     std::vector<std::byte> particle_vertex;
     std::vector<std::byte> ground_ring_vertex;
     std::vector<std::byte> ground_add_pixel;
@@ -581,7 +542,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
              std::pair{"shadow_vs.dxil", &shadow_vertex},
              std::pair{"shadow_ps.dxil", &shadow_pixel},
              std::pair{"environment_opaque_shadow_ps.dxil", &environment_opaque_shadow_pixel},
-             std::pair{"environment_masked_shadow_ps.dxil", &environment_masked_shadow_pixel},
              std::pair{"particle_vs.dxil", &particle_vertex},
               std::pair{"ground_ring_vs.dxil", &ground_ring_vertex},
               std::pair{"ground_add_ps.dxil", &ground_add_pixel},
@@ -650,16 +610,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (auto read = read_shader("archer_skin_resolve.dxil", hero_resolve_compute); !read) return read;
     }
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
-    {
-        for (auto [name, bytes] : {
-                 std::pair{"scene_ps.dxil", &scene_pixel},
-                 std::pair{"environment_opaque_ps.dxil", &environment_opaque_pixel},
-                 std::pair{"environment_masked_ps.dxil", &environment_masked_pixel}})
-        {
-            if (auto read = read_shader(name, *bytes); !read)
-                return read;
-        }
-    }
+        if (auto read = read_shader("scene_ps.dxil", scene_pixel); !read) return read;
     for (std::size_t i = 0; i < kAuthoredMaterialNames.size(); ++i)
     {
         const std::string base = "render/shader/" +
@@ -829,21 +780,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (auto created = create_mesh_pair(scene, scene_pipeline.Get(), scene_mesh); !created)
             return created;
 
-        auto environment_scene = scene;
-        environment_scene.PS = {environment_opaque_pixel.data(), environment_opaque_pixel.size()};
-        environment_scene.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-        result = pipeline_cache.CreateGraphics(
-            &environment_scene, IID_PPV_ARGS(&environment_opaque_scene_pipeline));
-        if (FAILED(result)) return HResultFailure("Create opaque environment scene PSO", result);
-        if (auto created = create_mesh_pair(environment_scene,
-                environment_opaque_scene_pipeline.Get(), scene_mesh); !created) return created;
-        environment_scene.PS = {environment_masked_pixel.data(), environment_masked_pixel.size()};
-        environment_scene.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        result = pipeline_cache.CreateGraphics(
-            &environment_scene, IID_PPV_ARGS(&environment_masked_scene_pipeline));
-        if (FAILED(result)) return HResultFailure("Create masked environment scene PSO", result);
-        if (auto created = create_mesh_pair(environment_scene,
-                environment_masked_scene_pipeline.Get(), scene_mesh); !created) return created;
     }
 
     auto shadow_state = scene;
@@ -873,14 +809,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (FAILED(result)) return HResultFailure("Create opaque environment shadow PSO", result);
     if (auto created = create_mesh_pair(environment_shadow,
             environment_opaque_shadow_pipeline.Get(), shadow_mesh); !created) return created;
-    environment_shadow.PS = {environment_masked_shadow_pixel.data(),
-                             environment_masked_shadow_pixel.size()};
-    environment_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    result = create_shadow_graphics(
-        &environment_shadow, IID_PPV_ARGS(&environment_masked_shadow_pipeline));
-    if (FAILED(result)) return HResultFailure("Create masked environment shadow PSO", result);
-    if (auto created = create_mesh_pair(environment_shadow,
-            environment_masked_shadow_pipeline.Get(), shadow_mesh); !created) return created;
     for (std::size_t i = 0; i < kAuthoredMaterialNames.size(); ++i)
     {
         const std::string_view name = kAuthoredMaterialNames[i];
@@ -892,6 +820,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
             continue;
         }
         auto material_shadow = environment_shadow;
+        material_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         material_shadow.PS = {material_shadow_pixels[i].data(),
                               material_shadow_pixels[i].size()};
         result = create_shadow_graphics(
@@ -916,7 +845,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (FAILED(result)) return HResultFailure("Create cluster shadow PSO", result);
     }
     auto hero_shadow = environment_shadow;
-    hero_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    // HeroShadowPS discards backfaces; cull them before pixel shading.
+    hero_shadow.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
     hero_shadow.PS = {hero_shadow_pixel.data(), hero_shadow_pixel.size()};
     result = create_shadow_graphics(&hero_shadow, IID_PPV_ARGS(&hero_shadow_pipeline));
     if (FAILED(result)) return HResultFailure("Create hero shadow PSO", result);
@@ -924,7 +854,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (config.surface_frontend == SurfaceFrontend::CompactDeferred)
     {
         auto hero_scene = scene;
-        hero_scene.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        // HeroScenePS discards backfaces; cull them before pixel shading.
+        hero_scene.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
         hero_scene.PS = {hero_scene_pixel.data(), hero_scene_pixel.size()};
         result = pipeline_cache.CreateGraphics(&hero_scene, IID_PPV_ARGS(&hero_scene_pipeline));
         if (FAILED(result)) return HResultFailure("Create hero surface PSO", result);
@@ -1487,19 +1418,8 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         return prepared;
     if (auto prepared = PrepareHdrPost(candidate_config, view_state.render_capacity,
             {width, height}, hdr_post); !prepared) return prepared;
-    RayGeometryCandidate ray_geometry;
-    RayAmbientOcclusionCandidate ray_ambient;
-    RayTransportCandidate ray_transport;
-    RayOmmCandidate ray_omm;
-    RaySceneCandidate ray_scene;
-    if (auto prepared = PrepareRayOmm(candidate_config, ray_omm); !prepared) return prepared;
-    if (auto prepared = PrepareRayScene(candidate_config, ray_scene); !prepared) return prepared;
-    RayReconstructionCandidate ray_reconstruction;
-    if (auto prepared = PrepareRayEffects(candidate_config, view_state.render_capacity,
-            ray_geometry, ray_ambient, ray_transport, RayReconstructionModeFor(candidate_config)); !prepared) return prepared;
-    if (auto prepared = PrepareRayReconstruction(candidate_config, view_state.render_capacity,
-            {width, height}, ray_reconstruction); !prepared) return prepared;
-    if (auto prepared = ValidateRayReconstructionBudget(ray_reconstruction); !prepared) return prepared;
+    SceneGeometryCandidate scene_geometry;
+    if (auto prepared = PrepareSceneGeometry(candidate_config, scene_geometry); !prepared) return prepared;
     BrixelizerCandidate brixelizer;
     if (auto prepared = PrepareBrixelizerGi(candidate_config, view_state.render_active, brixelizer); !prepared) return prepared;
     VirtualShadowCandidate virtual_shadows;
@@ -1551,10 +1471,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
     auto previous_root = std::move(root_signature);
     auto previous_scene = std::move(scene_pipeline);
     auto previous_shadow = std::move(shadow_pipeline);
-    auto previous_environment_opaque_scene = std::move(environment_opaque_scene_pipeline);
-    auto previous_environment_masked_scene = std::move(environment_masked_scene_pipeline);
     auto previous_environment_opaque_shadow = std::move(environment_opaque_shadow_pipeline);
-    auto previous_environment_masked_shadow = std::move(environment_masked_shadow_pipeline);
     auto previous_material_scenes = std::move(environment_material_scene_pipelines);
     std::array previous_heroes{std::move(hero_scene_pipeline), std::move(hero_visibility_pipeline),
         std::move(hero_shadow_pipeline), std::move(hero_resolve_pipeline), std::move(hero_translucent_pipeline)};
@@ -1639,10 +1556,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         root_signature = std::move(previous_root);
         scene_pipeline = std::move(previous_scene);
         shadow_pipeline = std::move(previous_shadow);
-        environment_opaque_scene_pipeline = std::move(previous_environment_opaque_scene);
-        environment_masked_scene_pipeline = std::move(previous_environment_masked_scene);
         environment_opaque_shadow_pipeline = std::move(previous_environment_opaque_shadow);
-        environment_masked_shadow_pipeline = std::move(previous_environment_masked_shadow);
         environment_material_scene_pipelines = std::move(previous_material_scenes);
         hero_scene_pipeline = std::move(previous_heroes[0]);
         hero_visibility_pipeline = std::move(previous_heroes[1]);
@@ -1735,17 +1649,7 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = this->light_list.Commit(std::move(light_list), completed); !committed)
         { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_omm.Commit(std::move(ray_omm), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_scene.Commit(std::move(ray_scene), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_geometry.Commit(std::move(ray_geometry), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_ambient_occlusion.Commit(std::move(ray_ambient), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_transport.Commit(std::move(ray_transport), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->ray_reconstruction.Commit(std::move(ray_reconstruction), completed); !committed)
+        if (auto committed = this->scene_geometry.Commit(std::move(scene_geometry), completed); !committed)
         { frame_submission_faulted = true; return committed; }
         if (auto committed = brixelizer_gi.Commit(std::move(brixelizer), completed); !committed)
         { frame_submission_faulted = true; return committed; }

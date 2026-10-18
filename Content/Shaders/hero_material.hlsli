@@ -2,9 +2,9 @@
 #define HS_HERO_MATERIAL_HLSLI
 
 #include "material_surface.hlsli"
+#include "render_binding_contract.hlsli"
 
 static const uint HsHeroMaterialIdBase = 0x20000000u;
-static const uint HsHeroMaterialCount = 7u;
 static const uint HsHeroInvalidOrdinal = 0xffffffffu;
 
 // Each authored FBX slot has an opaque ordinal and an optional transparent
