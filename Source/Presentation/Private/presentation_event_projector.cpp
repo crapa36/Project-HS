@@ -1,4 +1,5 @@
 #include <hs/presentation/projector.hpp>
+#include <hs/presentation/meadow_surface.hpp>
 
 #include <array>
 #include <cstdint>
@@ -49,6 +50,11 @@ void AddAudio(const DomainSignal &s, std::span<PresentationEvent> out, std::size
 PresentationGeometry ProjectGeometry(const DomainSignal &s) noexcept
 {
     PresentationGeometry geometry{};
+    if (s.kind == DomainSignalKind::BossDied || s.kind == DomainSignalKind::BossPhaseChanged)
+    {
+        geometry.source_id = s.source_entity_id;
+        return geometry;
+    }
     if (s.kind == DomainSignalKind::BleedTicked ||
         s.kind == DomainSignalKind::BurnTicked)
     {
@@ -62,6 +68,7 @@ PresentationGeometry ProjectGeometry(const DomainSignal &s) noexcept
     case DomainSignalGeometryKind::Cone: geometry.kind = PresentationGeometryKind::Cone; break;
     case DomainSignalGeometryKind::RingGaps: geometry.kind = PresentationGeometryKind::RingGaps; break;
     case DomainSignalGeometryKind::Projectile: geometry.kind = PresentationGeometryKind::Projectile; break;
+    case DomainSignalGeometryKind::EntityAttachment: geometry.kind = PresentationGeometryKind::EntityAttachment; break;
     case DomainSignalGeometryKind::None: geometry.kind = PresentationGeometryKind::None; break;
     }
     geometry.radius = s.geometry.radius;
@@ -93,8 +100,20 @@ void AddVfx(const DomainSignal &s, std::span<PresentationEvent> out, std::size_t
 }
 }
 
-std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEvent> out) noexcept
+std::size_t ProjectDomainSignal(const DomainSignal &source, std::span<PresentationEvent> out,
+                                float arena_half_extent) noexcept
 {
+    auto s = source;
+    if (arena_half_extent >= 14.0f)
+    {
+        s.position.y += MeadowGroundHeight({s.position.x, s.position.z});
+        if ((s.flags & static_cast<std::uint8_t>(DomainSignalFlag::HasTarget)) != 0)
+            s.target.y += MeadowGroundHeight({s.target.x, s.target.z});
+        if (s.geometry.kind == DomainSignalGeometryKind::Line ||
+            s.geometry.kind == DomainSignalGeometryKind::Projectile)
+            s.geometry.end_position.y += MeadowGroundHeight(
+                {s.geometry.end_position.x, s.geometry.end_position.z});
+    }
     if (out.empty()) return 0;
     std::size_t n = 0;
     if (s.kind == DomainSignalKind::BossSpawnWarning || s.kind == DomainSignalKind::EnemySpawnWarning)
@@ -164,7 +183,9 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::RicochetLinked: AddAudio(s,out,n,"audio.skill.ricochet.bounce"); break;
     case DomainSignalKind::HealCollected: AddAudio(s,out,n,"audio.pickup.heal"); break;
     case DomainSignalKind::MagnetCollected: AddAudio(s,out,n,"audio.pickup.magnet"); break;
-    case DomainSignalKind::RelicCollected: AddAudio(s,out,n,"audio.pickup.relic_chest"); break;
+    case DomainSignalKind::RelicCollected:
+        AddVfx(s,out,n,"particle.pickup.relic_chest.open");
+        AddAudio(s,out,n,"audio.pickup.relic_chest"); break;
     case DomainSignalKind::ExperienceCollected: AddVfx(s,out,n,"particle.pickup.xp_collect"); AddAudio(s,out,n,"audio.pickup.xp_collect"); break;
     case DomainSignalKind::BleedBurnExploded: AddAudio(s,out,n,"audio.relic.bleed_burn_explosion"); break;
     case DomainSignalKind::CombatChainHit: AddAudio(s,out,n,"audio.relic.combat_chain"); break;
@@ -180,7 +201,9 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::ExplosiveArrowSecondary: AddAudio(s,out,n,"audio.skill.explosive.secondary"); break;
     case DomainSignalKind::MultiShotCast: AddAudio(s,out,n,"audio.skill.multishot.release"); break;
     case DomainSignalKind::PiercingShotCast: AddAudio(s,out,n,"audio.skill.piercing.release"); break;
-    case DomainSignalKind::RetreatShotCast: AddAudio(s,out,n,"audio.skill.retreat.cast"); break;
+    case DomainSignalKind::RetreatShotCast:
+        AddVfx(s,out,n,"particle.upgrade.retreat.start_burst");
+        AddAudio(s,out,n,"audio.skill.retreat.cast"); break;
     case DomainSignalKind::RetreatLanded: AddAudio(s,out,n,"audio.skill.retreat.land"); AddAudio(s,out,n,"audio.player.land"); break;
     case DomainSignalKind::RetreatMoved: AddAudio(s,out,n,"audio.skill.retreat.move"); AddAudio(s,out,n,"audio.player.move_whoosh"); break;
     case DomainSignalKind::RicochetArrowCast: AddAudio(s,out,n,"audio.skill.ricochet.release"); break;
@@ -220,6 +243,39 @@ std::size_t ProjectDomainSignal(const DomainSignal &s, std::span<PresentationEve
     case DomainSignalKind::RelicTriggered:
         if (const auto asset = RelicTriggerVfx(s.context); !asset.empty()) AddVfx(s, out, n, asset);
         break;
+    case DomainSignalKind::PickupSpawned:
+        switch (static_cast<PickupKind>(s.context))
+        {
+        case PickupKind::Heal: AddVfx(s,out,n,"particle.pickup.heal.spawn"); break;
+        case PickupKind::Magnet: AddVfx(s,out,n,"particle.pickup.magnet.spawn"); break;
+        case PickupKind::RelicChest: AddVfx(s,out,n,"particle.pickup.relic_chest.spawn"); break;
+        default: break;
+        }
+        break;
+    case DomainSignalKind::PlayerLevelUp:
+        AddVfx(s,out,n,"particle.player.level_up"); break;
+    case DomainSignalKind::PlayerStatAllocated:
+        AddVfx(s,out,n,"particle.player.stat_allocated"); break;
+    case DomainSignalKind::ChargedShotCancelled:
+        AddVfx(s,out,n,"particle.skill.charged_shot.cancel"); break;
+    case DomainSignalKind::SessionVictory:
+        AddVfx(s,out,n,"particle.session.victory"); break;
+    case DomainSignalKind::SessionDefeat:
+        AddVfx(s,out,n,"particle.session.defeat"); break;
+    case DomainSignalKind::BossDashRetargeted:
+        AddVfx(s,out,n,"particle.boss.dash.retarget_flash"); break;
+    case DomainSignalKind::BossVolleyOffsetTelegraphed:
+        AddVfx(s,out,n,"particle.boss.volley.second_offset_warning"); break;
+    case DomainSignalKind::BossAreaTicked:
+        AddVfx(s,out,n,"particle.boss.area.tick"); break;
+    case DomainSignalKind::BossShockwaveContact:
+        AddVfx(s,out,n,"particle.boss.shockwave.impact"); break;
+    case DomainSignalKind::MagnetActivated:
+        AddVfx(s,out,n,"particle.pickup.magnet.activate"); break;
+    case DomainSignalKind::PlayerHitDirection:
+        AddVfx(s,out,n,"particle.player.hit_direction"); break;
+    case DomainSignalKind::WaveStarted:
+        AddVfx(s,out,n,"particle.session.wave_start"); break;
     default: break;
     }
     return n;

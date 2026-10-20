@@ -5,10 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <queue>
 #include <span>
 #include <utility>
 #include <vector>
@@ -33,6 +33,8 @@ struct NavigationGrid
     float cell_size{1.0f};
     int width{kNavigationGridDimension};
     int height{kNavigationGridDimension};
+    // Edge costs are 10/14; fifteen buckets preserve Dijkstra's cost order.
+    std::array<std::vector<std::pair<int, int>>, 15> flow_pending;
 
     int Index(int x, int y) const noexcept { return y * width + x; }
     bool In(int x, int y) const noexcept { return x >= 0 && y >= 0 && x < width && y < height; }
@@ -86,14 +88,18 @@ struct NavigationGrid
         distance.fill(kUnreachableNavigationDistance);
         const auto target_index = NearestClearCell(target);
         if (target_index < 0) return;
-        using Entry = std::pair<int, int>;
-        std::priority_queue<Entry, std::vector<Entry>, std::greater<>> pending;
         distance[target_index] = 0;
-        pending.emplace(0, target_index);
-        while (!pending.empty())
+        flow_pending[0].emplace_back(0, target_index);
+        std::size_t pending_count = 1;
+        int cost = 0;
+        while (pending_count != 0)
         {
-            const auto [cost, current] = pending.top(); pending.pop();
-            if (cost != distance[current]) continue;
+            auto &bucket = flow_pending[static_cast<std::size_t>(cost) % flow_pending.size()];
+            if (bucket.empty()) { ++cost; continue; }
+            const auto [queued_cost, current] = bucket.back();
+            bucket.pop_back();
+            --pending_count;
+            if (queued_cost != distance[current]) continue;
             const auto x = current % width, y = current / width;
             for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
             {
@@ -106,7 +112,8 @@ struct NavigationGrid
                 const auto next_cost = cost + (dx != 0 && dy != 0 ? 14 : 10);
                 if (next_cost >= distance[next]) continue;
                 distance[next] = next_cost;
-                pending.emplace(next_cost, next);
+                flow_pending[static_cast<std::size_t>(next_cost) % flow_pending.size()].emplace_back(next_cost, next);
+                ++pending_count;
             }
         }
     }
@@ -144,6 +151,56 @@ inline float SegmentDiscHitTime(Float2 from, Float2 to, Float2 center, float rad
     if (b >= 0.0f || discriminant < 0.0f) return 2.0f;
     const float t = (-b - std::sqrt(discriminant)) / a;
     return t >= 0.0f && t <= 1.0f ? t : 2.0f;
+}
+
+// Derived within one tick. Projection/separation correct endpoints, not a swept route.
+struct DiscMotion2D
+{
+    struct Segment { Float2 from, to; float begin{}, end{}; };
+    std::array<Segment, 4> segments{}; // Three solver contacts plus a stationary remainder.
+    std::uint8_t count{};
+    Float2 final_position{};
+
+    void Reset(Float2 position) noexcept { count = 0; final_position = position; }
+    void Record(Float2 from, Float2 to, float begin, float end) noexcept
+    {
+        if (end <= begin) return;
+        assert(count < segments.size());
+        segments[count++] = {from, to, begin, end};
+    }
+};
+
+// Returns time local to the projectile's remaining [begin, 1] tick interval.
+inline float MovingDiscHitTime(Float2 from, Float2 to, const DiscMotion2D &motion,
+                               float radius, float begin = 0.0f) noexcept
+{
+    const auto same = [](Float2 a, Float2 b) { return a.x == b.x && a.y == b.y; };
+    if (motion.count == 0 || (motion.count == 1 &&
+        same(motion.segments[0].from, motion.segments[0].to) &&
+        same(motion.segments[0].to, motion.final_position)))
+        return SegmentDiscHitTime(from, to, motion.final_position, radius);
+    const auto interpolate = [](Float2 a, Float2 b, float t) {
+        return Float2{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
+    };
+    auto first = 2.0f;
+    for (std::uint8_t index = 0; index < motion.count; ++index)
+    {
+        const auto &segment = motion.segments[index];
+        const auto start = std::max(begin, segment.begin);
+        const auto end = std::min(1.0f, segment.end);
+        if (end <= start || begin >= 1.0f) continue;
+        const auto p0 = interpolate(from, to, (start - begin) / (1.0f - begin));
+        const auto p1 = interpolate(from, to, (end - begin) / (1.0f - begin));
+        const auto t0 = interpolate(segment.from, segment.to, (start - segment.begin) / (segment.end - segment.begin));
+        const auto t1 = interpolate(segment.from, segment.to, (end - segment.begin) / (segment.end - segment.begin));
+        const auto hit = SegmentDiscHitTime({p0.x - t0.x, p0.y - t0.y},
+                                            {p1.x - t1.x, p1.y - t1.y}, {}, radius);
+        if (hit <= 1.0f)
+            first = std::min(first, ((start - begin) + (end - start) * hit) / (1.0f - begin));
+    }
+    if (SegmentDiscHitTime(to, to, motion.final_position, radius) == 0.0f)
+        first = std::min(first, 1.0f);
+    return first;
 }
 
 inline float FirstObstacleHitTime(Float2 from, Float2 to, float radius,
@@ -199,23 +256,26 @@ inline Float2 ProjectOutsideObstacles(Float2 point, float radius,
 
 inline Float2 MoveDisc2D(Float2 from, Float2 delta, float radius,
                          const ArenaBoundary &boundary,
-                         std::span<const ArenaObstacle2D> obstacles) noexcept
+                         std::span<const ArenaObstacle2D> obstacles,
+                         DiscMotion2D *motion = nullptr) noexcept
 {
     auto position = ClampToArena(boundary, ProjectOutsideObstacles(from, radius, obstacles), radius);
+    if (motion) motion->Reset(position);
+    auto elapsed = 0.0f;
     auto remaining = delta;
     for (int iteration = 0; iteration < 3; ++iteration)
     {
         auto hit_time = 1.0f;
         const ArenaObstacle2D *hit = nullptr;
-        for (const auto &obstacle : obstacles)
+        const auto a = remaining.x * remaining.x + remaining.y * remaining.y;
+        if (!(a <= 1.0e-8f)) for (const auto &obstacle : obstacles)
         {
             const Float2 offset{position.x - obstacle.center.x, position.y - obstacle.center.y};
             const auto combined = radius + obstacle.radius;
-            const auto a = remaining.x * remaining.x + remaining.y * remaining.y;
             const auto b = 2.0f * (offset.x * remaining.x + offset.y * remaining.y);
             const auto c = offset.x * offset.x + offset.y * offset.y - combined * combined;
             const auto discriminant = b * b - 4.0f * a * c;
-            if (a <= 1.0e-8f || discriminant < 0.0f) continue;
+            if (discriminant < 0.0f) continue;
             const auto candidate = (-b - std::sqrt(discriminant)) / (2.0f * a);
             const auto starts_on_surface_moving_inward =
                 c <= 1.0e-4f && offset.x * remaining.x + offset.y * remaining.y < 0.0f;
@@ -226,9 +286,20 @@ inline Float2 MoveDisc2D(Float2 from, Float2 delta, float radius,
                 hit = &obstacle;
             }
         }
-        if (!hit) { position = {position.x + remaining.x, position.y + remaining.y}; break; }
+        if (!hit)
+        {
+            const Float2 next{position.x + remaining.x, position.y + remaining.y};
+            if (motion) motion->Record(position, next, elapsed, 1.0f);
+            position = next;
+            elapsed = 1.0f;
+            break;
+        }
         const auto safe_time = std::max(0.0f, hit_time - 1.0e-4f);
-        position = {position.x + remaining.x * safe_time, position.y + remaining.y * safe_time};
+        const Float2 next{position.x + remaining.x * safe_time, position.y + remaining.y * safe_time};
+        const auto contact_time = elapsed + (1.0f - elapsed) * hit_time;
+        if (motion) motion->Record(position, next, elapsed, contact_time);
+        position = next;
+        elapsed = contact_time;
         remaining = {remaining.x * (1.0f - hit_time), remaining.y * (1.0f - hit_time)};
         const auto normal_length = std::sqrt(NavigationDistanceSquared(position, hit->center));
         if (normal_length <= 1.0e-6f) break;
@@ -237,6 +308,12 @@ inline Float2 MoveDisc2D(Float2 from, Float2 delta, float radius,
         const auto into_surface = remaining.x * normal.x + remaining.y * normal.y;
         if (into_surface < 0.0f) { remaining.x -= normal.x * into_surface; remaining.y -= normal.y * into_surface; }
     }
-    return ProjectOutsideObstacles(ClampToArena(boundary, position, radius), radius, obstacles);
+    const auto result = ProjectOutsideObstacles(ClampToArena(boundary, position, radius), radius, obstacles);
+    if (motion)
+    {
+        motion->Record(position, position, elapsed, 1.0f);
+        motion->final_position = result;
+    }
+    return result;
 }
 } // namespace hs::gameplay_detail

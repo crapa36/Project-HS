@@ -29,11 +29,14 @@ struct SimulationConfig
     bool automatic_choices{};
     bool start_in_main_menu{};
     SimulationScenarioPolicy scenario{};
+    // Recorded/test sessions publish checksums; ordinary play can request them explicitly.
+    bool capture_checksums{true};
 };
 
 struct TickResult
 {
     Tick tick{};
+    // Zero when automatic checksum capture is disabled.
     GameplayChecksum checksum{};
     SessionPhase phase{SessionPhase::MainMenu};
 };
@@ -52,6 +55,7 @@ class GameSimulation
                                     const SimulationRules &rules);
     [[nodiscard]] TickResult TickFixed(const InputFrame &input,
                                        std::chrono::nanoseconds fixed_delta);
+    // Always returns the current checksum, even when automatic capture is disabled.
     [[nodiscard]] GameplayChecksum ComputeChecksum() const;
     [[nodiscard]] const SimulationRules &Rules() const noexcept;
     [[nodiscard]] SessionProbe GetSessionProbe() const noexcept;

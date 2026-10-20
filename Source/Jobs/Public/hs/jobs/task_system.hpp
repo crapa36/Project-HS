@@ -3,7 +3,6 @@
 #include <hs/core/result.hpp>
 
 #include <cstddef>
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <stop_token>
@@ -11,27 +10,6 @@
 
 namespace hs
 {
-
-enum class TaskPriority : std::uint8_t
-{
-    Normal,
-};
-
-struct TaskDesc
-{
-    std::string_view name;
-    TaskPriority priority{TaskPriority::Normal};
-};
-
-struct TaskHandle
-{
-    std::uint64_t value{};
-
-    [[nodiscard]] explicit operator bool() const noexcept
-    {
-        return value != 0;
-    }
-};
 
 class TaskSystem;
 
@@ -65,12 +43,17 @@ class TaskSystem
     TaskSystem(const TaskSystem &) = delete;
     TaskSystem &operator=(const TaskSystem &) = delete;
 
-    [[nodiscard]] TaskHandle Submit(TaskGroup &group, TaskDesc description,
-                                    std::move_only_function<void(std::stop_token)> task);
+    // Preparation may throw before admission. A rejected backend submission
+    // returns false and records failure; accepted work completes once.
+    [[nodiscard]] bool Submit(TaskGroup &group, std::string_view name,
+                              std::move_only_function<void(std::stop_token)> task);
 
-    void ParallelFor(TaskGroup &group, TaskDesc description, std::size_t count, std::size_t grain,
+    void ParallelFor(TaskGroup &group, std::string_view name, std::size_t count, std::size_t grain,
                      std::move_only_function<void(std::size_t begin, std::size_t end)> task);
 
+    // Seals admission and joins work. Do not wait on the current task's group
+    // (including from its synchronous stop callback). Result allocation may
+    // throw only after joining; cancellation callbacks may submit without waiting.
     [[nodiscard]] Result Wait(TaskGroup &group);
     [[nodiscard]] std::size_t WorkerCount() const noexcept;
 

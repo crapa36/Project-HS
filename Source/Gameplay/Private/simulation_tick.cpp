@@ -27,16 +27,20 @@ GameSimulation::SimulationWorld::SimulationWorld()
     combat_state->cast_hits.reserve(1'024);
     combat_state->area_hits.reserve(1'024);
     combat_state->cast_runtimes.reserve(512);
-    telemetry->balance_observer.enemy_hit_casts.reserve(256);
     telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
     combat_state->collision_candidates.reserve(128);
+    combat_state->collision_hit_times.reserve(1'024);
+    combat_state->live_area_ids.reserve(256);
 }
 
 void GameSimulation::SimulationWorld::InitializePlayerState()
 {
     actors->player = {};
+    actors->player_position_history.assign(
+        static_cast<std::size_t>(rules.relics.movement_echo.position_history_age_ticks) + 1,
+        actors->player.position);
     const auto &stats = rules.stats;
     actors->player.max_health = RoundDamage(stats.base_maximum_hp);
     actors->player.health = std::min(actors->player.max_health, RoundDamage(stats.base_current_hp));
@@ -298,6 +302,9 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
     pickup.guaranteed_boss_chest = guaranteed;
     actors->pickups.push_back(pickup);
     ++Metrics().pickup_drops[static_cast<std::size_t>(kind)];
+    if (kind != PickupKind::Experience)
+        EmitVfx(DomainSignalKind::PickupSpawned, pickup.position, {}, 1.0f,
+                0.2f, static_cast<std::uint8_t>(kind), pickup.id.value);
 }
 
 void GameSimulation::SimulationWorld::StartSession()
@@ -332,9 +339,12 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->boss_actions.clear();
     combat_state->cast_hits.clear();
     combat_state->area_hits.clear();
+    combat_state->cast_hit_index.clear();
+    combat_state->area_hit_index.clear();
     combat_state->cast_runtimes.clear();
     combat_state->domain_signals.clear();
     combat_state->visual_links.clear();
+    combat_state->boss_death_visual_count = 0;
     progression->waves.clear();
     progression->cards = {};
     progression->card_count = 0;
@@ -519,7 +529,7 @@ void GameSimulation::SimulationWorld::RunPipeline()
         case SimulationPhaseId::DeathDrop: DeathDropPhase(); break;
         case SimulationPhaseId::XpCard: XpCardPhase(); break;
         case SimulationPhaseId::CleanupBarrier: CommitCleanupBarrier(); break;
-        case SimulationPhaseId::GameplayHash: checksum = CalculateChecksum(); break;
+        case SimulationPhaseId::GameplayHash: UpdateChecksum(); break;
         }
     }
 }
@@ -559,17 +569,42 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
     actors->pending_projectile_spawns.clear();
     std::erase_if(actors->areas, [](const AreaActor &area) { return area.dead; });
     std::erase_if(actors->pickups, [](const PickupActor &pickup) { return pickup.dead; });
-    std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
+    if (std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
         return record.cast_id + 256 < next_cast_id;
-    });
+    }))
+    {
+        combat_state->cast_hit_index.clear();
+        for (std::size_t i = 0; i < combat_state->cast_hits.size(); ++i)
+        {
+            const auto &record = combat_state->cast_hits[i];
+            combat_state->cast_hit_index.emplace(std::pair{record.cast_id, record.target}, i);
+        }
+    }
     std::erase_if(combat_state->cast_runtimes, [this](const CastRuntime &runtime) {
-        return runtime.cast_id + 256 < next_cast_id;
-    });
-    std::erase_if(combat_state->area_hits, [this](const AreaHitRecord &record) {
-        return std::ranges::none_of(actors->areas, [&](const AreaActor &area) {
-            return area.id.value == record.area_id;
+        if (runtime.cast_id + 256 >= next_cast_id) return false;
+        if (runtime.cooldown_ticks_saved == 0) return true;
+        return std::ranges::none_of(actors->projectiles, [&](const ProjectileActor &projectile) {
+            return projectile.cast_id == runtime.cast_id;
         });
     });
+    auto &live_areas = combat_state->live_area_ids;
+    live_areas.clear();
+    if (!combat_state->area_hits.empty())
+    {
+        for (const auto &area : actors->areas) live_areas.push_back(area.id.value);
+        std::ranges::sort(live_areas);
+    }
+    if (std::erase_if(combat_state->area_hits, [&](const AreaHitRecord &record) {
+        return !std::ranges::binary_search(live_areas, record.area_id);
+    }))
+    {
+        combat_state->area_hit_index.clear();
+        for (std::size_t i = 0; i < combat_state->area_hits.size(); ++i)
+        {
+            const auto &record = combat_state->area_hits[i];
+            combat_state->area_hit_index.emplace(std::pair{record.area_id, record.target}, i);
+        }
+    }
 }
 
 GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
@@ -642,8 +677,9 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(actors->player.basic_arrow_sequence);
     value(actors->player.active_basic_empower_until);
     value(actors->player.movement_since_echo);
-    vector2(actors->player.one_second_ago);
-    value(actors->player.last_position_sample);
+    // History can affect a later relic acquisition, so hash it even without the relic.
+    count(actors->player_position_history.size());
+    for (const auto position : actors->player_position_history) vector2(position);
     value(actors->player.last_active);
     value(actors->player.last_active_tick);
     value(actors->player.alternating_refund_until);
@@ -941,6 +977,8 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
         value(runtime.kills);
         value(runtime.transfer_count);
         value(runtime.spawn_count);
+        // Unused budgets preserve the checksum stream of unaffected casts.
+        if (runtime.cooldown_ticks_saved != 0) value(runtime.cooldown_ticks_saved);
         value(runtime.basic_relic_triggers);
         value(runtime.triggered);
         value(runtime.refund_triggered);
@@ -1156,6 +1194,11 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         if (growth_ticks == wave.start_tick)
         {
             progression->waves.push_back({growth_ticks, wave.duration_ticks, wave.count, 0});
+            DomainSignalGeometry geometry{};
+            geometry.source_id = wave.start_tick;
+            geometry.start_tick = geometry.end_tick = tick;
+            EmitVfx(DomainSignalKind::WaveStarted, {}, {}, rules.arena_half_extent,
+                    0.025f, 0, 0, geometry);
         }
     }
     for (auto &wave : progression->waves)
@@ -1360,6 +1403,10 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
             geometry.source_id = action.warning_sequence;
             EmitVfx(signal, boss.position, volley_direction, 1.0f, 0.025f,
                     context, 0, geometry);
+            if (action.angle_offset != 0.0f)
+                EmitVfx(DomainSignalKind::BossVolleyOffsetTelegraphed,
+                        boss.position, volley_direction, 1.0f, 0.025f,
+                        context, 0, geometry);
         }
         else if (action.kind == BossActionKind::Shockwave)
         {
@@ -1547,15 +1594,6 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
             BossAi(enemy);
             continue;
         }
-        const auto attack_direction = Normalize(Subtract(actors->player.position, enemy.position));
-        const auto radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
-        const auto navigation_target = SegmentClear2D(enemy.position, actors->player.position,
-                                                      radius, rules.arena_boundary,
-                                                      ArenaObstacles())
-                                           ? actors->player.position
-                                           : navigation->enemy_navigation.NextWaypoint(enemy.position,
-                                                                            actors->player.position);
-        const auto direction = Normalize(Subtract(navigation_target, enemy.position));
         const auto distance = Length(Subtract(actors->player.position, enemy.position));
         enemy.velocity = {};
         if (enemy.attacking)
@@ -1576,7 +1614,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                    0, false, 0.0f, 0, kNoTelemetrySource,
                                    kNoTelemetrySource,
                                    static_cast<std::uint8_t>(
-                                       EnemyTelemetryIndex(enemy)));
+                                       EnemyTelemetryIndex(enemy)), 0, enemy.locked_aim);
                     }
                 }
                 else if (enemy.kind == EnemyKind::Ranged)
@@ -1612,7 +1650,8 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                EffectOrigin::Original, enemy.attack_cast_id,
                                0, false, 0.0f, 0, kNoTelemetrySource,
                                kNoTelemetrySource,
-                               static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                               static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                               Normalize(Subtract(actors->player.position, enemy.position)));
                     enemy.dead = true;
                 }
                 enemy.attacking = false;
@@ -1625,6 +1664,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
              (enemy.kind == EnemyKind::Ranged && distance <= enemy.attack_range) ||
              (enemy.kind == EnemyKind::Suicide && distance <= enemy.attack_range)))
         {
+            const auto attack_direction = Normalize(Subtract(actors->player.position, enemy.position));
             ++Metrics().enemy_attack_attempts[EnemyTelemetryIndex(enemy)];
             enemy.attack_cast_id = next_enemy_attack_id++;
             enemy.attacking = true;
@@ -1671,12 +1711,16 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
             }
             continue;
         }
-        if (enemy.kind == EnemyKind::Ranged)
+        if (enemy.kind != EnemyKind::Ranged || distance > enemy.attack_range)
         {
-            if (distance > enemy.attack_range) enemy.velocity = direction;
-        }
-        else
-        {
+            const auto radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
+            const auto navigation_target = SegmentClear2D(enemy.position, actors->player.position,
+                                                          radius, rules.arena_boundary,
+                                                          ArenaObstacles())
+                                               ? actors->player.position
+                                               : navigation->enemy_navigation.NextWaypoint(enemy.position,
+                                                                                actors->player.position);
+            const auto direction = Normalize(Subtract(navigation_target, enemy.position));
             enemy.velocity = direction;
         }
         enemy.velocity = Multiply(enemy.velocity, enemy.move_speed * SlowMultiplier(enemy));

@@ -5,6 +5,7 @@
 #include <hs/core/cooked_format.hpp>
 
 #include "cast_runtime.hpp"
+#include "balance_observer.hpp"
 #include "relic_rule_table.hpp"
 #include "damage_command_buffer.hpp"
 #include "simulation_pipeline.hpp"
@@ -69,6 +70,7 @@ struct PlayerState
 {
     Float2 position{};
     Float2 previous_position{};
+    DiscMotion2D tick_motion; // Derived collision cache, rebuilt before every CollisionHit phase.
     Float2 aim{0.0f, 1.0f};
     Float2 facing{0.0f, 1.0f};
     Float2 move_target{};
@@ -101,8 +103,6 @@ struct PlayerState
     std::uint64_t basic_arrow_sequence{};
     Tick active_basic_empower_until{};
     float movement_since_echo{};
-    Float2 one_second_ago{};
-    Tick last_position_sample{};
     SkillKind last_active{SkillKind::Count};
     Tick last_active_tick{};
     Tick alternating_refund_until{};
@@ -131,6 +131,9 @@ struct PlayerState
     Tick active_animation_start{};
     Tick active_animation_until{};
     float locomotion_blend{};
+    // Read-model presentation clock; no simulation decisions or checksum use it.
+    Tick movement_stopped_tick{};
+    bool locomotion_moving{};
     Tick retreat_followup_tick{};
     Float2 retreat_followup_direction{};
     std::uint64_t retreat_followup_cast{};
@@ -154,6 +157,7 @@ struct EnemyActor
     std::optional<BossKind> boss;
     Float2 position{};
     Float2 previous_position{};
+    DiscMotion2D tick_motion;
     Float2 velocity{};
     Float2 displacement_per_tick{};
     Tick displacement_ticks{};
@@ -302,6 +306,9 @@ struct PickupActor
     bool attracted_by_magnet_stat{};
     bool globally_attracted{};
     bool dead{};
+    // Actual pickup motion clock, presentation-only and excluded from checksum.
+    Tick visual_motion_started{}, visual_motion_updated{};
+    float visual_motion_initial_distance{};
 };
 
 enum class ScheduledKind : std::uint8_t
@@ -381,20 +388,6 @@ struct AreaHitRecord
     std::uint64_t area_id{};
     std::uint64_t target{};
     std::uint8_t count{};
-};
-
-struct BalanceObserver
-{
-    BalanceTelemetry metrics{};
-    std::vector<std::uint64_t> enemy_hit_casts;
-    std::vector<std::uint64_t> player_hit_casts;
-
-    void Reset()
-    {
-        metrics = {};
-        enemy_hit_casts.clear();
-        player_hit_casts.clear();
-    }
 };
 
 struct ActiveWave
@@ -583,9 +576,11 @@ struct GameSimulation::SimulationWorld
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
     SimulationWorld();
+    void UpdateChecksum() { checksum = config.capture_checksums ? CalculateChecksum() : 0; }
     BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
     const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
     void InitializePlayerState();
+    void RebuildNavigation();
     std::span<const ArenaObstacle2D> ArenaObstacles() const noexcept
     {
         return {rules.arena_obstacles.data(), rules.arena_obstacle_count};
@@ -667,7 +662,9 @@ struct GameSimulation::SimulationWorld
                     std::uint8_t source_upgrade = kNoTelemetrySource,
                     std::uint8_t source_relic = kNoTelemetrySource,
                     std::uint8_t source_enemy = kNoTelemetrySource,
-                    std::uint64_t originating_area_id = 0);
+                    std::uint64_t originating_area_id = 0,
+                    Float2 incoming_direction = {}, bool shockwave_contact = false,
+                    Float2 impact_position = {});
     void QueueAreaDamage(Float2 position, float radius, std::int32_t damage, SkillKind skill,
                     EffectOrigin origin, std::uint64_t cast_id,
                     std::uint8_t bleed = 0, bool burn = false,
@@ -694,7 +691,8 @@ struct GameSimulation::SimulationWorld
     std::uint8_t IncrementCastHit(std::uint64_t cast, std::uint64_t target);
     std::uint8_t IncrementAreaHit(std::uint64_t area, std::uint64_t target);
     CastRuntime &FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill);
-    void OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
+    // True means the remaining tick must be swept again in the new direction.
+    bool OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
                          Float2 contact_position);
     void ExplodeProjectile(ProjectileActor &projectile);
     void CollisionHitPhase();
@@ -709,7 +707,7 @@ struct GameSimulation::SimulationWorld
                    std::uint8_t source_relic = kNoTelemetrySource);
     void DamageStatusPhase();
     std::uint64_t Heal(std::int32_t amount, bool emit_signal = true);
-    void CancelChargedShot() noexcept;
+    void CancelChargedShot(bool released = false) noexcept;
     std::uint32_t EnemyExperience(const EnemyActor &enemy) const noexcept;
     void HandleEnemyDeath(EnemyActor &enemy);
     void DeathDropPhase();
@@ -728,6 +726,8 @@ struct GameSimulation::SimulationWorld
     void CommitAbilitySpawnBarrier();
     void CommitCleanupBarrier();
     GameplayChecksum CalculateChecksum() const;
+    [[nodiscard]] EnemyView EnemyReadView(const EnemyActor &enemy) const;
+    [[nodiscard]] BossActionView BossActionReadView(const BossAction &action) const;
     void HandleRadialBasicAttack(Tick release_ticks, std::uint64_t cast_id);
     void HandleMovementEcho(Tick release_ticks, std::uint64_t cast_id);
     void HandleAlternatingSkills(SkillKind skill, std::size_t cooldown_index);

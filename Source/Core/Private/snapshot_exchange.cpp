@@ -35,7 +35,7 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
         if (slots_[index].state.load(std::memory_order_acquire) == SlotState::Ready)
         {
             const auto sequence = slots_[index].publish_sequence.load(std::memory_order_relaxed);
-            if (sequence < oldest_sequence)
+            if (!oldest || sequence < oldest_sequence)
             {
                 oldest = index;
                 oldest_sequence = sequence;
@@ -130,11 +130,20 @@ RenderSnapshotExchange::Consumer::~Consumer()
 
 RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest() noexcept
 {
-    if (const auto newest = exchange_->AcquireNewestReady())
+    if (auto newest = exchange_->AcquireNewestReady())
     {
-        exchange_->ReleaseRead(previous_);
-        previous_ = current_;
-        current_ = newest;
+        // Inspect the sequence only after claiming Reading: a Ready slot can
+        // be overwritten by the producer, while both retained slots are owned.
+        if (current_ &&
+            exchange_->slots_[*newest].publish_sequence.load(std::memory_order_relaxed) <=
+                exchange_->slots_[*current_].publish_sequence.load(std::memory_order_relaxed))
+            exchange_->ReleaseRead(newest);
+        else
+        {
+            exchange_->ReleaseRead(previous_);
+            previous_ = current_;
+            current_ = newest;
+        }
     }
 
     ReadPair pair;

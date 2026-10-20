@@ -2,13 +2,17 @@
 
 #include <taskflow/taskflow.hpp>
 
+#if defined(_WIN32)
 #include <Windows.h>
+#endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cassert>
+#include <cstdio>
+#include <cwchar>
 #include <exception>
-#include <format>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -18,15 +22,34 @@ namespace hs
 
 struct TaskGroup::State
 {
-    void SetFailure(Result failure)
+    // Failure publication cannot allocate, including when handling bad_alloc.
+    void RecordFailureLocked(ErrorCode code, const char *message, const char *name = "") noexcept
     {
-        std::lock_guard lock(mutex);
-        if (result.Succeeded())
+        if (failure_code == ErrorCode::None)
         {
-            result = std::move(failure);
-            stop_source.request_stop();
+            failure_code = code;
+            std::snprintf(failure_message.data(), failure_message.size(), "%s%s%s",
+                          name, *name ? ": " : "", message);
         }
     }
+
+    void SetFailure(ErrorCode code, const char *message, const char *name = "") noexcept
+    {
+        bool first = false;
+        {
+            std::lock_guard lock(mutex);
+            first = failure_code == ErrorCode::None;
+            RecordFailureLocked(code, message, name);
+        }
+        // request_stop synchronously invokes user callbacks; never hold mutex.
+        if (first) stop_source.request_stop();
+    }
+
+    struct Completion
+    {
+        State *state;
+        ~Completion() { if (state) state->CompleteOne(); }
+    };
 
     void CompleteOne() noexcept
     {
@@ -39,7 +62,8 @@ struct TaskGroup::State
     std::atomic<std::size_t> pending{};
     std::stop_source stop_source;
     std::mutex mutex;
-    Result result = Result::Success();
+    ErrorCode failure_code{ErrorCode::None};
+    std::array<char, 512> failure_message{};
     void *owner{};
     bool sealed{};
 };
@@ -56,6 +80,7 @@ struct TaskSystem::Impl
 
     void NameWorkerThread() const noexcept
     {
+#if defined(_WIN32)
         if (!executor || executor->this_worker() == nullptr)
         {
             return;
@@ -68,14 +93,15 @@ struct TaskSystem::Impl
         }
 
         const auto worker_id = executor->this_worker()->id();
-        const auto name = std::format(L"HS Worker {}", worker_id);
-        SetThreadDescription(GetCurrentThread(), name.c_str());
+        wchar_t name[64]{};
+        if (std::swprintf(name, std::size(name), L"HS Worker %zu", worker_id) <= 0) return;
+        SetThreadDescription(GetCurrentThread(), name);
         named_by = this;
+#endif
     }
 
     std::size_t worker_count{};
     std::unique_ptr<tf::Executor> executor;
-    std::atomic<std::uint64_t> next_task_id{1};
 };
 
 TaskGroup::TaskGroup() : state_(std::make_shared<State>())
@@ -113,46 +139,24 @@ TaskSystem::~TaskSystem()
     }
 }
 
-TaskHandle TaskSystem::Submit(TaskGroup &group, TaskDesc description,
-                              std::move_only_function<void(std::stop_token)> task)
+bool TaskSystem::Submit(TaskGroup &group, std::string_view name,
+                        std::move_only_function<void(std::stop_token)> task)
 {
     if (!group.state_ || !task)
     {
-        return {};
+        return false;
     }
 
     const auto state = group.state_;
-    {
-        std::lock_guard lock(state->mutex);
-        if (state->sealed)
-        {
-            if (state->result.Succeeded())
-            {
-                state->result = Result::Failure(ErrorCode::InvalidState, "hs_jobs",
-                                                "Cannot submit after TaskSystem::Wait.");
-            }
-            return {};
-        }
-        if (state->owner != nullptr && state->owner != impl_.get())
-        {
-            if (state->result.Succeeded())
-            {
-                state->result = Result::Failure(ErrorCode::InvalidState, "hs_jobs",
-                                                "TaskGroup cannot span TaskSystem instances.");
-            }
-            return {};
-        }
-        state->owner = impl_.get();
-        state->pending.fetch_add(1, std::memory_order_relaxed);
-    }
-
-    const auto handle = TaskHandle{impl_->next_task_id.fetch_add(1, std::memory_order_relaxed)};
-    const std::string task_name =
-        description.name.empty() ? "unnamed" : std::string(description.name);
+    // Construct directly: an MSVC Debug string move allocates an iterator
+    // proxy inside noexcept and cannot propagate allocation failure.
+    const std::string task_name(
+        name.empty() ? std::string_view("unnamed") : name);
     auto shared_task =
         std::make_shared<std::move_only_function<void(std::stop_token)>>(std::move(task));
 
     auto run = [state, implementation = impl_.get(), shared_task, task_name]() mutable noexcept {
+        TaskGroup::State::Completion completion{state.get()};
         implementation->NameWorkerThread();
         try
         {
@@ -164,38 +168,60 @@ TaskHandle TaskSystem::Submit(TaskGroup &group, TaskDesc description,
         }
         catch (const std::exception &exception)
         {
-            state->SetFailure(Result::Failure(ErrorCode::TaskFailed, "hs_jobs",
-                                              std::format("{}: {}", task_name, exception.what())));
+            state->SetFailure(ErrorCode::TaskFailed, exception.what(), task_name.c_str());
         }
         catch (...)
         {
-            state->SetFailure(Result::Failure(ErrorCode::TaskFailed, "hs_jobs",
-                                              std::format("{}: unknown exception", task_name)));
+            state->SetFailure(ErrorCode::TaskFailed, "unknown exception", task_name.c_str());
         }
-        state->CompleteOne();
     };
+
+    {
+        std::lock_guard lock(state->mutex);
+        if (state->sealed)
+        {
+            state->RecordFailureLocked(ErrorCode::InvalidState, "Cannot submit after TaskSystem::Wait.");
+            return false;
+        }
+        if (state->owner != nullptr && state->owner != impl_.get())
+        {
+            state->RecordFailureLocked(ErrorCode::InvalidState, "TaskGroup cannot span TaskSystem instances.");
+            return false;
+        }
+        state->owner = impl_.get();
+        state->pending.fetch_add(1, std::memory_order_relaxed);
+    }
+    TaskGroup::State::Completion reservation{state.get()};
 
     if (!impl_->executor)
     {
+        reservation.state = nullptr;
         run();
-        return handle;
+        return true;
     }
 
     try
     {
+        // Pinned/patched backend throws only before publication. After success
+        // the task owns completion (and may already have completed).
         impl_->executor->silent_async(task_name, std::move(run));
+        reservation.state = nullptr;
     }
     catch (const std::exception &exception)
     {
-        state->SetFailure(Result::Failure(ErrorCode::TaskFailed, "hs_jobs", exception.what()));
-        state->CompleteOne();
-        return {};
+        state->SetFailure(ErrorCode::TaskFailed, exception.what());
+        return false;
+    }
+    catch (...)
+    {
+        state->SetFailure(ErrorCode::TaskFailed, "unknown submission exception");
+        return false;
     }
 
-    return handle;
+    return true;
 }
 
-void TaskSystem::ParallelFor(TaskGroup &group, TaskDesc description, std::size_t count,
+void TaskSystem::ParallelFor(TaskGroup &group, std::string_view name, std::size_t count,
                              std::size_t grain,
                              std::move_only_function<void(std::size_t, std::size_t)> task)
 {
@@ -205,9 +231,8 @@ void TaskSystem::ParallelFor(TaskGroup &group, TaskDesc description, std::size_t
     }
     if (grain == 0 || !task)
     {
-        group.state_->SetFailure(
-            Result::Failure(ErrorCode::InvalidArgument, "hs_jobs",
-                            "ParallelFor requires non-zero grain and a callable."));
+        group.state_->SetFailure(ErrorCode::InvalidArgument,
+                                "ParallelFor requires non-zero grain and a callable.");
         return;
     }
     if (count == 0)
@@ -217,15 +242,17 @@ void TaskSystem::ParallelFor(TaskGroup &group, TaskDesc description, std::size_t
 
     auto shared_task =
         std::make_shared<std::move_only_function<void(std::size_t, std::size_t)>>(std::move(task));
-    for (std::size_t begin = 0; begin < count; begin += grain)
+    for (std::size_t begin = 0; begin < count;)
     {
-        const auto end = std::min(begin + grain, count);
-        (void)Submit(group, description, [shared_task, begin, end](std::stop_token stop) {
+        const auto end = begin + std::min(grain, count - begin);
+        const auto submitted = Submit(group, name, [shared_task, begin, end](std::stop_token stop) {
             if (!stop.stop_requested())
             {
                 (*shared_task)(begin, end);
             }
         });
+        if (!submitted) break;
+        begin = end;
     }
 }
 
@@ -263,9 +290,11 @@ Result TaskSystem::Wait(TaskGroup &group)
     }
 
     std::lock_guard lock(state->mutex);
-    if (!state->result.Succeeded())
+    if (state->failure_code != ErrorCode::None)
     {
-        return state->result;
+        // Materialize Result only after all completions. Allocation failure may
+        // propagate to this caller; it cannot strand pending work or an executor.
+        return Result::Failure(state->failure_code, "hs_jobs", state->failure_message.data());
     }
     if (state->stop_source.stop_requested())
     {

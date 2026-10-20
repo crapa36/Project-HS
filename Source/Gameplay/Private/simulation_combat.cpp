@@ -51,6 +51,30 @@ DomainSignalKind ProjectileImpactKind(const ProjectileActor &projectile) noexcep
     return DomainSignalKind::Count;
 }
 
+void BindStatusVisual(DomainSignal &signal, const EnemyActor &enemy,
+                      SkillKind skill, std::uint8_t source_upgrade,
+                      std::size_t episode_index) noexcept
+{
+    // A status application is owned by the enemy's actual status episode. It
+    // can be applied by a transferred burn or an area before damage flush, so
+    // do not borrow the enemy's last damage cast as its activation identity.
+    signal.source_entity_id = enemy.id.value;
+    signal.status_episode_generation = enemy.status_visual_episodes[episode_index].generation;
+    if (skill >= SkillKind::Count || source_upgrade >= kUpgradeCount) return;
+    signal.upgrade_skill = static_cast<std::uint8_t>(skill);
+    signal.upgrade_index = source_upgrade;
+    signal.upgrade_stage = UpgradeVisualStage::Resolve;
+    signal.upgrade_owner_id = enemy.id.value;
+}
+
+void BindUpgradeLink(VisualLinkView &link, SkillKind skill,
+                     std::uint8_t source_upgrade, std::uint64_t cast_id) noexcept
+{
+    link.skill = skill;
+    link.source_upgrade = source_upgrade;
+    link.cast_id = cast_id;
+}
+
 } // namespace
 
 void GameSimulation::SimulationWorld::EmitUpgradeVisual(
@@ -214,18 +238,19 @@ Tick GameSimulation::SimulationWorld::EffectiveCooldownTicks(SkillKind skill) co
 
 EnemyActor *GameSimulation::SimulationWorld::FindEnemy(std::uint64_t id) noexcept
 {
-    const auto iterator = std::ranges::find(actors->enemies, id, [](const EnemyActor &enemy) {
+    // Spawn barriers append increasing IDs; cleanup preserves survivor order.
+    const auto iterator = std::ranges::lower_bound(actors->enemies, id, {}, [](const EnemyActor &enemy) {
         return enemy.id.value;
     });
-    return iterator == actors->enemies.end() ? nullptr : &*iterator;
+    return iterator == actors->enemies.end() || iterator->id.value != id ? nullptr : &*iterator;
 }
 
 const EnemyActor *GameSimulation::SimulationWorld::FindEnemy(std::uint64_t id) const noexcept
 {
-    const auto iterator = std::ranges::find(actors->enemies, id, [](const EnemyActor &enemy) {
+    const auto iterator = std::ranges::lower_bound(actors->enemies, id, {}, [](const EnemyActor &enemy) {
         return enemy.id.value;
     });
-    return iterator == actors->enemies.end() ? nullptr : &*iterator;
+    return iterator == actors->enemies.end() || iterator->id.value != id ? nullptr : &*iterator;
 }
 
 std::uint32_t GameSimulation::SimulationWorld::NormalEnemyCount() const noexcept
@@ -397,6 +422,22 @@ AreaActor *GameSimulation::SimulationWorld::SpawnArea(AreaKind kind, SkillKind s
 void GameSimulation::SimulationWorld::ScheduleAction(const ScheduledAction &action)
 {
     auto scheduled = action;
+    if (action.kind == ScheduledKind::Area && action.skill == SkillKind::ArrowRain &&
+        action.origin == EffectOrigin::Derived && action.source_upgrade == 0)
+    {
+        // Keep the actual schedule's identity/clock without allocating an
+        // entity, emitting a success event, or changing damage/RNG state.
+        scheduled.visual_started = tick;
+        std::uint64_t identity = 14695981039346656037ull;
+        for (const auto value : {action.cast_id, static_cast<std::uint64_t>(action.due),
+                                std::uint64_t{0x4152524f57524149}})
+            for (unsigned byte = 0; byte < 8; ++byte)
+            {
+                identity ^= (value >> (byte * 8)) & 255u;
+                identity *= 1099511628211ull;
+            }
+        scheduled.visual_owner_id = identity ? identity : 1;
+    }
     if (action.kind == ScheduledKind::Explosion && action.skill == SkillKind::ExplosiveArrow &&
         action.source_upgrade == 1)
     {
@@ -427,7 +468,8 @@ void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int
                 std::uint8_t source_upgrade,
                 std::uint8_t source_relic,
                 std::uint8_t source_enemy,
-                std::uint64_t originating_area_id)
+                std::uint64_t originating_area_id, Float2 incoming_direction,
+                bool shockwave_contact, Float2 impact_position)
 {
     if (target == 0 && tick < actors->player.revive_invulnerable_until)
     {
@@ -449,7 +491,8 @@ void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int
                   std::max(rules.stats.combat.minimum_final_damage, amount), skill,
                  origin, proc.root_cast, source_upgrade, source_relic, source_enemy,
                  bleed, burn, slow, slow_duration, {}, {}, 0,
-                 originating_area_id});
+                 originating_area_id, incoming_direction, impact_position,
+                 shockwave_contact});
 }
 
 void GameSimulation::SimulationWorld::QueueAreaDamage(Float2 position, float radius, std::int32_t damage, SkillKind skill,
@@ -1102,7 +1145,7 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
     actors->player.basic_attack_animation_until = tick;
     actors->player.active_cast_tick = tick + 9;
     actors->player.active_animation_until = actors->player.active_cast_tick + kAnimationBlendOutTicks;
-    CancelChargedShot();
+    CancelChargedShot(true);
     actors->player.active_basic_empower_until =
         tick + rules.upgrades.basic_attack.post_active_three_arrow.activation_window_ticks;
 }
@@ -1128,6 +1171,14 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
             direction = Normalize(Subtract(actors->player.position, boss->position));
         if (action.kind == BossActionKind::Dash)
         {
+            if (LengthSquared(action.direction) <= 0.0001f)
+            {
+                DomainSignalGeometry retarget{};
+                retarget.source_id = action.cast_id;
+                retarget.start_tick = retarget.end_tick = tick;
+                EmitVfx(DomainSignalKind::BossDashRetargeted, boss->position,
+                        direction, 1.0f, 1.0f, 0, boss->id.value, retarget);
+            }
             EmitVfx(DomainSignalKind::BossDashStarted, boss->position,
                     direction, 1.0f, 0.12f);
             boss->velocity = Multiply(direction, action.speed);
@@ -1324,13 +1375,13 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
                 {
                     projectile->homing = true;
                     projectile->homing_target = target->id.value;
-                    if (action.origin == EffectOrigin::Derived)
-                        EmitUpgradeVisual(SkillKind::PiercingShot, 1,
-                                          UpgradeVisualStage::Spawn,
-                                          projectile->position,
-                                          Normalize(projectile->velocity),
-                                          projectile->cast_id, projectile->id.value);
                 }
+                if (action.origin == EffectOrigin::Derived)
+                    EmitUpgradeVisual(SkillKind::PiercingShot, 1,
+                                      UpgradeVisualStage::Spawn,
+                                      projectile->position,
+                                      Normalize(projectile->velocity),
+                                      projectile->cast_id, projectile->id.value);
             }
             if (projectile && action.skill == SkillKind::RicochetArrow &&
                 action.origin == EffectOrigin::Original)
@@ -1465,6 +1516,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
 void GameSimulation::SimulationWorld::MovementPhase()
 {
     actors->player.previous_position = actors->player.position;
+    actors->player.tick_motion.Reset(actors->player.position);
     const auto stationary_attack = current_input.held.basic_attack_held ||
                                    tick < actors->player.active_cast_tick;
     if (actors->player.retreat_landing_pending && tick >= actors->player.retreat_until)
@@ -1523,19 +1575,43 @@ void GameSimulation::SimulationWorld::MovementPhase()
         actors->player.retreat_landing_pending = false;
         actors->player.forced_move_skill = SkillKind::Count;
     }
-    if (actors->player.retreat_followup_tick != 0 && tick >= actors->player.retreat_followup_tick)
+    const auto second_retreat = actors->player.retreat_followup_tick != 0 &&
+                                tick >= actors->player.retreat_followup_tick;
+    if (second_retreat)
     {
         EmitVfx(DomainSignalKind::RetreatMoved, actors->player.position,
                 Multiply(actors->player.retreat_followup_direction, -1.0f), 1.0f, 0.1f);
         const auto before = actors->player.position;
         if (!config.scenario.player_stationary)
-            actors->player.position = Add(actors->player.position,
+        {
+            actors->player.position = MoveDisc2D(actors->player.position,
                                   Multiply(actors->player.retreat_followup_direction,
                                            -rules.upgrades.retreat_shot
                                                 .delayed_second_retreat_and_arrow
-                                                .additional_move_distance));
+                                                .additional_move_distance),
+                                  rules.stats.player_collision_radius,
+                                  rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
+            actors->player.position = ClampToArena(rules.arena_boundary, actors->player.position,
+                                                   rules.stats.player_collision_radius);
+        }
         RecordUpgradeDisplacement(SkillKind::RetreatShot, 7, before,
                                   actors->player.position);
+        const auto actual_second_move = Subtract(actors->player.position, before);
+        if (LengthSquared(actual_second_move) > 0.0f)
+        {
+            DomainSignalGeometry geometry{};
+            geometry.kind = DomainSignalGeometryKind::Line;
+            geometry.width = rules.stats.player_collision_radius * 2.0f;
+            geometry.source_id = kPlayerRenderId;
+            geometry.start_tick = geometry.end_tick = tick;
+            geometry.end_position = {actors->player.position.x, 1.05f,
+                                     actors->player.position.y};
+            EmitUpgradeVisual(SkillKind::RetreatShot, 8,
+                              UpgradeVisualStage::Spawn, before,
+                              Normalize(actual_second_move),
+                              actors->player.retreat_followup_cast,
+                              kPlayerRenderId, geometry);
+        }
         auto direction = actors->player.retreat_followup_direction;
         auto *target = NearestEnemy(actors->player.position,
                                     rules.skills[static_cast<std::size_t>(
@@ -1554,14 +1630,15 @@ void GameSimulation::SimulationWorld::MovementPhase()
         }
         actors->player.retreat_followup_tick = 0;
     }
-    if (tick < actors->player.retreat_until && !config.scenario.player_stationary)
+    // The follow-up owns this tick's movement, including the position used to fire.
+    if (!second_retreat && tick < actors->player.retreat_until && !config.scenario.player_stationary)
     {
         actors->player.position = MoveDisc2D(actors->player.position,
                                      Multiply(actors->player.retreat_velocity, kTickSeconds),
                                      rules.stats.player_collision_radius,
-                                     rules.arena_boundary, ArenaObstacles());
+                                     rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
     }
-    else if (actors->player.has_move_target && !stationary_attack)
+    else if (!second_retreat && actors->player.has_move_target && !stationary_attack)
     {
         const auto direct_path = SegmentClear2D(actors->player.position, actors->player.move_target,
                                                 rules.stats.player_collision_radius,
@@ -1588,14 +1665,14 @@ void GameSimulation::SimulationWorld::MovementPhase()
             actors->player.position = MoveDisc2D(actors->player.position,
                                          Multiply(Normalize(delta), step),
                                          rules.stats.player_collision_radius,
-                                         rules.arena_boundary, ArenaObstacles());
+                                         rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
             actors->player.facing = Normalize(delta, actors->player.facing);
         }
         else
         {
             actors->player.position = MoveDisc2D(actors->player.position, delta,
                                          rules.stats.player_collision_radius,
-                                         rules.arena_boundary, ArenaObstacles());
+                                         rules.arena_boundary, ArenaObstacles(), &actors->player.tick_motion);
             if (LengthSquared(Subtract(actors->player.move_target, actors->player.position)) <= step * step)
                 actors->player.has_move_target = false;
         }
@@ -1606,6 +1683,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
     }
     actors->player.position = ClampToArena(rules.arena_boundary, actors->player.position,
                                    rules.stats.player_collision_radius);
+    actors->player.tick_motion.final_position = actors->player.position;
     actors->player.movement_since_echo += Length(Subtract(actors->player.position,
                                                    actors->player.previous_position));
     const auto moved = Length(Subtract(actors->player.position, actors->player.previous_position));
@@ -1620,18 +1698,21 @@ void GameSimulation::SimulationWorld::MovementPhase()
         Metrics().stat_utility[static_cast<std::size_t>(StatKind::MoveSpeed)] +=
             static_cast<std::uint64_t>(std::llround(extra * 1000.0f));
     }
+    const bool forced_motion = tick < actors->player.retreat_until;
+    const bool locomotion_moving = !forced_motion && moved > 0.0f;
+    if (forced_motion || locomotion_moving)
+        actors->player.movement_stopped_tick = 0;
+    else if (actors->player.locomotion_moving)
+        actors->player.movement_stopped_tick = tick;
+    actors->player.locomotion_moving = locomotion_moving;
     const auto locomotion_target =
         LengthSquared(Subtract(actors->player.position, actors->player.previous_position)) > 0.000001f
             ? 1.0f : 0.0f;
     const auto locomotion_step = 1.0f / (Seconds(0.12f));
     actors->player.locomotion_blend += std::clamp(locomotion_target - actors->player.locomotion_blend,
                                            -locomotion_step, locomotion_step);
-    if (tick - actors->player.last_position_sample >=
-        rules.relics.movement_echo.position_history_age_ticks)
-    {
-        actors->player.one_second_ago = actors->player.previous_position;
-        actors->player.last_position_sample = tick;
-    }
+    actors->player_position_history[tick % actors->player_position_history.size()] =
+        actors->player.position;
 
     for (auto &enemy : actors->enemies)
     {
@@ -1655,7 +1736,7 @@ void GameSimulation::SimulationWorld::MovementPhase()
             const auto radius = enemy.boss ? rules.boss_common.collision_radius
                                            : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
             enemy.position = MoveDisc2D(enemy.position, enemy.displacement_per_tick,
-                                        radius, rules.arena_boundary, ArenaObstacles());
+                                        radius, rules.arena_boundary, ArenaObstacles(), &enemy.tick_motion);
             if (--enemy.displacement_ticks == 0) enemy.displacement_per_tick = {};
         }
         else
@@ -1664,11 +1745,12 @@ void GameSimulation::SimulationWorld::MovementPhase()
                                            : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
             enemy.position = MoveDisc2D(enemy.position,
                                         Multiply(enemy.velocity, kTickSeconds), radius,
-                                        rules.arena_boundary, ArenaObstacles());
+                                        rules.arena_boundary, ArenaObstacles(), &enemy.tick_motion);
         }
         const auto enemy_radius = enemy.boss ? rules.boss_common.collision_radius
                                              : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
         enemy.position = ClampToArena(rules.arena_boundary, enemy.position, enemy_radius);
+        enemy.tick_motion.final_position = enemy.position;
         if (enemy.boss && tick < enemy.dash_until && !enemy.dash_hit &&
             SegmentCircle(enemy.previous_position, enemy.position,
                           actors->player.position,
@@ -1680,7 +1762,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
             QueueDamage(0, enemy.dash_damage, SkillKind::Count,
                        EffectOrigin::Original, enemy.attack_cast_id, 0, false,
                        0.0f, 0, kNoTelemetrySource, kNoTelemetrySource,
-                       static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                       static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                       Normalize(Subtract(actors->player.position, enemy.position)));
             enemy.dash_hit = true;
         }
         if (enemy.boss && enemy.attacking && tick >= enemy.attack_resolve)
@@ -1695,7 +1778,8 @@ void GameSimulation::SimulationWorld::MovementPhase()
                 QueueDamage(0, enemy.damage, SkillKind::Count,
                            EffectOrigin::Original, enemy.attack_cast_id, 0, false,
                            0.0f, 0, kNoTelemetrySource, kNoTelemetrySource,
-                           static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)));
+                           static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
+                           Normalize(Subtract(actors->player.position, enemy.position)));
             }
             enemy.attacking = false;
             enemy.velocity = {};
@@ -1722,34 +1806,49 @@ void GameSimulation::SimulationWorld::MovementPhase()
 
 void GameSimulation::SimulationWorld::SpatialGridPhase()
 {
-    const auto rebuild = [&]() {
+    // Keep pair order, but avoid striding through large actor records for every pair.
+    auto &positions = combat_state->separation_positions;
+    positions.resize(actors->enemies.size());
+    for (std::size_t index = 0; index < actors->enemies.size(); ++index)
+        positions[index] = actors->enemies[index].position;
+    const auto rebuild = [&](bool swept) {
         for (auto &cell : combat_state->enemy_grid) cell.clear();
         for (std::size_t index = 0; index < actors->enemies.size(); ++index)
         {
-            if (actors->enemies[index].dead) continue;
-            const auto x = SpatialGridCoordinate(actors->enemies[index].position.x,
-                                                 rules.arena_half_extent);
-            const auto y = SpatialGridCoordinate(actors->enemies[index].position.y,
-                                                 rules.arena_half_extent);
-            combat_state->enemy_grid[static_cast<std::size_t>(y * kGridDimension + x)].push_back(index);
+            if (actors->enemies[index].dead || (!swept && actors->enemies[index].boss)) continue;
+            const auto &enemy = actors->enemies[index];
+            auto minimum = enemy.position, maximum = enemy.position;
+            if (swept)
+                for (std::uint8_t segment = 0; segment < enemy.tick_motion.count; ++segment)
+                    for (const auto point : {enemy.tick_motion.segments[segment].from,
+                                             enemy.tick_motion.segments[segment].to})
+                    {
+                        minimum.x = std::min(minimum.x, point.x); minimum.y = std::min(minimum.y, point.y);
+                        maximum.x = std::max(maximum.x, point.x); maximum.y = std::max(maximum.y, point.y);
+                    }
+            const auto minimum_x = SpatialGridCoordinate(minimum.x, rules.arena_half_extent);
+            const auto minimum_y = SpatialGridCoordinate(minimum.y, rules.arena_half_extent);
+            const auto maximum_x = SpatialGridCoordinate(maximum.x, rules.arena_half_extent);
+            const auto maximum_y = SpatialGridCoordinate(maximum.y, rules.arena_half_extent);
+            for (auto y = minimum_y; y <= maximum_y; ++y)
+                for (auto x = minimum_x; x <= maximum_x; ++x)
+                    combat_state->enemy_grid[static_cast<std::size_t>(y * kGridDimension + x)].push_back(index);
         }
     };
-    const auto separate = [this](std::size_t left, std::size_t right) {
-        if (actors->enemies[left].dead || actors->enemies[right].dead || actors->enemies[left].boss ||
-            actors->enemies[right].boss)
-        {
-            return;
-        }
-        const auto delta = Subtract(actors->enemies[left].position, actors->enemies[right].position);
+    const auto separate = [this, &positions](std::size_t left, std::size_t right) {
+        const auto delta = Subtract(positions[left], positions[right]);
         const auto distance_squared = LengthSquared(delta);
-        if (distance_squared <= 0.0001f || distance_squared >= 0.64f) return;
-        const auto push = Multiply(Normalize(delta),
+        if (distance_squared >= 0.64f) return;
+        const auto direction = distance_squared > 0.0000000001f ? Normalize(delta)
+            : Float2{actors->enemies[left].id.value < actors->enemies[right].id.value
+                         ? -1.0f : 1.0f, 0.0f};
+        const auto push = Multiply(direction,
                                    (0.8f - std::sqrt(distance_squared)) * 0.5f);
-        actors->enemies[left].position = Add(actors->enemies[left].position, push);
-        actors->enemies[right].position = Subtract(actors->enemies[right].position, push);
+        positions[left] = Add(positions[left], push);
+        positions[right] = Subtract(positions[right], push);
     };
 
-    rebuild();
+    rebuild(false);
     constexpr std::array<std::pair<int, int>, 4> kForwardNeighbors{{
         {1, 0}, {-1, 1}, {0, 1}, {1, 1},
     }};
@@ -1783,15 +1882,19 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
             }
         }
     }
-    for (auto &enemy : actors->enemies)
+    for (std::size_t index = 0; index < actors->enemies.size(); ++index)
     {
+        auto &enemy = actors->enemies[index];
+        enemy.position = positions[index];
         const auto radius = enemy.boss ? rules.boss_common.collision_radius
                                        : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
         enemy.position = ProjectOutsideObstacles(
             ClampToArena(rules.arena_boundary, enemy.position, radius),
             radius, ArenaObstacles());
+        enemy.tick_motion.final_position = enemy.position;
     }
-    rebuild();
+    // Separation uses final centers once; only projectile collision needs swept bounds.
+    rebuild(true);
 }
 
 bool GameSimulation::SimulationWorld::AlreadyHit(const ProjectileActor &projectile, std::uint64_t target) const noexcept
@@ -1808,23 +1911,22 @@ void GameSimulation::SimulationWorld::RecordHit(ProjectileActor &projectile, std
 
 std::uint8_t GameSimulation::SimulationWorld::IncrementCastHit(std::uint64_t cast, std::uint64_t target)
 {
-    const auto iterator = std::ranges::find_if(combat_state->cast_hits, [=](const CastHitRecord &record) {
-        return record.cast_id == cast && record.target == target;
-    });
-    if (iterator != combat_state->cast_hits.end())
-    {
-        return ++iterator->count;
-    }
+    const auto key = std::pair{cast, target};
+    if (const auto found = combat_state->cast_hit_index.find(key);
+        found != combat_state->cast_hit_index.end())
+        return ++combat_state->cast_hits[found->second].count;
+    combat_state->cast_hit_index.emplace(key, combat_state->cast_hits.size());
     combat_state->cast_hits.push_back({cast, target, 1});
     return 1;
 }
 
 std::uint8_t GameSimulation::SimulationWorld::IncrementAreaHit(std::uint64_t area, std::uint64_t target)
 {
-    const auto iterator = std::ranges::find_if(combat_state->area_hits, [=](const AreaHitRecord &record) {
-        return record.area_id == area && record.target == target;
-    });
-    if (iterator != combat_state->area_hits.end()) return ++iterator->count;
+    const auto key = std::pair{area, target};
+    if (const auto found = combat_state->area_hit_index.find(key);
+        found != combat_state->area_hit_index.end())
+        return ++combat_state->area_hits[found->second].count;
+    combat_state->area_hit_index.emplace(key, combat_state->area_hits.size());
     combat_state->area_hits.push_back({area, target, 1});
     return 1;
 }
@@ -1838,7 +1940,7 @@ CastRuntime &GameSimulation::SimulationWorld::FindOrCreateCastRuntime(std::uint6
     return combat_state->cast_runtimes.back();
 }
 
-void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectile,
+bool GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectile,
                                                        EnemyActor &enemy,
                                                        Float2 contact_position)
 {
@@ -1986,6 +2088,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                                       SkillKind::BasicAttack, 5});
         EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
+        BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                         SkillKind::BasicAttack, 5, 2);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                             UpgradeEffectMetric::SlowApplications);
         RecordUpgradeEffect(SkillKind::BasicAttack, 5,
@@ -2001,6 +2105,11 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             RecordUpgradeEffect(SkillKind::BasicAttack, 5,
                                 UpgradeEffectMetric::CooldownTicksSaved,
                                 before - *longest);
+            if (before > *longest)
+                EmitUpgradeVisual(SkillKind::BasicAttack, 6,
+                                  UpgradeVisualStage::Spawn, actors->player.position,
+                                  actors->player.aim, projectile.cast_id,
+                                  kPlayerRenderId);
         }
     }
     if (projectile.skill == SkillKind::PiercingShot &&
@@ -2047,6 +2156,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
             EmitVfxLine(DomainSignalKind::BurnTransferred,
                         source ? source->position : projectile.previous_position,
                         enemy.position);
+            BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                            6, projectile.cast_id);
             ApplyBurn(enemy, runtime.stored_burn_attack, false,
                       runtime.stored_burn_remaining, projectile.skill, 6);
             ++runtime.transfer_count;
@@ -2131,6 +2242,10 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 arrow->homing_target = target->id.value;
                 arrow->burn = true;
                 ++runtime.transfer_count;
+                EmitVfxLine(DomainSignalKind::BurnTransferred,
+                            enemy.position, target->position);
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                5, projectile.cast_id);
                 EmitUpgradeVisual(SkillKind::MultiShot, 6,
                                   UpgradeVisualStage::Spawn, arrow->position,
                                   Normalize(arrow->velocity), projectile.cast_id,
@@ -2149,6 +2264,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         enemy.mark_expires = tick + mark.mark_duration_ticks;
         EmitVfx(DomainSignalKind::MarkApplied, enemy.position, {},
                 enemy.boss ? 1.4f : 0.75f, 0.025f);
+        BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                         SkillKind::ExplosiveArrow, 6, 3);
         RecordUpgradeEffect(SkillKind::ExplosiveArrow, 6,
                             UpgradeEffectMetric::ExplosionsCreated);
         QueueAreaDamage(enemy.position,
@@ -2298,7 +2415,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 hit_direction, hit_scale, hit_height,
                 static_cast<std::uint8_t>(projectile.skill));
 
-    if (projectile.skill == SkillKind::RicochetArrow && projectile.bounce_remaining > 0)
+    if (projectile.skill == SkillKind::RicochetArrow && !projectile.returning && projectile.bounce_remaining > 0)
     {
         if (HasUpgrade(projectile.upgrade_mask, 3))
         {
@@ -2349,6 +2466,13 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         {
             EmitVfxLine(DomainSignalKind::RicochetLinked, enemy.position, next->position);
             if (projectile.origin == EffectOrigin::Original &&
+                HasUpgrade(projectile.upgrade_mask, 2) && projectile.hit_count == 1)
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                1, projectile.cast_id);
+            else if (projectile.origin == EffectOrigin::Derived && projectile.source_upgrade == 5)
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                5, projectile.cast_id);
+            if (projectile.origin == EffectOrigin::Original &&
                 HasUpgrade(projectile.upgrade_mask, 7))
             {
                 Tick *longest{};
@@ -2363,12 +2487,17 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                 if (longest)
                 {
                     const auto before = *longest;
+                    const auto maximum = ricochet_upgrades.ricochet_cooldown_reduction
+                                             .maximum_reduction_ticks;
+                    const auto available = maximum > runtime.cooldown_ticks_saved
+                        ? maximum - runtime.cooldown_ticks_saved : 0;
                     const auto reduction = std::min(
                         ricochet_upgrades.ricochet_cooldown_reduction
                             .cooldown_reduction_per_ricochet_ticks,
-                        ricochet_upgrades.ricochet_cooldown_reduction.maximum_reduction_ticks);
+                        available);
                     *longest = before > reduction ? before - reduction : 0;
                     const auto saved = before - *longest;
+                    runtime.cooldown_ticks_saved += saved;
                     RecordUpgradeEffect(SkillKind::RicochetArrow, 6,
                                         UpgradeEffectMetric::CooldownTicksSaved,
                                         saved);
@@ -2389,6 +2518,8 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                               projectile.skill, 3);
                 EmitVfxLine(DomainSignalKind::BurnTransferred,
                             enemy.position, next->position);
+                BindUpgradeLink(combat_state->visual_links.back(), projectile.skill,
+                                3, projectile.cast_id);
                 projectile.carried_burn_attack = enemy.status.burn->attack_snapshot;
                 projectile.carried_burn_expires = enemy.status.burn->expires;
             }
@@ -2418,7 +2549,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
                                             rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)]
                                                 .projectile_speed);
             projectile.remaining_range = search_radius;
-            return;
+            return true;
         }
         if (projectile.origin == EffectOrigin::Original)
         {
@@ -2447,7 +2578,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
         projectile.velocity = Multiply(
             Normalize(Subtract(actors->player.position, projectile.position)),
             rules.skills[static_cast<std::size_t>(SkillKind::RicochetArrow)].projectile_speed);
-        return;
+        return true;
     }
     if (projectile.pierce_remaining > 0 && (!enemy.boss || projectile.pierce_remaining != 255))
     {
@@ -2460,6 +2591,7 @@ void GameSimulation::SimulationWorld::OnProjectileHit(ProjectileActor &projectil
     {
         projectile.dead = true;
     }
+    return false;
 }
 
 void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileActor &projectile)
@@ -2646,100 +2778,134 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
     {
         auto &projectile = actors->projectiles[projectile_index];
         if (projectile.dead) continue;
-        const auto original_end = projectile.position;
-        const auto wall_time = FirstObstacleHitTime(projectile.previous_position,
-            original_end, projectile.radius, ArenaObstacles());
-        if (wall_time <= 1.0f)
-            projectile.position = Add(projectile.previous_position,
-                Multiply(Subtract(original_end, projectile.previous_position), wall_time));
-        if (projectile.player_owned)
+        auto segment_start = projectile.previous_position;
+        auto segment_end = projectile.position;
+        auto remaining_seconds = kTickSeconds;
+        auto elapsed_fraction = 0.0f;
+        std::uint64_t redirect_target{};
+        std::uint32_t redirects{};
+        for (;;)
         {
-            const auto largest_enemy_radius = std::max(
-                rules.boss_common.collision_radius,
-                std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Melee)].collision_radius,
-                         std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)].collision_radius,
-                                  rules.enemies[static_cast<std::size_t>(EnemyKind::Suicide)].collision_radius)));
-            const auto margin = projectile.radius + largest_enemy_radius;
-            CollectSpatialGridCandidates(
-                combat_state->enemy_grid,
-                {std::min(projectile.previous_position.x, projectile.position.x) - margin,
-                 std::min(projectile.previous_position.y, projectile.position.y) - margin},
-                {std::max(projectile.previous_position.x, projectile.position.x) + margin,
-                 std::max(projectile.previous_position.y, projectile.position.y) + margin},
-                rules.arena_half_extent, combat_state->collision_candidates);
-            std::ranges::sort(combat_state->collision_candidates, [&](std::size_t left,
-                                                                      std::size_t right) {
-                const auto hit_time = [&](std::size_t index) {
+            const auto wall_time = FirstObstacleHitTime(segment_start,
+                segment_end, projectile.radius, ArenaObstacles());
+            const auto reachable_end = wall_time <= 1.0f
+                ? Add(segment_start, Multiply(Subtract(segment_end, segment_start), wall_time))
+                : segment_end;
+            bool redirected{};
+            if (projectile.player_owned)
+            {
+                const auto largest_enemy_radius = std::max(
+                    rules.boss_common.collision_radius,
+                    std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Melee)].collision_radius,
+                             std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)].collision_radius,
+                                      rules.enemies[static_cast<std::size_t>(EnemyKind::Suicide)].collision_radius)));
+                const auto margin = projectile.radius + largest_enemy_radius;
+                CollectSpatialGridCandidates(
+                    combat_state->enemy_grid,
+                    {std::min(segment_start.x, reachable_end.x) - margin,
+                     std::min(segment_start.y, reachable_end.y) - margin},
+                    {std::max(segment_start.x, reachable_end.x) + margin,
+                     std::max(segment_start.y, reachable_end.y) + margin},
+                    rules.arena_half_extent, combat_state->collision_candidates);
+                auto &candidates = combat_state->collision_candidates;
+                std::ranges::sort(candidates);
+                candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+                auto &hit_times = combat_state->collision_hit_times;
+                hit_times.resize(actors->enemies.size());
+                for (const auto index : candidates)
+                {
                     const auto &enemy = actors->enemies[index];
                     const auto radius = enemy.boss ? rules.boss_common.collision_radius
                         : rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
-                    return SegmentDiscHitTime(projectile.previous_position, original_end,
-                                              enemy.position, projectile.radius + radius);
-                };
-                const auto left_time = hit_time(left), right_time = hit_time(right);
-                if (left_time != right_time) return left_time < right_time;
-                return actors->enemies[left].id.value < actors->enemies[right].id.value;
-            });
-            for (const auto enemy_index : combat_state->collision_candidates)
-            {
-                auto &enemy = actors->enemies[enemy_index];
-                if (enemy.dead || AlreadyHit(projectile, enemy.id.value)) continue;
-                const auto enemy_radius = enemy.boss
-                                              ? rules.boss_common.collision_radius
-                                              : rules.enemies[static_cast<std::size_t>(enemy.kind)]
-                                                    .collision_radius;
-                const auto combined = projectile.radius + enemy_radius;
-                const auto actor_time = SegmentDiscHitTime(projectile.previous_position,
-                    original_end, enemy.position, combined);
-                if (actor_time <= 1.0f && actor_time < wall_time)
+                    hit_times[index] = MovingDiscHitTime(segment_start, segment_end,
+                        enemy.tick_motion, projectile.radius + radius, elapsed_fraction);
+                }
+                std::ranges::sort(candidates, [&](std::size_t left, std::size_t right) {
+                    if (hit_times[left] != hit_times[right]) return hit_times[left] < hit_times[right];
+                    return actors->enemies[left].id.value < actors->enemies[right].id.value;
+                });
+                // Hits can displace actors; only the sort keys are cached for this segment.
+                for (const auto enemy_index : combat_state->collision_candidates)
                 {
-                    const auto contact_position = Add(
-                        projectile.previous_position,
-                        Multiply(Subtract(original_end, projectile.previous_position),
-                                 actor_time));
-                    OnProjectileHit(projectile, enemy, contact_position);
-                    if (projectile.dead)
+                    auto &enemy = actors->enemies[enemy_index];
+                    if (enemy.dead || AlreadyHit(projectile, enemy.id.value)) continue;
+                    const auto enemy_radius = enemy.boss
+                                                  ? rules.boss_common.collision_radius
+                                                  : rules.enemies[static_cast<std::size_t>(enemy.kind)]
+                                                        .collision_radius;
+                    const auto combined = projectile.radius + enemy_radius;
+                    const auto actor_time = MovingDiscHitTime(segment_start,
+                        segment_end, enemy.tick_motion, combined, elapsed_fraction);
+                    // A return clears hit_ids, but its departure contact is not a new hit.
+                    if (actor_time == 0.0f && enemy.id.value == redirect_target) continue;
+                    if (actor_time <= 1.0f && actor_time < wall_time)
                     {
-                        projectile.position = Add(projectile.previous_position,
-                            Multiply(Subtract(original_end, projectile.previous_position), actor_time));
-                        ExplodeProjectile(projectile);
-                        break;
+                        const auto contact_position = Add(
+                            segment_start,
+                            Multiply(Subtract(segment_end, segment_start),
+                                     actor_time));
+                        projectile.position = contact_position;
+                        if (OnProjectileHit(projectile, enemy, contact_position))
+                        {
+                            elapsed_fraction += (1.0f - elapsed_fraction) * actor_time;
+                            remaining_seconds *= 1.0f - actor_time;
+                            redirect_target = enemy.id.value;
+                            redirected = true;
+                            break;
+                        }
+                        if (projectile.dead)
+                        {
+                            ExplodeProjectile(projectile);
+                            break;
+                        }
                     }
                 }
             }
-        }
-        else if (const auto actor_time = SegmentDiscHitTime(projectile.previous_position,
-                     original_end, actors->player.position,
+            else if (const auto actor_time = MovingDiscHitTime(segment_start,
+                     segment_end, actors->player.tick_motion,
                      projectile.radius + rules.stats.player_collision_radius);
                  actor_time <= 1.0f && actor_time < wall_time)
-        {
-            const auto contact_position = Add(
-                projectile.previous_position,
-                Multiply(Subtract(original_end, projectile.previous_position), actor_time));
-            if (const auto impact = ProjectileImpactKind(projectile);
-                impact != DomainSignalKind::Count)
-                EmitVfx(impact, contact_position,
-                        {projectile.velocity.x, projectile.velocity.y}, 1.0f,
-                        0.45f, 0, 0, ProjectileImpactGeometry(projectile));
-            QueueDamage(0, projectile.damage, SkillKind::Count,
-                       EffectOrigin::Original, projectile.cast_id, 0, false, 0.0f, 0,
-                       kNoTelemetrySource, kNoTelemetrySource,
-                       projectile.source_enemy);
-            projectile.dead = true;
+            {
+                const auto contact_position = Add(
+                    segment_start,
+                    Multiply(Subtract(segment_end, segment_start), actor_time));
+                if (const auto impact = ProjectileImpactKind(projectile);
+                    impact != DomainSignalKind::Count)
+                    EmitVfx(impact, contact_position,
+                            {projectile.velocity.x, projectile.velocity.y}, 1.0f,
+                            0.45f, 0, 0, ProjectileImpactGeometry(projectile));
+                QueueDamage(0, projectile.damage, SkillKind::Count,
+                           EffectOrigin::Original, projectile.cast_id, 0, false, 0.0f, 0,
+                           kNoTelemetrySource, kNoTelemetrySource,
+                           projectile.source_enemy, 0, Normalize(projectile.velocity));
+                projectile.dead = true;
+            }
+            if (projectile.dead) break;
+            if (redirected)
+            {
+                // Stop at the last verified contact if zero-time redirects exhaust the bound.
+                if (++redirects >= 64 || remaining_seconds <= 0.0f) break;
+                segment_start = projectile.position;
+                const auto step = Multiply(projectile.velocity, remaining_seconds);
+                segment_end = Add(segment_start, step);
+                projectile.remaining_range -= Length(step);
+                continue;
+            }
+            projectile.position = reachable_end;
+            if (wall_time <= 1.0f)
+            {
+                if (const auto impact = ProjectileImpactKind(projectile);
+                    impact != DomainSignalKind::Count)
+                    EmitVfx(impact, projectile.position,
+                            {projectile.velocity.x, projectile.velocity.y}, 1.0f,
+                            projectile.player_owned ? 1.05f : 0.45f, 0, 0,
+                            ProjectileImpactGeometry(projectile));
+                ExplodeProjectile(projectile);
+                projectile.dead = true;
+            }
+            break;
         }
         if (projectile.dead) continue;
-        if (wall_time <= 1.0f)
-        {
-            if (const auto impact = ProjectileImpactKind(projectile);
-                impact != DomainSignalKind::Count)
-                EmitVfx(impact, projectile.position,
-                        {projectile.velocity.x, projectile.velocity.y}, 1.0f,
-                        projectile.player_owned ? 1.05f : 0.45f, 0, 0,
-                        ProjectileImpactGeometry(projectile));
-            ExplodeProjectile(projectile);
-            projectile.dead = true;
-            continue; // A wall impact is not a range-end split or ricochet trigger.
-        }
         if (projectile.remaining_range <= 0.0f)
         {
             if (projectile.skill == SkillKind::PiercingShot &&
@@ -2759,10 +2925,13 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     if (auto *branch = FireProjectile(
                             projectile.skill, projectile.position, child_direction,
                              split.damage_multiplier, EffectOrigin::Derived, projectile.cast_id, 0,
-                            true, 1); branch && target)
+                            true, 1))
                     {
-                        branch->homing = true;
-                        branch->homing_target = target->id.value;
+                        if (target)
+                        {
+                            branch->homing = true;
+                            branch->homing_target = target->id.value;
+                        }
                         EmitUpgradeVisual(SkillKind::PiercingShot, 2,
                                           UpgradeVisualStage::Spawn, branch->position,
                                           Normalize(branch->velocity), projectile.cast_id,
@@ -2787,6 +2956,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     {
                         arrow->homing = true;
                         arrow->homing_target = target->id.value;
+                        EmitUpgradeVisual(SkillKind::MultiShot, 8,
+                                          UpgradeVisualStage::Spawn, arrow->position,
+                                          Normalize(arrow->velocity), projectile.cast_id,
+                                          arrow->id.value);
                     }
                 }
                 projectile.dead = true;
@@ -2862,6 +3035,17 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     area.radius / 2.0f, 0.12f);
         if (area.kind == AreaKind::EnemyDamage)
         {
+            if (area.ring_outer_radius <= 0.0f && area.source_enemy >= kBossTelemetryBase &&
+                area.source_enemy != kNoTelemetrySource)
+            {
+                DomainSignalGeometry geometry{};
+                geometry.kind = DomainSignalGeometryKind::Circle;
+                geometry.radius = area.radius;
+                geometry.start_tick = geometry.end_tick = tick;
+                geometry.source_id = area.id.value;
+                EmitVfx(DomainSignalKind::BossAreaTicked, area.position, {},
+                        1.0f, 0.12f, 0, 0, geometry);
+            }
             if (area.ring_outer_radius > 0.0f)
             {
                 const auto duration = std::max<Tick>(area.expires - area.active_tick, 1);
@@ -2893,7 +3077,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     QueueDamage(0, area.damage, SkillKind::Count,
                                area.origin, area.cast_id, 0, false, 0.0f, 0,
                                kNoTelemetrySource, kNoTelemetrySource,
-                               area.source_enemy);
+                               area.source_enemy, 0,
+                               Normalize(delta), true, actors->player.position);
                 }
             }
             else if (DistanceSquared(area.position, actors->player.position) <=
@@ -2904,7 +3089,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 QueueDamage(0, area.damage, SkillKind::Count,
                            area.origin, area.cast_id, 0, false, 0.0f, 0,
                            kNoTelemetrySource, kNoTelemetrySource,
-                           area.source_enemy);
+                           area.source_enemy, 0,
+                           Normalize(Subtract(actors->player.position, area.position)));
             }
         }
         else if (area.kind == AreaKind::Trap)
@@ -2959,6 +3145,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                     target->mark_expires = tick + mark.mark_duration_ticks;
                     EmitVfx(DomainSignalKind::MarkApplied, target->position,
                             {}, target->boss ? 1.4f : 0.75f, 0.025f);
+                    BindStatusVisual(combat_state->domain_signals.back(), *target,
+                                     SkillKind::Trap, 6, 3);
                     RecordUpgradeEffect(SkillKind::Trap, 6,
                                         UpgradeEffectMetric::ExplosionsCreated);
                     QueueDamage(target->id.value,
@@ -3072,6 +3260,8 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                          area.skill, area.source_upgrade, area.source_relic});
                     EmitVfx(DomainSignalKind::SlowApplied, enemy.position, {},
                             enemy.boss ? 1.4f : 0.75f, 0.025f);
+                    BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                                     area.skill, area.source_upgrade, 2);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
                                         UpgradeEffectMetric::SlowApplications);
                     RecordUpgradeEffect(area.skill, area.source_upgrade,
@@ -3295,7 +3485,13 @@ void GameSimulation::SimulationWorld::ApplyBleed(EnemyActor &enemy, float attack
                 std::uint8_t source_relic)
 {
     if (stacks != 0 && rules.statuses.bleed.maximum_stacks != 0) BeginStatusEpisode(enemy, 0, tick);
-    if (stacks != 0) EmitVfx(DomainSignalKind::BleedApplied, enemy.position);
+    if (stacks != 0)
+    {
+        EmitVfx(DomainSignalKind::BleedApplied, enemy.position);
+        if (rules.statuses.bleed.maximum_stacks != 0)
+            BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                             source_skill, source_upgrade, 0);
+    }
     RecordUpgradeEffect(source_skill, source_upgrade,
                         UpgradeEffectMetric::BleedStacksApplied, stacks);
     for (std::uint8_t stack = 0; stack < stacks; ++stack)
@@ -3328,6 +3524,8 @@ void GameSimulation::SimulationWorld::ApplyBurn(EnemyActor &enemy, float attack,
     if (rules.statuses.burn.maximum_instances == 0) return;
     BeginStatusEpisode(enemy, 1, tick);
     EmitVfx(DomainSignalKind::BurnApplied, enemy.position);
+    BindStatusVisual(combat_state->domain_signals.back(), enemy,
+                     source_skill, source_upgrade, 1);
     RecordUpgradeEffect(source_skill, source_upgrade,
                         UpgradeEffectMetric::BurnApplications);
     const BurnEffect incoming{attack, tick + duration + 1,
@@ -3437,14 +3635,23 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             telemetry->damage_taken += event.amount;
             EmitVfx(DomainSignalKind::PlayerDamaged, actors->player.position, {},
                     1.0f, 0.1f);
+            if (applied_damage > 0)
+            {
+                DomainSignalGeometry contact{};
+                contact.source_id = event.cast_id;
+                contact.start_tick = contact.end_tick = tick;
+                EmitVfx(DomainSignalKind::PlayerHitDirection, actors->player.position,
+                        event.incoming_direction, 1.0f, 0.1f, 0, 0, contact);
+                if (event.shockwave_contact)
+                    EmitVfx(DomainSignalKind::BossShockwaveContact, event.impact_position,
+                            event.incoming_direction, 1.0f, 0.1f, 0, 0, contact);
+            }
             if (source_enemy < kEnemyArchetypeCount)
             {
-                const auto hit_key = (static_cast<std::uint64_t>(source_enemy) << 56) |
-                                     (event.cast_id & 0x00FFFFFFFFFFFFFFull);
-                if (std::ranges::find(telemetry->balance_observer.enemy_hit_casts, hit_key) ==
-                    telemetry->balance_observer.enemy_hit_casts.end())
+                if (BalanceObserver::RecordHit(
+                        telemetry->balance_observer.enemy_hit_casts[source_enemy],
+                        event.cast_id & 0x00FFFFFFFFFFFFFFull))
                 {
-                    telemetry->balance_observer.enemy_hit_casts.push_back(hit_key);
                     ++Metrics().enemy_hits[source_enemy];
                 }
                 Metrics().enemy_damage[source_enemy] += applied_damage;
@@ -3471,10 +3678,9 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             ++Metrics().skill_hit_events[skill_index];
             if (event.cast_id != 0)
             {
-                if (std::ranges::find(telemetry->balance_observer.player_hit_casts, event.cast_id) ==
-                    telemetry->balance_observer.player_hit_casts.end())
+                if (BalanceObserver::RecordHit(
+                        telemetry->balance_observer.player_hit_casts, event.cast_id))
                 {
-                    telemetry->balance_observer.player_hit_casts.push_back(event.cast_id);
                     ++Metrics().skill_casts_with_hit[skill_index];
                 }
             }
@@ -3640,6 +3846,8 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
                  event.skill, source_upgrade, event.source_relic});
             EmitVfx(DomainSignalKind::SlowApplied, enemy->position, {},
                     enemy->boss ? 1.4f : 0.75f, 0.025f);
+            BindStatusVisual(combat_state->domain_signals.back(), *enemy,
+                             event.skill, source_upgrade, 2);
             RecordUpgradeEffect(event.skill, source_upgrade,
                                 UpgradeEffectMetric::SlowApplications);
             RecordUpgradeEffect(event.skill, source_upgrade,
@@ -3690,11 +3898,26 @@ std::uint64_t GameSimulation::SimulationWorld::Heal(std::int32_t amount,
     return applied;
 }
 
-void GameSimulation::SimulationWorld::CancelChargedShot() noexcept
+void GameSimulation::SimulationWorld::CancelChargedShot(bool released) noexcept
 {
     if (actors->player.charging)
+    {
         EmitSignal(DomainSignalKind::ChargedShotEnded, actors->player.position,
                    static_cast<std::uint8_t>(SkillKind::ChargedShot));
+        if (!released)
+        {
+            DomainSignalGeometry attachment{};
+            attachment.kind = DomainSignalGeometryKind::EntityAttachment;
+            attachment.radius = rules.stats.player_collision_radius;
+            attachment.source_id = kPlayerRenderId;
+            attachment.start_tick = actors->player.charge_start;
+            attachment.end_tick = tick;
+            EmitVfx(DomainSignalKind::ChargedShotCancelled, actors->player.position,
+                    actors->player.aim, 1.0f, 1.05f,
+                    static_cast<std::uint8_t>(SkillKind::ChargedShot),
+                    kPlayerRenderId, attachment);
+        }
+    }
     actors->player.charging = false;
     actors->player.charging_skill = SkillKind::Count;
     actors->player.charging_slot = 0xFF;
@@ -3717,8 +3940,27 @@ void GameSimulation::SimulationWorld::HandleEnemyDeath(EnemyActor &enemy)
             enemy.boss ? 1.5f : 1.0f, 0.3f,
             static_cast<std::uint8_t>(enemy.kind), enemy.boss ? 0 : enemy.id.value);
     if (enemy.boss)
-        EmitSignal(DomainSignalKind::BossDied, enemy.position,
-                   static_cast<std::uint8_t>(*enemy.boss));
+    {
+        EmitVfx(DomainSignalKind::BossDied, enemy.position, {0.0f, 1.0f}, 1.0f, 0.0f,
+                static_cast<std::uint8_t>(*enemy.boss), enemy.id.value);
+        combat_state->domain_signals.back().status_episode_generation = enemy.phase2_started;
+        assert(combat_state->boss_death_visual_count < combat_state->boss_death_visuals.size());
+        if (combat_state->boss_death_visual_count < combat_state->boss_death_visuals.size())
+        {
+            auto &capture = combat_state->boss_death_visuals[combat_state->boss_death_visual_count++];
+            capture = {};
+            capture.sequence = event_sequence;
+            capture.tick = tick;
+            capture.enemy = EnemyReadView(enemy);
+            const auto action = std::find_if(combat_state->boss_actions.begin(), combat_state->boss_actions.end(),
+                [&](const auto &value) { return value.boss_id == enemy.id.value; });
+            if (action != combat_state->boss_actions.end())
+            {
+                capture.has_action = true;
+                capture.action = BossActionReadView(*action);
+            }
+        }
+    }
     ++telemetry->kills;
     const auto enemy_index = EnemyTelemetryIndex(enemy);
     ++Metrics().enemy_killed[enemy_index];
@@ -4019,12 +4261,14 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
                     return area.kind == AreaKind::EnemyDamage;
                 });
             EmitVfx(DomainSignalKind::BossPhaseChanged, enemy.position,
-                    {}, 1.0f, 1.25f);
+                    {}, 1.0f, 1.25f, 0, enemy.id.value);
+            combat_state->domain_signals.back().status_episode_generation = enemy.phase2_started;
         }
     }
     if (final_dead)
     {
         session_phase = SessionPhase::Victory;
+        EmitSignal(DomainSignalKind::SessionVictory, actors->player.position);
     }
     else if (actors->player.health <= 0)
     {
@@ -4034,6 +4278,7 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
             EmitVfx(DomainSignalKind::PlayerDied, actors->player.position, {},
                     1.0f, 0.2f);
             session_phase = SessionPhase::Defeat;
+            EmitSignal(DomainSignalKind::SessionDefeat, actors->player.position);
         }
     }
 }
@@ -4064,15 +4309,23 @@ void GameSimulation::SimulationWorld::HandleMovementEcho(Tick release_ticks, std
 {
     const auto &relic = rules.relics.movement_echo;
     if (actors->player.movement_since_echo < relic.required_distance) return;
+    // CastAttack precedes Movement: tick-age is a completed movement sample
+    // for positive ages. Age zero uses the current pre-movement position.
+    const auto history_tick = tick > relic.position_history_age_ticks
+                                  ? tick - relic.position_history_age_ticks : 0;
+    const auto echo_position = relic.position_history_age_ticks == 0
+                                  ? actors->player.position
+                                  : actors->player_position_history[
+                                        history_tick % actors->player_position_history.size()];
     RecordRelicEffect(RelicKind::MovementEcho, UpgradeEffectMetric::Activations);
     RecordRelicEffect(RelicKind::MovementEcho,
                       UpgradeEffectMetric::ProjectilesCreated);
     ScheduleAction({tick + release_ticks, ScheduledKind::Projectile,
-              SkillKind::BasicAttack, actors->player.one_second_ago, actors->player.aim,
+              SkillKind::BasicAttack, echo_position, actors->player.aim,
               relic.damage_multiplier, 0.0f, 0.0f, 1, 0,
               EffectOrigin::Derived, cast_id, kNoTelemetrySource,
               static_cast<std::uint8_t>(RelicKind::MovementEcho)});
-    EmitVfx(DomainSignalKind::AfterimageArrowFired, actors->player.one_second_ago,
+    EmitVfx(DomainSignalKind::AfterimageArrowFired, echo_position,
             actors->player.aim, 1.0f, 0.3f,
             static_cast<std::uint8_t>(RelicKind::MovementEcho));
     actors->player.movement_since_echo = 0.0f;

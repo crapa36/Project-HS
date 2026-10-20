@@ -33,6 +33,10 @@ struct DamageCommand
     std::array<std::int32_t, 3> amplified_damage{};
     std::uint8_t amplified_count{};
     std::uint64_t originating_area_id{};
+    // Captured contact data only; damage ordering and GameplayChecksum exclude it.
+    Float2 incoming_direction{};
+    Float2 impact_position{};
+    bool shockwave_contact{};
 };
 
 enum class ProcPermission : std::uint8_t

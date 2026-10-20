@@ -1,5 +1,7 @@
 #pragma once
 
+#include <map>
+
 namespace hs
 {
 
@@ -8,6 +10,8 @@ using namespace gameplay_detail;
 struct ActorState
 {
     PlayerState player{};
+    // Tick-indexed ring, including tick zero; bounded by the authored echo age.
+    std::vector<Float2> player_position_history;
     std::vector<EnemyActor> enemies;
     std::vector<ProjectileActor> projectiles;
     std::vector<AreaActor> areas;
@@ -25,12 +29,21 @@ struct CombatState
     std::vector<BossAction> boss_actions;
     std::vector<CastHitRecord> cast_hits;
     std::vector<AreaHitRecord> area_hits;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> cast_hit_index, area_hit_index;
+    std::vector<std::uint64_t> live_area_ids;
     std::vector<CastRuntime> cast_runtimes;
     std::vector<DomainSignal> domain_signals;
     // Presentation metadata only; intentionally excluded from the checksum.
     std::vector<VisualLinkView> visual_links;
+    // Fixed backing avoids allocation/order changes in the death phase. No
+    // visual TTL enters Gameplay; Runtime uses the cooked death source clock.
+    std::array<BossDeathVisualView, kCosmeticOwnerCapacity> boss_death_visuals{};
+    std::size_t boss_death_visual_count{};
     EnemySpatialGrid enemy_grid;
+    // Transient compact working set for the ordered separation pass; never authoritative.
+    std::vector<Float2> separation_positions;
     std::vector<std::size_t> collision_candidates;
+    std::vector<float> collision_hit_times;
 };
 
 struct NavigationState
