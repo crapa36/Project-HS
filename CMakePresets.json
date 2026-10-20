@@ -1,8 +1,8 @@
 {
   "version": 9,
   "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 30,
+    "major": 4,
+    "minor": 4,
     "patch": 0
   },
   "configurePresets": [
@@ -16,7 +16,11 @@
       },
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "HS_BUILD_TESTS": "ON"
+        "HS_BUILD_TESTS": "OFF",
+        "HS_BUILD_RUNTIME": "ON",
+        "HS_BUILD_CONTENT_TOOLS": "ON",
+        "HS_ENABLE_VALIDATION": "OFF",
+        "HS_ENABLE_GPU_VALIDATION": "OFF"
       }
     },
     {
@@ -24,6 +28,7 @@
       "inherits": "msvc-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
+        "HS_BUILD_TESTS": "ON",
         "HS_BUILD_RUNTIME": "OFF",
         "HS_BUILD_CONTENT_TOOLS": "OFF"
       }
@@ -43,7 +48,9 @@
       "inherits": "msvc-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "HS_ENABLE_VALIDATION": "ON"
+        "HS_BUILD_TESTS": "OFF",
+        "HS_ENABLE_VALIDATION": "OFF",
+        "HS_ENABLE_GPU_VALIDATION": "OFF"
       }
     },
     {
@@ -51,6 +58,7 @@
       "inherits": "msvc-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "HS_BUILD_TESTS": "ON",
         "HS_ENABLE_VALIDATION": "ON"
       }
     },
@@ -69,6 +77,31 @@
         "HS_BUILD_TESTS": "OFF",
         "HS_ENABLE_VALIDATION": "OFF"
       }
+    },
+    {
+      "name": "linux-core",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/Build/${presetName}",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "HS_BUILD_TESTS": "ON",
+        "HS_BUILD_RUNTIME": "OFF",
+        "HS_BUILD_CONTENT_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "msvc-portable-tests",
+      "inherits": "msvc-core",
+      "cacheVariables": {
+        "HS_BUILD_RENDER_DATA_TESTS": "ON",
+        "HS_BUILD_ASSET_PIPELINE_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -79,7 +112,17 @@
         "hs_tests",
         "hs_gameplay_internal_tests",
         "hs_navigation_tests",
-        "hs_simulation_tests"
+        "hs_simulation_tests",
+        "hs_graphics_settings_tests",
+        "hs_sha256_tests",
+        "hs_simulation_rules_serialization_tests",
+        "hs_task_system_failure_tests",
+        "hs_hzb_region_tests",
+        "hs_render_scene_extractor_tests",
+        "hs_ui_command_admission_tests",
+        "hs_vfx_session_state_tests",
+        "hs_runtime_diagnostics_tests",
+        "hs_project_hs_arguments_tests"
       ]
     },
     {
@@ -104,6 +147,17 @@
     {
       "name": "msvc-release",
       "configurePreset": "msvc-release"
+    },
+    {
+      "name": "linux-core",
+      "configurePreset": "linux-core"
+    },
+    {
+      "name": "msvc-portable-tests",
+      "configurePreset": "msvc-portable-tests",
+      "targets": [
+        "all"
+      ]
     }
   ],
   "testPresets": [
@@ -112,7 +166,7 @@
       "configurePreset": "msvc-core",
       "filter": {
         "include": {
-          "name": "^(build\\.msvc-header-dependencies$|foundation\\.|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core)$)"
+          "name": "^(foundation\\.|rendering\\.(hzb-region-cpu|scene-delta)$|runtime\\.(ui-command-admission|diagnostics-bounds|arguments|vfx-session-state)$|architecture\\.layers$|simulation\\.(internal-invariants|navigation|determinism-core|canonical-rules)$)"
         }
       },
       "output": {
@@ -154,6 +208,20 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "linux-core",
+      "configurePreset": "linux-core",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-portable-tests",
+      "configurePreset": "msvc-portable-tests",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ],
   "workflowPresets": [
@@ -188,6 +256,40 @@
         {
           "type": "test",
           "name": "msvc-validation"
+        }
+      ]
+    },
+    {
+      "name": "verify-core-linux",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "linux-core"
+        },
+        {
+          "type": "build",
+          "name": "linux-core"
+        },
+        {
+          "type": "test",
+          "name": "linux-core"
+        }
+      ]
+    },
+    {
+      "name": "verify-portable",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "msvc-portable-tests"
+        },
+        {
+          "type": "build",
+          "name": "msvc-portable-tests"
+        },
+        {
+          "type": "test",
+          "name": "msvc-portable-tests"
         }
       ]
     }

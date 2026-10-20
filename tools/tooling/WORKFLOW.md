@@ -5,17 +5,21 @@ evidence are isolated under ignored `Build/tooling`; none is a game dependency.
 
 ## C++ navigation: adopted
 
-`hs_lsp` is registered in repo-local `.codex/config.toml` and starts
-`node Tools/tooling/lsp-server.mjs`. The launcher discovers Visual Studio clangd
-and uses `Build/msvc-core/compile_commands.json`. Run `Tools/verify.ps1` first if
-that database is absent. A newly started Codex session loads this registration.
+`hs_lsp` is registered in repo-local `.codex/config.toml` with an explicit project
+working directory and repository-relative launcher path. The launcher itself also
+derives the repository root from `import.meta.url`, so it does not depend on a
+user-specific checkout path.
+discovers Visual Studio clangd and prefers `Build/msvc-validation/compile_commands.json`
+for Runtime/renderer diagnostics, falling back to `Build/msvc-core/compile_commands.json`
+for a core-only checkout. Run `Tools/verify.ps1` first if neither database exists.
+A newly started Codex session loads the registration for the active worktree.
 
 - Use `goto_definition` for symbol identity, `symbols` for a bounded outline,
   and `diagnostics` for an edited file. Use `rg` for literals and file discovery.
 - MCP positions: line is 1-based; character is 0-based. Inspect rename scope before
   applying edits. No post-edit blocking hook is enabled.
 - Core compilation data does not cover Runtime/renderer targets. For those tasks,
-  use their actual compile database before trusting semantic diagnostics.
+  create the validation database before trusting semantic diagnostics.
 - Background indexing is enabled in the persistent server; wait for indexing
   before interpreting an empty cross-file reference result as absence.
 
@@ -57,36 +61,13 @@ Evidence: `Build/tooling/sccache/measurements.json`, `stats.txt`, and
 The isolated failed build tree is retained only as evidence.
 Upstream: https://github.com/mozilla/sccache
 
-## Repowise: optional structural lookup, not the semantic oracle
+## Removed experiment harnesses
 
-Qualified 0.48.0, commit `eb4010c34caf7379b1de608f1b5acb0b5e19e8b4`.
-Offline mock-provider/mock-embedder indexing covered 140 files and 1,817 symbols;
-seven oversized files were skipped. No model or embedding service was used.
-Exact `EffectiveAttack` lookup returned a verified live 10-line body in 1.78 s;
-the checked-in wrapper also succeeded. Broad `SimulationWorld` context took
-2.37 s but selected a constructor rather than the class and included guessed
-graph edges. Use clangd for exact C++ identity. These timings do not establish
-an improvement over rg or a reduction in tokens.
-
-Use only when a structural overview answers a concrete question:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File Tools/tooling/repowise.ps1 -Action symbol -Query 'Source/Gameplay/Private/simulation_combat.cpp::GameSimulation::SimulationWorld::EffectiveAttack'
-```
-
-The wrapper disables telemetry and workspace auto-discovery. No always-on MCP
-or editor hook is registered. The isolated installation resolved 132 packages,
-so do not make it a prerequisite for normal navigation or builds. Index freshness
-must be checked against live files, including uncommitted changes, not HEAD alone.
-For index initialization use the isolated CLI with `--provider=mock
---embedder=mock --no-prose --mode=fast --no-onboarding --no-editor-setup
---no-save-key --no-agents --no-claude-md --no-codex --no-distill-hook
---no-workspace --exclude=ContentSource/** --exclude=Content/**
---exclude=Build/** --exclude=Artifacts/** --yes --progress=json`.
-Use `--exclude=PATTERN`, not separate wildcard arguments on Windows.
-
-Evidence: `Build/tooling/repowise/index2.log`, `query.json`, `symbol.json`.
-Upstream: https://github.com/repowise-dev/repowise
+Repowise, Usage Tracker, and the LSP/sccache measurement harnesses are no longer
+maintained repository entry points. No production build or test used them.
+Use `rg` and the adopted LSP launcher for navigation. Previous qualification
+artifacts under ignored `Build/tooling` are historical local evidence, not
+prerequisites or proof of current performance.
 
 ## AddressSanitizer: on-demand core investigations
 
@@ -115,46 +96,91 @@ uses `/fsanitize=address` with `/INCREMENTAL:NO`, and writes to
 workflow; use it as the narrow validation for a concrete core memory-safety
 investigation.
 
-## Usage Tracker: not adopted
+## RenderDoc / rdc-cli: startup qualified, game capture blocked, not adopted
 
-Both 0.28.0 (GitHub tag) and 0.27.0 (PyPI) failed initial database creation on
-Windows with WinError 32. `kernel/operational.py` opens a staging SQLite connection
-in a context manager, then calls `os.replace` without closing that connection.
-The context manager commits but does not close it; Windows retains the file lock.
-This is not evidence of successfully collected usage or measured token savings.
-Keep the bounded single-session `usage-query.py` harness for future qualification;
-do not scan/upload all conversations or start its dashboard by default.
-Current isolated venv is 0.27.0. Evidence:
-`Build/tooling/usage/query-027-error.log`.
-Upstream: https://github.com/douglasmonsky/codex-usage-tracker
+RenderDoc 1.46 portable CLI help and qrenderdoc's pre-UI `--python` startup
+succeeded. Its built-in RenderDoc module uses Python 3.8.20; import, version,
+capture-control and descriptor/buffer query API availability checks passed.
+This path needs no separately built `renderdoc.pyd` or standalone Python wrapper.
+rdc-cli 0.6.3 remains isolated and is not the qualified replay entry point.
 
-## RenderDoc / rdc-cli: qualification incomplete, not adopted
+The startup launcher temporarily sets `Analytics_TotalOptOut=true` to bypass the
+first-run dialog, then restores the original UI.config bytes in a finally block.
+Restoration was verified. Tools, scripts and artifacts stay in
+`Build/tooling/renderdoc`; no global installation or Vulkan registration is
+required. Capture and replay are separate, explicitly requested operations.
 
-RenderDoc 1.44 portable CLI help succeeded; rdc-cli 0.6.3 installed in an isolated
-Python 3.13 environment. `rdc doctor` could not import the RenderDoc replay module:
-the portable package did not provide matching `renderdoc.pyd` bindings. Its
-renderdoccmd discovery also failed in that probe. A bounded qrenderdoc Python
-startup probe timed out. Task-owned GUI processes were stopped afterward.
-No `.rdc` capture or replay analysis succeeded, so no GPU diagnosis benefit has
-been demonstrated. Do not replace existing GPU-validation/render-smoke gates.
-Future qualification requires matching Python bindings, successful doctor replay
-checks, an actual game capture, and a verified event/resource query. Vulkan
-registration is not needed to qualify this D3D12 game.
+Actual Project-HS capture did not succeed. Injection returned success, but the
+game exited with code 1 before the requested frame. Suspended launch with
+redirected stdout/stderr exposed `Create DirectWrite UI surface failed:
+0x80004002` (E_NOINTERFACE) during software Direct2D/WIC UI surface creation.
+That shared error label covers bitmap, render-target and brush creation, so the
+individual failing call is not established. No `.rdc` or actual GPU event/resource
+query was obtained. API availability is not replay qualification; do not replace
+existing GPU-validation/render-smoke gates. Do not upload raw captures.
 
-Evidence: `Build/tooling/renderdoc/doctor.log`; portable package SHA-256:
-`67a6cfabd5041c2d646b66b6dfE90f94272457c5410084b71f652f9f9cff8f96`.
-Upstreams: https://renderdoc.org/builds and https://github.com/BANANASJIM/rdc-cli
+Evidence: `Build/tooling/renderdoc/headless-qualification.json`,
+`headless-process.json`, `capture-result-3.json` and `capture-result-3.target.log`.
+Portable package SHA-256:
+`9CA4D09ECABA2CC791168660D6FC2A7E3D70FE67146E87EC05C5F8DEA70772F7`.
+Upstreams: https://renderdoc.org/builds and
+https://github.com/baldurk/renderdoc/blob/v1.46/docs/python_api/faq.rst
 
 ## Build and experiment loop
 
+For a cohesive implementation batch, name the exact native CMake targets and/or
+Action IDs before invoking one partial build. Preview that same list first:
+
+```powershell
+Tools/hs_dev.ps1 -Command build -Target 'hs_renderer_d3d12,hs_render_test_runner,render.shader.runtime.geometry' -DryRun
+Tools/hs_dev.ps1 -Command build -Target 'hs_renderer_d3d12,hs_render_test_runner,render.shader.runtime.geometry'
+```
+
+`build` requires a nonempty comma-separated `-Target` list and a configured Ninja
+build tree. `-BuildRoot` selects another configured tree; the default is
+`Build/msvc-validation`. `-DryRun -Json` returns the same plan as structured data.
+Dry runs query metadata without building or bootstrapping CMake. The plan lists
+every requested name, its resolved target, and the CMake argument array; execution
+passes that array once to the pinned `Tools/cmake.ps1 --build ... --target ...`
+wrapper. Use an MSVC developer environment for native Windows builds.
+
+Native names must be configured CMake target aliases. Known Action IDs resolve
+through their ActionResult namespace to `Actions/<namespace>/result.json`, then
+the configured Ninja output graph validates the result. This works before a
+Generation is composed and does not load its pointer. If an ActionResult does
+not exist yet, use its exact native producer target for the first build; no
+namespace is guessed from an ID. Duplicate resolved targets are built once.
+Empty names, CLI flags, raw paths, and broad administrative targets such as
+`all` or `clean` are rejected. There is no working-tree inference or default
+all-target build. A partial build is not a verification receipt.
+
+`hs_dev` now exposes only `build` and `verify`. For exact tests, use
+`Tools/hs_dev.ps1 verify -Workflow verify-core -Test simulation.determinism-core`
+or call `Tools/verify.ps1` directly. Verification retains CTest preparation
+dependencies, fixture selection, timeouts, and a small JSON result with selected
+tests, exit status, and log path. CMake configures the selected preset with tests
+enabled, then CTest supplies the selection including fixture setup/cleanup.
+Native output and phase changes are streamed immediately and saved to the same
+log. With `-Json`, progress goes to stderr and stdout remains one JSON result.
+`-BuildRoot` applies only to `build`; verification selects its tree by workflow.
+The duplicate `doctor`, `status`, `why`, `deps`, `rdeps`, `path`, `affected`, and
+`gc` facade commands were removed. Use configured Ninja `-t query` for native
+build dependencies and explicit `-Test` or `-Label` for test selection.
+Ninja queries do not reconstruct the logical product graph. Generation
+verification and explicit cleanup remain in `hs_generation`; its reader lease,
+pin, and product validation contracts are unchanged.
+Changed-file inference, verification receipts, and automatic corrupt-product
+repair were removed. Verification reports producer/test failures directly;
+repair a damaged local generation explicitly before retrying.
+
 Default: rg discovery -> persistent hs_lsp symbol lookup -> smallest edit ->
 targeted MSVC build/test -> required full workflow after stabilization.
-Use Repowise only for a bounded structural question not already answered by LSP.
 No usage collection, cache server, or GPU capture runs automatically per edit.
 
 Use `Tools/verify.ps1 -Workflow verify-core` or `-Workflow verify` as appropriate.
-During iteration use paired `-Target` / `-Test` to build and test only the affected
-area. Completed evidence remains reusable only while its inputs remain valid.
+During iteration use `hs_dev build -Target` for explicit compilation and
+`verify.ps1 -Test` for exact tests and their prerequisites.
+Completed evidence remains reusable only while its inputs remain valid.
 Before a balance simulation, use `hs_combat_sim --relic-balance-suite=FILE
 --validate-only` and inspect its planned size. Do not rerun completed matrices.
 

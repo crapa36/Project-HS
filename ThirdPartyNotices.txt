@@ -9,3 +9,8 @@ Autodesk FBX SDK 2020.3.7 VS2022 - Autodesk SDK license; Cook-only, not redistri
 Noto Sans KR - SIL Open Font License 1.1
 Dear ImGui 1.91.9b - MIT
 nlohmann/json 3.12.0 - MIT
+meshoptimizer 1.3 - MIT; Cook-only, pinned 9e1f07b159d3cb777f1c67ed31fc11fd117986f4
+Intel XeSS 3.0.2 (XeSS, XeFG and XeLL) - Intel Simplified Software License, October 2022; optional Runtime
+NVIDIA Streamline 2.14.1 - MIT framework plus separate NVIDIA DLSS/DLSS-G plugin licenses; optional Runtime, shipped license files apply to their respective components
+AMD FidelityFX SDK 2.3.0 - AMD FidelityFX SDK license (including the binary SDK terms); optional Runtime
+Microsoft DirectSR / DirectX Agility SDK 1.715.1-preview - Microsoft prerelease DirectX license; optional local Windows development only, excluded from Runtime install redistribution

@@ -1,0 +1,13 @@
+--- a/taskflow/core/graph.hpp
++++ b/taskflow/core/graph.hpp
+@@ -510,7 +510,9 @@
+   
+   private:
+   
+-  std::string _name;
++  // The pointer constructor can propagate MSVC Debug iterator-proxy OOM.
++  // The default string constructor is noexcept even when it allocates.
++  std::string _name {""};
+   
+   void* _data {nullptr};
+   

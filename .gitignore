@@ -55,7 +55,16 @@ events.ndjson
 *.tmp
 
 # Local planning documents
-/Docs/
+/Docs/*
+!/Docs/ENGINE_LEAN_AUDIT.md
+!/Docs/VFX_Visual_UX_Audit_Resolution.md
+!/Docs/Consolidated_Review_Resolution.md
+!/Docs/Grass_History_Correction.md
+!/Docs/Plans/
+/Docs/Plans/*
+!/Docs/Plans/ENGINE_RENDERER_V7.md
+!/Docs/Plans/CONTENT_GENERATION_DIRECTIVE.md
+!/Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md
 
 # Operating system files
 .DS_Store

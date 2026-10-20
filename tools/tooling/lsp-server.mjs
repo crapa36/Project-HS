@@ -8,9 +8,11 @@ const vs = execFileSync(join(process.env['ProgramFiles(x86)'],'Microsoft Visual 
   ['-latest','-products','*','-requires','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath'],
   {encoding:'utf8',windowsHide:true}).trim();
 const clangd = process.env.HS_CLANGD ?? join(vs,'VC/Tools/Llvm/x64/bin/clangd.exe');
-const database = join(root,'Build/msvc-core');
+const fullDatabase = join(root,'Build/msvc-validation');
+const coreDatabase = join(root,'Build/msvc-core');
+const database = existsSync(join(fullDatabase,'compile_commands.json')) ? fullDatabase : coreDatabase;
 if (!existsSync(clangd) || !existsSync(join(database,'compile_commands.json'))) {
-  throw new Error('clangd and the verify-core compile database are required. Run Tools/verify.ps1 first.');
+  throw new Error('clangd and a Project HS compile database are required. Run Tools/verify.ps1 first.');
 }
 mkdirSync(work,{recursive:true});
 process.env.LSP_TOOLS_MCP_PROJECT_CONFIG = join(work,'lsp-client.json');
