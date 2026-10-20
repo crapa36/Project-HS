@@ -38,6 +38,7 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
         std::uint32_t timing;
         PresentationGeometryKind geometry;
         bool scheduled;
+        bool persistent{};
     };
     const auto explosive = MakeAssetId("skill.explosive_arrow").value;
     const auto charged = MakeAssetId("skill.charged_shot").value;
@@ -113,6 +114,8 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
                    Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
         Activation{basic, 0, 1, "particle.upgrade.arrow.echo",
                     Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+        Activation{basic, 5, 1, "particle.upgrade.cooldown_proc",
+                    Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
         Activation{basic, 1, 3, "particle.upgrade.arrow.pierce",
                     Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
         Activation{piercing, 1, 1, "particle.upgrade.piercing.exit_split",
@@ -135,6 +138,8 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
         Activation{multi, 5, 1, "particle.upgrade.tracking_spawn",
                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+        Activation{multi, 7, 1, "particle.upgrade.tracking_spawn",
+                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
         Activation{multi, 0, 1, "particle.upgrade.multishot.secondary_fan",
                    Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
         Activation{multi, 3, 1, "particle.upgrade.multishot.rear_fan",
@@ -143,6 +148,8 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
                    Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
         Activation{retreat, 0, 1, "particle.upgrade.retreat.triple_release",
                    Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+        Activation{retreat, 7, 1, "particle.upgrade.retreat.second_dash",
+                   Hash32("LineAreaPayload"), 0, PresentationGeometryKind::Line, false, true},
     };
     for (const auto &event:events)
     {
@@ -170,6 +177,53 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
                                                                             : event.upgrade_skill == static_cast<std::uint8_t>(SkillKind::MultiShot)
                                                                                   ? multi
                                                                              : 0;
+        const bool status_application =
+            event.asset.value == MakeAssetId("particle.status.bleed_apply").value ||
+            event.asset.value == MakeAssetId("particle.status.burn_apply").value ||
+            event.asset.value == MakeAssetId("particle.status.slow_apply").value ||
+            event.asset.value == MakeAssetId("particle.common.mark_apply").value;
+        if (status_application)
+        {
+            const auto binding = std::find_if(program.upgrade_bindings.begin(),
+                                              program.upgrade_bindings.end(),
+                [&](const auto &value) {
+                    return value.skill_id == skill_id &&
+                        value.ordinal == event.upgrade_index + 1u;
+                });
+            const auto lookup = std::find_if(program.effect_lookup.begin(),
+                                             program.effect_lookup.end(),
+                [&](const auto &value) { return value.effect_id == event.asset.value; });
+            if (binding == program.upgrade_bindings.end() ||
+                binding->sequence.first > program.upgrade_sequences.size() ||
+                binding->sequence.count >
+                    program.upgrade_sequences.size() - binding->sequence.first ||
+                lookup == program.effect_lookup.end() || lookup->handle == 0 ||
+                lookup->handle > program.effects.size())
+                return Invalid("Status application binding or effect is missing.");
+            const auto sequence = std::span(program.upgrade_sequences).subspan(
+                binding->sequence.first, binding->sequence.count);
+            if (std::find(sequence.begin(), sequence.end(), lookup->handle) == sequence.end())
+            {
+                // Some upgrade areas apply a generic status in addition to
+                // their authored area recipe. That real status remains on its
+                // generic path and does not claim upgrade binding coverage.
+                auto generic = event;
+                generic.upgrade_stage = 0;
+                dispatched.push_back(generic);
+                continue;
+            }
+            const auto &effect = program.effects[lookup->handle - 1];
+            if (effect.handle != lookup->handle || effect.input_mode != 0 ||
+                effect.payload_kind != Hash32("PointEventPayload") ||
+                effect.timing_kind != 0 || !std::isfinite(effect.seconds) ||
+                effect.seconds <= 0 || event.upgrade_stage != 3 ||
+                event.upgrade_owner_id == 0 || event.status_episode_generation == 0 ||
+                !std::isfinite(event.position.x) || !std::isfinite(event.position.y) ||
+                !std::isfinite(event.position.z))
+                return Invalid("Status application requires its actual entity episode.");
+            dispatched.push_back(event);
+            continue;
+        }
         const auto activation = std::find_if(activations.begin(), activations.end(), [&](const auto &value) {
             return value.skill == skill_id && value.index == event.upgrade_index &&
                    value.stage == event.upgrade_stage;
@@ -203,7 +257,7 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
         if (std::find(sequence.begin(),sequence.end(),lookup->handle)==sequence.end())
             return Invalid("Upgrade stage effect is not a member of its cooked upgrade binding.");
         const auto &effect=program.effects[lookup->handle-1];
-        if (effect.handle!=lookup->handle || effect.input_mode!=0 ||
+        if (effect.handle!=lookup->handle || effect.input_mode!=(activation->persistent ? 1u : 0u) ||
             effect.payload_kind!=activation->payload || effect.timing_kind!=activation->timing ||
             (!activation->scheduled && (!std::isfinite(effect.seconds) || effect.seconds<=0)))
             return Invalid(std::string("Upgrade stage effect has incompatible payload or timing: ") +
@@ -242,6 +296,26 @@ Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
         auto translated=event;
         translated.asset={effect_id};
         dispatched.push_back(translated);
+        if (activation->persistent && activation->skill == retreat && activation->index == 7)
+        {
+            const auto afterimage_id = MakeAssetId("particle.upgrade.retreat.afterimage").value;
+            const auto afterimage_lookup = std::find_if(program.effect_lookup.begin(),
+                                                        program.effect_lookup.end(),
+                [&](const auto &value) { return value.effect_id == afterimage_id; });
+            if (afterimage_lookup == program.effect_lookup.end() ||
+                afterimage_lookup->handle == 0 ||
+                afterimage_lookup->handle > program.effects.size() ||
+                std::find(sequence.begin(), sequence.end(), afterimage_lookup->handle) == sequence.end())
+                return Invalid("Second retreat afterimage is not in its cooked binding.");
+            const auto &afterimage = program.effects[afterimage_lookup->handle - 1];
+            if (afterimage.handle != afterimage_lookup->handle || afterimage.input_mode != 1 ||
+                afterimage.payload_kind != Hash32("PresentationContextPayload") ||
+                afterimage.timing_kind != 0 || !std::isfinite(afterimage.seconds) ||
+                afterimage.seconds <= 0)
+                return Invalid("Second retreat afterimage has incompatible owner timing.");
+            translated.asset = {afterimage_id};
+            dispatched.push_back(translated);
+        }
     }
     output=std::move(dispatched);
     return Result::Success();

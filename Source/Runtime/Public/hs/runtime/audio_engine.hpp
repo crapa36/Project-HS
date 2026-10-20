@@ -6,8 +6,12 @@
 #include <hs/runtime/save_store.hpp>
 
 #include <cstdint>
-#include <memory>
 #include <filesystem>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <unordered_map>
 
 namespace hs
 {
@@ -66,6 +70,9 @@ class AudioEngine
     [[nodiscard]] Result Initialize(const SettingsData &settings);
     [[nodiscard]] Result Initialize(const SettingsData &settings,
                                     const std::filesystem::path &audio_directory);
+    [[nodiscard]] Result Initialize(
+        const SettingsData &settings,
+        const std::unordered_map<std::string, std::filesystem::path> &product_paths);
     void Shutdown() noexcept;
     void ApplySettings(const SettingsData &settings) noexcept;
     void SetBackgroundMuted(bool muted) noexcept;
@@ -80,6 +87,11 @@ class AudioEngine
     [[nodiscard]] AudioStatus Status() const noexcept;
 
   private:
+    using ResolveAudioPath =
+        std::function<Result(std::string_view, std::filesystem::path &)>;
+    [[nodiscard]] Result InitializeResolved(const SettingsData &settings,
+                                             const ResolveAudioPath &resolve_path);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

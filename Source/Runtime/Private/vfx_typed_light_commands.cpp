@@ -64,7 +64,7 @@ std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxProgramData &p,st
  std::vector<VfxLightInput> result;
  for(const auto &input:inputs)
  {
-  if(input.quality==VfxQuality::Low||static_cast<std::uint32_t>(input.quality)>2||input.effect_handle==0||input.effect_handle>p.effects.size()||current_tick<input.event_tick)continue;
+  if(static_cast<std::uint32_t>(input.quality)>2||input.effect_handle==0||input.effect_handle>p.effects.size()||current_tick<input.event_tick)continue;
   const auto &effect=p.effects[input.effect_handle-1];
   if(effect.handle!=input.effect_handle||effect.input_mode!=0||effect.timing_kind!=0||!std::isfinite(effect.seconds)||effect.seconds<=0||!Range(effect.sources,p.sources))continue;
   const auto center=Center(input,effect.payload_kind);if(!center)continue;

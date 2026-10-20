@@ -11,9 +11,18 @@
 #include <cstdint>
 #include <optional>
 #include <functional>
+#include <vector>
 
 namespace hs
 {
+
+// Desktop placement only: IDs and physical rectangles are valid; native HDR
+// and presentation modes are queried by the initialized renderer separately.
+// This Win32 query does not create a DXGI object before vendor initialization.
+[[nodiscard]] Result EnumerateWindowDisplayPlacements(std::vector<RendererDisplayOutput> &);
+// Current active CCD timing for the HWND's actual monitor. This read-only Win32
+// query does not create DXGI objects or substitute an assumed refresh frequency.
+[[nodiscard]] Result QueryWindowDisplayRefresh(HWND window, double &refresh_hz);
 
 class Window
 {
@@ -28,7 +37,7 @@ class Window
 
     [[nodiscard]] Result Create(std::uint32_t width, std::uint32_t height, bool visible,
                                 bool borderless);
-    [[nodiscard]] bool PumpMessages();
+    [[nodiscard]] bool PumpMessages(Result *failure = nullptr);
     [[nodiscard]] HWND Handle() const noexcept;
     void StopInput() noexcept;
     void BeginSkillRebind(std::uint32_t slot) noexcept;
@@ -36,6 +45,10 @@ class Window
     [[nodiscard]] bool ConsumeReboundSkillKeys(
         std::array<std::uint16_t, 4> &keys) noexcept;
     [[nodiscard]] Result SetBorderless(bool borderless);
+    // UI/window owner thread; complete placement before renderer request publication.
+    [[nodiscard]] Result ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borderless,
+                                               std::uint32_t client_width,
+                                               std::uint32_t client_height);
     void SetUiClickHandler(std::function<void(Float2)> handler);
     void SetUiHoverHandler(std::function<void(Float2)> handler);
 
@@ -50,8 +63,8 @@ class Window
     RuntimeChannels *channels_{};
     HWND window_{};
     HINSTANCE instance_{};
+    DWORD dpi_error_{};
     HeldInputState held_{};
-    Float2 ui_cursor_normalized_{};
     std::array<std::uint16_t, 4> skill_virtual_keys_{};
     PresentationCamera camera_{};
     std::optional<std::uint8_t> pending_rebind_slot_;

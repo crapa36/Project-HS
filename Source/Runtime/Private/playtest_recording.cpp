@@ -1,4 +1,5 @@
 #include <hs/runtime/playtest_recording.hpp>
+#include "recording_io.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -158,8 +159,17 @@ struct PlaytestRecorder::Impl
         upgrade_uses_at_acquisition{};
     std::array<Tick, kRelicCount> relic_acquired_ticks{};
     double distance_moved{};
+    enum class FinishState { Pending, Failed, Succeeded };
     bool active{};
-    bool finished{};
+    FinishState finish_state{FinishState::Pending};
+
+    bool FinishTraceFiles() noexcept
+    {
+        const bool inputs_written = runtime_detail::FinishRecordingFile(inputs);
+        const bool timeline_written = runtime_detail::FinishRecordingFile(timeline);
+        const bool events_written = runtime_detail::FinishRecordingFile(events);
+        return inputs_written && timeline_written && events_written;
+    }
 };
 
 PlaytestRecorder::PlaytestRecorder() : impl_(std::make_unique<Impl>()) {}
@@ -184,11 +194,14 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
     impl_->timeline.open(impl_->directory / "timeline.csv", std::ios::trunc);
     impl_->events.open(impl_->directory / "events.ndjson", std::ios::trunc);
     if (!impl_->inputs || !impl_->timeline || !impl_->events)
+    {
+        (void)impl_->FinishTraceFiles();
         return Result::Failure(ErrorCode::InvalidState, "hs_playtest",
                                "Cannot create playtest trace files.");
+    }
 
-    std::ofstream(impl_->directory / "metadata.json", std::ios::trunc)
-        << Json{{"format_version", 4},
+    std::ofstream metadata(impl_->directory / "metadata.json", std::ios::trunc);
+    metadata << Json{{"format_version", 4},
                 {"simulation_version", kSimulationVersion},
                 {"gameplay_hash_version", kGameplayHashVersion},
                 {"simulation_rules_hash", config.simulation_rules_hash},
@@ -198,6 +211,12 @@ Result PlaytestRecorder::Start(const PlaytestRecorderConfig &config)
                 {"seed", config.seed}}
                .dump(2)
         << '\n';
+    if (!runtime_detail::FinishRecordingFile(metadata))
+    {
+        (void)impl_->FinishTraceFiles();
+        return Result::Failure(ErrorCode::InvalidState, "hs_playtest",
+                               "Cannot finalize playtest metadata.");
+    }
     impl_->timeline
         << "tick,growth_tick,boss_tick,phase,level,xp,hp,max_hp,enemies,bosses,"
            "player_projectiles,enemy_projectiles,pickups,kills,damage_dealt,"
@@ -214,7 +233,7 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
                                 const SimulationObservation &probe,
                                 std::span<const PresentationEvent> presentation_events)
 {
-    if (!impl_->active || impl_->finished) return Result::Success();
+    if (!impl_->active || impl_->finish_state != Impl::FinishState::Pending) return Result::Success();
     for (std::size_t skill = 0; skill < kCombatSkillCount; ++skill)
         for (std::size_t upgrade = 0; upgrade < kUpgradeCount; ++upgrade)
             if ((probe.upgrade_masks[skill] & (1u << upgrade)) != 0 &&
@@ -301,11 +320,13 @@ Result PlaytestRecorder::Record(const InputFrame &input, GameplayChecksum checks
 
 Result PlaytestRecorder::Finish(bool execution_valid)
 {
-    if (!impl_->active || impl_->finished) return Result::Success();
-    impl_->finished = true;
-    impl_->inputs.flush();
-    impl_->timeline.flush();
-    impl_->events.flush();
+    if (!impl_->active || impl_->finish_state == Impl::FinishState::Succeeded)
+        return Result::Success();
+    if (impl_->finish_state == Impl::FinishState::Failed)
+        return Result::Failure(ErrorCode::InvalidState, "hs_playtest",
+                               "Playtest finalization already failed.");
+    impl_->finish_state = Impl::FinishState::Failed;
+    const bool trace_written = impl_->FinishTraceFiles();
 
     const auto &probe = impl_->terminal_probe ? *impl_->terminal_probe
                                               : impl_->last_probe;
@@ -533,9 +554,6 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                 {"phase_ticks", impl_->phase_ticks},
                 {"skill_press_counts", impl_->skill_press_counts},
                 {"findings", findings}, {"user_review", "awaiting"}};
-    std::ofstream result(impl_->directory / "result.json", std::ios::trunc);
-    result << output.dump(2) << '\n';
-
     std::ofstream report(impl_->directory / "analysis.md", std::ios::trunc);
     report << "# Project HS 플레이테스트 분석\n\n"
                  << "- 결과: " << outcome << "\n- 레벨: " << probe.level
@@ -599,9 +617,22 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                  << "- [ ] 성장 선택의 효과와 시너지를 체감할 수 있었다.\n"
                  << "- [ ] 일반 구간과 보스전의 시간 및 난이도가 적절했다.\n"
                  << "- 소감: \n";
-    return result && report ? Result::Success()
-                            : Result::Failure(ErrorCode::InvalidState, "hs_playtest",
-                                              "Cannot finalize playtest reports.");
+    const bool report_written = runtime_detail::FinishRecordingFile(report);
+    output["execution_valid"] = execution_valid && trace_written && report_written;
+    const auto result_path = impl_->directory / "result.json";
+    const auto temporary_result_path = impl_->directory / "result.json.tmp";
+    std::ofstream result(temporary_result_path, std::ios::trunc);
+    result << output.dump(2) << '\n';
+    const bool result_written = runtime_detail::FinishRecordingFile(result);
+    // A success receipt becomes visible only after its last buffered write closes.
+    const bool result_published = result_written &&
+        MoveFileExW(temporary_result_path.c_str(), result_path.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    const bool complete = trace_written && report_written && result_published;
+    if (complete) impl_->finish_state = Impl::FinishState::Succeeded;
+    return complete ? Result::Success()
+                    : Result::Failure(ErrorCode::InvalidState, "hs_playtest",
+                                      "Cannot finalize playtest reports.");
 }
 
 const std::filesystem::path &PlaytestRecorder::Directory() const noexcept
@@ -611,7 +642,7 @@ const std::filesystem::path &PlaytestRecorder::Directory() const noexcept
 
 bool PlaytestRecorder::Active() const noexcept
 {
-    return impl_->active && !impl_->finished;
+    return impl_->active && impl_->finish_state == Impl::FinishState::Pending;
 }
 
 Result LoadPlaytestReplay(const std::filesystem::path &directory,
@@ -664,10 +695,14 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             frame.held.basic_attack_held = json.at("basic_attack_held").get<bool>();
             for (const auto &edge : json.at("edges"))
             {
-                const auto action = edge.at("action").get<std::uint8_t>();
-                const auto kind = edge.at("kind").get<std::uint8_t>();
-                if (action > static_cast<std::uint8_t>(GameAction::Pause) ||
-                    kind > static_cast<std::uint8_t>(EdgeKind::Released))
+                const auto &action_json = edge.at("action");
+                const auto &kind_json = edge.at("kind");
+                if (!action_json.is_number_unsigned() || !kind_json.is_number_unsigned())
+                    return Invalid("Playtest input contains an invalid action edge.");
+                const auto action = action_json.get<std::uint64_t>();
+                const auto kind = kind_json.get<std::uint64_t>();
+                if (action > static_cast<std::uint64_t>(GameAction::CharacterPage) ||
+                    kind > static_cast<std::uint64_t>(EdgeKind::Released))
                     return Invalid("Playtest input contains an invalid action edge.");
                 frame.ordered_edges.push_back(
                     {edge.at("sequence").get<Sequence>(),
@@ -675,13 +710,21 @@ Result LoadPlaytestReplay(const std::filesystem::path &directory,
             }
             for (const auto &action_json : json.at("ui_actions"))
             {
-                const auto kind = action_json.at("kind").get<std::uint8_t>();
-                if (kind > static_cast<std::uint8_t>(UiActionKind::SwapLoadoutSlots))
+                const auto &value_json = action_json.at("value");
+                const auto secondary_json = action_json.value("secondary", Json(0u));
+                if (!action_json.at("kind").is_number_unsigned() ||
+                    !value_json.is_number_unsigned() || !secondary_json.is_number_unsigned())
+                    return Invalid("Playtest UI action fields must be unsigned integers.");
+                const auto kind = action_json.at("kind").get<std::uint64_t>();
+                const auto value = value_json.get<std::uint64_t>();
+                const auto secondary = secondary_json.get<std::uint64_t>();
+                if (kind > static_cast<std::uint64_t>(UiActionKind::SwapLoadoutSlots) ||
+                    value > UINT8_MAX || secondary > UINT8_MAX)
                     return Invalid("Playtest input contains an invalid UI action.");
                 frame.ui_actions.push_back(
                     {static_cast<UiActionKind>(kind),
-                     action_json.at("value").get<std::uint8_t>(),
-                     action_json.value("secondary", std::uint8_t{})});
+                     static_cast<std::uint8_t>(value),
+                     static_cast<std::uint8_t>(secondary)});
             }
             parsed.frames.push_back(std::move(frame));
         }

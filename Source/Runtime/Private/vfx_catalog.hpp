@@ -18,15 +18,19 @@ class VfxCatalog
   public:
     [[nodiscard]] static Result Load(const std::filesystem::path &path,
                                      VfxCatalog &catalog);
+    [[nodiscard]] static Result Load(const std::filesystem::path &path,
+                                     const std::filesystem::path &program_path,
+                                     VfxCatalog &catalog);
     [[nodiscard]] const CookedVfxDefinition *FindEffect(EffectId id) const noexcept;
     [[nodiscard]] const CookedParticleSprite *FindSprite(AssetId id) const noexcept;
     [[nodiscard]] Result ExpandEvent(const PresentationEvent &event,
-                                std::uint32_t quality_percent,
+                                float decorative_fraction,
                                 std::vector<ParticleSpawnCommand> &particles,
                                 std::vector<VfxLineSpawnCommand> &lines) const;
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return payload_hash_; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return sprite_count_; }
     [[nodiscard]] const VfxProgramData &Program() const noexcept { return program_; }
+    void Swap(VfxCatalog &prepared) noexcept;
 
   private:
     std::vector<CookedVfxDefinition> definitions_;

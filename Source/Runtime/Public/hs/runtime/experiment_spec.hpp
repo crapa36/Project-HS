@@ -73,6 +73,7 @@ struct ExperimentSpec
 };
 
 [[nodiscard]] std::string_view ToString(ExperimentMode mode) noexcept;
+// Loaded actions execute by target tick, then sequence within the tick.
 [[nodiscard]] Result LoadExperimentSpec(const std::filesystem::path &path,
                                         ExperimentSpec &spec);
 [[nodiscard]] Result SaveExperimentSpec(const std::filesystem::path &path,

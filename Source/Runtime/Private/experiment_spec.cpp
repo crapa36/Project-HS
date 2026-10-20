@@ -414,6 +414,10 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
             previous_tick = item.target_tick;
             parsed.timeline_actions.push_back(std::move(item));
         }
+        std::ranges::sort(parsed.timeline_actions, [](const auto &left, const auto &right) {
+            return left.target_tick < right.target_tick ||
+                   (left.target_tick == right.target_tick && left.sequence < right.sequence);
+        });
 
         const auto &probes = root.at("probes");
         if (!probes.is_array())

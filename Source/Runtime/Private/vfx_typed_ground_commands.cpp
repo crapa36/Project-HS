@@ -1,5 +1,7 @@
 #include "vfx_typed_ground_commands.hpp"
 
+#include <hs/core/render_snapshot.hpp>
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -366,6 +368,62 @@ void AppendSourceOutputs(const VfxProgramData &cooked, std::size_t source_index,
         result.push_back(item);
     }
 }
+void AppendWaveGroundOutputs(const VfxProgramData &cooked, const VfxEffectRecord &effect,
+                            const VfxEventInput &input, float age,
+                            std::vector<VfxTypedGroundCommand> &result)
+{
+    const auto *context = std::get_if<VfxContextPayload>(&input.payload);
+    if (!context || effect.handle != input.effect_handle || effect.input_mode != 0 || effect.timing_kind != 0 ||
+        effect.payload_kind != kContextPayload || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
+        !std::isfinite(context->scalar0) || context->scalar0 <= 0 ||
+        !std::isfinite(age) || age < 0 || age >= 1 ||
+        effect.sources.count != 2 || effect.sources.first > cooked.sources.size() ||
+        effect.sources.count > cooked.sources.size() - effect.sources.first)
+        return;
+    std::uint64_t id{};
+    for (const auto &lookup : cooked.effect_lookup)
+        if (lookup.handle == effect.handle)
+        {
+            if (id != 0) return;
+            id = lookup.effect_id;
+        }
+    const bool warning = id == Hash64("particle.session.wave_warning");
+    if (!warning && id != Hash64("particle.session.wave_start")) return;
+    const Float3 center{input.world_transform[12], input.world_transform[13],
+                        input.world_transform[14]};
+    if (!Finite(center)) return;
+    for (std::size_t index = effect.sources.first;
+         index < effect.sources.first + effect.sources.count; ++index)
+    {
+        const auto &source = cooked.sources[index];
+        if (source.effect != effect.handle || source.type != VfxSourceType::Direct ||
+            source.parameters.count != 0 || source.parameters.first > cooked.parameters.size() ||
+            source.outputs.count != 1 || source.outputs.first >= cooked.outputs.size() ||
+            source.stable_id != Hash32(warning
+                ? (index == effect.sources.first ? "danger_boundary" : "radial_ticks")
+                : (index == effect.sources.first ? "gameplay_boundary" : "interior_secondary")))
+            continue;
+        float envelope{};
+        if (!SourceEnvelope(source, age, envelope)) continue;
+        GroundOwner owner{};
+        owner.stable_id = context->owner_id ? context->owner_id : input.sequence;
+        owner.effect_handle = input.effect_handle;
+        owner.circle.center = center;
+        // Arena presentation context is a cosmetic arena-scale indicator;
+        // it never represents an attack or changes an authoritative hitbox.
+        owner.circle.radius = context->scalar0;
+        owner.circle.lifetime01 = age;
+        owner.is_circle_preview = warning;
+        owner.normalized_age = owner.lifetime01 = age;
+        owner.alpha = envelope;
+        owner.quality = input.quality;
+        owner.stable_seed = input.stable_seed;
+        owner.command_tick = input.event_tick;
+        owner.command_lifetime = effect.seconds;
+        AppendSourceOutputs(cooked, index, owner, result);
+    }
+}
+
 void AppendExpandingRingOutputs(const VfxProgramData &cooked, std::size_t source_index,
                                 const VfxEventInput &input, float age, float envelope,
                                 float duration, std::vector<VfxTypedGroundCommand> &result)
@@ -1072,9 +1130,10 @@ void AppendPersistentEntityGroundOutputs(const VfxProgramData &cooked,
         effect_id == kPickupHealIdle || effect_id == kPickupMagnetIdle ||
         effect_id == kPickupRelicIdle;
     const bool charged_overcharge = effect_id == kChargedOverchargeLoop;
+    const bool suicide_countdown = effect_id == Hash64("particle.enemy.suicide.countdown_loop");
     if (effect_id != kPlayerInvulnerable && effect_id != kBossPhase2Aura &&
         effect_id != kBossPhaseTransition && effect_id != kStatusSlow &&
-        effect_id != kStatusMark && !pickup_idle && !charged_overcharge) return;
+        effect_id != kStatusMark && !pickup_idle && !charged_overcharge && !suicide_countdown) return;
     const bool pickup_relic_idle = effect_id == kPickupRelicIdle;
     const auto &entity = std::get<VfxEntityPayload>(input.payload);
     const Float3 anchor{input.current_transform[12], input.current_transform[13],
@@ -1111,7 +1170,7 @@ void AppendPersistentEntityGroundOutputs(const VfxProgramData &cooked,
         {
             const auto &output = cooked.outputs[output_index];
             if (effect_id == kStatusSlow || effect_id == kStatusMark ||
-                pickup_idle || charged_overcharge)
+                pickup_idle || charged_overcharge || suicide_countdown)
             {
                 std::uint32_t mask_slice = 0xffffffffu;
                 float mask_strength = 0.0f;
@@ -1530,6 +1589,31 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
     std::vector<VfxTypedGroundCommand> result;
     for (const auto &input : inputs)
     {
+        if (input.source_visual_kind == static_cast<std::uint8_t>(PersistentVfxKind::WaveTimer))
+        {
+            if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size() ||
+                input.stable_id == 0 || !std::holds_alternative<VfxContextPayload>(input.payload) ||
+                !std::isfinite(input.elapsed_seconds) || input.elapsed_seconds < 0 ||
+                static_cast<std::uint32_t>(input.quality) > 2)
+                continue;
+            VfxEventInput timer{};
+            timer.effect_handle = input.effect_handle;
+            timer.sequence = input.stable_id;
+            timer.event_tick = current_tick;
+            timer.world_transform = input.current_transform;
+            timer.stable_seed = input.stable_seed;
+            timer.quality = input.quality;
+            timer.payload = input.payload;
+            const auto first = result.size();
+            AppendWaveGroundOutputs(cooked, cooked.effects[input.effect_handle - 1],
+                                    timer, input.normalized_age, result);
+            for (std::size_t index = first; index < result.size(); ++index)
+            {
+                result[index].source_visual_kind = input.source_visual_kind;
+                result[index].command.lifetime_min = result[index].command.lifetime_max = 2.0f / 60.0f;
+            }
+            continue;
+        }
         if (std::holds_alternative<VfxEntityPayload>(input.payload))
         {
             AppendPersistentEntityGroundOutputs(cooked, input, current_tick, result);
@@ -1697,6 +1781,7 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
             continue;
         if (context_payload)
         {
+            AppendWaveGroundOutputs(cooked, effect, input, age, result);
             std::uint64_t effect_id{};
             bool ambiguous = false;
             for (const auto &lookup : cooked.effect_lookup)

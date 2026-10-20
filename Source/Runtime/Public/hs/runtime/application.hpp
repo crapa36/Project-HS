@@ -22,6 +22,7 @@ struct ApplicationTimelineAction
 struct ApplicationConfig
 {
     bool smoke{};
+    bool smoke_render_lockstep{};
     bool warp{};
     bool visible{true};
     bool validation{};
@@ -48,6 +49,7 @@ struct ApplicationConfig
     std::uint32_t skill_vfx_capture{0xFFFFFFFFu};
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};
     Float2 skill_vfx_aim{0.0f, 9.0f};
+    bool capture_diagnostics{}; // Opt in to full performance CSV/NDJSON; ordinary play writes no detailed logs.
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};
@@ -57,10 +59,20 @@ struct ApplicationConfig
     std::uint32_t camera_zoom_percent{100};
     std::uint32_t shadow_resolution{1024};
     std::uint32_t particle_percentage{100};
+    bool resolution_explicit{};
+    bool vsync_explicit{};
+    bool frame_cap_explicit{};
+    bool borderless_explicit{};
+    bool render_scale_explicit{};
+    bool shadow_resolution_explicit{};
+    bool particle_percentage_explicit{};
+    bool bloom_explicit{};
+    bool outline_explicit{};
     std::uint64_t seed{1};
     Tick maximum_ticks{180};
     BarrierMode barrier_mode{BarrierMode::Automatic};
     std::filesystem::path artifact_directory{"Artifacts/runtime"};
+    std::filesystem::path generation_pointer;
     std::filesystem::path heartbeat_path;
     std::filesystem::path playtest_output_directory;
     std::filesystem::path replay_directory;
