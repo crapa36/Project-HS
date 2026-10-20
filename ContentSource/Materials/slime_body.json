@@ -1,0 +1,271 @@
+{
+  "id": "slime_body",
+  "version": 7,
+  "domain": "translucent",
+  "shading_model": "metallic_roughness",
+  "parameters": [
+    {
+      "id": "metallic",
+      "type": "float",
+      "default": 0
+    },
+    {
+      "id": "roughness_scale",
+      "type": "float",
+      "default": 1
+    },
+    {
+      "id": "transmission_weight",
+      "type": "float",
+      "default": 1
+    },
+    {
+      "id": "ior",
+      "type": "float",
+      "default": 1.36
+    },
+    {
+      "id": "absorption_per_m",
+      "type": "float3",
+      "default": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    },
+    {
+      "id": "thickness_m",
+      "type": "float",
+      "default": 0.5
+    },
+    {
+      "id": "coat_weight",
+      "type": "float",
+      "default": 0.38
+    },
+    {
+      "id": "coat_roughness",
+      "type": "float",
+      "default": 0.19
+    }
+  ],
+  "textures": [],
+  "samplers": [],
+  "nodes": [
+    {
+      "id": "base_color",
+      "op": "context",
+      "type": "float3",
+      "name": "sampled_base_color"
+    },
+    {
+      "id": "normal",
+      "op": "context",
+      "type": "float3",
+      "name": "shading_normal"
+    },
+    {
+      "id": "roughness_sample",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_roughness"
+    },
+    {
+      "id": "alpha",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_alpha"
+    },
+    {
+      "id": "ao",
+      "op": "context",
+      "type": "float",
+      "name": "sampled_ao"
+    },
+    {
+      "id": "metallic",
+      "op": "parameter",
+      "type": "float",
+      "name": "metallic"
+    },
+    {
+      "id": "roughness_scale",
+      "op": "parameter",
+      "type": "float",
+      "name": "roughness_scale"
+    },
+    {
+      "id": "roughness",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "roughness_sample",
+        "type": "float"
+      },
+      "b": {
+        "node": "roughness_scale",
+        "type": "float"
+      }
+    },
+    {
+      "id": "feature_alpha_threshold",
+      "op": "constant",
+      "type": "float",
+      "value": 0.98
+    },
+    {
+      "id": "coverage",
+      "op": "less",
+      "type": "bool",
+      "a": {
+        "node": "alpha",
+        "type": "float"
+      },
+      "b": {
+        "node": "feature_alpha_threshold",
+        "type": "float"
+      }
+    },
+    {
+      "id": "coverage_float",
+      "op": "convert",
+      "type": "float",
+      "input": {
+        "node": "coverage",
+        "type": "bool"
+      }
+    },
+    {
+      "id": "opacity",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "alpha",
+        "type": "float"
+      },
+      "b": {
+        "node": "coverage_float",
+        "type": "float"
+      }
+    },
+    {
+      "id": "basic",
+      "op": "metallic_roughness_closure",
+      "type": "surface_closure",
+      "base_color": {
+        "node": "base_color",
+        "type": "float3"
+      },
+      "normal": {
+        "node": "normal",
+        "type": "float3"
+      },
+      "roughness": {
+        "node": "roughness",
+        "type": "float"
+      },
+      "metallic": {
+        "node": "metallic",
+        "type": "float"
+      },
+      "ao": {
+        "node": "ao",
+        "type": "float"
+      },
+      "opacity": {
+        "node": "opacity",
+        "type": "float"
+      }
+    },
+    {
+      "id": "transmission_weight",
+      "op": "parameter",
+      "type": "float",
+      "name": "transmission_weight"
+    },
+    {
+      "id": "ior",
+      "op": "parameter",
+      "type": "float",
+      "name": "ior"
+    },
+    {
+      "id": "absorption_per_m",
+      "op": "parameter",
+      "type": "float3",
+      "name": "absorption_per_m"
+    },
+    {
+      "id": "thickness_m",
+      "op": "parameter",
+      "type": "float",
+      "name": "thickness_m"
+    },
+    {
+      "id": "solid",
+      "op": "solid_transmission_closure",
+      "type": "surface_closure",
+      "base": {
+        "node": "basic",
+        "type": "surface_closure"
+      },
+      "weight": {
+        "node": "transmission_weight",
+        "type": "float"
+      },
+      "ior": {
+        "node": "ior",
+        "type": "float"
+      },
+      "absorption_per_m": {
+        "node": "absorption_per_m",
+        "type": "float3"
+      },
+      "thickness_m": {
+        "node": "thickness_m",
+        "type": "float"
+      }
+    },
+    {
+      "id": "coat_weight",
+      "op": "parameter",
+      "type": "float",
+      "name": "coat_weight"
+    },
+    {
+      "id": "coat_roughness",
+      "op": "parameter",
+      "type": "float",
+      "name": "coat_roughness"
+    },
+    {
+      "id": "surface",
+      "op": "coat_closure",
+      "type": "surface_closure",
+      "base": {
+        "node": "solid",
+        "type": "surface_closure"
+      },
+      "weight": {
+        "node": "coat_weight",
+        "type": "float"
+      },
+      "roughness": {
+        "node": "coat_roughness",
+        "type": "float"
+      }
+    }
+  ],
+  "outputs": {
+    "surface": "typed_closure",
+    "closure": {
+      "node": "surface",
+      "type": "surface_closure"
+    },
+    "normal_space": "world"
+  },
+  "render_flags": {
+    "two_sided": true,
+    "alpha_mode": "blend"
+  }
+}

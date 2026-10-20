@@ -56,5 +56,17 @@
       "baked/foliage_leaf_atlas_1_normal.png",
       "baked/foliage_leaf_atlas_2_normal.png"
     ]
-  }
+  },
+  "ground_detail": [
+    {
+      "base_color": "textures/ground_detail_basecolor.png",
+      "normal": "textures/ground_detail_normal.png",
+      "surface_ra": "textures/ground_detail_surface_ra.png"
+    },
+    {
+      "base_color": "textures/meadow_additions_v004_basecolor.png",
+      "normal": "textures/meadow_additions_v004_normal.png",
+      "surface_ra": "textures/meadow_additions_v004_surface_ra.png"
+    }
+  ]
 }

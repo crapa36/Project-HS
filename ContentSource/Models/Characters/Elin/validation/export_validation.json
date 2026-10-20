@@ -1,0 +1,71 @@
+{
+  "source_blend": {
+    "objects": 73,
+    "meshes": 72,
+    "triangles_evaluated": 742267,
+    "textures": 36,
+    "materials": 23,
+    "bounds_blender_m": [
+      [
+        -0.39500001072883606,
+        -0.2199999988079071,
+        -8.571425347270178e-09
+      ],
+      [
+        0.625,
+        0.29249998927116394,
+        2.0325000286102295
+      ]
+    ],
+    "height_m": 2.032500037181655,
+    "rigged": false,
+    "animated": false,
+    "scene": "Elin_Model",
+    "units": "metres",
+    "up": "Z",
+    "front": "-Y"
+  },
+  "glb": {
+    "embedded_images": 27,
+    "materials": 23,
+    "external_files": false
+  },
+  "roundtrip": {
+    "glb": {
+      "meshes": 72,
+      "triangles": 742267,
+      "textures": 27,
+      "bounds_blender_m": [
+        [
+          -0.39500001072883606,
+          -0.2199999988079071,
+          -8.571425347270178e-09
+        ],
+        [
+          0.625,
+          0.29249998927116394,
+          2.0325000286102295
+        ]
+      ],
+      "passed": true
+    },
+    "fbx": {
+      "meshes": 72,
+      "triangles": 742267,
+      "textures": 48,
+      "bounds_blender_m": [
+        [
+          -0.39500001072883606,
+          -0.21999971568584442,
+          -2.683753663745847e-08
+        ],
+        [
+          0.625,
+          0.29250022768974304,
+          2.0325000286102295
+        ]
+      ],
+      "passed": true
+    }
+  }
+}

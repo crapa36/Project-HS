@@ -1,0 +1,403 @@
+{
+  "complete": true,
+  "baseline_mesh_count": 72,
+  "baseline_mesh_values_sha256": "0512df5310c27e86341616fda72a0af6438c6a742455bb61fd0772a3b599768d",
+  "unowned_mesh_values_preserved": true,
+  "total_meshes": 84,
+  "new_meshes": [
+    {
+      "name": "flower_daisy",
+      "triangles": 8456,
+      "bounds_engine_m": [
+        [
+          -0.36137479543685913,
+          -4.429061300470494e-05,
+          -0.29004621505737305
+        ],
+        [
+          0.29306983947753906,
+          0.43899109959602356,
+          0.24159304797649384
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.2275761572525218e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_daisy_lod1",
+      "triangles": 4040,
+      "bounds_engine_m": [
+        [
+          -0.35264885425567627,
+          -5.759203850175254e-05,
+          -0.28750672936439514
+        ],
+        [
+          0.29306983947753906,
+          0.44077247381210327,
+          0.24458201229572296
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.910498902305801e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_daisy_lod2",
+      "triangles": 1050,
+      "bounds_engine_m": [
+        [
+          -0.3531436622142792,
+          -7.387181540252641e-05,
+          -0.2897827923297882
+        ],
+        [
+          0.29306983947753906,
+          0.44041720032691956,
+          0.1978815346956253
+        ]
+      ],
+      "minimum_triangle_area_m2": 4.116173112353156e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup",
+      "triangles": 6496,
+      "bounds_engine_m": [
+        [
+          -0.32033997774124146,
+          -5.038683957536705e-05,
+          -0.25434696674346924
+        ],
+        [
+          0.29471510648727417,
+          0.45327022671699524,
+          0.2654454708099365
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.2935333100174668e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup_lod1",
+      "triangles": 2880,
+      "bounds_engine_m": [
+        [
+          -0.305549681186676,
+          -6.999499601079151e-05,
+          -0.24298609793186188
+        ],
+        [
+          0.29471510648727417,
+          0.45327022671699524,
+          0.2654454708099365
+        ]
+      ],
+      "minimum_triangle_area_m2": 1.5206612962979094e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_buttercup_lod2",
+      "triangles": 738,
+      "bounds_engine_m": [
+        [
+          -0.305549681186676,
+          -0.00010316701082047075,
+          -0.24298609793186188
+        ],
+        [
+          0.29471510648727417,
+          0.45327022671699524,
+          0.20830482244491577
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.2406323915667138e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.011605441570281982
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet",
+      "triangles": 6552,
+      "bounds_engine_m": [
+        [
+          -0.3511987030506134,
+          -0.0007848654058761895,
+          -0.27132150530815125
+        ],
+        [
+          0.31880733370780945,
+          0.3348531723022461,
+          0.28161492943763733
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.2626831702948486e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.01240682601928711
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet_lod1",
+      "triangles": 3360,
+      "bounds_engine_m": [
+        [
+          -0.3511987030506134,
+          -0.0007585647399537265,
+          -0.27132150530815125
+        ],
+        [
+          0.31880733370780945,
+          0.3348531723022461,
+          0.2725540101528168
+        ]
+      ],
+      "minimum_triangle_area_m2": 2.7712088265954263e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.014678895473480225
+        ],
+        [
+          0.988394558429718,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "flower_violet_lod2",
+      "triangles": 936,
+      "bounds_engine_m": [
+        [
+          -0.3511987030506134,
+          -0.000707819068338722,
+          -0.27132150530815125
+        ],
+        [
+          0.31880733370780945,
+          0.3348531723022461,
+          0.20912796258926392
+        ]
+      ],
+      "minimum_triangle_area_m2": 3.0432971566862716e-07,
+      "uv0_range": [
+        [
+          0.01171875,
+          0.024111807346343994
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch",
+      "triangles": 4008,
+      "bounds_engine_m": [
+        [
+          -0.3275701701641083,
+          0.0,
+          -0.278280109167099
+        ],
+        [
+          0.29248863458633423,
+          0.22200001776218414,
+          0.22232376039028168
+        ]
+      ],
+      "minimum_triangle_area_m2": 5.623431200383808e-08,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.01240682601928711
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch_lod1",
+      "triangles": 1916,
+      "bounds_engine_m": [
+        [
+          -0.25697770714759827,
+          0.0,
+          -0.2538435161113739
+        ],
+        [
+          0.2921062111854553,
+          0.22200001776218414,
+          0.22275057435035706
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.17951446652693e-08,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.014678895473480225
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    },
+    {
+      "name": "clover_patch_lod2",
+      "triangles": 656,
+      "bounds_engine_m": [
+        [
+          -0.2571025788784027,
+          0.0,
+          -0.2540355622768402
+        ],
+        [
+          0.290476530790329,
+          0.22200001776218414,
+          0.2209784835577011
+        ]
+      ],
+      "minimum_triangle_area_m2": 6.507265975928533e-08,
+      "uv0_range": [
+        [
+          0.26171875,
+          0.024111807346343994
+        ],
+        [
+          0.98828125,
+          0.48828125
+        ]
+      ],
+      "material_index": 0,
+      "renderer_material_ordinal": 15,
+      "texture_layer": 0,
+      "finite_unit_normal_tangent": true,
+      "opaque_closed_leaf_shells": true
+    }
+  ],
+  "coordinate_transform": "Blender Z-up -> engine Y-up: (x,z,-y), proper rotation determinant +1",
+  "uv_tangent_contract": "Flip V into PNG coordinates before calc_tangents; rotate tangent with position/normal and preserve recalculated bitangent sign",
+  "protected_material_and_texture_sha256": {
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Materials\\ground_detail.json": "f885d03de74900a675ccd495057af158929372dd348362d72c1420f4b8f984de",
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Textures\\Environment\\baked_materials.json": "2506197c6a3440b6888c1ff13baa17a3feb5305c4fb4ba4c21a1a0ba7dd8136c",
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Textures\\Environment\\project_hs_environment_materials_v9_LEAN.json": "0ac1203116201c81aac831dbd47bd3f6e29704e6f87e6aa12bd4a29441076030",
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Textures\\Environment\\textures\\ground_detail_basecolor.png": "c830a6f72592ed4ad02efb5ed9f1b3b72607a24f133c0f39dc7d4b561e1e8809",
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Textures\\Environment\\textures\\ground_detail_surface_ra.png": "a29077e9462acbb1e0bdfce9ca81e3a026246ee66d02438125c5d7cf11573a81",
+    "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\ContentSource\\Textures\\Environment\\textures\\ground_detail_normal.png": "7fdd533db35598742e2bf6e127184486bf7ca8fa849115ed13c7f477d34ae2ac"
+  }
+}

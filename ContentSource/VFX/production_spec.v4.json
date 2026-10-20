@@ -35,7 +35,6 @@
       "recursive GPU sub-emitter graph가 gameplay 결과를 소유하는 구조",
       "일반-purpose Grid2D/3D fluid solver를 기본 backend로 탑재",
       "MBOIT/sorted translucency를 기본 투명도 경로로 사용",
-      "ray-traced particle collision",
       "mesh shader/Work Graph/async-compute를 초기 필수 경로로 강제",
       "particle마다 dynamic light 하나를 생성",
       "초기 VFX 구현을 위해 복잡한 placed-resource alias optimizer를 선행 구현"
@@ -564,8 +563,7 @@
       "not_required_for_v4": [
         "Grid2D fluid",
         "general 3D fluid",
-        "MBOIT",
-        "raytraced_particle_collision"
+        "MBOIT"
       ]
     },
     "support_shader_contracts": {

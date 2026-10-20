@@ -1,6 +1,6 @@
 import bpy, json, numpy as np
 from pathlib import Path
-ROOT=Path(r'C:/Users/crapa/Documents/GitHub/Project HS')
+ROOT=Path(__file__).resolve().parents[2]
 OUT=ROOT/'ContentSource/Models/Environment'
 PACK=ROOT/'ContentSource/Textures/Environment'
 SPEC=json.loads((PACK/'project_hs_environment_materials_v9_LEAN.json').read_text(encoding='utf-8'))

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "id": "default_probe",
+  "kind": "hdr_equirectangular",
+  "color_space": "rec709_linear",
+  "radiance_unit": "scene_linear_radiance_per_steradian",
+  "sun_policy": "separate_directional_light",
+  "source_path": "ContentSource/Lighting/forest_slope_1k.hdr",
+  "source_encoding": "radiance_rgbe",
+  "source_primaries_policy": "authored_rec709_if_unspecified",
+  "panorama_mapping": "longitude_atan2_z_x_latitude_acos_y",
+  "radiance_scale": 1.0,
+  "orientation_y_degrees": 0.0,
+  "bake": {
+    "cube_edge": 64,
+    "ggx_samples": 1024
+  },
+  "author_notes": "Forest Slope 1K RGBE panorama by Andreas Mischok, Poly Haven CC0; exact upstream bytes and hashes are recorded in forest_slope_1k.source.json. Its all-zero PRIMARIES are explicitly interpreted as Rec709 linear under the authored source policy. Forest canopy supplies the photographed environment; the engine's directional light remains the separate direct-light source and no procedural sun disk is added. Bake outputs preserve scene-linear radiance without exposure or display transfer."
+}

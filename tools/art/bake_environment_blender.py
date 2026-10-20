@@ -1,8 +1,11 @@
 """Blender MCP high-to-low authoring/bake and LOD/FBX export. Run functions per asset."""
-import bpy, math, json, random
+import bpy, math, json, random, runpy
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mesh_indexing import index_mesh
 from mathutils import Vector
-ROOT=Path(r'C:/Users/crapa/Documents/GitHub/Project HS')
+ROOT=Path(__file__).resolve().parents[2]
 OUT=ROOT/'ContentSource/Models/Environment'
 PACK=ROOT/'ContentSource/Textures/Environment'
 BAKED=PACK/'baked';BAKED.mkdir(exist_ok=True)
@@ -151,7 +154,7 @@ def finish():
                 loop=copy.loops[li];p=copy.vertices[loop.vertex_index].co;n=loop.normal;t=loop.tangent;uv=copy.uv_layers.active.data[li].uv
                 material=int(ob.name.split('_')[1]) if is_baked else tri.material_index
                 vertices.append([p.x,p.z,-p.y,n.x,n.z,-n.y,uv.x,uv.y,t.x,t.z,-t.y,loop.bitangent_sign,material])
-        meshes.append({'name':ob.name,'vertices':vertices});stats.append({'name':ob.name,'triangles':len(vertices)//3,'units':'metres','pivot':'ground origin','uv0':True,'normal':True,'tangent':True})
+        meshes.append(index_mesh({'name':ob.name,'vertices':vertices}));stats.append({'name':ob.name,'triangles':len(vertices)//3,'units':'metres','pivot':'ground origin','uv0':True,'normal':True,'tangent':True})
         bpy.data.meshes.remove(copy)
     (OUT/'environment_meshes.json').write_text(json.dumps({'version':1,'meshes':meshes},separators=(',',':')),encoding='utf-8')
     (OUT/'asset_manifest.json').write_text(json.dumps({'units':'metres','assets':stats,'highpoly':[o.name for o in SC.objects if o.name.startswith('HP_')],'collision':[o.name for o in SC.objects if o.name.startswith('UCX_')]},indent=2),encoding='utf-8')
@@ -181,7 +184,7 @@ def finish():
             select_only(objects,objects[0]);bpy.ops.export_scene.fbx(filepath=str(OUT/(name+'.fbx')),use_selection=True,object_types={'MESH'},apply_unit_scale=True,apply_scale_options='FBX_SCALE_UNITS',axis_forward='-Z',axis_up='Y',use_tspace=True,mesh_smooth_type='FACE',bake_anim=False,path_mode='RELATIVE',add_leaf_bones=False)
             if collision:collision.hide_render=True;collision.hide_set(True)
     # Dedicated FBX export converts local foliage UVs to full atlas coordinates.
-    exec(compile((ROOT/'tools/art/export_environment_fbx.py').read_text(encoding='utf-8'),'export_environment_fbx.py','exec'),{})
+    runpy.run_path(str(ROOT/'tools/art/export_environment_fbx.py'))
     for ob in SC.objects:
         if ob.name.startswith(('HP_','UCX_')) or '_lod' in ob.name:ob.hide_render=True;ob.hide_set(True)
     for im in bpy.data.images:

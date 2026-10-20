@@ -1,0 +1,33 @@
+{
+  "complete": true,
+  "source_script_sha256": "21db5dd7472b55f88628f4eaf9eb784e572bffb51b5774e33f7fab8edfd49c01",
+  "runtime_records_sha256": "5b748be9501c9e254ee74dd92e885e14a8df1f57553c2419b748bf7f0fef5594",
+  "environment_before_sha256": "578e81bd6ed78cdbeb917775a6926d150164ba76c0d55a0d409f1b0ba4fed52d",
+  "environment_after_sha256": "0003e6cc1c992ea8f40cffe5dd5f4177d52367e6c13a2d9951a330dad97f683c",
+  "preserved_record_count": 63,
+  "preserved_records_sha256": "99ed960ae31269368a53283dd17e5499126bdbf26046fe7d5ef2cb9a7c9829b6",
+  "mesh_names": [
+    "barrel_broken",
+    "barrel_broken_lod1",
+    "barrel_broken_lod2",
+    "barrel_intact",
+    "barrel_intact_lod1",
+    "barrel_intact_lod2",
+    "cart_broken",
+    "cart_broken_lod1",
+    "cart_broken_lod2",
+    "crate_broken",
+    "crate_broken_lod1",
+    "crate_broken_lod2",
+    "crate_intact",
+    "crate_intact_lod1",
+    "crate_intact_lod2",
+    "shrub_low",
+    "shrub_low_lod1",
+    "shrub_low_lod2",
+    "stump_roots",
+    "stump_roots_lod1",
+    "stump_roots_lod2"
+  ],
+  "original_backup": "Build/asset-authoring-backups/meadow-props/environment_meshes_before_578e81bd6ed78cdb.json"
+}

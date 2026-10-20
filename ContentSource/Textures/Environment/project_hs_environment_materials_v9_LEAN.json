@@ -210,6 +210,25 @@
           "detail_normal": "textures/mesh_bark_detail_normal.png",
           "surface_ra": "textures/mesh_bark_surface_ra.png"
         }
+      },
+      {
+        "id": "mesh_ground_detail",
+        "mapping": {
+          "mode": "uv0_atlas",
+          "atlas_size": [
+            2048,
+            2048
+          ],
+          "gutter_px": 24,
+          "layers": 2,
+          "material_index": 0,
+          "opaque_geometry_silhouette": true
+        },
+        "textures": {
+          "base_color": "textures/ground_detail_basecolor.png",
+          "normal": "textures/ground_detail_normal.png",
+          "surface_ra": "textures/ground_detail_surface_ra.png"
+        }
       }
     ]
   },

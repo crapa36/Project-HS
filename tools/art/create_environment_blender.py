@@ -1,8 +1,11 @@
-"""Run through Blender MCP. Authored metre-scale assets; original scene is preserved."""
+"""Run with Blender --python, or runpy.run_path through Blender MCP. Authored metre-scale assets; original scene is preserved."""
 import bpy, math, random, json
 from pathlib import Path
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mesh_indexing import index_mesh
 from mathutils import Vector
-ROOT=Path(r'C:/Users/crapa/Documents/GitHub/Project HS')
+ROOT=Path(__file__).resolve().parents[2]
 OUT=ROOT/'ContentSource/Models/Environment'
 PACK=ROOT/'ContentSource/Textures/Environment'
 SPEC=json.loads((PACK/'project_hs_environment_materials_v9_LEAN.json').read_text())
@@ -165,7 +168,7 @@ def export():
                 loop=mesh.loops[li];p=mesh.vertices[loop.vertex_index].co;n=loop.normal;t=loop.tangent;uv=mesh.uv_layers.active.data[li].uv
                 # Blender Z-up to engine Y-up: proper rotation, no UV flip.
                 vertices.append([p.x,p.z,-p.y,n.x,n.z,-n.y,uv.x,uv.y,t.x,t.z,-t.y,loop.bitangent_sign,tri.material_index])
-        meshes.append({'name':obj.name,'vertices':vertices})
+        meshes.append(index_mesh({'name':obj.name,'vertices':vertices}))
         stats.append({'name':obj.name,'triangles':len(vertices)//3,'bounds_blender_m':[list(min(v.co[i] for v in mesh.vertices) for i in range(3)),list(max(v.co[i] for v in mesh.vertices) for i in range(3))],'species':obj.get('species','')})
     OUT.mkdir(parents=True,exist_ok=True)
     (OUT/'environment_meshes.json').write_text(json.dumps({'version':1,'meshes':meshes},separators=(',',':')),encoding='utf-8')

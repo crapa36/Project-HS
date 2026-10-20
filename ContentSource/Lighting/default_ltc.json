@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "default_ltc",
+  "kind": "ltc_ggx",
+  "brdf": "hs_isotropic_ggx_uncorrelated_smith_schlick",
+  "parameterization": "perceptual_roughness_sqrt_one_minus_ndotv",
+  "normalization": "cosine_over_pi_solid_angle_density",
+  "bake": {"edge": 64, "samples": 1024, "iterations": 128},
+  "author_notes": "Deterministic independent LTC fit of the shared Project HS GGX model (alpha=max(roughness squared,0.002)). No imported coefficient table. Energies are dimensionless; the renderer applies authored area-light radiance and emitter geometry. The NdotV=0 endpoint is its positive 0.00001 limit. Reference method: Heitz, Dupuy, Hill and Neubelt, SIGGRAPH 2016."
+}

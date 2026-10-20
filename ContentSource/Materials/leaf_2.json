@@ -1,0 +1,518 @@
+{
+  "id": "leaf_2",
+  "version": 7,
+  "domain": "surface",
+  "shading_model": "metallic_roughness",
+  "parameters": [
+    {
+      "id": "metallic",
+      "type": "float",
+      "default": 0.0
+    },
+    {
+      "id": "roughness_scale",
+      "type": "float",
+      "default": 1.0
+    },
+    {
+      "id": "tint",
+      "type": "float3",
+      "default": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "id": "opacity_scale",
+      "type": "float",
+      "default": 1.0
+    },
+    {
+      "id": "transmission_weight",
+      "type": "float",
+      "default": 0.30
+    },
+    {
+      "id": "transmission_tint",
+      "type": "float3",
+      "default": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    }
+  ],
+  "textures": [
+    {
+      "id": "base_color",
+      "product_id": "render/texture/environment_leaf_basecolor.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "base_color"
+    },
+    {
+      "id": "surface",
+      "product_id": "render/texture/environment_leaf_roughness.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "roughness"
+    },
+    {
+      "id": "normal",
+      "product_id": "render/texture/environment_leaf_normal.rpkg",
+      "dimension": "texture2d_array",
+      "semantic": "normal"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "material_uv",
+      "op": "context",
+      "type": "float2",
+      "name": "uv"
+    },
+    {
+      "id": "material_dx",
+      "op": "context",
+      "type": "float2",
+      "name": "d_uv_dx"
+    },
+    {
+      "id": "material_dy",
+      "op": "context",
+      "type": "float2",
+      "name": "d_uv_dy"
+    },
+    {
+      "id": "material_layer",
+      "op": "context",
+      "type": "uint",
+      "name": "layer"
+    },
+    {
+      "id": "material_uv_scale",
+      "op": "constant",
+      "type": "float2",
+      "value": [
+        1.0,
+        1.0
+      ]
+    },
+    {
+      "id": "material_scaled_uv",
+      "op": "multiply",
+      "type": "float2",
+      "a": {
+        "node": "material_uv",
+        "type": "float2"
+      },
+      "b": {
+        "node": "material_uv_scale",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_scaled_dx",
+      "op": "multiply",
+      "type": "float2",
+      "a": {
+        "node": "material_dx",
+        "type": "float2"
+      },
+      "b": {
+        "node": "material_uv_scale",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_scaled_dy",
+      "op": "multiply",
+      "type": "float2",
+      "a": {
+        "node": "material_dy",
+        "type": "float2"
+      },
+      "b": {
+        "node": "material_uv_scale",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_sampler",
+      "op": "sampler_ref",
+      "type": "sampler_ref",
+      "declaration": "material_sampler"
+    },
+    {
+      "id": "material_base_color_texture",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "base_color"
+    },
+    {
+      "id": "material_base_color_sample",
+      "op": "sample_grad",
+      "type": "float4",
+      "texture": {
+        "node": "material_base_color_texture",
+        "type": "texture_ref"
+      },
+      "sampler": {
+        "node": "material_sampler",
+        "type": "sampler_ref"
+      },
+      "uv": {
+        "node": "material_scaled_uv",
+        "type": "float2"
+      },
+      "layer": {
+        "node": "material_layer",
+        "type": "uint"
+      },
+      "dx": {
+        "node": "material_scaled_dx",
+        "type": "float2"
+      },
+      "dy": {
+        "node": "material_scaled_dy",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_surface_texture",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "surface"
+    },
+    {
+      "id": "material_surface_sample",
+      "op": "sample_grad",
+      "type": "float4",
+      "texture": {
+        "node": "material_surface_texture",
+        "type": "texture_ref"
+      },
+      "sampler": {
+        "node": "material_sampler",
+        "type": "sampler_ref"
+      },
+      "uv": {
+        "node": "material_scaled_uv",
+        "type": "float2"
+      },
+      "layer": {
+        "node": "material_layer",
+        "type": "uint"
+      },
+      "dx": {
+        "node": "material_scaled_dx",
+        "type": "float2"
+      },
+      "dy": {
+        "node": "material_scaled_dy",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_normal_texture",
+      "op": "texture_ref",
+      "type": "texture_ref",
+      "declaration": "normal"
+    },
+    {
+      "id": "material_normal_sample",
+      "op": "sample_grad",
+      "type": "float4",
+      "texture": {
+        "node": "material_normal_texture",
+        "type": "texture_ref"
+      },
+      "sampler": {
+        "node": "material_sampler",
+        "type": "sampler_ref"
+      },
+      "uv": {
+        "node": "material_scaled_uv",
+        "type": "float2"
+      },
+      "layer": {
+        "node": "material_layer",
+        "type": "uint"
+      },
+      "dx": {
+        "node": "material_scaled_dx",
+        "type": "float2"
+      },
+      "dy": {
+        "node": "material_scaled_dy",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_color_0",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_base_color_sample",
+        "type": "float4"
+      },
+      "component": 0
+    },
+    {
+      "id": "material_color_1",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_base_color_sample",
+        "type": "float4"
+      },
+      "component": 1
+    },
+    {
+      "id": "material_color_2",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_base_color_sample",
+        "type": "float4"
+      },
+      "component": 2
+    },
+    {
+      "id": "sampled",
+      "op": "construct",
+      "type": "float3",
+      "components": [
+        {
+          "node": "material_color_0",
+          "type": "float"
+        },
+        {
+          "node": "material_color_1",
+          "type": "float"
+        },
+        {
+          "node": "material_color_2",
+          "type": "float"
+        }
+      ]
+    },
+    {
+      "id": "rough_sample",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_surface_sample",
+        "type": "float4"
+      },
+      "component": 0
+    },
+    {
+      "id": "rough_scale",
+      "op": "parameter",
+      "name": "roughness_scale",
+      "type": "float"
+    },
+    {
+      "id": "rough_product",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "rough_sample",
+        "type": "float"
+      },
+      "b": {
+        "node": "rough_scale",
+        "type": "float"
+      }
+    },
+    {
+      "id": "rough_final",
+      "op": "saturate",
+      "type": "float",
+      "input": {
+        "node": "rough_product",
+        "type": "float"
+      }
+    },
+    {
+      "id": "sampled_alpha",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_base_color_sample",
+        "type": "float4"
+      },
+      "component": 3
+    },
+    {
+      "id": "material_normal_0",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_normal_sample",
+        "type": "float4"
+      },
+      "component": 0
+    },
+    {
+      "id": "material_normal_1",
+      "op": "extract",
+      "type": "float",
+      "input": {
+        "node": "material_normal_sample",
+        "type": "float4"
+      },
+      "component": 1
+    },
+    {
+      "id": "material_normal_xy",
+      "op": "construct",
+      "type": "float2",
+      "components": [
+        {
+          "node": "material_normal_0",
+          "type": "float"
+        },
+        {
+          "node": "material_normal_1",
+          "type": "float"
+        }
+      ]
+    },
+    {
+      "id": "material_decoded_normal",
+      "op": "decode_normal_xy",
+      "type": "float3",
+      "input": {
+        "node": "material_normal_xy",
+        "type": "float2"
+      }
+    },
+    {
+      "id": "material_ao",
+      "op": "constant",
+      "type": "float",
+      "value": 1.0
+    },
+    {
+      "id": "material_tint",
+      "op": "parameter",
+      "name": "tint",
+      "type": "float3"
+    },
+    {
+      "id": "material_tinted_base",
+      "op": "multiply",
+      "type": "float3",
+      "a": {
+        "node": "sampled",
+        "type": "float3"
+      },
+      "b": {
+        "node": "material_tint",
+        "type": "float3"
+      }
+    },
+    {
+      "id": "material_opacity_scale",
+      "op": "parameter",
+      "name": "opacity_scale",
+      "type": "float"
+    },
+    {
+      "id": "material_scaled_opacity",
+      "op": "multiply",
+      "type": "float",
+      "a": {
+        "node": "sampled_alpha",
+        "type": "float"
+      },
+      "b": {
+        "node": "material_opacity_scale",
+        "type": "float"
+      }
+    },
+    {
+      "id": "material_metallic_param",
+      "op": "parameter",
+      "name": "metallic",
+      "type": "float"
+    },
+    {
+      "id": "material_closure",
+      "op": "metallic_roughness_closure",
+      "type": "surface_closure",
+      "base_color": {
+        "node": "material_tinted_base",
+        "type": "float3"
+      },
+      "normal": {
+        "node": "material_decoded_normal",
+        "type": "float3"
+      },
+      "roughness": {
+        "node": "rough_final",
+        "type": "float"
+      },
+      "metallic": {
+        "node": "material_metallic_param",
+        "type": "float"
+      },
+      "ao": {
+        "node": "material_ao",
+        "type": "float"
+      },
+      "opacity": {
+        "node": "material_scaled_opacity",
+        "type": "float"
+      }
+    },
+    {
+      "id": "material_transmission_weight",
+      "op": "parameter",
+      "name": "transmission_weight",
+      "type": "float"
+    },
+    {
+      "id": "material_transmission_tint",
+      "op": "parameter",
+      "name": "transmission_tint",
+      "type": "float3"
+    },
+    {
+      "id": "material_thin_closure",
+      "op": "thin_transmission_closure",
+      "type": "surface_closure",
+      "base": {
+        "node": "material_closure",
+        "type": "surface_closure"
+      },
+      "weight": {
+        "node": "material_transmission_weight",
+        "type": "float"
+      },
+      "tint": {
+        "node": "material_transmission_tint",
+        "type": "float3"
+      }
+    }
+  ],
+  "outputs": {
+    "surface": "typed_closure",
+    "closure": {
+      "node": "material_thin_closure",
+      "type": "surface_closure"
+    },
+    "normal_space": "tangent"
+  },
+  "render_flags": {
+    "two_sided": true,
+    "alpha_mode": "mask"
+  },
+  "samplers": [
+    {
+      "id": "material_sampler",
+      "profile": "foliage_anisotropic_clamp"
+    }
+  ]
+}
