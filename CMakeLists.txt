@@ -720,6 +720,18 @@ hs_configure_target(hs_geometry_cooker)
 add_library(hs_scene_hlod_cooker STATIC Source/Apps/Content/scene_hlod_cooker.cpp)
 target_link_libraries(hs_scene_hlod_cooker PUBLIC hs_geometry_cooker PRIVATE hs_meshoptimizer_cook hs_jobs)
 hs_configure_target(hs_scene_hlod_cooker)
+# Asset cooking can perform hundreds of thousands of BVH distance queries per
+# HLOD group. Keep the runtime, renderer and tests in the regular checked Debug
+# configuration, but optimize only these offline geometry-building libraries.
+# CMP0184 (NEW under the project's CMake 4.4 minimum) allows runtime checks to
+# be disabled per target; MSVC otherwise rejects /O2 together with /RTC1.
+if(MSVC)
+    foreach(hs_offline_geometry_target IN ITEMS
+        hs_meshoptimizer_cook hs_geometry_cooker hs_scene_hlod_cooker)
+        set_property(TARGET ${hs_offline_geometry_target} PROPERTY MSVC_RUNTIME_CHECKS "")
+        target_compile_options(${hs_offline_geometry_target} PRIVATE "$<$<CONFIG:Debug>:/O2>")
+    endforeach()
+endif()
 set(
     HS_FBX_SDK_ROOT
     "C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.7"
