@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/scene_probe.schema.json",
+  "title": "Project HS static scene spatial probe source v1",
+  "description": "Spatial probe positions and boxes for actual common-material static-scene offscreen cube capture. Local HDR raw/GGX cubes include the global environment through sky once; SH is world-space cosine-convolved SH9 and visibility is independent first-hit world distance. The SPB1 package remains distinct from global LPB1 environment v1. The producer must resolve actual material/light/static-layout inputs and derive nonzero revisions rather than inventing fixed revisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "environment_product", "color_space", "radiance_unit", "capture", "blend_policy", "revision_policy", "probes", "author_notes"],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"const": "local_probes"},
+    "environment_product": {"const": "render/lighting/default_probe.rpkg"},
+    "color_space": {"const": "rec709_linear"},
+    "radiance_unit": {"const": "scene_linear_radiance_per_steradian"},
+    "blend_policy": {"const": "normalized_influence_visibility_with_single_environment_baseline"},
+    "revision_policy": {"const": "hash_actual_environment_material_light_static_layout_inputs"},
+    "capture": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "cube_edge", "ggx_samples", "maximum_cube_views_per_graph", "include", "exclude"],
+      "properties": {
+        "kind": {"const": "native_static_common_material_cube_views"},
+        "cube_edge": {"enum": [16, 32, 64, 128]},
+        "ggx_samples": {"enum": [64, 128, 256, 512, 1024, 2048]},
+        "maximum_cube_views_per_graph": {"type": "integer", "minimum": 1, "maximum": 6},
+        "include": {"const": ["static_geometry", "common_material_opacity", "static_direct_lights", "emission", "global_environment_sky"]},
+        "exclude": {"const": ["dynamic_characters", "dynamic_vfx", "ui", "post", "exposure", "recursive_local_probes"]}
+      }
+    },
+    "probes": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/probe"}},
+    "author_notes": {"type": "string", "minLength": 1, "maxLength": 4096}
+  },
+  "$defs": {
+    "position": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "number", "minimum": -100000, "maximum": 100000}},
+    "probe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stable_id", "position", "weight", "influence_min", "influence_max", "influence_fade", "projection_min", "projection_max", "visibility_bias", "visibility_fade", "capture_distance"],
+      "properties": {
+        "stable_id": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "position": {"$ref": "#/$defs/position"},
+        "weight": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "influence_min": {"$ref": "#/$defs/position"},
+        "influence_max": {"$ref": "#/$defs/position"},
+        "influence_fade": {"type": "number", "exclusiveMinimum": 0, "maximum": 100000},
+        "projection_min": {"$ref": "#/$defs/position"},
+        "projection_max": {"$ref": "#/$defs/position"},
+        "visibility_bias": {"type": "number", "minimum": 0, "maximum": 100000},
+        "visibility_fade": {"type": "number", "exclusiveMinimum": 0, "maximum": 100000},
+        "capture_distance": {"type": "number", "exclusiveMinimum": 0.1, "maximum": 100000}
+      }
+    }
+  }
+}

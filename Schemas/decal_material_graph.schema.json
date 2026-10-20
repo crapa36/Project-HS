@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/decal_material_graph.schema.json",
+  "title": "Project HS typed MaterialIR decal domain v1",
+  "description": "Projected masked decals evaluate validated MaterialIR and modify the common resolved Surface before lighting and guide consumers. Each material packages explicit Surface receiver classifications. Geometry material ordinals remain independent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "version",
+    "domain",
+    "shading_model",
+    "parameters",
+    "textures",
+    "samplers",
+    "nodes",
+    "outputs",
+    "render_flags"
+  ],
+  "properties": {
+    "id": {
+      "enum": [
+        "decal_fracture",
+        "decal_organic"
+      ]
+    },
+    "version": {
+      "const": 7
+    },
+    "domain": {
+      "const": "decal"
+    },
+    "shading_model": {
+      "const": "metallic_roughness"
+    },
+    "parameters": {
+      "$ref": "material_graph.schema.json#/properties/parameters/oneOf/1"
+    },
+    "textures": {
+      "maxItems": 1,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "product_id",
+          "dimension",
+          "semantic"
+        ],
+        "properties": {
+          "semantic": {
+            "enum": [
+              "decal_structure",
+              "decal_mask"
+            ]
+          },
+          "dimension": {
+            "const": "texture2d_array"
+          },
+          "product_id": {
+            "type": "string",
+            "pattern": "^render/texture/[a-z0-9_]+[.]rpkg$"
+          },
+          "id": {
+            "$ref": "#/$defs/node_id"
+          }
+        }
+      },
+      "minItems": 1
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "material_graph.schema.json#/properties/nodes/items"
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "op": {
+                "const": "context"
+              },
+              "name": {
+                "enum": [
+                  "decal_tint_hdr",
+                  "decal_projector"
+                ]
+              },
+              "type": {
+                "const": "float4"
+              },
+              "id": {
+                "$ref": "#/$defs/node_id"
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "op": {
+                "const": "context"
+              },
+              "name": {
+                "const": "decal_shape"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "id": {
+                "$ref": "#/$defs/node_id"
+              }
+            }
+          },
+          {
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "id",
+              "op",
+              "type",
+              "inputs"
+            ],
+            "properties": {
+              "inputs": {
+                "maxItems": 15,
+                "type": "array",
+                "items": {
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": [
+                    "node",
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "texture_ref",
+                        "sampler_ref",
+                        "float2",
+                        "uint",
+                        "float3",
+                        "float4",
+                        "float"
+                      ]
+                    },
+                    "node": {
+                      "$ref": "#/$defs/node_id"
+                    }
+                  }
+                },
+                "minItems": 15
+              },
+              "op": {
+                "enum": [
+                  "decal_fracture",
+                  "decal_organic"
+                ]
+              },
+              "type": {
+                "const": "surface_closure"
+              },
+              "id": {
+                "$ref": "#/$defs/node_id"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "outputs": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "surface",
+        "closure",
+        "normal_space"
+      ],
+      "properties": {
+        "closure": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "node",
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "surface_closure"
+            },
+            "node": {
+              "$ref": "#/$defs/node_id"
+            }
+          }
+        },
+        "normal_space": {
+          "const": "world"
+        },
+        "surface": {
+          "const": "typed_closure"
+        }
+      }
+    },
+    "render_flags": {
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "alpha_mode",
+        "receivers"
+      ],
+      "properties": {
+        "alpha_mode": {
+          "const": "mask"
+        },
+        "receivers": {
+          "additionalProperties": false,
+          "type": "object",
+          "required": [
+            "models",
+            "required_surface_flags",
+            "forbidden_surface_flags",
+            "normal_filter"
+          ],
+          "properties": {
+            "forbidden_surface_flags": {
+              "type": "integer",
+              "maximum": 1792,
+              "minimum": 0
+            },
+            "models": {
+              "maxItems": 3,
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "cel",
+                  "environment",
+                  "jelly"
+                ]
+              },
+              "minItems": 1
+            },
+            "normal_filter": {
+              "enum": [
+                "any",
+                "ground_facing"
+              ]
+            },
+            "required_surface_flags": {
+              "type": "integer",
+              "maximum": 1793,
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "samplers": {
+      "maxItems": 1,
+      "type": "array",
+      "items": {
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "profile"
+        ],
+        "properties": {
+          "profile": {
+            "const": "linear_clamp"
+          },
+          "id": {
+            "$ref": "#/$defs/node_id"
+          }
+        }
+      },
+      "minItems": 1
+    }
+  },
+  "$defs": {
+    "node_id": {
+      "pattern": "^[a-z_][a-z0-9_]{0,31}$",
+      "type": "string"
+    }
+  }
+}

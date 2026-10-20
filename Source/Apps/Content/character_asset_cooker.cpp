@@ -3,8 +3,10 @@
 #endif
 
 #include "content_cooker.hpp"
+#include "../CharacterContent/character_sources.hpp"
 
 #include <hs/core/dds_format.hpp>
+#include <hs/render_data/material_schema.hpp>
 
 #include <fbxsdk.h>
 #include <DirectXTex.h>
@@ -17,7 +19,9 @@
 #include <cmath>
 #include <cctype>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -34,6 +38,45 @@
 
 namespace hs::content
 {
+
+namespace
+{
+bool AtomicWriteCharacterFile(const std::filesystem::path &path,
+                              std::span<const std::byte> bytes,
+                              std::string &error_message)
+{
+    auto temporary = path;
+    temporary += L".tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream.write(reinterpret_cast<const char *>(bytes.data()),
+                          static_cast<std::streamsize>(bytes.size())))
+        {
+            error_message = "cannot write temporary file";
+            return false;
+        }
+    }
+    const auto handle = CreateFileW(temporary.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+    {
+        error_message = "cannot open temporary file for flush";
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    const auto flushed = FlushFileBuffers(handle);
+    CloseHandle(handle);
+    if (!flushed || !MoveFileExW(temporary.c_str(), path.c_str(),
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        error_message = "atomic replacement failed with Win32 error " +
+                        std::to_string(GetLastError());
+        DeleteFileW(temporary.c_str());
+        return false;
+    }
+    return true;
+}
+} // namespace
 
 FbxScene *LoadFbx(FbxManager &manager, const std::filesystem::path &path,
                   std::string_view scene_name)
@@ -759,6 +802,9 @@ void GatherAnimation(FbxScene &scene, const std::vector<BoneSource> &model_bones
 
     const auto frame_count =
         std::max<std::uint32_t>(2, static_cast<std::uint32_t>(std::ceil(duration * 60.0)) + 1);
+    if (output.transforms.size() > 800'000 || model_bones.empty() ||
+        frame_count > (800'000 - output.transforms.size()) / model_bones.size())
+        throw std::runtime_error("Character animation transform budget exceeded");
     hs::CharacterClipHeader header;
     header.clip = clip;
     header.looping = looping;
@@ -1006,7 +1052,7 @@ bool WriteCharacterAsset(const std::filesystem::path &path,
     header.payload_crc32 = hs::Crc32(
         std::span(file.data() + sizeof(header), header.payload_size));
     std::memcpy(file.data(), &header, sizeof(header));
-    return AtomicWrite(path, file, error_message);
+    return AtomicWriteCharacterFile(path, file, error_message);
 }
 
 bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
@@ -1110,7 +1156,7 @@ bool WriteDds(IWICImagingFactory &factory, const std::filesystem::path &path,
     std::memcpy(cursor, &header, sizeof(header));
     cursor += sizeof(header);
     std::memcpy(cursor, pixels.data(), pixels.size());
-    return AtomicWrite(path, file, error_message);
+    return AtomicWriteCharacterFile(path, file, error_message);
 }
 
 bool CookCharacterAsset(const std::filesystem::path &output,
@@ -1129,11 +1175,22 @@ bool CookCharacterAsset(const std::filesystem::path &output,
     {
         auto *model = LoadFbx(*manager, source.model, source.diagnostic_name);
         std::vector<BoneSource> bones;
-        const bool ground_archer = source.model == std::filesystem::path(HS_CHARACTER_MODEL);
+        const bool ground_archer = source.output_name == "archer";
         GatherModel(*model, character, bones, source.model,
                     source.allow_missing_material_textures, ground_archer);
         if (source.seal_eye_socket)
             SealSlimeEyeSocket(character);
+        auto &named = character.animation_extension;
+        named = {};
+        if (!source.named_animations.empty())
+        {
+            named.character_asset_id = hs::MakeAssetId(
+                "render/character/" + source.output_name + ".rpkg");
+            named.sample_rate_hz = 60;
+            for (const auto &bone : bones) named.bone_names.emplace_back(bone.node->GetName());
+            named.parents = character.parents;
+            named.inverse_bind_matrices = character.inverse_bind_matrices;
+        }
         character.upper_body_weights.resize(bones.size());
         for (std::size_t bone_index = 0; bone_index < bones.size(); ++bone_index)
         {
@@ -1170,11 +1227,68 @@ bool CookCharacterAsset(const std::filesystem::path &output,
             GatherAnimation(*animation, bones, clip, looping, character, animation_path, ground_archer);
             animation->Destroy();
         }
+        // Reuse the five imported samples exactly. Extra authored files pass
+        // through the same hierarchy, coordinate, retargeting and TRS checks,
+        // but never become a sixth legacy slot or survive in its transform data.
+        std::unordered_set<std::string> named_names;
+        std::unordered_set<std::string> named_files;
+        for (const auto &authored : source.named_animations)
+        {
+            if (authored.authored_name != authored.file.stem().string() ||
+                !named_names.insert(authored.authored_name).second ||
+                !named_files.insert(authored.file.generic_string()).second)
+                throw std::runtime_error("Duplicate or mismatched named animation source");
+            const auto legacy = std::ranges::find(source.animations, authored.file);
+            hs::CharacterClipHeader header;
+            const auto legacy_clip_count = character.clips.size();
+            const auto legacy_transform_count = character.transforms.size();
+            if (legacy != source.animations.end())
+                header = character.clips[static_cast<std::size_t>(legacy - source.animations.begin())];
+            else
+            {
+                auto *animation = LoadFbx(*manager, authored.file, source.diagnostic_name);
+                GatherAnimation(*animation, bones, hs::CharacterAnimationClip::Count,
+                                authored.looping, character, authored.file, ground_archer);
+                animation->Destroy();
+                header = character.clips.back();
+            }
+            if ((header.looping != 0) != authored.looping)
+                throw std::runtime_error("Named animation loop flag disagrees with legacy clip");
+            const auto count = static_cast<std::size_t>(header.frame_count) * bones.size();
+            if (named.transforms.size() > 800'000 || count > 800'000 - named.transforms.size())
+                throw std::runtime_error("Named animation transform budget exceeded");
+            named.clips.push_back({hs::MakeAssetId("character/" + source.output_name +
+                "/animation/" + authored.authored_name), authored.authored_name,
+                static_cast<std::uint32_t>(named.transforms.size()), header.frame_count,
+                header.duration_seconds, authored.looping});
+            named.transforms.insert(named.transforms.end(),
+                character.transforms.begin() + header.first_transform,
+                character.transforms.begin() + header.first_transform + static_cast<std::ptrdiff_t>(count));
+            character.clips.resize(legacy_clip_count);
+            character.transforms.resize(legacy_transform_count);
+        }
         if (!WriteCharacterAsset(output / (source.output_name + ".meshbin"), character,
                                  error_message))
         {
             manager->Destroy();
             return false;
+        }
+        if (!named.clips.empty())
+        {
+            const auto logical_id = "render/animation/" + source.output_name + ".rpkg";
+            const std::vector<std::string> dependencies{"character/" + source.output_name + ".meshbin"};
+            const auto bytes = render_data::BuildCharacterAnimationExtension(
+                hs::MakeAssetId(logical_id), dependencies, named);
+            const auto verified = render_data::DecodeCharacterAnimationExtension(bytes, hs::MakeAssetId(logical_id));
+            if (verified.parents != character.parents ||
+                verified.inverse_bind_matrices != character.inverse_bind_matrices ||
+                verified.clips.size() != source.named_animations.size())
+                throw std::runtime_error("Named animation skeleton self-validation failed");
+            if (!AtomicWriteCharacterFile(output / (source.output_name + "_animation.rpkg"), bytes, error_message))
+            {
+                manager->Destroy();
+                return false;
+            }
         }
     }
     catch (const std::exception &exception)
@@ -1215,8 +1329,72 @@ bool CookCharacterAsset(const std::filesystem::path &output,
     return true;
 }
 
+bool WriteCharacterMaterialBindings(const std::filesystem::path &output,
+    const CharacterCookResult &character, const CharacterAssetSource &source,
+    const std::filesystem::path &authoring_path, std::string &error_message)
+{
+    try
+    {
+        const auto require = [&](bool condition, std::string_view message) {
+            if (!condition) throw std::runtime_error("Character material authoring: " + std::string(message));
+        };
+        std::ifstream input(authoring_path, std::ios::binary);
+        require(static_cast<bool>(input), "cannot read " + authoring_path.string());
+        const auto authoring = Json::parse(input);
+        require(authoring.is_object() && authoring.size() == 2 && authoring.at("version") == 1 &&
+                authoring.at("characters").is_object() && authoring.at("characters").contains(source.output_name),
+                "missing authored character material table for " + source.output_name);
+        const auto &rules = authoring.at("characters").at(source.output_name);
+        require(rules.is_array() && !rules.empty(), "expected material identity rules");
+        Json bindings = Json::array();
+        for (std::size_t slot = 0; slot < character.materials.size(); ++slot)
+        {
+            const auto &material = character.materials[slot];
+            const Json *selected{};
+            for (const auto &rule : rules)
+            {
+                require(rule.is_object() && (rule.contains("name") != rule.contains("diffuse")) &&
+                        rule.contains("opaque") && (rule.size() == 2 ||
+                        (rule.size() == 3 && rule.contains("translucent"))), "invalid material identity rule");
+                const auto key = rule.contains("name") ? "name" : "diffuse";
+                require(rule.at(key).is_string() && rule.at("opaque").is_string(), "material identity must be a string");
+                const auto matches = rule.at(key) == (rule.contains("name") ? material.name : material.diffuse.filename().string());
+                if (!matches) continue;
+                require(selected == nullptr, "ambiguous material identity for slot " + std::to_string(slot));
+                selected = &rule;
+            }
+            require(selected != nullptr, "unknown FBX material slot " + std::to_string(slot) +
+                    " name=" + material.name + " diffuse=" + material.diffuse.filename().string());
+            const auto opaque = selected->at("opaque").get<std::string>();
+            require(std::ranges::find(render_data::kHeroMaterialNames, opaque) != render_data::kHeroMaterialNames.end() &&
+                    opaque != "slime_body", "opaque binding is not an authored opaque hero material");
+            Json binding{{"slot", slot}, {"name", material.name},
+                {"source_diffuse", material.diffuse.filename().string()},
+                {"source_normal", material.normal.filename().string()}, {"opaque", opaque}};
+            if (selected->contains("translucent"))
+            {
+                require(selected->at("translucent") == "slime_body" && opaque == "slime_features",
+                        "transparent jelly must have a matching opaque feature material");
+                binding["translucent"] = "slime_body";
+            }
+            else require(opaque != "slime_features", "jelly feature material is missing its transparent body");
+            bindings.push_back(std::move(binding));
+        }
+        const auto encoded = Json{{"version", 1}, {"character", source.output_name},
+                                  {"slots", std::move(bindings)}}.dump(2) + "\n";
+        return AtomicWriteCharacterFile(output / (source.output_name + "_materials.json"),
+            std::as_bytes(std::span(encoded.data(), encoded.size())), error_message);
+    }
+    catch (const std::exception &error)
+    {
+        error_message = error.what();
+        return false;
+    }
+}
+
 bool CookMonsterMaterialTextures(const std::filesystem::path &output,
-                                 std::string &error_message)
+                                 std::string &error_message,
+                                 const std::filesystem::path &source)
 {
     Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr,
@@ -1225,7 +1403,6 @@ bool CookMonsterMaterialTextures(const std::filesystem::path &output,
         error_message = "WIC factory creation failed";
         return false;
     }
-    const auto source = std::filesystem::path(HS_MONSTER_TEXTURE_DIRECTORY);
     return WriteDds(*factory.Get(), output / "monster_basecolor.dds",
                     source / "BasecolorDefault_TEX.png", {255, 255, 255, 255},
                     error_message) &&
@@ -1235,18 +1412,17 @@ bool CookMonsterMaterialTextures(const std::filesystem::path &output,
                     source / "RAM_TEX.png", {255, 0, 0, 255}, error_message);
 }
 
+bool CookMonsterMaterialTextures(const std::filesystem::path &output,
+                                 std::string &error_message)
+{
+    return CookMonsterMaterialTextures(output, error_message, paths::MonsterTextures());
+}
+
 bool CookCharacterAsset(const std::filesystem::path &output,
                         CharacterCookResult &character,
                         std::string &error_message)
 {
-    const CharacterAssetSource archer{
-        HS_CHARACTER_MODEL,
-        {std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "Idle.fbx",
-         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "RunForward.fbx",
-         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DrawArrow.fbx",
-         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "AimRecoil.fbx",
-         std::filesystem::path(HS_CHARACTER_ANIMATION_DIRECTORY) / "DeathBackward.fbx"},
-        "archer", "Archer", false};
+    const auto archer = CharacterAssetSources(paths::SourceRoot())[0];
     return CookCharacterAsset(output, character, error_message, archer);
 }
 

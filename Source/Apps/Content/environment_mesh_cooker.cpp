@@ -17,16 +17,23 @@ namespace
 constexpr std::uint32_t kMagic = 0x4d455348;
 constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1",
     "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
-    "grass_2", "grass_3"};
+    "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
+    "ground_leaves", "twig_cluster", "fence_short",
+    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
 struct Mesh { std::string name; std::vector<SkinnedVertex> vertices; };
 std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
 {
     std::ifstream stream(path);
     if (!stream) throw std::runtime_error("Cannot open environment mesh source: " + path.string());
-    const auto root = nlohmann::json::parse(stream);
+    auto root = nlohmann::json::parse(stream);
+    std::ifstream meadow(path.parent_path() / "meadow_surface_meshes.json");
+    if (!meadow) throw std::runtime_error("Missing authored meadow surface geometry");
+    const auto supplement = nlohmann::json::parse(meadow);
+    if (supplement.at("version") != 1) throw std::runtime_error("Unsupported meadow geometry version");
+    for (const auto& mesh : supplement.at("meshes")) root.at("meshes").push_back(mesh);
     if (root.at("version") != 1 || !root.at("meshes").is_array() ||
         root.at("meshes").size() != names.size() * 3)
-        throw std::runtime_error("Environment mesh source must contain version 1 and all 42 LOD meshes.");
+        throw std::runtime_error("Environment mesh source must contain version 1 and all catalogued LOD meshes.");
     std::set<std::string> found;
     std::vector<Mesh> meshes;
     for (const auto &entry : root.at("meshes"))
@@ -37,15 +44,33 @@ std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
         if (std::ranges::find(names, base_name) == names.end() || !found.insert(mesh.name).second)
             throw std::runtime_error("Unknown or duplicate environment mesh: " + mesh.name);
         const auto &vertices = entry.at("vertices");
-        if (!vertices.is_array() || vertices.empty() || vertices.size() % 3 != 0 || vertices.size() > 3'000'000)
+        const auto indices = entry.find("indices");
+        const bool indexed = indices != entry.end();
+        if (!vertices.is_array() || vertices.empty() || vertices.size() > 3'000'000 ||
+            (!indexed && vertices.size() % 3 != 0))
             throw std::runtime_error("Invalid environment triangle count: " + mesh.name);
-        const int material_count = mesh.name.starts_with("leaf_") ? 18 :
+        if (indexed && (!indices->is_array() || indices->empty() || indices->size() % 3 != 0 || indices->size() > 3'000'000))
+            throw std::runtime_error("Invalid environment index count: " + mesh.name);
+        mesh.vertices.reserve(vertices.size());
+        constexpr std::array atlas1_names{"fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy"};
+        const bool atlas1 = std::ranges::find(atlas1_names, base_name) != atlas1_names.end();
+        const int material_count = atlas1 ? 2 : mesh.name.starts_with("leaf_") ? 18 :
                                    mesh.name.starts_with("grass_") ? 30 :
-                                   mesh.name.starts_with("trunk_") ? 3 : 4;
+                                   mesh.name.starts_with("trunk_") ? 3 :
+                                   mesh.name.starts_with("rock_") ? 4 : 1;
         for (const auto &record : vertices)
         {
             if (!record.is_array() || record.size() != 13)
                 throw std::runtime_error("Environment vertex must contain 13 values: " + mesh.name);
+            // Check the indexed source value before float32 conversion can round a fraction to an integer.
+            if (indexed)
+            {
+                if (!record[12].is_number())
+                    throw std::runtime_error("Invalid indexed environment material: " + mesh.name);
+                const auto material = record[12].get<double>();
+                if (!std::isfinite(material) || material != std::floor(material) || material < 0 || material >= material_count)
+                    throw std::runtime_error("Invalid indexed environment material: " + mesh.name);
+            }
             std::array<float, 13> values{};
             for (std::size_t i = 0; i < values.size(); ++i)
             {
@@ -69,6 +94,23 @@ std::vector<Mesh> ReadMeshes(const std::filesystem::path &path)
             std::copy_n(values.begin()+8, 4, vertex.tangent.begin());
             vertex.material_index = static_cast<std::uint16_t>(values[12]);
             mesh.vertices.push_back(vertex);
+        }
+        if (indexed)
+        {
+            // Source-only compression: retain the existing expanded meshbin/GPU ABI and exact triangle order.
+            const auto source_vertices = std::move(mesh.vertices);
+            mesh.vertices.clear();
+            mesh.vertices.reserve(indices->size());
+            for (const auto &index : *indices)
+            {
+                if (!index.is_number_integer() ||
+                    (!index.is_number_unsigned() && index.get<std::int64_t>() < 0))
+                    throw std::runtime_error("Invalid environment index: " + mesh.name);
+                const auto source_index = index.get<std::uint64_t>();
+                if (source_index >= source_vertices.size())
+                    throw std::runtime_error("Invalid environment index range: " + mesh.name);
+                mesh.vertices.push_back(source_vertices[static_cast<std::size_t>(source_index)]);
+            }
         }
         for (std::size_t i = 0; i < mesh.vertices.size(); i += 3)
         {

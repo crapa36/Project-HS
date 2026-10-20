@@ -1,0 +1,3551 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/material_graph.schema.json",
+  "title": "Project HS typed material graph v7",
+  "description": "Bounded typed MaterialIR with numeric parameters, explicit samples, context adapters and typed closure layers. Skin subsurface and solid dielectric transmission use uniform optical profiles in metres; unsupported varying optical inputs fail compiler validation. Thin, subsurface and solid transport are mutually exclusive in this single-profile representation. Hero sampled-context adapters use no graph texture/sampler declarations. Environment ordinals remain fixed. Advanced tangent/coat/sheen/thin/emission families use requested sidecars. Arbitrary HLSL and bindless resources remain unsupported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "version",
+    "domain",
+    "shading_model",
+    "parameters",
+    "textures",
+    "nodes",
+    "outputs",
+    "render_flags"
+  ],
+  "properties": {
+    "id": {
+      "enum": [
+        "trunk_0",
+        "trunk_1",
+        "trunk_2",
+        "leaf_0",
+        "leaf_1",
+        "leaf_2",
+        "rock_0",
+        "rock_1",
+        "rock_2",
+        "rock_3",
+        "grass_0",
+        "grass_1",
+        "grass_2",
+        "grass_3",
+        "terrain",
+        "archer_skin",
+        "archer_cloth",
+        "archer_cutout",
+        "archer_equipment",
+        "slime_features",
+        "slime_body",
+        "monster_pbr"
+      ]
+    },
+    "version": {
+      "enum": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "domain": {
+      "enum": [
+        "surface",
+        "translucent"
+      ]
+    },
+    "shading_model": {
+      "const": "metallic_roughness"
+    },
+    "parameters": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "metallic",
+            "roughness_scale"
+          ],
+          "properties": {
+            "metallic": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "roughness_scale": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 2
+            }
+          }
+        },
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "default"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "type": {
+                "enum": [
+                  "bool",
+                  "uint",
+                  "float",
+                  "float2",
+                  "float3",
+                  "float4"
+                ]
+              },
+              "default": {},
+              "uint_min": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              },
+              "uint_max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          }
+        }
+      ]
+    },
+    "textures": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/legacy_textures"
+        },
+        {
+          "$ref": "#/$defs/texture_declarations"
+        }
+      ]
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sampled_base_color"
+              },
+              "type": {
+                "const": "float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sampled_roughness"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sampled_alpha"
+              },
+              "type": {
+                "const": "float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "bool"
+              },
+              "value": {
+                "type": "boolean"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "uint"
+              },
+              "value": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "float"
+              },
+              "value": {
+                "$ref": "#/$defs/float_value"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "value": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "$ref": "#/$defs/float_value"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "value": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                  "$ref": "#/$defs/float_value"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "value"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "constant"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "value": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                  "$ref": "#/$defs/float_value"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "min",
+                  "max"
+                ]
+              },
+              "type": {
+                "const": "uint"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_uint"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "min",
+              "max"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "clamp"
+              },
+              "type": {
+                "const": "uint"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "min": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "max": {
+                "$ref": "#/$defs/edge_uint"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "min",
+                  "max"
+                ]
+              },
+              "type": {
+                "const": "float"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "min",
+              "max"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "clamp"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "min": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "max": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "min",
+                  "max"
+                ]
+              },
+              "type": {
+                "const": "float2"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "min",
+              "max"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "clamp"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "min": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "max": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "min",
+                  "max"
+                ]
+              },
+              "type": {
+                "const": "float3"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "min",
+              "max"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "clamp"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "min": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "max": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "add",
+                  "subtract",
+                  "multiply",
+                  "divide",
+                  "min",
+                  "max"
+                ]
+              },
+              "type": {
+                "const": "float4"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "min",
+              "max"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "clamp"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "min": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "max": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "saturate",
+                  "negate"
+                ]
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b",
+              "t"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "lerp"
+              },
+              "type": {
+                "const": "float"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "t": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "saturate",
+                  "negate"
+                ]
+              },
+              "type": {
+                "const": "float2"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b",
+              "t"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "lerp"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "t": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "components"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "construct"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "components": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "items": {
+                  "$ref": "#/$defs/edge_float"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "component"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "extract"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "component": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "saturate",
+                  "negate"
+                ]
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b",
+              "t"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "lerp"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "t": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "components"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "construct"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "components": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": {
+                  "$ref": "#/$defs/edge_float"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "component"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "extract"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "component": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "saturate",
+                  "negate"
+                ]
+              },
+              "type": {
+                "const": "float4"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b",
+              "t"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "lerp"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "t": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "components"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "construct"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "components": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                  "$ref": "#/$defs/edge_float"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "component"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "extract"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "component": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "bool"
+              },
+              "input": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/edge_bool"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_uint"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_float"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "equal"
+              },
+              "type": {
+                "const": "bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_bool"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "uint"
+              },
+              "input": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/edge_bool"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_uint"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_float"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "less",
+                  "less_equal",
+                  "equal"
+                ]
+              },
+              "type": {
+                "const": "bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_uint"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "convert"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/edge_bool"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_uint"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_float"
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "less",
+                  "less_equal",
+                  "equal"
+                ]
+              },
+              "type": {
+                "const": "bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "enum": [
+                  "logical_and",
+                  "logical_or"
+                ]
+              },
+              "type": {
+                "const": "bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_bool"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "logical_not"
+              },
+              "type": {
+                "const": "bool"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_bool"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "bool"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_bool"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "uint"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_uint"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "float"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "condition",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "select"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "condition": {
+                "$ref": "#/$defs/edge_bool"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float4"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "declaration"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "texture_ref"
+              },
+              "type": {
+                "const": "texture_ref"
+              },
+              "declaration": {
+                "$ref": "#/$defs/node_id"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "declaration"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sampler_ref"
+              },
+              "type": {
+                "const": "sampler_ref"
+              },
+              "declaration": {
+                "$ref": "#/$defs/node_id"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "context"
+              },
+              "type": {
+                "const": "float2"
+              },
+              "name": {
+                "enum": [
+                  "uv",
+                  "d_uv_dx",
+                  "d_uv_dy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "context"
+              },
+              "type": {
+                "const": "uint"
+              },
+              "name": {
+                "enum": [
+                  "layer",
+                  "mesh",
+                  "seed"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "context"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "name": {
+                "enum": [
+                  "actual_world_position",
+                  "d_actual_world_dx",
+                  "d_actual_world_dy",
+                  "stable_world_position",
+                  "d_stable_world_dx",
+                  "d_stable_world_dy",
+                  "normal",
+                  "shading_normal",
+                  "sampled_base_color",
+                  "view_direction",
+                  "sampled_emission"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "context"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "name": {
+                "enum": [
+                  "tangent"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "context"
+              },
+              "type": {
+                "const": "float"
+              },
+              "name": {
+                "enum": [
+                  "eye_distance",
+                  "sampled_roughness",
+                  "sampled_metallic",
+                  "sampled_alpha",
+                  "roughness_scale",
+                  "sampled_ao",
+                  "metallic"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "texture",
+              "sampler",
+              "uv",
+              "layer",
+              "dx",
+              "dy"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sample_grad"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "texture": {
+                "$ref": "#/$defs/edge_texture_ref"
+              },
+              "sampler": {
+                "$ref": "#/$defs/edge_sampler_ref"
+              },
+              "uv": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "layer": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "dx": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "dy": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "texture",
+              "sampler",
+              "uv",
+              "layer",
+              "lod"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "sample_level"
+              },
+              "type": {
+                "const": "float4"
+              },
+              "texture": {
+                "$ref": "#/$defs/edge_texture_ref"
+              },
+              "sampler": {
+                "$ref": "#/$defs/edge_sampler_ref"
+              },
+              "uv": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "layer": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "lod": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "decode_normal_xy"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float2"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "a",
+              "b"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "normal_rnm"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "a": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "b": {
+                "$ref": "#/$defs/edge_float3"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "eye_distance"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "detail_fade"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "eye_distance": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "normal",
+              "tangent"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "tangent_to_world"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "normal": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "tangent": {
+                "$ref": "#/$defs/edge_float4"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "position",
+              "seed"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "seeded_noise_2d"
+              },
+              "type": {
+                "const": "float"
+              },
+              "position": {
+                "$ref": "#/$defs/edge_float2"
+              },
+              "seed": {
+                "$ref": "#/$defs/edge_uint"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "f0",
+              "cos_theta"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "fresnel_schlick"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "f0": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "cos_theta": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "textures",
+              "samplers",
+              "world",
+              "world_dx",
+              "world_dy",
+              "mesh",
+              "seed",
+              "view_direction",
+              "eye_distance"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "terrain_stochastic"
+              },
+              "type": {
+                "const": "terrain_result"
+              },
+              "textures": {
+                "type": "array",
+                "minItems": 6,
+                "maxItems": 6,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_texture_ref"
+                  }
+                ],
+                "items": false
+              },
+              "samplers": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 2,
+                "prefixItems": [
+                  {
+                    "$ref": "#/$defs/edge_sampler_ref"
+                  },
+                  {
+                    "$ref": "#/$defs/edge_sampler_ref"
+                  }
+                ],
+                "items": false
+              },
+              "world": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "world_dx": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "world_dy": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "mesh": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "seed": {
+                "$ref": "#/$defs/edge_uint"
+              },
+              "view_direction": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "eye_distance": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "field"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "terrain_field"
+              },
+              "type": {
+                "const": "float3"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_terrain_result"
+              },
+              "field": {
+                "enum": [
+                  "base_color",
+                  "normal",
+                  "detail"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "input",
+              "field"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "terrain_field"
+              },
+              "type": {
+                "const": "float"
+              },
+              "input": {
+                "$ref": "#/$defs/edge_terrain_result"
+              },
+              "field": {
+                "enum": [
+                  "roughness",
+                  "ao"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "base_color",
+              "normal",
+              "roughness",
+              "metallic",
+              "ao",
+              "opacity"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "metallic_roughness_closure"
+              },
+              "type": {
+                "const": "surface_closure"
+              },
+              "base_color": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "normal": {
+                "$ref": "#/$defs/edge_float3"
+              },
+              "roughness": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "metallic": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "ao": {
+                "$ref": "#/$defs/edge_float"
+              },
+              "opacity": {
+                "$ref": "#/$defs/edge_float"
+              }
+            }
+          },
+          {
+            "$ref": "#/$defs/coat_closure"
+          },
+          {
+            "$ref": "#/$defs/anisotropy_closure"
+          },
+          {
+            "$ref": "#/$defs/sheen_closure"
+          },
+          {
+            "$ref": "#/$defs/thin_transmission_closure"
+          },
+          {
+            "$ref": "#/$defs/emission_closure"
+          },
+          {
+            "$ref": "#/$defs/unlit_closure"
+          },
+          {
+            "$ref": "#/$defs/subsurface_closure"
+          },
+          {
+            "$ref": "#/$defs/solid_transmission_closure"
+          }
+        ]
+      }
+    },
+    "outputs": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/opaque_outputs"
+        },
+        {
+          "$ref": "#/$defs/masked_outputs"
+        },
+        {
+          "$ref": "#/$defs/legacy_leaf_outputs"
+        },
+        {
+          "$ref": "#/$defs/closure_outputs"
+        }
+      ]
+    },
+    "render_flags": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "two_sided",
+        "alpha_mode"
+      ],
+      "properties": {
+        "two_sided": {
+          "type": "boolean"
+        },
+        "alpha_mode": {
+          "enum": [
+            "opaque",
+            "mask",
+            "blend"
+          ]
+        }
+      }
+    },
+    "samplers": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "profile"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/node_id"
+          },
+          "profile": {
+            "enum": [
+              "linear_clamp",
+              "linear_wrap",
+              "environment_anisotropic_wrap",
+              "foliage_anisotropic_clamp"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "not": {
+              "enum": [
+                "archer_skin",
+                "archer_cloth",
+                "archer_cutout",
+                "archer_equipment",
+                "slime_features",
+                "slime_body",
+                "monster_pbr"
+              ]
+            }
+          }
+        }
+      },
+      "then": {
+        "if": {
+          "properties": {
+            "id": {
+              "enum": [
+                "leaf_0",
+                "leaf_1",
+                "leaf_2",
+                "grass_0",
+                "grass_1",
+                "grass_2",
+                "grass_3"
+              ]
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "render_flags": {
+              "properties": {
+                "two_sided": {
+                  "const": true
+                },
+                "alpha_mode": {
+                  "const": "mask"
+                }
+              }
+            },
+            "outputs": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/masked_outputs"
+                },
+                {
+                  "$ref": "#/$defs/legacy_leaf_outputs"
+                },
+                {
+                  "$ref": "#/$defs/closure_outputs"
+                }
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "render_flags": {
+              "properties": {
+                "two_sided": {
+                  "const": false
+                },
+                "alpha_mode": {
+                  "const": "opaque"
+                }
+              }
+            },
+            "outputs": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/opaque_outputs"
+                },
+                {
+                  "$ref": "#/$defs/closure_outputs"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "not": {
+              "const": "leaf_0"
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "not": {
+              "$ref": "#/$defs/legacy_leaf_outputs"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "enum": [
+              3,
+              4,
+              5,
+              6,
+              7
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "samplers"
+        ],
+        "properties": {
+          "textures": {
+            "$ref": "#/$defs/texture_declarations"
+          },
+          "outputs": {}
+        }
+      },
+      "else": {
+        "properties": {
+          "textures": {
+            "$ref": "#/$defs/legacy_textures"
+          },
+          "samplers": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "enum": [
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "required": [
+              "base_color",
+              "roughness",
+              "normal",
+              "ao",
+              "normal_space"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "enum": [
+              5,
+              6,
+              7
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "samplers"
+        ],
+        "properties": {
+          "textures": {
+            "$ref": "#/$defs/texture_declarations"
+          },
+          "outputs": {
+            "$ref": "#/$defs/closure_outputs"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "enum": [
+              2,
+              3,
+              4
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "outputs": {
+            "not": {
+              "$ref": "#/$defs/closure_outputs"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "const": "terrain"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "samplers"
+        ],
+        "properties": {
+          "version": {
+            "enum": [
+              4,
+              5,
+              6,
+              7
+            ]
+          },
+          "textures": {
+            "type": "array",
+            "minItems": 6,
+            "maxItems": 6,
+            "prefixItems": [
+              {
+                "properties": {
+                  "id": {
+                    "const": "gaussian"
+                  },
+                  "semantic": {
+                    "const": "gaussian"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "surface"
+                  },
+                  "semantic": {
+                    "const": "surface"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "normal"
+                  },
+                  "semantic": {
+                    "const": "normal"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "detail"
+                  },
+                  "semantic": {
+                    "const": "detail"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "height"
+                  },
+                  "semantic": {
+                    "const": "height"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "histogram"
+                  },
+                  "semantic": {
+                    "const": "histogram"
+                  }
+                }
+              }
+            ],
+            "items": false
+          },
+          "samplers": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "prefixItems": [
+              {
+                "properties": {
+                  "id": {
+                    "const": "environment_sampler"
+                  },
+                  "profile": {
+                    "const": "environment_anisotropic_wrap"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "id": {
+                    "const": "histogram_sampler"
+                  },
+                  "profile": {
+                    "const": "linear_clamp"
+                  }
+                }
+              }
+            ],
+            "items": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "enum": [
+              6,
+              7
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "array"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "version": {
+            "not": {
+              "const": 7
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "nodes": {
+            "items": {
+              "not": {
+                "required": [
+                  "op"
+                ],
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "coat_closure",
+                      "anisotropy_closure",
+                      "sheen_closure",
+                      "thin_transmission_closure",
+                      "emission_closure",
+                      "unlit_closure",
+                      "subsurface_closure",
+                      "solid_transmission_closure"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "enum": [
+              "archer_skin",
+              "archer_cloth",
+              "archer_cutout",
+              "archer_equipment",
+              "slime_features",
+              "slime_body",
+              "monster_pbr"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "version": {
+            "const": 7
+          },
+          "textures": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "samplers": {
+            "type": "array",
+            "maxItems": 0
+          },
+          "outputs": {
+            "$ref": "#/$defs/closure_outputs"
+          }
+        },
+        "required": [
+          "samplers"
+        ]
+      },
+      "else": {
+        "properties": {
+          "samplers": {
+            "minItems": 1
+          },
+          "textures": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/legacy_textures"
+              },
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/texture_declarations"
+                  },
+                  {
+                    "minItems": 3
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "id": {
+            "enum": [
+              "archer_skin",
+              "archer_cloth",
+              "archer_cutout",
+              "archer_equipment",
+              "slime_features",
+              "slime_body",
+              "monster_pbr"
+            ]
+          }
+        }
+      },
+      "then": {
+        "if": {
+          "properties": {
+            "id": {
+              "const": "slime_body"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "domain": {
+              "const": "translucent"
+            },
+            "render_flags": {
+              "properties": {
+                "two_sided": {
+                  "const": true
+                },
+                "alpha_mode": {
+                  "const": "blend"
+                }
+              }
+            }
+          }
+        },
+        "else": {
+          "if": {
+            "properties": {
+              "id": {
+                "const": "monster_pbr"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "domain": {
+                "const": "surface"
+              },
+              "render_flags": {
+                "properties": {
+                  "two_sided": {
+                    "const": false
+                  },
+                  "alpha_mode": {
+                    "const": "opaque"
+                  }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "domain": {
+                "const": "surface"
+              },
+              "render_flags": {
+                "properties": {
+                  "two_sided": {
+                    "const": false
+                  },
+                  "alpha_mode": {
+                    "const": "mask"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "coat_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "weight",
+        "roughness"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "coat_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "weight": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "roughness": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    },
+    "anisotropy_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "amount",
+        "tangent"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "anisotropy_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "amount": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "tangent": {
+          "$ref": "#/$defs/edge_float3"
+        }
+      }
+    },
+    "sheen_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "weight",
+        "tint",
+        "roughness"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "sheen_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "weight": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "tint": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "roughness": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    },
+    "thin_transmission_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "weight",
+        "tint"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "thin_transmission_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "weight": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "tint": {
+          "$ref": "#/$defs/edge_float3"
+        }
+      }
+    },
+    "emission_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "emission"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "emission_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "emission": {
+          "$ref": "#/$defs/edge_float3"
+        }
+      }
+    },
+    "unlit_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "color",
+        "opacity"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "unlit_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "color": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "opacity": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]{0,31}$"
+    },
+    "value_type": {
+      "enum": [
+        "bool",
+        "uint",
+        "float",
+        "float2",
+        "float3",
+        "float4",
+        "texture_ref",
+        "sampler_ref",
+        "terrain_result",
+        "surface_closure"
+      ]
+    },
+    "float_value": {
+      "type": "number",
+      "minimum": -16,
+      "maximum": 16
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "$ref": "#/$defs/value_type"
+        }
+      }
+    },
+    "edge_bool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "bool"
+        }
+      }
+    },
+    "edge_uint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "uint"
+        }
+      }
+    },
+    "edge_float": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "float"
+        }
+      }
+    },
+    "edge_float2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "float2"
+        }
+      }
+    },
+    "edge_float3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "float3"
+        }
+      }
+    },
+    "edge_float4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "float4"
+        }
+      }
+    },
+    "edge_terrain_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "terrain_result"
+        }
+      }
+    },
+    "edge_surface_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "surface_closure"
+        }
+      }
+    },
+    "closure_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "closure",
+        "normal_space"
+      ],
+      "properties": {
+        "surface": {
+          "const": "typed_closure"
+        },
+        "closure": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "normal_space": {
+          "enum": [
+            "tangent",
+            "world"
+          ]
+        }
+      }
+    },
+    "opaque_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "base_color",
+        "roughness"
+      ],
+      "properties": {
+        "surface": {
+          "const": "builtin_metallic_roughness"
+        },
+        "base_color": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "roughness": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "normal": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "ao": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "normal_space": {
+          "enum": [
+            "tangent",
+            "world"
+          ]
+        }
+      }
+    },
+    "masked_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "base_color",
+        "roughness",
+        "opacity"
+      ],
+      "properties": {
+        "surface": {
+          "const": "builtin_metallic_roughness"
+        },
+        "base_color": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "roughness": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "opacity": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "normal": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "ao": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "normal_space": {
+          "enum": [
+            "tangent",
+            "world"
+          ]
+        }
+      }
+    },
+    "legacy_leaf_outputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "surface",
+        "opacity"
+      ],
+      "properties": {
+        "surface": {
+          "const": "builtin_metallic_roughness"
+        },
+        "opacity": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    },
+    "legacy_textures": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_color",
+        "surface",
+        "normal",
+        "detail"
+      ],
+      "properties": {
+        "base_color": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "surface": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "normal": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 512
+        }
+      }
+    },
+    "texture_declarations": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "product_id",
+          "dimension",
+          "semantic"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/node_id"
+          },
+          "product_id": {
+            "type": "string",
+            "pattern": "^render/texture/environment_[a-z0-9_]+\\.rpkg$"
+          },
+          "dimension": {
+            "const": "texture2d_array"
+          },
+          "semantic": {
+            "enum": [
+              "base_color",
+              "surface",
+              "roughness",
+              "normal",
+              "detail",
+              "gaussian",
+              "height",
+              "histogram"
+            ]
+          }
+        }
+      }
+    },
+    "edge_texture_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "texture_ref"
+        }
+      }
+    },
+    "edge_sampler_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node",
+        "type"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/node_id"
+        },
+        "type": {
+          "const": "sampler_ref"
+        }
+      }
+    },
+    "subsurface_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "weight",
+        "radius_m",
+        "thickness_m"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "subsurface_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "weight": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "radius_m": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "thickness_m": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    },
+    "solid_transmission_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "op",
+        "type",
+        "base",
+        "weight",
+        "ior",
+        "absorption_per_m",
+        "thickness_m"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "op": {
+          "const": "solid_transmission_closure"
+        },
+        "type": {
+          "const": "surface_closure"
+        },
+        "base": {
+          "$ref": "#/$defs/edge_surface_closure"
+        },
+        "weight": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "ior": {
+          "$ref": "#/$defs/edge_float"
+        },
+        "absorption_per_m": {
+          "$ref": "#/$defs/edge_float3"
+        },
+        "thickness_m": {
+          "$ref": "#/$defs/edge_float"
+        }
+      }
+    }
+  }
+}

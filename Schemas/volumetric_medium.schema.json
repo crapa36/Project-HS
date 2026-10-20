@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["version", "units", "volumes"],
+  "properties": {
+    "version": {"const": 1},
+    "units": {"const": "metres_scene_linear_rec709"},
+    "volumes": {"type": "array", "maxItems": 256, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id","generation","shape","world_to_local","density","extinction_per_metre","scattering_per_metre","phase_g"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "generation": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "shape": {"enum": ["global","box","sphere"]},
+        "world_to_local": {"type": "array", "minItems": 16,"maxItems":16,"items":{"type":"number"}},
+        "density": {"type":"number","minimum":0},
+        "extinction_per_metre": {"type":"number","minimum":0},
+        "scattering_per_metre": {"type":"array","minItems":3,"maxItems":3,"items":{"type":"number","minimum":0}},
+        "phase_g": {"type":"number","exclusiveMinimum":-1,"exclusiveMaximum":1}
+      }
+    }}
+  }
+}

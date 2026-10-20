@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-hs.local/schemas/ltc_lut.schema.json",
+  "title": "Project HS LTC fit source v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "kind", "brdf", "parameterization", "normalization", "bake", "author_notes"],
+  "properties": {
+    "version": {"const": 1},
+    "id": {"const": "default_ltc"},
+    "kind": {"const": "ltc_ggx"},
+    "brdf": {"const": "hs_isotropic_ggx_uncorrelated_smith_schlick"},
+    "parameterization": {"const": "perceptual_roughness_sqrt_one_minus_ndotv"},
+    "normalization": {"const": "cosine_over_pi_solid_angle_density"},
+    "bake": {
+      "type": "object", "additionalProperties": false,
+      "required": ["edge", "samples", "iterations"],
+      "properties": {
+        "edge": {"const": 64},
+        "samples": {"enum": [256, 512, 1024, 2048, 4096]},
+        "iterations": {"type": "integer", "minimum": 32, "maximum": 256}
+      }
+    },
+    "author_notes": {"type": "string", "minLength": 1, "maxLength": 2048}
+  }
+}

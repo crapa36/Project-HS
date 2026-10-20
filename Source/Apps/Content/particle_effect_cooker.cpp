@@ -289,6 +289,29 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
     std::memcpy(payload.data() + definitions.size() * sizeof(definitions.front()) +
                     emitters.size() * sizeof(emitters.front()),
                 cooked_sprites.data(), cooked_sprites.size() * sizeof(cooked_sprites.front()));
+    // The cooked ABI is a raw struct stream. Explicitly clear its unused padding
+    // before hashing so stack contents cannot change either bytes or payload_hash.
+    constexpr auto definition_tail = offsetof(hs::CookedVfxDefinition, line_primitive) +
+                                     sizeof(hs::VfxPrimitive);
+    constexpr auto emitter_gap = offsetof(hs::CookedParticleEmitter, primitive) +
+                                 sizeof(hs::VfxPrimitive);
+    constexpr auto emitter_gap_end = offsetof(hs::CookedParticleEmitter, local_offset);
+    constexpr auto sprite_tail = offsetof(hs::CookedParticleSprite, frame_rows) +
+                                 sizeof(std::uint8_t);
+    const auto definition_bytes = definitions.size() * sizeof(hs::CookedVfxDefinition);
+    const auto emitter_bytes = emitters.size() * sizeof(hs::CookedParticleEmitter);
+    for (std::size_t i = 0; i < definitions.size(); ++i)
+        std::fill(payload.begin() + i * sizeof(hs::CookedVfxDefinition) + definition_tail,
+                  payload.begin() + (i + 1) * sizeof(hs::CookedVfxDefinition), std::byte{});
+    for (std::size_t i = 0; i < emitters.size(); ++i)
+        std::fill(payload.begin() + definition_bytes + i * sizeof(hs::CookedParticleEmitter) + emitter_gap,
+                  payload.begin() + definition_bytes + i * sizeof(hs::CookedParticleEmitter) + emitter_gap_end,
+                  std::byte{});
+    for (std::size_t i = 0; i < cooked_sprites.size(); ++i)
+        std::fill(payload.begin() + definition_bytes + emitter_bytes +
+                      i * sizeof(hs::CookedParticleSprite) + sprite_tail,
+                  payload.begin() + definition_bytes + emitter_bytes +
+                      (i + 1) * sizeof(hs::CookedParticleSprite), std::byte{});
     hs::CookedParticleEffectsHeader header;
     header.effect_count = static_cast<std::uint32_t>(definitions.size());
     header.emitter_count = static_cast<std::uint32_t>(emitters.size());
@@ -302,7 +325,7 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
 }
 
 bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const ParticleSpriteSource> sprites,
-                       std::string &error_message)
+                       const std::filesystem::path &source_textures, std::string &error_message)
 {
     DirectX::ScratchImage masks;
     auto result = masks.Initialize2D(DXGI_FORMAT_R8_UNORM, 512, 512, sprites.size(), 1);
@@ -315,7 +338,7 @@ bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const Partic
     {
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage source;
-        const auto source_path = std::filesystem::path(HS_VFX_TEXTURE_DIRECTORY) / sprites[slice].file;
+        const auto source_path = source_textures / sprites[slice].file;
         result = DirectX::LoadFromWICFile(source_path.c_str(), DirectX::WIC_FLAGS_NONE, &metadata, source);
         DirectX::ScratchImage rgba;
         if (SUCCEEDED(result))
@@ -348,6 +371,12 @@ bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const Partic
         return false;
     }
     return true;
+}
+
+bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const ParticleSpriteSource> sprites,
+                       std::string &error_message)
+{
+    return WriteVfxMaskArray(path, sprites, paths::VfxTextures(), error_message);
 }
 
 } // namespace hs::content
