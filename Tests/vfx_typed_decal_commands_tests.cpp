@@ -47,4 +47,4 @@ void Invalid()
  p=Program();p.sources[0].parameters={0,1};Check(Run(p,i).empty(),"unknown source params ignored");p=Program();i.payload=hs::VfxConePayload{};Check(Run(p,i).empty(),"unsupported cone coerced");
 }
 }
-int main(){try{GeometryAndIdentity();ResidueAndOwner();Invalid();std::cout<<"Typed decal commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxDecalTests(){try{GeometryAndIdentity();ResidueAndOwner();Invalid();std::cout<<"Typed decal commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

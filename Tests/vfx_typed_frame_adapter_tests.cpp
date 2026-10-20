@@ -1,8 +1,11 @@
 #include "vfx_typed_frame_adapter.hpp"
+#include "vfx_session_state.hpp"
+#include "vfx_typed_screen_commands.hpp"
 
 #include <hs/game_domain/domain_signal.hpp>
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -217,6 +220,28 @@ void TestEventGeometryTagsAndGapExpansion()
     Check(std::abs(multishot_payload.range - 23.0f) < 0.0001f &&
               std::abs(multishot_payload.half_angle_degrees - 31.0f) < 0.0001f,
           "multishot cone geometry was changed by the adapter");
+}
+
+void TestTerminalVfxClock()
+{
+    using Clock = hs::FixedStepClock::Clock;
+    hs::runtime_detail::VfxSessionState state;
+    const auto start = Clock::time_point{};
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory, start) == 120,
+          "terminal VFX clock did not anchor at the source snapshot tick");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 3) == 123,
+          "terminal VFX clock did not advance at fixed-step real time");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Paused,
+                                    start + hs::FixedStepClock::kFixedStep * 6) == 120,
+          "paused VFX clock used terminal real time");
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 6) == 120,
+          "terminal VFX clock retained an anchor after leaving terminal phase");
+    state.Synchronize(1);
+    Check(state.UpdateTerminalClock(120, hs::SessionPhase::Victory,
+                                    start + hs::FixedStepClock::kFixedStep * 9) == 120,
+          "terminal VFX clock did not reset with the session");
 }
 
 void TestArrowRainPullLinkGeometry()
@@ -628,18 +653,22 @@ void TestUpgradeSlowAreaAliases()
         {arrow_rain_id, 3, 1, Hash32("CircleAreaPayload")},
     });
     program.upgrade_bindings = {
-        {Hash64("skill.trap"), 2, {0, 1}},
-        {Hash64("skill.arrow_rain"), 8, {1, 1}},
+        {Hash64("skill.trap"), 2, {0, 2}},
+        {Hash64("skill.arrow_rain"), 8, {2, 2}},
+        {Hash64("skill.arrow_rain"), 6, {4, 1}},
     };
-    program.upgrade_sequences = {2, 3};
+    program.upgrade_sequences = {2, 1, 3, 1, 1};
+    for (auto &effect : program.effects) effect.timing_kind = 1;
 
     const auto trap = UpgradeSlowAreaVisual(trap_skill, 1, 0xA1);
     const auto trap_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
         program, {}, std::array{trap}, {}, 130);
     Check(trap_result.unsupported_effect_ids.empty() &&
-              trap_result.persistent.size() == 1 &&
-              trap_result.persistent.front().effect_handle == 2,
-          "trap landing slow did not select its authored alias");
+              trap_result.persistent.size() == 2 &&
+              trap_result.persistent.front().effect_handle == 2 &&
+              trap_result.persistent[1].effect_handle == 1 &&
+              trap_result.persistent[1].stable_id != trap_result.persistent[0].stable_id,
+          "trap landing slow did not submit distinct alias and bound base owners");
     const auto &trap_input = trap_result.persistent.front();
     const auto &trap_circle = std::get<hs::VfxCirclePayload>(trap_input.payload);
     Check(trap_input.stable_id == trap.stable_id &&
@@ -659,9 +688,11 @@ void TestUpgradeSlowAreaAliases()
     const auto arrow_rain_result = hs::runtime_detail::BuildVfxTypedFrameInputs(
         program, {}, std::array{arrow_rain}, {}, 130);
     Check(arrow_rain_result.unsupported_effect_ids.empty() &&
-              arrow_rain_result.persistent.size() == 1 &&
-              arrow_rain_result.persistent.front().effect_handle == 3,
-          "arrow rain finish slow did not select its authored alias");
+              arrow_rain_result.persistent.size() == 2 &&
+              arrow_rain_result.persistent.front().effect_handle == 3 &&
+              arrow_rain_result.persistent[1].effect_handle == 1 &&
+              arrow_rain_result.persistent[1].stable_id != arrow_rain_result.persistent[0].stable_id,
+          "arrow rain finish slow did not submit distinct alias and bound base owners");
 
     // ArrowRain upgrade 6 uses the same UpgradeSlowArea visual kind but keeps
     // the generic persistent area recipe because its source is not ordinal 7.
@@ -921,6 +952,33 @@ void TestProjectilePathUsesAuthoritativeMotion()
           path.velocity.x == 60.0f && path.velocity.z == 2.0f &&
           path.projectile_radius == 0.2f && path.lifetime01 == 0.0f,
           "projectile path used legacy cosmetic or frame delta motion");
+
+    const auto return_id = Hash64("particle.upgrade.arrow.return");
+    auto returning_program = Program({{return_id, 1, 1, Hash32("ProjectilePathPayload")}});
+    returning_program.effects[0].seconds = 0.5f;
+    returning_program.upgrade_bindings = {{Hash64("skill.basic_attack"), 7, {0, 1}}};
+    returning_program.upgrade_sequences = {1};
+    visual.kind = hs::PersistentVfxKind::BasicArrowReturn;
+    visual.effect_asset = {return_id};
+    visual.skill = 0;
+    visual.source_upgrade = 6;
+    visual.active_tick = 100;
+    visual.expires = 130;
+    visual.return_start_position = {8.0f, 1.0f, 6.0f};
+    const auto returned = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        returning_program, {}, std::array{visual}, {}, 110);
+    Check(returned.unsupported_effect_ids.empty() && returned.persistent.size() == 1,
+          "basic return did not bind to its actual return episode");
+    const auto &return_path = std::get<hs::VfxProjectilePathPayload>(returned.persistent[0].payload);
+    Check(return_path.path_origin_position.x == 8.0f && return_path.current_position.x == 4.0f &&
+              return_path.previous_position.x == 3.0f &&
+              std::abs(return_path.lifetime01 - 1.0f / 3.0f) < 0.00001f &&
+              std::abs(returned.persistent[0].elapsed_seconds - 10.0f / 60.0f) < 0.00001f,
+          "basic return borrowed projectile birth instead of its captured return clock and origin");
+    returning_program.upgrade_sequences.clear();
+    Check(hs::runtime_detail::BuildVfxTypedFrameInputs(
+              returning_program, {}, std::array{visual}, {}, 110).persistent.empty(),
+          "basic return accepted missing cooked upgrade membership");
 }
 
 void TestHostileProjectileBindings()
@@ -1087,13 +1145,17 @@ void TestWarningOwnerRefresh()
         {volley_id, 1, 0, Hash32("ConePayload")},
         {dash_id, 2, 0, Hash32("LineAreaPayload")} });
     hs::runtime_detail::RebindVfxGroundEventOwners(reloaded, retained);
-    Check(retained.size() == 2 && retained[0].effect_handle == 2 &&
+    Check(retained.size() == 3 && retained[0].effect_handle == 2 &&
               retained[1].effect_handle == 1 && retained[0].geometry_owner_id == 77 &&
-              retained[1].geometry_owner_id == 88,
+              retained[1].geometry_owner_id == 88 && retained[2].geometry_owner_id == 0 &&
+              retained[2].event_tick == original_sibling.event_tick &&
+              std::holds_alternative<hs::VfxPointPayload>(retained[2].payload),
           "owner-backed warning handles were not rebound after reload");
     auto missing = Program({{dash_id, 4, 1, Hash32("LineAreaPayload")} });
     hs::runtime_detail::RebindVfxGroundEventOwners(missing, retained);
-    Check(retained.empty(), "warnings with missing or mismatched recipes survived reload");
+    Check(retained.size() == 1 && retained[0].geometry_owner_id == 0 &&
+              retained[0].event_tick == original_sibling.event_tick,
+          "warnings with missing or mismatched recipes survived reload, or an unrelated event was removed");
 }
 
 void TestRangedWarningIdentity()
@@ -1173,6 +1235,25 @@ void TestOwnedVisualLinks()
     auto oldseed=input.stable_seed;program.effects.push_back(program.effects[0]);program.effects[1].handle=2;program.effect_lookup[0].handle=2;
     Check(decode(104).persistent[0].stable_seed==oldseed,"link reorder changed semantic seed");
     visual.link_target_position=visual.position;Check(decode(104).persistent.empty(),"degenerate link accepted");
+
+    program=Program({{Hash64("particle.upgrade.ricochet.return"),1,1,Hash32("SourceTargetPayload")}});
+    program.effects[0].timing_kind=1;
+    program.upgrade_bindings={{Hash64("skill.ricochet_arrow"),1,{0,1}}};
+    program.upgrade_sequences={1};
+    visual.kind=hs::PersistentVfxKind::RicochetReturnLink;
+    visual.cast_id=19;visual.skill=5;visual.source_upgrade=0;
+    visual.projectile_owner_id=71;visual.projectile_spawned_tick=80;
+    visual.position=visual.projectile_current_position={5,.7f,2};
+    visual.projectile_previous_position={6,.7f,2};
+    visual.return_start_position={9,.7f,2};visual.link_target_position={1,.7f,2};
+    const auto returning=decode(104);
+    Check(returning.unsupported_effect_ids.empty()&&returning.persistent.size()==1&&
+          returning.persistent[0].normalized_age==.5f,
+          "ricochet return lost real cast provenance or actual return distance progress");
+    visual.source_upgrade=1;
+    Check(decode(104).persistent.empty(),"ricochet return accepted unrelated upgrade provenance");
+    visual.source_upgrade=0;program.upgrade_sequences.clear();
+    Check(decode(104).persistent.empty(),"ricochet return accepted missing cooked membership");
 }
 
 void TestEnemyStatusOwners()
@@ -1315,11 +1396,111 @@ void TestPlayerStateOwners()
               entity.lifetime01 == .5f && active.persistent[0].elapsed_seconds == .5f &&
               context.ratio01 == .25f && context.owner_id == shell.stable_id,
           "player shell clock/mesh or low-health ratio lost");
+    low.active_tick = 131;
+    low.expires = 132;
+    const std::array renewed_owners{shell, low};
+    const auto renewed = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, renewed_owners, owners, 131);
+    Check(renewed.persistent.size() == 2 &&
+              renewed.persistent[1].stable_id == active.persistent[1].stable_id &&
+              renewed.persistent[1].elapsed_seconds > active.persistent[1].elapsed_seconds,
+          "renewed low-health presence preserves an advancing pulse clock");
     const auto expired = hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, owners, {}, 160);
     Check(expired.persistent.empty(), "expired player state remained active");
     shell.effect_asset = {};
     Check(hs::runtime_detail::BuildVfxTypedFrameInputs(program, {}, std::span(&shell, 1), {}, 130)
               .persistent.empty(), "unidentified player shell accepted");
+}
+
+void TestLowHealthPulseClock()
+{
+    auto program = Program({{Hash64("post.player.low_health_vignette"), 1, 1,
+                             Hash32("PresentationContextPayload")}});
+    program.effects[0].timing_kind = 1;
+    program.effects[0].sources = {0, 1};
+    hs::VfxSourceRecord source;
+    source.effect = 1; source.type = hs::VfxSourceType::Direct;
+    source.knot_count = 2; source.knots = {0, 1}; source.outputs = {0, 1};
+    program.sources.push_back(source);
+    hs::VfxOutputRecord overlay;
+    overlay.profile = hs::VfxOutputProfile::ScreenOverlay;
+    overlay.shape = Hash32("screen_vignette"); overlay.shape_component_kind = Hash32("screen");
+    overlay.coverage_type = Hash32("analytic_screen");
+    overlay.motion = hs::VfxMotionKind::SlowPulseStateLocked;
+    overlay.rgba = {1, .1f, .1f, .5f}; overlay.hdr = 1;
+    overlay.parameters = {0, 2}; overlay.textures = {0, 1};
+    program.outputs.push_back(overlay);
+    program.parameters = {
+        {Hash32("center_clear"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(.5f)},
+        {Hash32("edge_power"), hs::VfxParameterType::Float, std::bit_cast<std::uint32_t>(2.0f)}};
+    hs::VfxTextureBindingRecord texture; texture.role = Hash32("profile.global");
+    program.texture_bindings.push_back(texture);
+    constexpr std::string_view path = "Content/Textures/VFX/vfx_gradient_lut.dds";
+    for (const auto byte : path) program.strings.push_back(static_cast<std::byte>(byte));
+    program.texture_resources.push_back({0, {0, static_cast<std::uint32_t>(path.size())}});
+    hs::VfxPersistentInput health;
+    health.stable_id = 11; health.effect_handle = 1;
+    health.payload = hs::VfxContextPayload{10, {}, .30f, 0, 0};
+    hs::runtime_detail::VfxLowHealthPulseState pulse;
+    std::vector<hs::VfxScreenInput> output;
+    const auto emit = [&](hs::Tick tick, bool present = true) {
+        Check(static_cast<bool>(hs::runtime_detail::BuildVfxTypedScreenCommands(
+            program, {}, present ? std::span(&health, 1) : std::span<hs::VfxPersistentInput>{},
+            tick, hs::VfxQuality::High, pulse, output)), "valid health pulse did not decode");
+    };
+    emit(1000);
+    Check(output.size() == 1 && output[0].envelope == 0 && pulse.phase == 0,
+          "health entry did not start its own short transition");
+    emit(1050);
+    const auto prior = output[0];
+    const double prior_phase = pulse.phase;
+    std::get<hs::VfxContextPayload>(health.payload).ratio01 = .29f;
+    emit(1050); // HP changes at the same simulation instant, including paused renders.
+    Check(output[0].gradient_age == prior.gradient_age && output[0].envelope == prior.envelope &&
+              pulse.phase == prior_phase && std::get<hs::VfxContextPayload>(health.payload).ratio01 == .29f,
+          "HP update moved accrued pulse phase or delayed live HP");
+    const double frequency = pulse.frequency;
+    emit(1051);
+    Check(std::abs(pulse.phase - std::fmod(prior_phase + frequency / 60.0, 1.0)) < 1e-12,
+          "new HP frequency did not control subsequent tick integration");
+    const auto paused = output[0];
+    for (unsigned i = 0; i < 8; ++i) emit(1051);
+    Check(output[0].gradient_age == paused.gradient_age && output[0].envelope == paused.envelope,
+          "render/view repetition advanced the paused simulation clock");
+    const auto retained_pulse = pulse;
+    program.outputs[0].shape = Hash32("invalid_screen_shape");
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, std::span(&health, 1),
+              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
+          "rejected output published a partial pulse clock update");
+    program.outputs[0].shape = Hash32("screen_vignette");
+    const std::array duplicate_health{health, health};
+    Check(!hs::runtime_detail::BuildVfxTypedScreenCommands(program, {}, duplicate_health,
+              1052, hs::VfxQuality::High, pulse, output) && output.empty() &&
+              pulse.phase == retained_pulse.phase && pulse.last_tick == retained_pulse.last_tick,
+          "rejected later owner published a partial pulse clock update");
+    emit(1052, false);
+    Check(output.empty() && pulse.stable_id == 0, "low-health exit retained a live phase owner");
+    emit(1060);
+    Check(pulse.phase == 0 && output[0].envelope == 0, "re-entry resumed an absent episode");
+    emit(1069);
+    Check(pulse.EntryFade() == 1, "entry transition did not finish after nine ticks");
+    health.stable_id = 12; emit(1070);
+    Check(pulse.phase == 0 && pulse.entered_tick == 1070, "new owner inherited pulse history");
+    emit(2);
+    Check(pulse.phase == 0 && pulse.last_tick == 2, "clock rollback underflowed pulse history");
+    hs::runtime_detail::VfxLowHealthPulseState dense, sparse;
+    dense.Advance(1, 2, 100, .29f); sparse = dense;
+    for (hs::Tick tick = 101; tick <= 700; ++tick) dense.Advance(1, 2, tick, .29f);
+    sparse.Advance(1, 2, 700, .29f);
+    Check(std::abs(dense.phase - sparse.phase) < 1e-11,
+          "skipped constant-HP snapshots changed integrated phase");
+    hs::runtime_detail::VfxSessionState session;
+    session.session_id = 1; session.low_health_pulse = dense;
+    session.ClearDecoded();
+    Check(session.low_health_pulse.stable_id == 1, "catalog retention clear reset simulation phase");
+    Check(session.Synchronize(2) && session.low_health_pulse.stable_id == 0,
+          "session reset retained the previous player's pulse");
 }
 
 void TestPickupIdleOwners()
@@ -1710,10 +1891,32 @@ void TestProcStampedProjectileBindings()
               std::abs(decoded.persistent[0].elapsed_seconds - 10.0f / 60.0f) < 0.00001f &&
               std::abs(decoded.persistent[0].source_duration_seconds - 0.30f) < 0.00001f &&
               entity.render_instance_id == ricochet.entity_render_id &&
+              decoded.persistent[1].previous_transform[12] == 2.0f &&
               entity.footprint_radius == ricochet.radius &&
               std::abs(decoded.persistent[1].normalized_age - 5.0f / 21.0f) < 0.00001f &&
               std::abs(decoded.persistent[1].source_duration_seconds - 0.35f) < 0.00001f,
           "fixed proc owner lost projectile path, entity attachment, or episode clock");
+    auto stale = owners;
+    for (auto &owner : stale)
+    {
+        owner.projectile_current_position = {-99, 0, -99};
+        owner.projectile_owner_id = 999;
+    }
+    const auto skipped = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, owners, stale, 110);
+    Check(skipped.persistent.size() == 2 &&
+              std::get<hs::VfxProjectilePathPayload>(skipped.persistent[0].payload).previous_position.x == 2.0f &&
+              skipped.persistent[1].previous_transform[12] == 2.0f,
+          "skipped/new-owner snapshot substituted stale attachment history");
+    auto spawned = owners;
+    for (auto &owner : spawned)
+        owner.projectile_previous_position = owner.projectile_current_position;
+    const auto born = hs::runtime_detail::BuildVfxTypedFrameInputs(
+        program, {}, spawned, stale, 110);
+    Check(born.persistent.size() == 2 &&
+              std::get<hs::VfxProjectilePathPayload>(born.persistent[0].payload).previous_position.x == 3.0f &&
+              born.persistent[1].previous_transform[12] == 3.0f,
+          "new/discontinuous owner lost its authoritative collapsed endpoints");
     const auto run = [&](const hs::PersistentVfxVisual &owner, hs::Tick tick,
                          const hs::VfxProgramData &content) {
         return hs::runtime_detail::BuildVfxTypedFrameInputs(
@@ -1752,9 +1955,11 @@ int main()
 {
     try
     {
+        TestTerminalVfxClock();
         TestEnemyStatusOwners();
         TestBossStateOwners();
         TestPlayerStateOwners();
+        TestLowHealthPulseClock();
         TestPickupIdleOwners();
         TestPlayerStampedEntityBindings();
         TestChargedOverchargeOwner();

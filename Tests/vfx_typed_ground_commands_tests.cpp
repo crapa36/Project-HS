@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_ground_commands.hpp"
+#include "test_generation_paths.hpp"
 #include <hs/core/render_snapshot.hpp>
 
 #include <algorithm>
@@ -816,8 +817,7 @@ void ExpandingRingRejectsWrongContractAndMalformedParams()
 
 void CookedExpandingRingsConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return; // A direct test-target build need not cook content.
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
     hs::VfxProgramData cooked;
@@ -867,8 +867,7 @@ void CookedExpandingRingsConvertWhenContentIsAvailable()
 
 void CookedRetreatShockwaveCircleStaysWithinGameplayRadiusWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return; // A direct test-target build need not cook content.
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -1121,8 +1120,7 @@ void HexConstellationRejectsMalformedContract()
 
 void CookedHexConstellationsConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
     hs::VfxProgramData cooked;
@@ -1332,8 +1330,7 @@ void BossSignatureRejectsWrongContractAndInvalidGeometry()
 
 void CookedBossSignaturesConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
     hs::VfxProgramData cooked;
@@ -2001,8 +1998,7 @@ void ChargedPulseRejectsMalformedContextAndCookedContract()
 
 void CookedChargedPulseGroundOutputsConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -2416,8 +2412,7 @@ void DashWakeRejectsWrongContractAndInvalidGeometry()
 
 void CookedRemainingGroundOutputsConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
     hs::VfxProgramData cooked;
@@ -2503,8 +2498,7 @@ void CookedRemainingGroundOutputsConvertWhenContentIsAvailable()
 
 void CookedPlayerStateRingConvertsWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -2549,8 +2543,7 @@ void CookedPlayerStateRingConvertsWhenContentIsAvailable()
 
 void CookedPickupIdlePolarRunesConvertWhenContentIsAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -2596,7 +2589,7 @@ void CookedPickupIdlePolarRunesConvertWhenContentIsAvailable()
 }
 } // namespace
 
-int main()
+int RunVfxGroundTests()
 {
     try
     {

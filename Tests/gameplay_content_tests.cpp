@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include "test_generation_paths.hpp"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/dds_format.hpp>
@@ -79,8 +80,8 @@ void TestRelicDataIsCookedFromJson()
     std::vector<std::array<float, 16>> shared_bind;
     for (const auto asset : {"enemy_melee", "enemy_ranged", "enemy_suicide", "enemy_gel_projectile"})
     {
-    std::ifstream slime(std::filesystem::current_path() / "Cooked" /
-                            (std::string(asset) + ".meshbin"),
+    std::ifstream slime(test_generation::ProductPath(
+                            "character/" + std::string(asset) + ".meshbin"),
                         std::ios::binary);
     hs::CharacterAssetHeader slime_header;
     slime.read(reinterpret_cast<char *>(&slime_header), sizeof(slime_header));
@@ -177,7 +178,8 @@ void TestRelicDataIsCookedFromJson()
         Check(draw_hop_height > 0.1f, "melee attack retains its authored jump above the ground");
     for (const auto suffix : {"_diffuse_0.dds", "_normal_0.dds"})
     {
-        const auto path = std::filesystem::current_path() / "Cooked" / (std::string(asset) + suffix);
+        const auto path = test_generation::ProductPath(
+            "character/" + std::string(asset) + suffix);
         std::ifstream texture(path, std::ios::binary);
         std::uint32_t magic{};
         hs::DdsHeader header;

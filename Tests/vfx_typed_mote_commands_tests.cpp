@@ -1,4 +1,6 @@
 #include "../Source/Runtime/Private/vfx_typed_mote_commands.hpp"
+#include "test_generation_paths.hpp"
+#include <hs/core/render_snapshot.hpp>
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -189,8 +191,8 @@ hs::VfxPersistentInput PersistentMoteOwner(std::uint32_t elapsed_tick)
     owner.current_transform[12] = 4.0f;
     owner.current_transform[13] = .25f;
     owner.current_transform[14] = -2.0f;
-    owner.normalized_age = 0.0f;
-    owner.payload = hs::VfxEntityPayload{.8f, 0.0f, 1.0f, 1u, 77u};
+    owner.normalized_age = static_cast<float>(elapsed_tick) / 120.0f;
+    owner.payload = hs::VfxEntityPayload{.8f, owner.normalized_age, 1.0f, 1u, 77u};
     return owner;
 }
 
@@ -330,6 +332,13 @@ void PickupIdleMotesFollowPresentEntity()
                 Near(at20[0].normalized_age, 20.0f / 39.0f) &&
                 Near(at20[1].normalized_age, 0.0f),
                 "pickup idle motes did not use the authored entity cadence");
+        auto presence = owner;
+        presence.normalized_age = 0.0f;
+        std::get<hs::VfxEntityPayload>(presence.payload).lifetime01 = 0.0f;
+        const auto live = PersistentMotes(program, presence);
+        Require(live.size() == at20.size() && live[0].stable_seed == at20[0].stable_seed &&
+                std::isfinite(live[0].normalized_age),
+                "live pickup presence produced no births or a nonfinite source age");
         const auto repeat = PersistentMotes(program, owner);
         Require(repeat.size() == at20.size() &&
                 repeat[0].stable_seed == at20[0].stable_seed,
@@ -391,6 +400,7 @@ hs::VfxProgramData PersistentTrapMoteProgram()
 hs::VfxPersistentInput PersistentTrapMoteOwner(std::uint32_t elapsed_tick)
 {
     auto owner = PersistentMoteOwner(elapsed_tick);
+    owner.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::TrapArmed);
     constexpr float duration_ticks = 120.0f;
     owner.normalized_age = static_cast<float>(elapsed_tick) / duration_ticks;
     hs::VfxCirclePayload circle;
@@ -400,6 +410,27 @@ hs::VfxPersistentInput PersistentTrapMoteOwner(std::uint32_t elapsed_tick)
     circle.lifetime01 = owner.normalized_age;
     owner.payload = circle;
     return owner;
+}
+
+void EventTrapMotesUsePointClock()
+{
+    auto program = PersistentTrapMoteProgram();
+    program.effects[0].input_mode = program.effects[0].timing_kind = 0;
+    program.effects[0].seconds = .65f;
+    program.effects[0].payload_kind = Hash("PointEventPayload");
+    program.effect_lookup[0].effect_id = Hash64("particle.skill.trap");
+    hs::VfxEventInput event;
+    event.effect_handle = 1; event.sequence = 7; event.event_tick = 100; event.stable_seed = 99;
+    hs::VfxPointPayload point; point.position = {4, .25f, -2}; point.authored_scale = 2;
+    event.payload = point;
+    const auto at20 = Owned(program, event, 120);
+    Require(at20.size() == 2 && Near(at20[0].position.x, 4) && Near(at20[0].size, .1f) &&
+            Near(at20[0].normalized_age, 20.0f / 39.0f) && Near(at20[1].normalized_age, 0),
+            "event trap lost actual point scale, rate births or event clock");
+    Require(Owned(program, event, 99).empty() && Owned(program, event, 139).empty(),
+            "event trap emitted outside its fixed 39-tick interval");
+    event.payload = hs::VfxCirclePayload{};
+    Require(Owned(program, event, 120).empty(), "event trap accepted circle substitution");
 }
 
 void PersistentTrapMotesUseCircleClockGeometry()
@@ -442,6 +473,8 @@ void PersistentTrapMotesRejectMalformedRecipesAndQuality()
     owner = PersistentTrapMoteOwner(20);
     program.effect_lookup[0].effect_id = Hash64("persistent.trap.pending");
     Require(PersistentMotes(program, owner).empty(), "pending trap recipe used the armed clock");
+    owner.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::TrapPending);
+    Require(!PersistentMotes(program, owner).empty(), "actual pending trap clock was not admitted");
     program = PersistentTrapMoteProgram();
     owner = PersistentTrapMoteOwner(20);
     std::get<hs::VfxCirclePayload>(owner.payload).radius =
@@ -467,7 +500,7 @@ void PersistentTrapMotesRejectMalformedRecipesAndQuality()
 
 void CookedPersistentTrapMotesConvert()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     Require(std::filesystem::exists(path), "cooked VFX program missing for trap motes");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
@@ -495,6 +528,7 @@ void CookedPersistentTrapMotesConvert()
     owner.stable_id = 0x13579bdu;
     owner.stable_seed = 0x2468aceu;
     owner.effect_handle = identity->handle;
+    owner.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::TrapArmed);
     owner.elapsed_seconds = 20.0f / 60.0f;
     owner.normalized_age = 0.25f;
     owner.quality = hs::VfxQuality::Medium;
@@ -513,7 +547,7 @@ void CookedPersistentTrapMotesConvert()
 
 void CookedPickupIdleMotesConvert()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     Require(std::filesystem::exists(path), "cooked VFX program missing for pickup idle motes");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
@@ -773,8 +807,7 @@ void PersistentSparksFollowCookedTuning()
 
 void CookedPersistentSparksConvertWhenAvailable()
 {
-    const auto path = std::filesystem::path("Cooked") / "vfx_program.hsbin";
-    if (!std::filesystem::exists(path)) return;
+    const auto path = test_generation::ProductPath("vfx/vfx_program.hsbin");
     std::ifstream stream(path, std::ios::binary);
     const std::vector<char> bytes{std::istreambuf_iterator<char>(stream),
                                   std::istreambuf_iterator<char>()};
@@ -817,8 +850,8 @@ void CookedPersistentSparksConvertWhenAvailable()
             std::to_string(authored) + " converted=" + std::to_string(converted));
 }
 }
-int main()
+int RunVfxMoteTests()
 {
-    try {BurstAndScale();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();OwnedMalformedAndQuality();PersistentMotesAreStatelessAndOwnerBound();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
+    try {BurstAndScale();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();OwnedMalformedAndQuality();PersistentMotesAreStatelessAndOwnerBound();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

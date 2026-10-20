@@ -104,4 +104,4 @@ void Invalid()
  p=Program();i=Input();i.geometry_owner_id=1;i.geometry_start_tick=100;i.geometry_end_tick=100;Check(Run(p,i).empty(),"invalid owner clock accepted");
 }
 }
-int main(){try{GeometryClockAndIdentity();Presence();ExactBossGeometry();TextureContracts();Invalid();std::cout<<"Typed distortion commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxDistortionTests(){try{GeometryClockAndIdentity();Presence();ExactBossGeometry();TextureContracts();Invalid();std::cout<<"Typed distortion commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

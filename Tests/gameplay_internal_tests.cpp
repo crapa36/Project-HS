@@ -1,4 +1,5 @@
 #include "relic_rule_table.hpp"
+#include "balance_observer.hpp"
 #include "simulation_pipeline.hpp"
 #include "spatial_grid.hpp"
 
@@ -13,6 +14,32 @@ namespace
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void TestBalanceHitDeduplication()
+{
+    hs::gameplay_detail::BalanceObserver observer;
+    const std::vector<std::uint64_t> hits{50, 4, 50, 19, 4, 0, 19, 100, 0};
+    std::vector<std::uint64_t> reference;
+    for (const auto cast : hits)
+    {
+        const bool first = std::ranges::find(reference, cast) == reference.end();
+        if (first) reference.push_back(cast);
+        Check(observer.RecordHit(observer.player_hit_casts, cast) == first,
+              "delayed and repeated hits preserve first-hit attribution");
+        for (auto &enemy : observer.enemy_hit_casts)
+            Check(observer.RecordHit(enemy, cast) == first,
+                  "enemy archetypes independently deduplicate the same cast");
+    }
+    Check(observer.player_hit_casts.size() == reference.size(),
+          "only unique cast ids occupy telemetry storage");
+    observer.metrics.enemy_hits[0] = 7;
+    observer.Reset();
+    Check(observer.metrics.enemy_hits[0] == 0 &&
+              observer.RecordHit(observer.player_hit_casts, 50),
+          "run reset clears metrics and player hit history");
+    for (auto &enemy : observer.enemy_hit_casts)
+        Check(observer.RecordHit(enemy, 50), "run reset clears every enemy history");
 }
 
 void TestSpatialGridAgainstBruteForce()
@@ -140,6 +167,7 @@ int main()
                   pipeline.back() == SimulationPhaseId::GameplayHash,
               "phase-specific visibility barriers are explicit and ordered");
         TestSpatialGridAgainstBruteForce();
+        TestBalanceHitDeduplication();
         std::cout << "gameplay_internal_tests passed\n";
         return 0;
     }

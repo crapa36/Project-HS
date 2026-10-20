@@ -1,10 +1,15 @@
 #include "vfx_ribbon_state.hpp"
+#include "vfx_ribbon_resources.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -15,6 +20,7 @@ using hs::VfxOutputProfile;
 using hs::VfxRibbonOutputInput;
 using hs::VfxRibbonSourceInput;
 using hs::renderer_detail::VfxRibbonState;
+static_assert(std::is_nothrow_move_assignable_v<VfxRibbonState>);
 
 void Check(bool condition, const char *message)
 {
@@ -35,12 +41,230 @@ VfxRibbonSourceInput Source(std::uint64_t owner, std::uint32_t importance = 1)
                               {1.0f, 0.5f, 0.2f, 1.0f}, 0.2f, 0.05f, 0.01f, 0.0f, 2.0f, 0.5f, 3, 0, false});
     return source;
 }
+
+struct TestRibbonBuffer
+{
+    std::uint64_t width{};
+    std::shared_ptr<int> allocation;
+};
+
+hs::Result TryRibbonBufferUpdate(VfxRibbonState &state, std::array<TestRibbonBuffer, 3> &buffers,
+    std::span<const VfxRibbonSourceInput> sources, std::uint32_t points, std::uint64_t generation,
+    unsigned fail_allocation, bool &checkpoint_copied)
+{
+    using namespace hs::renderer_detail;
+    const std::array<std::uint64_t, 3> widths{buffers[0].width, buffers[1].width, buffers[2].width};
+    const auto expected_history = std::uint64_t(points / kRibbonHistorySamples) * kRibbonHistoryStride;
+    checkpoint_copied = widths[0] != expected_history || widths[1] != expected_history || widths[2] == 0 ||
+        state.OutputsMayExceed(sources, widths[2] / kRibbonArgumentStride);
+    std::optional<VfxRibbonState> checkpoint;
+    if (checkpoint_copied) checkpoint = state;
+    const auto reject = [&](hs::Result failure) {
+        if (checkpoint) state = std::move(*checkpoint);
+        return failure;
+    };
+    std::string error;
+    if (!state.Update(sources, 11, 1, generation, points, .5f, {}, error))
+        return reject(hs::Result::Failure(hs::ErrorCode::InvalidArgument, "test", error));
+    const auto history_bytes = std::uint64_t(state.Capacity()) * kRibbonHistoryStride;
+    const auto args_bytes = std::max<std::size_t>(state.Outputs().size(), 1) * kRibbonArgumentStride;
+    const auto replace = RibbonBufferReplacements(widths, history_bytes, args_bytes);
+    unsigned allocations{};
+    std::array<std::weak_ptr<int>, 3> candidates;
+    const auto allocate = [&](TestRibbonBuffer &buffer, std::uint64_t bytes) {
+        buffer = {bytes, std::make_shared<int>(int(++allocations) + 10)};
+        candidates[allocations - 1] = buffer.allocation;
+        if (allocations == fail_allocation)
+            return hs::Result::Failure(hs::ErrorCode::TaskFailed, "test", "injected ribbon allocation failure");
+        return hs::Result::Success();
+    };
+    auto result = ReplaceRibbonBuffers(std::array{&buffers[0], &buffers[1], &buffers[2]},
+        replace, history_bytes, args_bytes, allocate);
+    if (!result)
+    {
+        for (const auto &candidate : candidates)
+            Check(candidate.expired(), "failed ribbon candidates retained an allocation");
+        return reject(result);
+    }
+    return result;
+}
+
+void TestRibbonLookupLifecycle()
+{
+    VfxRibbonState state;
+    std::string error;
+    auto a = Source(20);
+    auto b = Source(10); b.effect_handle = 2;
+    auto c = Source(10); c.source_id = 3;
+    const auto update = [&](std::vector<VfxRibbonSourceInput> sources, hs::Tick tick) {
+        Check(state.Update(sources, tick, 1, 1, 256, .5f, {}, error), error.c_str());
+    };
+    update({a, b, c}, 1);
+    const auto c_generation = state.Updates()[0].identity[2];
+    const auto b_generation = state.Updates()[1].identity[2];
+    const auto a_generation = state.Updates()[2].identity[2];
+    Check(state.Updates()[0].identity[0] == 0 && state.Updates()[1].identity[0] == 1 &&
+          state.Updates()[2].identity[0] == 2, "source-key ordering did not assign ascending slots");
+    a.importance = 9; b.importance = 5;
+    update({c, a, b}, 2);
+    Check(state.Updates()[0].identity[0] == 2 && state.Updates()[0].identity[2] == a_generation &&
+          state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] == b_generation &&
+          state.Updates()[2].identity[0] == 0 && state.Updates()[2].identity[2] == c_generation,
+        "reordered priorities changed a source's slot or generation");
+    update({b, a}, 3);
+    Check(state.Updates().size() == 3 && state.Updates()[2].identity[0] == 0 &&
+          state.Updates()[2].identity[3] == 0 && state.Outputs()[2].metadata[0] == 0,
+        "missing source tail lost slot order after priority reordering");
+    update({}, 100);
+    auto d = Source(40);
+    update({d}, 101);
+    Check(state.Updates()[0].identity[0] == 3 && (state.Updates()[0].identity[3] & 2u),
+        "new source did not preserve append-before-reuse policy");
+    auto e = Source(50, 10);
+    update({c, e}, 102);
+    Check(state.Updates().size() == 3 && state.Updates()[0].identity[0] == 0 &&
+          state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] != c_generation &&
+          state.Updates()[2].identity[0] == 3 && state.Updates()[2].identity[3] == 0,
+        "expired keys or tail protection corrupted deterministic slot reuse");
+    c.analytic = true; c.history_seconds = 0; c.outputs[0].motion = VfxMotionKind::CurvedLinkTravelingHead;
+    update({d, c, e}, 103);
+    const auto first_analytic_generation = state.Updates()[1].identity[2];
+    auto history = c; history.analytic = false; history.history_seconds = .2f;
+    history.outputs[0].motion = VfxMotionKind::HistoryRibbonTaperedFlow;
+    update({d, history, e}, 103);
+    Check(state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[3] == 3u &&
+          state.Updates()[1].identity[2] != first_analytic_generation,
+        "same-tick analytic-to-history change did not reset the same slot");
+    update({d, c, e}, 103);
+    const auto analytic_generation = state.Updates()[1].identity[2];
+    Check(state.Updates()[1].identity[0] == 1 && (state.Updates()[1].identity[3] & 7u) == 7u,
+        "history-to-analytic change did not reset the same slot");
+    update({d, e}, 104);
+    Check(state.Updates().size() == 3 && state.Updates()[2].identity[0] == 1 &&
+          state.Updates()[2].identity[3] == 4u, "missing analytic key did not clear exactly once");
+    c.analytic = false; c.history_seconds = .2f; c.outputs[0].motion = VfxMotionKind::HistoryRibbonTaperedFlow;
+    update({c, e, d}, 105);
+    Check(state.Updates()[1].identity[0] == 1 && state.Updates()[1].identity[2] != analytic_generation &&
+          state.Updates()[1].identity[3] == 3u, "cancelled analytic key survived slot reuse");
+    auto f = Source(60, 12);
+    auto g = Source(70, 11);
+    e.importance = 10; c.importance = 9; d.importance = 0;
+    update({d, c, g, e, f}, 106);
+    Check(state.DroppedSources() == 1 && state.Updates().size() == 4 &&
+          state.Updates()[0].identity[0] == 2 && state.Updates()[1].identity[0] == 3 &&
+          state.Updates()[2].identity[0] == 0 && state.Updates()[3].identity[0] == 1,
+        "overflow replacement stole a later winner or changed first reusable slot order");
+    const auto before_duplicate = state.Updates()[0].identity;
+    auto duplicate = d; duplicate.importance = 99;
+    Check(!state.Update(std::vector{f, g, e, c, d, duplicate}, 107, 1, 1, 256, .5f, {}, error) &&
+          state.Updates()[0].identity == before_duplicate,
+        "overflow loser duplicate was accepted or mutated the successful frame");
+
+    for (unsigned reset = 0; reset != 4; ++reset)
+    {
+        auto reset_state = state;
+        Check(reset_state.Update(std::vector{c, e}, reset == 2 ? 105 : 107,
+              reset == 0 ? 2 : 1, reset == 1 ? 2 : 1, reset == 3 ? 128 : 256, .5f, {}, error), error.c_str());
+        Check(reset_state.Updates().size() == 2 && reset_state.Updates()[0].identity[0] == 0 &&
+              reset_state.Updates()[1].identity[0] == 1 && reset_state.Updates()[0].identity[3] == 3u &&
+              reset_state.Updates()[1].identity[3] == 3u,
+            "session/catalog/rewind/capacity reset retained a stale key index");
+    }
+}
+void TestRibbonBufferFailureRecovery()
+{
+    using namespace hs::renderer_detail;
+    const std::vector original{Source(10)};
+    auto growing = std::vector{Source(20)};
+    growing[0].outputs.push_back(growing[0].outputs[0]);
+    const auto make_buffers = [] {
+        return std::array<TestRibbonBuffer, 3>{TestRibbonBuffer{kRibbonHistoryStride, std::make_shared<int>(1)},
+            TestRibbonBuffer{kRibbonHistoryStride, std::make_shared<int>(2)},
+            TestRibbonBuffer{kRibbonArgumentStride, std::make_shared<int>(3)}};
+    };
+    for (unsigned fail = 1; fail <= 3; ++fail)
+    {
+        VfxRibbonState state;
+        std::string error;
+        Check(state.Update(original, 10, 1, 1, 64, .5f, {}, error), error.c_str());
+        auto buffers = make_buffers();
+        const auto committed = buffers;
+        bool checkpoint_copied{};
+        Check(!TryRibbonBufferUpdate(state, buffers, growing, 128, 2, fail, checkpoint_copied),
+            "injected ribbon allocation unexpectedly succeeded");
+        Check(checkpoint_copied && state.Capacity() == 1 && state.Outputs().size() == 1 &&
+              state.Updates()[0].identity[1] == 10 && state.Updates()[0].identity[3] == 3,
+            "failed ribbon allocation consumed CPU slots or their reset state");
+        for (std::size_t index = 0; index < buffers.size(); ++index)
+            Check(buffers[index].width == committed[index].width &&
+                  buffers[index].allocation == committed[index].allocation,
+                "partial ribbon allocation changed a committed buffer");
+        Check(bool(TryRibbonBufferUpdate(state, buffers, growing, 128, 2, 0, checkpoint_copied)),
+            "ribbon allocation retry failed");
+        Check(state.Capacity() == 2 && state.Outputs().size() == 2 &&
+              (state.Updates()[0].identity[3] & 2u) != 0,
+            "ribbon retry lost the new GPU history reset");
+        Check(buffers[0].width == 2 * kRibbonHistoryStride && buffers[1].width == 2 * kRibbonHistoryStride &&
+              buffers[2].width == 2 * kRibbonArgumentStride,
+            "successful ribbon allocation did not commit the requested sizes");
+        for (std::size_t index = 0; index < buffers.size(); ++index)
+            Check(buffers[index].allocation != committed[index].allocation,
+                "successful ribbon allocation retained a replaced buffer");
+    }
+
+    VfxRibbonState state;
+    std::string error;
+    Check(state.Update(original, 10, 1, 1, 128, .5f, {}, error), error.c_str());
+    Check(!state.OutputsMayExceed(original, 1), "steady ribbon inputs requested a deep checkpoint");
+    Check(state.OutputsMayExceed(std::vector{Source(20)}, 1), "retained tail was omitted from the output bound");
+    Check(state.Update(std::vector{Source(20)}, 11, 1, 1, 128, .5f, {}, error), error.c_str());
+    Check(state.Outputs().size() == 2, "tail bound fixture did not retain its previous source");
+
+    state = {};
+    Check(state.Update(original, 10, 1, 1, 64, .5f, {}, error), error.c_str());
+    auto buffers = make_buffers();
+    const auto committed = buffers;
+    bool checkpoint_copied{};
+    Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) && !checkpoint_copied,
+        "steady ribbon frame copied state or failed");
+    for (std::size_t index = 0; index < buffers.size(); ++index)
+        Check(buffers[index].allocation == committed[index].allocation, "steady ribbon frame reallocated a buffer");
+
+    buffers[1] = {};
+    Check(!TryRibbonBufferUpdate(state, buffers, original, 64, 1, 1, checkpoint_copied) && checkpoint_copied,
+        "missing previous history did not prepare a recoverable replacement");
+    Check(!buffers[1].allocation && buffers[0].allocation == committed[0].allocation &&
+          buffers[2].allocation == committed[2].allocation, "failed previous repair changed other buffers");
+    Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) &&
+          buffers[1].allocation && buffers[1].width == kRibbonHistoryStride &&
+          buffers[0].allocation == committed[0].allocation && buffers[2].allocation == committed[2].allocation,
+        "missing previous history did not recover independently");
+    buffers[1].width = 16;
+    Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) &&
+          buffers[1].width == kRibbonHistoryStride, "mismatched previous history did not recover");
+
+    for (auto rejected : {std::vector{Source(10), Source(10)}, growing})
+    {
+        if (rejected.size() == 1) rejected[0].outputs[0].hdr = -1;
+        Check(state.OutputsMayExceed(rejected, 1), "rejected inputs underestimated their output bound");
+        Check(!TryRibbonBufferUpdate(state, buffers, rejected, 128, 2, 0, checkpoint_copied) &&
+              state.Capacity() == 1 && state.Outputs().size() == 1,
+            "rejected ribbon source consumed a checkpointed generation or capacity reset");
+    }
+    Check(!TryRibbonBufferUpdate(state, buffers, growing, 64, 2, 1, checkpoint_copied) && checkpoint_copied,
+        "generation reset argument growth was not checkpointed");
+    Check(bool(TryRibbonBufferUpdate(state, buffers, growing, 64, 2, 0, checkpoint_copied)) &&
+          (state.Updates()[0].identity[3] & 2u) != 0,
+        "argument-only failure consumed a generation reset before retry");
+}
 }
 
 int main()
 {
     try
     {
+        TestRibbonLookupLifecycle();
+        TestRibbonBufferFailureRecovery();
         std::string error;
         auto source = Source(10);
         VfxRibbonState state;

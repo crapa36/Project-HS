@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_flash_commands.hpp"
+#include "test_generation_paths.hpp"
 #include <hs/core/render_snapshot.hpp>
 
 #include <array>
@@ -321,6 +322,8 @@ void AuthoredSdfShapesAndContext()
         auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(c, std::span(&input, 1)); };
         auto decoded = run();
         Require(decoded.size() == 1 && decoded[0].shape == test.kind && Near(decoded[0].size, test.size * 2), "SDF shape or metre scale missing");
+        Require(!decoded[0].interpolate_owner_position,
+                "world impact unexpectedly followed an owner pose");
         Require(Near(decoded[0].direction.x, .6f) && Near(decoded[0].direction.z, .8f), "incoming direction was lost");
         if (test.curve >= 0) Require(decoded[0].curve_row == static_cast<std::uint32_t>(test.curve), "curve row changed");
         c.effects[0].payload_kind = Hash32("PresentationContextPayload");
@@ -1057,6 +1060,26 @@ void UpgradeStatusStampsUseAuthoredGeometry()
                 Near(command.lifetime, test.seconds * .55f) &&
                 (test.path || (command.mask_slice == 5 && Near(command.mask_strength, .38f))),
                 "upgrade status stamp did not use its authored geometry and fixed timing");
+        Require(command.interpolate_owner_position &&
+                Near(command.previous_position.x, test.path ? 7.5f : owner.previous_transform[12]) &&
+                Near(command.previous_position.z, test.path ? 8.5f : owner.previous_transform[14]),
+                "attached stamp did not carry its owner's interpolation endpoints");
+        // Authoritative equal endpoints already encode a spawn/discontinuity;
+        // never substitute a previously rendered stamp or extrapolate velocity.
+        if (test.path)
+            std::get<hs::VfxProjectilePathPayload>(owner.payload).previous_position = command.position;
+        else owner.previous_transform = owner.current_transform;
+        const auto discontinuous = run();
+        Require(discontinuous.size() == 1 &&
+                Near(discontinuous[0].previous_position.x, discontinuous[0].position.x) &&
+                Near(discontinuous[0].previous_position.z, discontinuous[0].position.z),
+                "equal owner endpoints invented a discontinuity interpolation");
+        if (test.path)
+            std::get<hs::VfxProjectilePathPayload>(owner.payload).previous_position.x =
+                std::numeric_limits<float>::quiet_NaN();
+        else owner.previous_transform[12] = std::numeric_limits<float>::quiet_NaN();
+        Require(run().empty(), "stamp accepted an invalid previous owner position");
+        owner = PersistentStampOwner(test.kind);
         owner.quality = hs::VfxQuality::Low;
         Require(run().size() == 1, "low quality lost upgrade status stamp");
 
@@ -1109,7 +1132,7 @@ void UpgradeStatusStampsUseAuthoredGeometry()
 
 void ProductionUpgradeStatusStampsDecode()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Require(file.good(), "production VFX program missing");
     const std::string binary{std::istreambuf_iterator<char>(file),
                              std::istreambuf_iterator<char>()};
@@ -1190,28 +1213,54 @@ void PickupCollectorImpactUsesLinkSource()
         link.source_position = {3, .4f, 4};
         link.target_position = {7, .4f, 9};
         input.payload = link;
-        const auto run = [&] { return hs::runtime_detail::BuildVfxTypedFlashCommands(
-            cooked, std::span(&input, 1)); };
+        std::vector<hs::Sequence> superseded;
+        const auto run = [&] {
+            superseded.clear();
+            return hs::runtime_detail::BuildVfxTypedFlashCommands(
+                cooked, std::span(&input, 1), &superseded);
+        };
         auto commands = run();
         Require(commands.size() == 1 && commands[0].shape == hs::VfxImpactShape::StarRing &&
                 Near(commands[0].position.x, 3) && Near(commands[0].position.z, 4) &&
                 Near(commands[0].direction.x, 4.0f / std::sqrt(41.0f)) &&
-                Near(commands[0].lifetime, .08f),
+                Near(commands[0].lifetime, .08f) && superseded == std::vector<hs::Sequence>{12},
                 "pickup link impact did not start at authoritative pickup position");
+        cooked.outputs[0].shape = Hash32("unsupported_pickup_shape");
+        Require(run().empty() && superseded.empty(),
+                "unsupported pickup burst suppressed its legacy fallback");
+        cooked.outputs[0].shape = output.shape;
+        cooked.outputs[0].hdr = std::numeric_limits<float>::quiet_NaN();
+        Require(run().empty() && superseded.empty(),
+                "malformed pickup burst suppressed its legacy fallback");
+        cooked.outputs[0].hdr = output.hdr;
+        auto rejected = input;
+        rejected.sequence = 13;
+        std::get<hs::VfxLinkPayload>(rejected.payload).target_position.x =
+            std::numeric_limits<float>::quiet_NaN();
+        const std::array mixed{input, rejected};
+        superseded.clear();
+        Require(hs::runtime_detail::BuildVfxTypedFlashCommands(cooked, mixed, &superseded).size() == 1 &&
+                    superseded == std::vector<hs::Sequence>{12},
+                "partially rejected pickup batch suppressed an unconverted event");
         link.target_position = link.source_position;
         input.payload = link;
-        Require(run().size() == 1, "coincident collector dropped pickup burst");
+        Require(run().size() == 1 && superseded == std::vector<hs::Sequence>{12},
+                "coincident collector dropped pickup burst");
         input.sequence = 0;
-        Require(run().empty(), "unidentified pickup collector event accepted");
+        Require(run().empty() && superseded.empty(), "unidentified pickup collector event accepted");
         input.sequence = 12;
         cooked.effect_lookup[0].effect_id = Hash64("particle.player.arrow_release");
-        Require(run().empty(), "unrelated link effect accepted as pickup impact");
+        Require(run().empty() && superseded.empty(), "unrelated link effect accepted as pickup impact");
+        cooked.effects[0].payload_kind = Hash32("PointEventPayload");
+        input.payload = hs::VfxPointPayload{};
+        Require(run().size() == 1 && superseded.empty(),
+                "non-pickup typed flash suppressed compatibility layers");
     }
 }
 
 void ProductionStatusAndPickupOutputsDecode()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Require(file.good(), "production VFX program missing");
     const std::string binary{std::istreambuf_iterator<char>(file),
                              std::istreambuf_iterator<char>()};
@@ -1257,15 +1306,16 @@ void ProductionStatusAndPickupOutputsDecode()
         link.source_position = {3, .3f, 4};
         link.target_position = {7, .3f, 9};
         event.payload = link;
+        std::vector<hs::Sequence> superseded;
         const auto commands = hs::runtime_detail::BuildVfxTypedFlashCommands(
-            cooked, std::span(&event, 1));
-        Require(commands.size() == 1,
+            cooked, std::span(&event, 1), &superseded);
+        Require(commands.size() == 1 && superseded == std::vector<hs::Sequence>{event.sequence},
                 "production pickup link did not decode its collection burst");
     }
 }
 } // namespace
 
-int main()
+int RunVfxFlashTests()
 {
     try
     {

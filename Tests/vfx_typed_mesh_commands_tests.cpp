@@ -10,7 +10,7 @@ constexpr std::uint32_t Hash(std::string_view s)
 { std::uint32_t h=2166136261u; for(const unsigned char c:s) h=(h^c)*16777619u; return h; }
 void Check(bool value, const char *message) { if(!value) throw std::runtime_error(message); }
 }
-int main()
+int RunVfxMeshTests()
 {
     try
     {
@@ -25,9 +25,10 @@ int main()
         hs::VfxOutputRecord output{};
         output.source=0; output.profile=hs::VfxOutputProfile::MeshEmissiveOit;
         output.shape=Hash("arrowhead_mesh"); output.motion=hs::VfxMotionKind::VelocityAlignedSharpHead;
-        output.rgba={1,0.8f,0.5f,0.9f}; output.hdr=3; output.gradient_row=7; output.parameters={0,1};
+        output.rgba={1,0.8f,0.5f,0.9f}; output.hdr=3; output.gradient_row=7; output.parameters={0,2};
         p.outputs.push_back(output);
         p.parameters.push_back({Hash("fresnel"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(0.35f)});
+        p.parameters.push_back({Hash("head_to_tail_ratio"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(0.42f)});
         hs::VfxPersistentInput owner;
         owner.stable_id=91; owner.effect_handle=1; owner.normalized_age=1;
         owner.current_transform[12]=5; owner.previous_transform[12]=4;
@@ -38,15 +39,21 @@ int main()
         const auto &c=commands.front();
         Check(c.owner_id==91 && c.position.x==5 && c.previous_position.x==4 && c.velocity.x==60 && c.radius==0.2f,
               "owner geometry or metres/second velocity changed");
-        Check(c.mesh_index==1 && c.gradient_row==7 && c.hdr==3 && c.fresnel==0.35f,"authored material/mesh selection lost");
+        Check(c.mesh_index==1 && c.gradient_row==7 && c.hdr==3 && c.fresnel==0.35f && c.head_to_tail_ratio==0.42f && c.shell_thickness==0,"authored material/mesh selection lost");
         Check(hs::runtime_detail::BuildVfxTypedMeshCommands(p,{}).empty(),"despawn retained a head");
         p.outputs[0].shape=Hash("unknown_mesh");
         Check(hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1)).empty(),"unknown mesh substituted");
+        p.outputs[0].shape=Hash("enemy_thorn_mesh");
+        p.outputs[0].motion=hs::VfxMotionKind::VelocityAligned;
+        p.parameters[1].bits=std::bit_cast<std::uint32_t>(0.5f);
+        commands=hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1));
+        Check(commands.size()==1 && commands[0].head_to_tail_ratio==0.5f,"enemy thorn authored ratio lost");
         p.outputs[0].shape=Hash("boss_crest_lance_mesh");
+        p.parameters[1]={Hash("shell_thickness"),hs::VfxParameterType::Float,std::bit_cast<std::uint32_t>(0.22f)};
         p.outputs[0].motion=hs::VfxMotionKind::VelocityAlignedHeavyLance;
         p.sources[0].type=hs::VfxSourceType::BallisticCollision;
         commands=hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1));
-        Check(commands.size()==1 && commands[0].mesh_index==6 && commands[0].position.x==5,
+        Check(commands.size()==1 && commands[0].mesh_index==6 && commands[0].position.x==5 && commands[0].shell_thickness==0.22f && commands[0].head_to_tail_ratio==0,
               "boss head must follow gameplay trajectory");
         p.outputs[0].source=4;
         Check(hs::runtime_detail::BuildVfxTypedMeshCommands(p,std::span(&owner,1)).empty(),"cross-source output accepted");

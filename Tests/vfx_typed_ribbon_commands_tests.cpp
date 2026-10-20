@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_ribbon_commands.hpp"
+#include "test_generation_paths.hpp"
 
 #include <algorithm>
 #include <array>
@@ -156,7 +157,7 @@ void TestBossDashWakeRibbon()
 
 void TestCookedBossDashWakeRibbon()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Check(file.good(), "production VFX program missing");
     const std::vector<char> bytes{std::istreambuf_iterator<char>(file),
                                   std::istreambuf_iterator<char>()};
@@ -657,7 +658,7 @@ void TestFixedEventAnalyticRibbons()
 
 void TestCookedFixedEventAnalyticRibbons()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Check(file.good(), "production VFX program missing");
     const std::vector<char> bytes{std::istreambuf_iterator<char>(file),
                                   std::istreambuf_iterator<char>()};
@@ -883,7 +884,7 @@ void TestPickupCollectRibbon()
 
 void TestCookedPickupCollectRibbon()
 {
-    std::ifstream file("Cooked/vfx_program.hsbin", std::ios::binary);
+    std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"), std::ios::binary);
     Check(file.good(), "production VFX program missing");
     const std::vector<char> bytes{std::istreambuf_iterator<char>(file),
                                   std::istreambuf_iterator<char>()};
@@ -949,7 +950,7 @@ void TestCookedPickupCollectRibbon()
     }
 }
 
-int main()
+int RunVfxRibbonTests()
 {
     try
     {

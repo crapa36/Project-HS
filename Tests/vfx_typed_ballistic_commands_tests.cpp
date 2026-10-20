@@ -1,4 +1,5 @@
 #include "../Source/Runtime/Private/vfx_typed_ballistic_commands.hpp"
+#include "test_generation_paths.hpp"
 #include <hs/core/render_snapshot.hpp>
 #include <algorithm>
 #include <bit>
@@ -200,7 +201,7 @@ void PersistentStatusShards()
 }
 void ProductionBowDrawStatusShards()
 {
- std::ifstream file("Cooked/vfx_program.hsbin",std::ios::binary);
+ std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"),std::ios::binary);
  Check(file.good(),"production VFX program missing");
  const std::string binary{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
  hs::VfxProgramData cooked;std::string error;
@@ -222,7 +223,7 @@ void ProductionBowDrawStatusShards()
 }
 void ProductionUpgradeStatusShards()
 {
- std::ifstream file("Cooked/vfx_program.hsbin",std::ios::binary);
+ std::ifstream file(test_generation::ProductPath("vfx/vfx_program.hsbin"),std::ios::binary);
  Check(file.good(),"production VFX program missing");
  const std::string binary{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
  hs::VfxProgramData cooked;std::string error;
@@ -250,4 +251,4 @@ void ProductionUpgradeStatusShards()
  }
 }
 }
-int main(){try{TimingIdentityAndScale();GeometryAndRecipes();CookedGlobalBindings();ProjectileForwardFans();RejectMalformed();PersistentStatusShards();ProductionBowDrawStatusShards();ProductionUpgradeStatusShards();std::cout<<"Typed ballistic commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxBallisticTests(){try{TimingIdentityAndScale();GeometryAndRecipes();CookedGlobalBindings();ProjectileForwardFans();RejectMalformed();PersistentStatusShards();ProductionBowDrawStatusShards();ProductionUpgradeStatusShards();std::cout<<"Typed ballistic commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

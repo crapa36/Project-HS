@@ -1,13 +1,16 @@
 #include <hs/runtime/experiment_spec.hpp>
-#include <hs/runtime/experiment_pipe.hpp>
 #include <hs/runtime/save_store.hpp>
 #include <hs/runtime/audio_engine.hpp>
 #include <hs/runtime/playtest_recording.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
+#include "session_music.hpp"
 #include "camera_pose.hpp"
+#include "recording_io.hpp"
+#include "window.hpp"
 #include "vfx_session_state.hpp"
+#include "test_generation_paths.hpp"
 #include "vfx_typed_ground_commands.hpp"
 #include "vfx_typed_flash_commands.hpp"
 #include "vfx_typed_ribbon_commands.hpp"
@@ -19,18 +22,25 @@
 #include "vfx_typed_decal_commands.hpp"
 
 #include <Windows.h>
+#include <hidusage.h>
+#include <dwrite_3.h>
+#include <wrl/client.h>
+
+#pragma comment(lib, "dwrite.lib")
 
 #include <array>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <format>
 #include <iostream>
+#include <iterator>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace
@@ -61,7 +71,10 @@ void TestSaveRecovery(const std::filesystem::path &root)
 
     auto second = first;
     second.best_level = 11;
-    Check(store.SaveProfile(second).Succeeded(), "second profile save");
+    const auto second_save = store.SaveProfile(second);
+    if (!second_save.Succeeded())
+        throw std::runtime_error("second profile save: " +
+                                 std::string(second_save.Message()));
     Check(std::filesystem::is_regular_file(root / "profile.json.bak"),
           "atomic replacement retains backup");
 
@@ -124,73 +137,34 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
     Check(loaded.scenario_id == source.scenario_id && loaded.seed == 42 &&
               loaded.timeline_actions.size() == 1 && loaded.termination.maximum_tick == 60,
           "experiment spec round trip");
-}
 
-void TestNamedPipeCommandRoundTrip()
-{
-    const auto name = L"test-" + std::to_wstring(GetCurrentProcessId());
-    hs::Result server_result = hs::Result::Success();
-    std::jthread server([&] {
-        server_result = hs::ServeExperimentPipeOnce(
-            name, [](std::string_view request, std::string &reply) {
-                hs::ExperimentPipeCommand command;
-                if (auto parsed = hs::ParseExperimentPipeCommand(request, command); !parsed)
-                    return parsed;
-                reply = hs::BuildExperimentPipeReply(command.sequence,
-                                                     command.target_tick, "accepted", "applied");
-                return hs::Result::Success();
-            });
-    });
-    const std::string request =
-        R"({"sequence":7,"target_tick":30,"command":"damage_player","payload":{"amount":5}})";
-    std::string reply;
-    hs::Result transaction = hs::Result::Failure(hs::ErrorCode::InvalidState,
-                                                 "test", "not attempted");
-    for (unsigned attempt = 0; attempt < 20 && !transaction; ++attempt)
-    {
-        transaction = hs::TransactExperimentPipe(name, request, reply,
-                                                 std::chrono::milliseconds(100));
-        if (!transaction) Sleep(5);
-    }
-    server.join();
-    Check(transaction.Succeeded() && server_result.Succeeded(), "named pipe transaction");
-    Check(reply.find("\"sequence\":7") != std::string::npos &&
-              reply.find("\"status\":\"accepted\"") != std::string::npos,
-          "named pipe ack preserves sequence");
-
-    hs::ExperimentPipeCommand invalid;
-    Check(!hs::ParseExperimentPipeCommand(R"({"sequence":1})", invalid),
-          "named pipe rejects incomplete JSON command");
-}
-
-void TestNamedPipeIdempotencyAndTargetTick()
-{
-    hs::ExperimentPipeCommandQueue queue;
-    const std::string accepted =
-        R"({"sequence":11,"target_tick":30,"command":"damage_player","payload":{"amount":5}})";
-    std::string first;
-    std::string duplicate;
-    Check(queue.Handle(accepted, 10, first).Succeeded() &&
-              queue.Handle(accepted, 20, duplicate).Succeeded() && first == duplicate &&
-              queue.AcceptedCount() == 1,
-          "duplicate sequence replays response without queueing twice");
-
-    const std::string missed =
-        R"({"sequence":12,"target_tick":20,"command":"heal_player","payload":{"amount":5}})";
-    std::string rejected;
-    Check(queue.Handle(missed, 20, rejected).Succeeded() &&
-              rejected.find("missed_target_tick") != std::string::npos &&
-              queue.AcceptedCount() == 1,
-          "elapsed target tick is rejected");
-    const auto commands = queue.TakeAccepted();
-    Check(commands.size() == 1 && commands.front().sequence == 11,
-          "accepted command executes once");
+    source.timeline_actions = {{2, 1, "heal_player", "{\"amount\":5}"},
+                               {1, 1, "damage_player", "{\"amount\":10}"}};
+    Check(hs::SaveExperimentSpec(path, source).Succeeded() &&
+              hs::LoadExperimentSpec(path, loaded).Succeeded() &&
+              loaded.timeline_actions.size() == 2 &&
+              loaded.timeline_actions[0].sequence == 1 &&
+              loaded.timeline_actions[1].sequence == 2,
+          "same-tick actions retain sequence order without transport");
+    const auto rejected = [&](std::vector<hs::ExperimentTimelineAction> actions) {
+        source.timeline_actions = std::move(actions);
+        const auto saved = hs::SaveExperimentSpec(path, source);
+        return !saved || !hs::LoadExperimentSpec(path, loaded);
+    };
+    Check(rejected({{1, 1, "damage_player", "{}"}, {1, 2, "heal_player", "{}"}}),
+          "duplicate action sequence is rejected");
+    Check(rejected({{1, 0, "damage_player", "{}"}}), "elapsed tick zero is rejected");
+    Check(rejected({{1, 61, "damage_player", "{}"}}), "action after termination is rejected");
+    Check(rejected({{1, 1, "damage_player", "[]"}}), "non-object payload is rejected");
 }
 
 void TestProductionVfxDecoding()
 {
     hs::VfxCatalog catalog;
-    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(), "production VFX catalog");
+    Check(hs::VfxCatalog::Load(
+              test_generation::ProductPath("vfx/particle_effects.hsbin"),
+              test_generation::ProductPath("vfx/vfx_program.hsbin"), catalog).Succeeded(),
+          "production VFX catalog");
     const auto &program = catalog.Program();
     const auto handle = [&](std::string_view id) {
         for (const auto &entry : program.effect_lookup)
@@ -414,12 +388,14 @@ void TestProductionVfxDecoding()
 void TestVfxCatalog()
 {
     hs::VfxCatalog catalog;
-    Check(hs::VfxCatalog::Load("Cooked/particle_effects.hsbin", catalog).Succeeded(),
-          "load cooked VFX catalog");
+    const auto particle_path = test_generation::ProductPath("vfx/particle_effects.hsbin");
+    const auto program_path = test_generation::ProductPath("vfx/vfx_program.hsbin");
+    Check(hs::VfxCatalog::Load(particle_path, program_path, catalog).Succeeded(),
+          "load selected VFX catalog");
     Check(catalog.SpriteCount() == 39, "load data-driven VFX sprite registry");
     const auto fixture = TestDirectory() / "vfx_required_program";
     std::filesystem::create_directories(fixture);
-    std::filesystem::copy_file("Cooked/particle_effects.hsbin", fixture / "particle_effects.hsbin",
+    std::filesystem::copy_file(particle_path, fixture / "particle_effects.hsbin",
                                std::filesystem::copy_options::overwrite_existing);
     hs::VfxCatalog rejected;
     Check(!hs::VfxCatalog::Load(fixture / "particle_effects.hsbin", rejected).Succeeded(),
@@ -446,12 +422,12 @@ void TestVfxCatalog()
     std::vector<hs::VfxLineSpawnCommand> lines;
     auto typed_only = event;
     typed_only.asset = hs::MakeAssetId("particle.player.arrow_release");
-    Check(catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded() && full.empty() && lines.empty(),
+    Check(catalog.ExpandEvent(typed_only, 1.0f, full, lines).Succeeded() && full.empty() && lines.empty(),
           "typed-only event must not require a legacy emitter");
     typed_only.asset = hs::MakeAssetId("particle.invalid.not_in_either_catalog");
-    Check(!catalog.ExpandEvent(typed_only, 100, full, lines).Succeeded(),
+    Check(!catalog.ExpandEvent(typed_only, 1.0f, full, lines).Succeeded(),
           "unknown VFX event must still fail catalog dispatch");
-    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && !full.empty(),
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded() && !full.empty(),
           "expand full-quality VFX");
     Check(std::ranges::any_of(full, [](const auto &command) {
               return command.renderer == hs::VfxRenderer::Sprite &&
@@ -468,7 +444,7 @@ void TestVfxCatalog()
     event.asset = hs::MakeAssetId("particle.basic_attack");
     std::vector<hs::ParticleSpawnCommand> basic_mesh;
     std::vector<hs::VfxLineSpawnCommand> basic_lines;
-    Check(catalog.ExpandEvent(event, 100, basic_mesh, basic_lines).Succeeded(), "basic VFX event expands");
+    Check(catalog.ExpandEvent(event, 1.0f, basic_mesh, basic_lines).Succeeded(), "basic VFX event expands");
     Check(std::ranges::all_of(basic_mesh, [](const auto &command) {
         return command.renderer != hs::VfxRenderer::Mesh || command.primitive != hs::VfxPrimitive::Ember || command.mesh_index != 1;
     }), "basic ember must not become authored arrowhead");
@@ -476,7 +452,7 @@ void TestVfxCatalog()
     Check(std::ranges::all_of(full, [](const auto &command) {
               return command.renderer == hs::VfxRenderer::Mesh || command.mesh_index == 0;
           }), "authored mesh selection leaves sprite and ground outputs unchanged");
-    Check(catalog.ExpandEvent(event, 50, half, lines).Succeeded() && half.size() == full.size(),
+    Check(catalog.ExpandEvent(event, 0.5f, half, lines).Succeeded() && half.size() == full.size(),
           "expand half-quality VFX");
       for (std::size_t index = 0; index < full.size(); ++index)
       {
@@ -514,7 +490,7 @@ void TestVfxCatalog()
           std::vector<hs::VfxLineSpawnCommand> effect_lines;
           Check(catalog.FindEffect(event.asset) != nullptr,
                 "new VFX exists in cooked catalog");
-          Check(catalog.ExpandEvent(event, 100, particles, effect_lines).Succeeded() &&
+          Check(catalog.ExpandEvent(event, 1.0f, particles, effect_lines).Succeeded() &&
                     !particles.empty(),
                 "new VFX expands into particles");
       }
@@ -522,17 +498,17 @@ void TestVfxCatalog()
     event.asset = hs::MakeAssetId("particle.boss.shockwave.release");
     event.geometry.kind = hs::PresentationGeometryKind::RingGaps;
     std::vector<hs::ParticleSpawnCommand> shockwave_accents;
-    Check(catalog.ExpandEvent(event, 100, shockwave_accents, lines).Succeeded() &&
+    Check(catalog.ExpandEvent(event, 1.0f, shockwave_accents, lines).Succeeded() &&
         !shockwave_accents.empty() && std::ranges::none_of(shockwave_accents, [](const auto &command) {
             return command.renderer == hs::VfxRenderer::Ground && command.primitive == hs::VfxPrimitive::Ring;
         }), "authoritative wavefront replaces only legacy ring that crosses safe gaps");
     event.geometry = {};
       event.asset = hs::MakeAssetId("particle.line.ricochet");
-    Check(!catalog.ExpandEvent(event, 100, full, lines).Succeeded(), "line target required");
+    Check(!catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded(), "line target required");
     parameters.flags = static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
     parameters.target = {4.0f, 0.0f, 5.0f};
     event.parameters = hs::EncodeVfxParameters(parameters);
-    Check(catalog.ExpandEvent(event, 100, full, lines).Succeeded() && lines.size() == 1 &&
+    Check(catalog.ExpandEvent(event, 1.0f, full, lines).Succeeded() && lines.size() == 1 &&
               lines.front().sprite != 0 && lines.front().uv_repeat > 1.0f &&
               lines.front().primitive == hs::VfxPrimitive::DashedRicochet,
           "expand line VFX");
@@ -542,7 +518,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded() &&
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded() &&
                   std::ranges::any_of(particles, [&](const auto &command) {
                       return command.renderer == renderer && command.primitive == primitive;
                   }),
@@ -553,7 +529,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded(),
               "composition VFX expands");
         const bool has_ring = std::ranges::any_of(particles, [](const auto &command) {
             return command.renderer == hs::VfxRenderer::Ground &&
@@ -573,7 +549,7 @@ void TestVfxCatalog()
         event.asset = hs::MakeAssetId(id);
         std::vector<hs::ParticleSpawnCommand> particles;
         std::vector<hs::VfxLineSpawnCommand> ignored_lines;
-        Check(catalog.ExpandEvent(event, 100, particles, ignored_lines).Succeeded(),
+        Check(catalog.ExpandEvent(event, 1.0f, particles, ignored_lines).Succeeded(),
               "hierarchy VFX expands");
         return particles;
     };
@@ -745,8 +721,10 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     const auto directory = root / "playtest";
     hs::PlaytestRecorder recorder;
     Check(recorder.Start({directory, 42, 99, 101}).Succeeded(), "start playtest recorder");
-    const std::array edges{hs::ActionEdge{1, hs::GameAction::SkillQ,
-                                         hs::EdgeKind::Pressed}};
+    const std::array edges{
+        hs::ActionEdge{1, hs::GameAction::SkillQ, hs::EdgeKind::Pressed},
+        hs::ActionEdge{2, hs::GameAction::CharacterPage, hs::EdgeKind::Pressed},
+        hs::ActionEdge{3, hs::GameAction::CharacterPage, hs::EdgeKind::Released}};
     const std::array ui_actions{
         hs::UiAction{hs::UiActionKind::SwapLoadoutSlots, 0, 1}};
     hs::InputFrame input{1, {}, edges, ui_actions};
@@ -792,6 +770,16 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
     Check(recorder.Record(menu_input, 3234, probe, {}).Succeeded(),
           "record post-run menu tick");
     Check(recorder.Finish(true).Succeeded(), "finish playtest recorder");
+    Check(recorder.Finish(true).Succeeded() && !recorder.Active(),
+          "successful finalization remains complete on repetition");
+    for (const auto name : {"metadata.json", "inputs.ndjson", "timeline.csv",
+                            "events.ndjson", "analysis.md", "result.json"})
+    {
+        const auto file = CreateFileW((directory / name).c_str(), GENERIC_READ, 0,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(file != INVALID_HANDLE_VALUE, "finalized recording releases every file handle");
+        CloseHandle(file);
+    }
     Check(std::filesystem::is_regular_file(directory / "result.json") &&
               std::filesystem::is_regular_file(directory / "analysis.md"),
           "playtest reports exist");
@@ -844,6 +832,170 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
               replay.frames[0].ui_actions[0] == ui_actions[0] &&
               replay.frames[2].expected_checksum == 3234,
           "playtest inputs replay exactly");
+    Check(replay.frames[0].ordered_edges.size() == edges.size(),
+          "replay retains character-page input edges");
+    for (std::size_t i = 0; i < edges.size(); ++i)
+    {
+        const auto &actual = replay.frames[0].ordered_edges[i];
+        Check(actual.sequence == edges[i].sequence && actual.action == edges[i].action &&
+                  actual.kind == edges[i].kind,
+              "replay preserves action order, kind, and sequence");
+    }
+
+    std::ifstream metadata_stream(directory / "metadata.json");
+    const std::string metadata((std::istreambuf_iterator<char>(metadata_stream)), {});
+    metadata_stream.close();
+    const auto reject_version = [&](std::string_view field, std::uint32_t current,
+                                    std::uint32_t previous) {
+        auto invalid = metadata;
+        const auto original = std::format("\"{}\": {}", field, current);
+        const auto position = invalid.find(original);
+        Check(position != std::string::npos, "find recorded replay version");
+        invalid.replace(position, original.size(), std::format("\"{}\": {}", field, previous));
+        {
+            std::ofstream output(directory / "metadata.json", std::ios::trunc);
+            output << invalid;
+            Check(output.good(), "write obsolete replay version");
+        }
+        const auto result = hs::LoadPlaytestReplay(directory, replay);
+        Check(!result && result.Message().find("incompatible") != std::string_view::npos,
+              "reject obsolete replay version before loading its input frames");
+        Check(replay.header.simulation_version == hs::kSimulationVersion &&
+                  replay.header.gameplay_hash_version == hs::kGameplayHashVersion &&
+                  replay.frames.size() == 3 && replay.frames[0].expected_checksum == 1234 &&
+                  replay.frames[0].ordered_edges[1].action == hs::GameAction::CharacterPage,
+              "obsolete replay version preserves the previous valid output");
+    };
+    reject_version("simulation_version", hs::kSimulationVersion, 4);
+    reject_version("gameplay_hash_version", hs::kGameplayHashVersion, 6);
+    {
+        std::ofstream output(directory / "metadata.json", std::ios::trunc);
+        output << metadata;
+        Check(output.good(), "restore current replay metadata for malformed input tests");
+    }
+
+    std::ifstream input_stream(directory / "inputs.ndjson");
+    const std::string trace((std::istreambuf_iterator<char>(input_stream)), {});
+    input_stream.close();
+    const auto reject_input = [&](std::string_view original, std::string_view replacement) {
+        auto invalid = trace;
+        const auto position = invalid.find(original);
+        Check(position != std::string::npos, "find recorded field for corruption test");
+        invalid.replace(position, original.size(), replacement);
+        {
+            std::ofstream output(directory / "inputs.ndjson", std::ios::trunc);
+            output << invalid;
+            Check(output.good(), "write malformed replay input");
+        }
+        Check(!hs::LoadPlaytestReplay(directory, replay), "reject invalid replay input");
+        Check(replay.frames.size() == 3 && replay.frames[0].expected_checksum == 1234 &&
+                  replay.frames[0].ordered_edges[1].action == hs::GameAction::CharacterPage,
+              "failed replay load preserves the previous valid recording");
+    };
+    for (const auto value : {"7", "256", "-1", "1.5", "18446744073709551615"})
+        reject_input("\"action\":6", std::string("\"action\":") + value);
+    for (const auto value : {"2", "256", "-1", "0.5"})
+        reject_input("\"kind\":0", std::string("\"kind\":") + value);
+    for (const auto value : {"256", "-1", "0.5", "18446744073709551615"})
+    {
+        reject_input("\"value\":0", std::string("\"value\":") + value);
+        reject_input("\"secondary\":1", std::string("\"secondary\":") + value);
+    }
+    for (const auto value : {"8", "256", "-1", "0.5"})
+        reject_input("\"kind\":7", std::string("\"kind\":") + value);
+}
+
+void TestRecordingFileFinalization(const std::filesystem::path &root)
+{
+    const auto path = root / "recording-finalize.txt";
+    std::filesystem::create_directories(root);
+    std::ofstream normal(path);
+    normal << "last partial batch";
+    Check(hs::runtime_detail::FinishRecordingFile(normal) && !normal.is_open(),
+          "normal finalization flushes and closes the real file");
+    std::ifstream saved(path);
+    const std::string text((std::istreambuf_iterator<char>(saved)), {});
+    Check(text == "last partial batch", "partial buffered data survives finalization");
+    saved.close();
+
+    struct FailedFlush : std::streambuf { int sync() override { return -1; } } failed;
+    for (bool exceptions : {false, true})
+    {
+        std::ofstream file(path);
+        std::ostream &stream = file;
+        auto *original = stream.rdbuf(&failed);
+        if (exceptions) stream.exceptions(std::ios::badbit | std::ios::failbit);
+        Check(!hs::runtime_detail::FinishRecordingFile(file) && !file.is_open(),
+              "flush failure propagates while the owned file still closes");
+        stream.rdbuf(original);
+
+        std::ofstream closed(path);
+        closed.close();
+        if (exceptions) closed.exceptions(std::ios::badbit | std::ios::failbit);
+        Check(!hs::runtime_detail::FinishRecordingFile(closed),
+              "close failure cannot return success");
+    }
+}
+
+void TestPlaytestFinalizationFailures(const std::filesystem::path &root)
+{
+    // An occupied report path is a real file-open failure, independent of ACLs.
+    for (const auto blocked : {"analysis.md", "result.json"})
+    {
+        const auto directory = root / (std::string("playtest-failure-") + blocked);
+        hs::PlaytestRecorder recorder;
+        Check(recorder.Start({directory, 42, 99, 101}).Succeeded(),
+              "start recorder for report failure");
+        hs::SimulationObservation probe;
+        probe.tick = 1;
+        probe.phase = hs::SessionPhase::Playing;
+        Check(recorder.Record({1, {}, {}}, 1234, probe, {}).Succeeded(),
+              "buffer a partial batch before finalization");
+        std::filesystem::create_directory(directory / blocked);
+        Check(!recorder.Finish(true), "report file-open failure rejects finalization");
+        if (std::string_view(blocked) == "analysis.md")
+        {
+            std::ifstream input(directory / "result.json");
+            const std::string receipt((std::istreambuf_iterator<char>(input)), {});
+            Check(receipt.contains("\"execution_valid\": false"),
+                  "failed analysis cannot publish a valid recording receipt");
+        }
+        Check(!recorder.Finish(true), "failed finalization cannot later return success");
+        Check(!recorder.Active(), "failed finalization ends recording admission");
+    }
+    const auto directory = root / "playtest-metadata-failure";
+    std::filesystem::create_directories(directory / "metadata.json");
+    hs::PlaytestRecorder recorder;
+    Check(!recorder.Start({directory, 42, 99, 101}),
+          "metadata file-open failure rejects recording admission");
+    Check(!recorder.Active(), "missing metadata never admits recording");
+}
+
+void TestSessionMusicTransitions()
+{
+    const auto menu = hs::MakeAssetId("audio.bgm.main_menu");
+    const auto session = hs::MakeAssetId("audio.bgm.session");
+    const auto boss = hs::MakeAssetId("audio.bgm.final_boss");
+    Check(hs::ResolveSessionMusic(hs::SessionPhase::Playing, menu).value == session.value &&
+              hs::ResolveSessionMusic(hs::SessionPhase::Playing, {}).value == session.value,
+          "new sessions start session music after menu or a terminal stinger");
+    for (const auto track : {session, boss})
+    {
+        for (const auto phase : {hs::SessionPhase::Paused, hs::SessionPhase::CardSelection,
+                                 hs::SessionPhase::StatAllocation, hs::SessionPhase::RelicSelection})
+        {
+            const auto temporary = hs::ResolveSessionMusic(phase, track);
+            Check(temporary.value == track.value &&
+                      hs::ResolveSessionMusic(hs::SessionPhase::Playing, temporary).value == track.value,
+                  "temporary pages and resume preserve the current session or boss music");
+        }
+    }
+    Check(hs::ResolveSessionMusic(hs::SessionPhase::MainMenu, boss).value == menu.value &&
+              hs::ResolveSessionMusic(hs::SessionPhase::Victory, boss).value ==
+                  hs::MakeAssetId("audio.stinger.victory").value &&
+              hs::ResolveSessionMusic(hs::SessionPhase::Defeat, boss).value ==
+                  hs::MakeAssetId("audio.stinger.defeat").value,
+          "menu and terminal outcomes replace boss music with their own cue");
 }
 
 void TestCameraPoseContinuity()
@@ -885,16 +1037,16 @@ void TestVfxSessionReset()
     state.ClearDecoded(); // A successful catalog reload retains semantic episode history.
     Check(!state.MarkPersistentBurst(77, 3) && state.MarkPersistentBurst(77, 4),
           "catalog reload replayed an active burst or merged distinct visual kinds");
-    state.flashes.emplace_back();
-    state.ground_events.emplace_back();
-    state.ribbon_events.emplace_back();
-    state.light_events.emplace_back();
-    state.distortion_events.emplace_back();
-    state.decal_events.emplace_back();
-    state.particle_spawns.emplace_back();
-    state.effect_lines.emplace_back();
-    Check(state.Synchronize(2) && state.flashes.empty() && state.ground_events.empty() &&
-              state.particle_spawns.empty() && state.effect_lines.empty() && state.ribbon_events.empty() && state.light_events.empty() && state.distortion_events.empty() && state.decal_events.empty(),
+    state.decoded.flashes.emplace_back();
+    state.decoded.ground_events.emplace_back();
+    state.decoded.ribbon_events.emplace_back();
+    state.decoded.light_events.emplace_back();
+    state.decoded.distortion_events.emplace_back();
+    state.decoded.decal_events.emplace_back();
+    state.decoded.particle_spawns.emplace_back();
+    state.decoded.effect_lines.emplace_back();
+    Check(state.Synchronize(2) && state.decoded.flashes.empty() && state.decoded.ground_events.empty() &&
+              state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty() && state.decoded.ribbon_events.empty() && state.decoded.light_events.empty() && state.decoded.distortion_events.empty() && state.decoded.decal_events.empty(),
           "session restart retained an old visual");
     Check(state.MarkPersistentBurst(77, 3),
           "new simulation session retained an old burst episode");
@@ -924,15 +1076,278 @@ void TestSessionProbeUiBridge()
           "session probe bridge preserves skills and loadout");
 }
 
+void TestCharacterDetailsTextFit()
+{
+    using Microsoft::WRL::ComPtr;
+    ComPtr<IDWriteFactory> base;
+    Check(SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+              reinterpret_cast<IUnknown **>(base.GetAddressOf()))), "create text-fit factory");
+    ComPtr<IDWriteFactory5> factory;
+    Check(SUCCEEDED(base.As(&factory)), "query bundled-font factory");
+    std::array<wchar_t, 32768> executable{};
+    Check(GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())) != 0,
+          "locate bundled text-fit font");
+    auto directory = std::filesystem::path(executable.data()).parent_path();
+    if (!std::filesystem::exists(directory / L"Fonts" / L"NotoSansKR.ttf")) directory = directory.parent_path();
+    ComPtr<IDWriteFontFile> file;
+    ComPtr<IDWriteFontSetBuilder1> builder;
+    ComPtr<IDWriteFontSet> set;
+    ComPtr<IDWriteFontCollection1> collection;
+    Check(SUCCEEDED(factory->CreateFontFileReference((directory / L"Fonts" / L"NotoSansKR.ttf").c_str(), nullptr, &file)) &&
+              SUCCEEDED(factory->CreateFontSetBuilder(&builder)) && SUCCEEDED(builder->AddFontFile(file.Get())) &&
+              SUCCEEDED(builder->CreateFontSet(&set)) &&
+              SUCCEEDED(factory->CreateFontCollectionFromFontSet(set.Get(), &collection)),
+          "load the renderer's bundled Noto Sans KR font");
+    ComPtr<IDWriteFontFamily> family;
+    ComPtr<IDWriteLocalizedStrings> names;
+    Check(collection->GetFontFamilyCount() && SUCCEEDED(collection->GetFontFamily(0, &family)) &&
+              SUCCEEDED(family->GetFamilyNames(&names)), "query bundled font name");
+    UINT32 index{}, length{};
+    BOOL exists{};
+    names->FindLocaleName(L"ko-kr", &index, &exists);
+    if (!exists) index = 0;
+    Check(SUCCEEDED(names->GetStringLength(index, &length)), "query font name length");
+    std::wstring family_name(length + 1, L'\0');
+    Check(SUCCEEDED(names->GetString(index, family_name.data(), length + 1)), "read bundled font name");
+    std::string fit_failures;
+    std::size_t trailing_only_wraps{};
+    const auto check_fit = [&](const hs::UiModel &entry) {
+        const std::string_view text(entry.utf8_text.data());
+        const auto count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                              static_cast<int>(text.size()), nullptr, 0);
+        Check(count > 0, "details text is complete valid UTF-8");
+        std::wstring wide(static_cast<std::size_t>(count), L'\0');
+        Check(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                  static_cast<int>(text.size()), wide.data(), count) == count, "decode details text");
+        ComPtr<IDWriteTextFormat> format;
+        ComPtr<IDWriteTextLayout> layout;
+        Check(SUCCEEDED(factory->CreateTextFormat(family_name.c_str(), collection.Get(), DWRITE_FONT_WEIGHT_NORMAL,
+                  DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, static_cast<float>(entry.font_pixels),
+                  L"ko-kr", &format)), "create authored details format");
+        Check(SUCCEEDED(format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)) &&
+                  SUCCEEDED(factory->CreateTextLayout(wide.data(), count, format.Get(),
+                      entry.size_pixels.x, 1080, &layout)), "measure unshrunk details text");
+        DWRITE_TEXT_METRICS metrics{};
+        Check(SUCCEEDED(layout->GetMetrics(&metrics)), "read details glyph metrics");
+        // Wrapped trailing spaces are not visible overflow and must not trigger renderer shrink/trim.
+        if (metrics.widthIncludingTrailingWhitespace > entry.size_pixels.x &&
+            metrics.width <= entry.size_pixels.x && metrics.height <= entry.size_pixels.y)
+            ++trailing_only_wraps;
+        for (const float scale : {1.0f, 720.0f / 1080.0f})
+            if (metrics.height * scale > entry.size_pixels.y * scale + 0.01f ||
+                metrics.width * scale > entry.size_pixels.x * scale + 0.01f)
+            {
+                fit_failures += std::format("Details need shrinking/clipping at scale {}: {} (visible={} trailing={} height={} > {}x{})\n",
+                    scale, text, metrics.width, metrics.widthIncludingTrailingWhitespace, metrics.height,
+                    entry.size_pixels.x, entry.size_pixels.y);
+            }
+    };
+    hs::PresentationCatalog catalog;
+    Check(hs::LoadPresentationCatalog(test_generation::ProductPath("game-data/presentation-catalog"), catalog).Succeeded(),
+          "load authored relic names and rules for text-fit");
+    hs::GameReadModelStorage model;
+    model.arena_half_extent = 10;
+    model.player.health = model.player.max_health = 100;
+    model.session.health = model.session.max_health = 100;
+    model.session.skill_levels.fill(1);
+    model.session.upgrade_masks.fill(0xFF);
+    model.session.relic_mask = hs::kAllRelicsMask;
+    for (auto &damage : model.summary.upgrade_damage) damage.fill(std::numeric_limits<std::uint64_t>::max());
+    model.summary.relic_triggers.fill(std::numeric_limits<std::uint64_t>::max());
+    model.summary.relic_damage.fill(std::numeric_limits<std::uint64_t>::max());
+    model.summary.relic_kills.fill(std::numeric_limits<std::uint64_t>::max());
+    for (auto &effects : model.summary.relic_effects) effects.fill(std::numeric_limits<std::uint64_t>::max());
+    hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
+    hs::PresentationUiState ui;
+    const auto project = [&] {
+        snapshot.Clear();
+        Check(hs::ProjectRenderSnapshot(model.View(), catalog, ui, {}, snapshot), "project text-fit fixture");
+    };
+    for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
+    {
+        model.session.phase = hs::SessionPhase::MainMenu;
+        ui.page = hs::UiPage::Collection;
+        ui.selected_collection_skill = static_cast<std::uint8_t>(skill);
+        project();
+        std::vector<std::string> descriptions;
+        for (const auto &entry : snapshot.View().ui)
+            if (entry.kind == hs::UiModel::Kind::Panel && entry.color_rgba == 0xFF2D4058u)
+            {
+                const std::string_view text(entry.utf8_text.data());
+                Check(text.find('\n') != std::string_view::npos, "collection retains the complete upgrade rule");
+                descriptions.emplace_back(text.substr(text.find('\n') + 1));
+            }
+        Check(descriptions.size() == hs::kUpgradeCount, "all authored upgrade descriptions are present");
+        model.session.phase = hs::SessionPhase::Paused;
+        ui.page = hs::UiPage::CharacterSkills;
+        ui.selected_character_skill = static_cast<std::uint8_t>(skill);
+        std::size_t shown{};
+        for (ui.character_details_page = 0; ui.character_details_page < hs::CharacterDetailsPageCount(model.session, ui);
+             ++ui.character_details_page)
+        {
+            project();
+            for (const auto &entry : snapshot.View().ui)
+                if (entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x >= 780 &&
+                    entry.anchor_pixels.y >= 530 && entry.anchor_pixels.y < 950)
+                {
+                    check_fit(entry);
+                    if (entry.color_rgba == 0xFFD7E0ECu)
+                        Check(shown < descriptions.size() && entry.utf8_text.data() == descriptions[shown++],
+                              "paged upgrade rule matches the full collection rule without truncation");
+                }
+        }
+        Check(shown == hs::kUpgradeCount, "paging exposes every authored upgrade rule exactly once");
+    }
+    ui.page = hs::UiPage::CharacterStats;
+    std::size_t shown{};
+    for (ui.character_details_page = 0; ui.character_details_page < hs::CharacterDetailsPageCount(model.session, ui);
+         ++ui.character_details_page)
+    {
+        project();
+        for (const auto &entry : snapshot.View().ui)
+            if (entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x < 1620 &&
+                entry.anchor_pixels.y >= 235 && entry.anchor_pixels.y < 950)
+            {
+                check_fit(entry);
+                if (entry.color_rgba == 0xFFB8C2D0u)
+                    Check(shown < hs::kRelicCount &&
+                              std::string_view(entry.utf8_text.data()) == catalog.relic_rules[shown++].data(),
+                          "paged relic rule matches the complete cooked description");
+            }
+    }
+    Check(shown == hs::kRelicCount, "paging exposes every authored relic rule exactly once");
+    Check(trailing_only_wraps != 0, "authored details exercise trailing-space wrap without visible overflow");
+    Check(fit_failures.empty(), fit_failures);
+    std::cout << "UI text-fit: 72 upgrade rules, 20 relic rules, maximum counters; no additional shrink/trim at 1080p/720p\n";
+}
+
+void TestDpiWindowCoordinates()
+{
+    auto manifest_path = test_generation::ExecutableDirectory() / "ProjectHS.manifest";
+    if (!std::filesystem::is_regular_file(manifest_path))
+        manifest_path = manifest_path.parent_path().parent_path() / "ProjectHS.manifest";
+    std::ifstream manifest(manifest_path);
+    const std::string declaration{std::istreambuf_iterator<char>(manifest), std::istreambuf_iterator<char>()};
+    Check(declaration.find(
+              "<dpiAwareness xmlns=\"http://schemas.microsoft.com/SMI/2016/WindowsSettings\">PerMonitorV2</dpiAwareness>") != std::string::npos,
+          "ProjectHS generated manifest declares PerMonitorV2");
+
+    const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    Check(previous != nullptr, "select PMv2 for the hidden window test");
+    struct RestoreDpiContext
+    {
+        DPI_AWARENESS_CONTEXT previous;
+        ~RestoreDpiContext() { SetThreadDpiAwarenessContext(previous); }
+    } restore{previous};
+    auto channels = std::make_unique<hs::RuntimeChannels>();
+    {
+        hs::PresentationCamera camera{0.0f, 45.0f, 60.0f, 10.0f, 50, 200};
+        hs::Window window(*channels, {}, camera);
+        Check(window.Create(640, 360, false, false).Succeeded(), "create a hidden DPI-aware window");
+        const auto handle = window.Handle();
+        UINT registered_count{};
+        Check(GetRegisteredRawInputDevices(nullptr, &registered_count, sizeof(RAWINPUTDEVICE)) == 0,
+              "query registered raw input devices");
+        std::vector<RAWINPUTDEVICE> registered(registered_count);
+        Check(GetRegisteredRawInputDevices(registered.data(), &registered_count,
+                                           sizeof(RAWINPUTDEVICE)) != static_cast<UINT>(-1),
+              "read registered raw input devices");
+        std::size_t foreground_devices{};
+        for (const auto &device : registered)
+        {
+            if (device.hwndTarget != handle || device.usUsagePage != HID_USAGE_PAGE_GENERIC ||
+                (device.usUsage != HID_USAGE_GENERIC_KEYBOARD && device.usUsage != HID_USAGE_GENERIC_MOUSE))
+                continue;
+            Check((device.dwFlags & (RIDEV_INPUTSINK | RIDEV_EXINPUTSINK)) == 0,
+                  "game keyboard and mouse receive raw input only while foreground");
+            ++foreground_devices;
+        }
+        Check(foreground_devices == 2, "both game raw input devices use foreground delivery");
+        hs::HeldInputState held;
+        held.move_held = true;
+        held.basic_attack_held = true;
+        channels->held_input.store(held);
+        const auto focus_epoch = channels->focus_epoch.load();
+        SendMessageW(handle, WM_KILLFOCUS, 0, 0);
+        held = channels->held_input.load();
+        Check(!held.move_held && !held.basic_attack_held &&
+                  channels->focus_epoch.load() == focus_epoch + 1,
+              "focus loss clears held input and invalidates queued action edges");
+        Check(!IsWindowVisible(handle) && AreDpiAwarenessContextsEqual(
+                  GetWindowDpiAwarenessContext(handle), DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2),
+              "hidden HWND retains the PMv2 context");
+        Check(window.ApplyDisplayPlacement({"auto"}, false, 640, 360).Succeeded(),
+              "place the requested physical client extent");
+        RECT client{}, native{};
+        Check(GetClientRect(handle, &client) && client.right == 640 && client.bottom == 360,
+              "client extent remains physical pixels at the actual monitor DPI");
+        POINT cursor{320, 180};
+        Check(ClientToScreen(handle, &cursor) && ScreenToClient(handle, &cursor) &&
+                  cursor.x == 320 && cursor.y == 180,
+              "screen/client mouse coordinates round-trip without manual scaling");
+        hs::Float2 hover{};
+        window.SetUiHoverHandler([&](hs::Float2 value) { hover = value; });
+        SendMessageW(handle, WM_MOUSEMOVE, 0, MAKELPARAM(160, 90));
+        Check(std::abs(hover.x + 0.5f) < 0.001f && std::abs(hover.y - 0.5f) < 0.001f,
+              "mouse lParam uses the physical client extent");
+
+        Check(GetWindowRect(handle, &native), "query hidden window placement");
+        RECT suggested{native.left + 7, native.top + 11, native.right + 20, native.bottom + 28};
+        const auto dpi = GetDpiForWindow(handle);
+        Check(dpi != 0, "query actual HWND DPI");
+        // Synthetic message tests placement/resize handling without requiring two DPI monitors.
+        SendMessageW(handle, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+        Check(GetWindowRect(handle, &native) && EqualRect(&native, &suggested),
+              "DPI notification applies the supplied physical position and frame");
+        Check(GetClientRect(handle, &client) && client.right == 653 && client.bottom == 377,
+              "DPI notification preserves the suggested client resize");
+        hs::ResizeCommand resize{}, last_resize{};
+        bool resized{};
+        while (channels->resize_commands.TryPop(resize)) { last_resize = resize; resized = true; }
+        Check(resized && last_resize.width == 653 && last_resize.height == 377,
+              "WM_SIZE publishes the physical renderer resize");
+
+        Check(window.ApplyDisplayPlacement({"auto"}, true, 640, 360).Succeeded(), "enter hidden borderless mode");
+        MONITORINFO monitor{sizeof(monitor)};
+        Check(GetMonitorInfoW(MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST), &monitor),
+              "query borderless monitor rectangle");
+        suggested = {monitor.rcMonitor.left + 10, monitor.rcMonitor.top + 10,
+                     monitor.rcMonitor.left + 110, monitor.rcMonitor.top + 110};
+        SendMessageW(handle, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+        Check(GetWindowRect(handle, &native) && EqualRect(&native, &monitor.rcMonitor),
+              "borderless DPI notification fills its target monitor");
+        Check(window.ApplyDisplayPlacement({"auto"}, false, 640, 360).Succeeded() &&
+                  GetClientRect(handle, &client) && client.right == 640 && client.bottom == 360,
+              "return from borderless to the requested physical client extent");
+
+        suggested = {};
+        SendMessageW(handle, WM_DPICHANGED, MAKEWPARAM(dpi, dpi), reinterpret_cast<LPARAM>(&suggested));
+        PostQuitMessage(0);
+        auto failure = hs::Result::Success();
+        Check(!window.PumpMessages(&failure) && !failure && failure.Code() == hs::ErrorCode::InvalidState &&
+                  failure.Message().find("DPI window placement failed") != std::string_view::npos,
+              "synchronous DPI failure is returned even with WM_QUIT queued");
+        Check(!channels->stop_requested.load(), "DPI failure reaches the caller before Runtime stops");
+    }
+    MSG quit{};
+    while (PeekMessageW(&quit, nullptr, WM_QUIT, WM_QUIT, PM_REMOVE)) {}
+}
+
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
     const auto root = TestDirectory();
     std::error_code error;
     std::filesystem::remove_all(root, error);
     try
     {
+        if (argc > 1)
+        {
+            Check(argc == 2 && std::string_view(argv[1]) == "ui-text-fit", "unknown runtime test case");
+            TestCharacterDetailsTextFit();
+            return 0;
+        }
         TestVfxCatalog();
         TestProductionVfxDecoding();
         TestSaveRecovery(root);
@@ -940,12 +1355,14 @@ int main()
         TestAudioCatalogValidation(root);
         TestAudioPayloadLazyLoad(root);
         TestExperimentSpecRoundTrip(root);
-        TestNamedPipeCommandRoundTrip();
-        TestNamedPipeIdempotencyAndTargetTick();
         TestPlaytestRecordAndReplay(root);
+        TestRecordingFileFinalization(root);
+        TestPlaytestFinalizationFailures(root);
+        TestSessionMusicTransitions();
         TestSessionProbeUiBridge();
         TestVfxSessionReset();
         TestCameraPoseContinuity();
+        TestDpiWindowCoordinates();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";
         return 0;

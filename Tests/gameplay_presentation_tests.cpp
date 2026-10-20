@@ -1,4 +1,5 @@
 #include "gameplay_test_support.hpp"
+#include <hs/presentation/meadow_surface.hpp>
 
 #include <algorithm>
 #include <array>
@@ -12,10 +13,183 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace gameplay_test
 {
+
+namespace
+{
+void CheckSettingsTelemetry(hs::GameSimulation &simulation)
+{
+    for (const auto &descriptor : hs::GraphicsSettingDescriptors())
+    {
+        const auto label = hs::GraphicsSettingDisplayLabel(descriptor);
+        Check(std::ranges::any_of(label, [](unsigned char byte) { return byte >= 0x80; }),
+              "every graphics setting has a Korean display label");
+    }
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Vsync, "true") == "켜짐" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "0") == "제한 없음" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::ManualScalePercent, "75") == "75%" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::ReconstructionProvider, "internal_taau") == "기본 TAA 업스케일링",
+          "settings localize values and show meaningful units");
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::Sharpening, "0.200000003") == "0.2" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::BloomStrength, "0.100000001") == "0.1" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::OutlineWidthPx, "1.23456789") == "1.235 px",
+          "float display removes binary precision noise and retains three decimal places");
+    Check(hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "1000.12500001") == "1000.125 nit" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::HdrPeakNits, "auto") == "자동" &&
+              hs::GraphicsSettingDisplayValue(hs::SettingId::FrameLimitFps, "144") == "144 FPS",
+          "auto-float display keeps units while automatic and integer values stay intact");
+    hs::GraphicsSettings capped;
+    capped.frame_limit_fps = 120;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "144",
+          "common high-refresh frame caps are selectable");
+    capped.frame_limit_fps = 144;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, -1, nullptr) == "120" &&
+              hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "165",
+          "144 FPS has adjacent high-refresh choices");
+    capped.frame_limit_fps = 138;
+    Check(hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, -1, nullptr) == "120" &&
+              hs::NextGraphicsSettingToken(capped, hs::SettingId::FrameLimitFps, 1, nullptr) == "144",
+          "custom saved frame caps retain their numeric position");
+    for (const auto extent : {hs::GraphicsExtent{1920, 1080}, {2560, 1080}, {1280, 1024}})
+    {
+        const auto scale = std::min(extent.width / 1920.0f, extent.height / 1080.0f);
+        const hs::Float2 pixels{extent.width * 0.5f + (1560 - 960) * scale,
+                               extent.height * 0.5f + (270 - 540) * scale};
+        const auto cursor = hs::ReferenceUiCursor(pixels, extent);
+        Check(std::abs(cursor.x - 0.625f) < 0.0001f &&
+                  std::abs(cursor.y - 0.5f) < 0.0001f,
+              "current click coordinates match letterboxed UI on every aspect ratio");
+    }
+    hs::GraphicsSettingsUiModel clicks;
+    auto click_ui = test_ui;
+    click_ui.settings_group = 1;
+    const auto click = hs::ResolveUiInteraction({}, click_ui, {},
+        hs::ReferenceUiCursor({1000, 430}, {1920, 1080}), &clicks);
+    Check(click.runtime_command && click.runtime_command->graphics_setting == hs::SettingId::Vsync &&
+              std::string_view(click.runtime_command->graphics_token.data()) == "false",
+          "clicking a setting value changes its canonical setting");
+    hs::GraphicsSettingsUiModel receipt;
+    receipt.choices = {
+        {hs::SettingId::HdrMode, "off", "off", "", true},
+        {hs::SettingId::HdrMode, "auto", "auto", "", true},
+        {hs::SettingId::HdrMode, "on", "on", "HDR 미지원", false},
+        {hs::SettingId::ReconstructionProvider, "auto", "auto", "", true},
+        {hs::SettingId::ReconstructionProvider, "dlss", "dlss", "DLSS 미지원", false},
+        {hs::SettingId::ReconstructionProvider, "internal_taau", "internal_taau", "", true},
+        {hs::SettingId::FrameGenerationMode, "off", "off", "", true},
+        {hs::SettingId::FrameGenerationMode, "auto", "auto", "프레임 생성 미지원", false}};
+    Check(!hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", nullptr) &&
+              !hs::GraphicsSettingTokenAvailable(hs::SettingId::ReconstructionProvider, "dlss", &receipt),
+          "unsupported features cannot be enabled before or after capability discovery");
+    receipt.requested.hdr_mode = hs::GraphicsHdrMode::Off;
+    receipt.requested.frame_generation_mode = hs::GraphicsFrameGenerationMode::Off;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "auto" &&
+              hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "internal_taau" &&
+              !hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::FrameGenerationMode, 1, &receipt),
+          "settings skip unsupported choices and disable controls with no available alternative");
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto disabled_ui = test_ui;
+            disabled_ui.settings_group = group;
+            disabled_ui.settings_page = page;
+            const auto rows = hs::GraphicsSettingsVisibleRows(disabled_ui);
+            for (std::size_t row = 0; row < rows.size(); ++row)
+                if (rows[row]->id == hs::SettingId::FrameGenerationMode)
+                    for (const float x : {1000.0f, 1470.0f, 1570.0f})
+                    {
+                        const auto click = hs::ResolveUiInteraction({}, disabled_ui, {},
+                            hs::ReferenceUiCursor({x, hs::kGraphicsUiRowY + row * hs::kGraphicsUiRowStride + 20},
+                                                  {1920, 1080}), &receipt);
+                        Check(!click.invalid && !click.runtime_command && !click.gameplay_action,
+                              "disabled setting labels and arrows ignore clicks without a rejection cue");
+                    }
+        }
+    receipt.requested.hdr_mode = hs::GraphicsHdrMode::On;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::HdrMode, 1, &receipt) == "off",
+          "an unavailable saved setting can still be turned off");
+    receipt.choices[2].available = true;
+    receipt.choices[4].available = true;
+    Check(hs::GraphicsSettingTokenAvailable(hs::SettingId::HdrMode, "on", &receipt) &&
+              hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::ReconstructionProvider, 1, &receipt) == "dlss",
+          "capability changes immediately restore supported choices");
+    receipt.requested.preset = hs::GraphicsPreset::Ultra;
+    Check(hs::NextGraphicsSettingToken(receipt.requested, hs::SettingId::Preset, 1, &receipt) == "custom",
+          "preset controls cycle directly from Ultra to Custom");
+    receipt.telemetry_status = {
+        "Monitor fixture | Refresh 59.94 Hz | Monitor HDR active | Renderer HDR10",
+        "Render 1280x720 / output 1920x1080 | Render FPS 61.5 | Display FPS unavailable",
+        "DXGI process VRAM usage / budget 128.0 / 512.0 MiB | Observed transition usage peak unavailable"};
+    for (const auto &descriptor : hs::GraphicsSettingDescriptors())
+        receipt.resolved.push_back({descriptor.id, "fixture applied value", "Fixture native applied status"});
+    hs::GameReadModelStorage model;
+    simulation.WriteReadModel(model);
+    hs::RenderSnapshotStorage snapshot(16, 2, 2, hs::kGraphicsUiSnapshotReserve);
+    auto ui = test_ui;
+    ui.settings_group = 0;
+    ui.settings_page = 0;
+    std::size_t maximum_rows{};
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto candidate = ui;
+            candidate.settings_group = group;
+            candidate.settings_page = page;
+            const auto count = hs::GraphicsSettingsVisibleRows(candidate).size();
+            if (count > maximum_rows) { maximum_rows = count; ui = candidate; }
+        }
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, ui,
+              hs::SettingsData{}, snapshot, 0xFF, nullptr, nullptr, nullptr, &receipt),
+          "settings telemetry fits the bounded production snapshot reserve");
+    Check(snapshot.View().ui.size() <= hs::kGraphicsUiSnapshotReserve,
+          "fully annotated settings rows and telemetry retain bounded capacity");
+    for (const auto &expected : receipt.telemetry_status)
+        Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+            const auto end = std::ranges::find(entry.utf8_text, '\0');
+            return entry.kind == hs::UiModel::Kind::Text &&
+                std::string_view(entry.utf8_text.data(), end - entry.utf8_text.begin()) == expected;
+        }), "settings exposes native observations and unavailable values as read-only text");
+    Check(std::ranges::none_of(snapshot.View().ui, [](const hs::UiModel &entry) {
+        return entry.kind == hs::UiModel::Kind::Button &&
+               entry.anchor_pixels.y >= 808.0f && entry.anchor_pixels.y < 900.0f;
+    }), "settings telemetry adds no editable hit boxes");
+    for (const float x : {1450.0f, 1550.0f})
+        Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+            return entry.kind == hs::UiModel::Kind::Button && entry.anchor_pixels.x == x &&
+                   entry.anchor_pixels.y == hs::kGraphicsUiRowY &&
+                   entry.size_pixels.x == 64.0f && entry.size_pixels.y == 48.0f;
+        }), "settings edit row keeps its original drawing and hit-test bounds");
+    for (const float boundary : {0.0f, 1.0f})
+    {
+        hs::SettingsData bounded;
+        bounded.master_volume = bounded.bgm_volume = bounded.sfx_volume = bounded.ui_volume =
+            bounded.screen_overlay_intensity = boundary;
+        auto bounded_ui = test_ui;
+        bounded_ui.settings_group = 7;
+        snapshot.Clear();
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, bounded_ui,
+                  bounded, snapshot), "bounded audio and overlay settings snapshot");
+        const float arrow_x = boundary == 0 ? 1450.0f : 1550.0f;
+        for (std::size_t row = 0; row < 5; ++row)
+        {
+            const auto y = hs::kGraphicsUiRowY + row * hs::kGraphicsUiRowStride;
+            Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+                return entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x == arrow_x &&
+                       entry.anchor_pixels.y == y;
+            }), "clamped audio and overlay arrows are visibly disabled");
+            const auto click = hs::ResolveUiInteraction({}, bounded_ui, bounded,
+                hs::ReferenceUiCursor({arrow_x + 20, y + 20}, {1920, 1080}));
+            Check(!click.invalid && !click.runtime_command && !click.gameplay_action,
+                  "clamped audio and overlay arrows emit no redundant apply or cue");
+        }
+    }
+}
+} // namespace
 
 void TestCursorMovement()
 {
@@ -59,6 +233,29 @@ void TestCursorMovement()
     Check(std::abs(negative_edge.x + 10.0f) < 0.0001f &&
               std::abs(negative_edge.y) < 0.0001f,
           "new RMB click replaces destination and reaches it");
+    hs::GameReadModelStorage movement_model;
+    simulation.WriteReadModel(movement_model);
+    Check(!movement_model.View().player.locomotion_moving &&
+              movement_model.View().player.movement_stopped_tick != 0,
+          "actual movement stop retains its presentation clock");
+    hs::RenderSnapshotStorage movement_snapshot(4, 2, 2, 64);
+    Check(WriteSnapshot(simulation, movement_snapshot), "stopped movement snapshot");
+    const auto stop_clip = hs::MakeAssetId("character/archer/animation/RunForwardStop");
+    Check(std::ranges::any_of(movement_snapshot.View().instances,
+              [&](const hs::RenderInstance &instance) {
+                  return instance.mesh == hs::RenderMesh::Archer &&
+                         instance.animation_clip_id.value == stop_clip.value;
+              }), "actual movement stop selects the authored non-looping clip");
+    held.move_target_world = {0.0f, 0.0f, 0.0f};
+    held.move_held = true;
+    (void)Tick(simulation, held);
+    movement_snapshot.Clear();
+    Check(WriteSnapshot(simulation, movement_snapshot), "resumed movement snapshot");
+    Check(std::ranges::none_of(movement_snapshot.View().instances,
+              [&](const hs::RenderInstance &instance) {
+                  return instance.mesh == hs::RenderMesh::Archer &&
+                         instance.animation_clip_id.value == stop_clip.value;
+              }), "resumed movement releases the stop clip");
     Check(simulation.Shutdown().Succeeded(), "movement shutdown");
 }
 
@@ -112,15 +309,39 @@ void TestUiHitRegionsMatchAnchors()
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(test_ui.page == hs::UiPage::MainMenuSettings, "settings anchor opens settings");
+    CheckSettingsTelemetry(simulation);
 
-    SetCursor(held, 700.0f, 348.0f);
+    std::vector<hs::SettingId> visible_ids;
+    for (std::uint8_t group = 0; group < 7; ++group)
+        for (std::uint8_t page = 0; page < hs::GraphicsSettingsPageCount(group); ++page)
+        {
+            auto visible_ui = test_ui;
+            visible_ui.settings_group = group;
+            visible_ui.settings_page = page;
+            const auto rows = hs::GraphicsSettingsVisibleRows(visible_ui);
+            Check(rows.size() <= hs::kGraphicsUiRowsPerPage, "settings rows remain bounded");
+            for (const auto *row : rows) visible_ids.push_back(row->id);
+        }
+    Check(visible_ids.size() == hs::kGraphicsSettingCount, "all graphics rows have a page");
+    for (std::size_t row = 0; row < visible_ids.size(); ++row)
+        Check(visible_ids[row] == hs::GraphicsSettingDescriptors()[row].id,
+              "drawing and hit testing share canonical definition order");
+
+    SetCursor(held, 450.0f, 195.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
-    Check(last_ui_command && last_ui_command->kind == hs::UiCommandKind::SetVsync &&
-              last_ui_command->value == 0,
+    SetCursor(held, 1'470.0f, 430.0f);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    Check(last_ui_command && last_ui_command->kind == hs::UiCommandKind::SetGraphicsSetting &&
+              last_ui_command->graphics_setting == hs::SettingId::Vsync &&
+              std::string_view(last_ui_command->graphics_token.data()) == "false",
           "settings VSync button emits exact target value");
 
-    SetCursor(held, 1'050.0f, 278.0f);
+    SetCursor(held, 1'560.0f, 195.0f);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
+                   sequence, held);
+    SetCursor(held, 1'470.0f, 270.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(last_ui_command && last_ui_command->kind ==
@@ -128,7 +349,7 @@ void TestUiHitRegionsMatchAnchors()
               last_ui_command->value == 90,
           "settings volume control emits clamped percent");
 
-    SetCursor(held, 1'100.0f, 578.0f);
+    SetCursor(held, 1'100.0f, 550.0f);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
                    sequence, held);
     Check(last_ui_command && last_ui_command->kind ==
@@ -209,10 +430,50 @@ void TestCharacterInformationPage()
                 return true;
             return model.anchor_pixels.x >= 780.0f &&
                    model.anchor_pixels.x + model.size_pixels.x <= 1'560.0f &&
-                   model.anchor_pixels.y + model.size_pixels.y <= 920.0f;
+                   model.anchor_pixels.y + model.size_pixels.y <= 940.0f;
         });
-    Check(upgrade_cards == hs::kUpgradeCount && upgrades_fit,
-          "all upgrade cards fit the character panel");
+    Check(upgrade_cards == hs::kCharacterUpgradesPerPage && upgrades_fit,
+          "readable upgrade cards fit the character panel without moving slot controls");
+    SetCursor(held, 1530, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    snapshot.Clear();
+    Check(test_ui.character_details_page == 1 && WriteSnapshot(simulation, snapshot) &&
+              contains_text(snapshot.View(), "강화 5 ·") && contains_text(snapshot.View(), "강화 8 ·") &&
+              !contains_text(snapshot.View(), "강화 1 ·"),
+          "next page exposes the remaining four upgrades");
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 1, "last upgrade page cannot advance");
+    SetCursor(held, 1330, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "previous returns to the first upgrade page");
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "first upgrade page cannot go back");
+    SetCursor(held, 1530, 968);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    SetCursor(held, 700, 165);
+    (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    Check(test_ui.character_details_page == 0, "switching a character tab resets its detail page");
+    const auto hidden = hs::ResolveUiInteraction(simulation.GetObservation(), test_ui, {},
+        hs::ReferenceUiCursor({400, 494}, {1920, 1080}));
+    Check(!hidden.invalid && !hidden.gameplay_action && !hidden.runtime_command,
+          "unlearned skill rows have no invisible interactive target");
+    const auto check_remapped_bindings = [&](bool hud, const std::array<std::string_view, 4> &labels) {
+        hs::SettingsData remapped;
+        remapped.skill_virtual_keys = {'Z', 'X', 0x71, '4'};
+        hs::GameReadModelStorage model;
+        simulation.WriteReadModel(model);
+        snapshot.Clear();
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
+                  remapped, snapshot), "remapped skill labels snapshot");
+        for (std::size_t slot = 0; slot < labels.size(); ++slot)
+            Check(std::ranges::any_of(snapshot.View().ui, [&](const hs::UiModel &entry) {
+                return entry.kind == hs::UiModel::Kind::Button &&
+                       entry.anchor_pixels.x == (hud ? 730.0f + slot * 190.0f : 780.0f + slot * 195.0f) &&
+                       entry.anchor_pixels.y == (hud ? 948.0f : 225.0f) &&
+                       std::string_view(entry.utf8_text.data()).starts_with(labels[slot]);
+            }), "HUD and character slots use the current physical binding, including empty slots and function keys");
+    };
+    check_remapped_bindings(false, {"Z  관통 사격", "X  다중 사격", "F2  비어 있음", "4  비어 있음"});
 
     SetCursor(held, 850, 240);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -235,6 +496,7 @@ void TestCharacterInformationPage()
     Check(reordered.skill_loadout[1] == hs::SkillKind::PiercingShot &&
               reordered.skill_loadout[2] == hs::SkillKind::MultiShot,
           "clicking two occupied slots swaps their QWER bindings");
+    check_remapped_bindings(false, {"Z  비어 있음", "X  관통 사격", "F2  다중 사격", "4  비어 있음"});
 
     SetCursor(held, 1'000, 165);
     (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed,
@@ -255,8 +517,8 @@ void TestCharacterInformationPage()
         });
     };
     Check(has_relic_text(0xFFFFD06Au, 247.0f) &&
-              has_relic_text(0xFF9CC8FFu, 277.0f) &&
-              has_relic_text(0xFFB8C2D0u, 305.0f),
+              has_relic_text(0xFF9CC8FFu, 280.0f) &&
+              has_relic_text(0xFFB8C2D0u, 404.0f),
           "relic cards separate name, contribution, and rule hierarchy");
     const auto relic_cards = std::ranges::count_if(
         snapshot.View().ui, [](const hs::UiModel &model) {
@@ -272,13 +534,31 @@ void TestCharacterInformationPage()
                    model.anchor_pixels.x + model.size_pixels.x <= 1'620.0f &&
                    model.anchor_pixels.y + model.size_pixels.y <= 935.0f;
         });
-    Check(relic_cards == hs::kRelicCount && relics_fit,
-          "all relic cards fit the character panel");
+    Check(relic_cards == hs::kCharacterRelicsPerPage && relics_fit,
+          "readable relic cards fit the character panel");
+    for (std::size_t page = 0; page < hs::CharacterDetailsPageCount(simulation.GetObservation(), test_ui); ++page)
+    {
+        snapshot.Clear();
+        Check(WriteSnapshot(simulation, snapshot), "paged relic snapshot");
+        for (std::size_t relic = page * hs::kCharacterRelicsPerPage;
+             relic < std::min(hs::kRelicCount, (page + 1) * hs::kCharacterRelicsPerPage); ++relic)
+            Check(contains_text(snapshot.View(), DefaultContent().presentation.relic_rules[relic].data()),
+                  "every acquired relic retains its complete authored rule on a reachable page");
+        SetCursor(held, 1530, 968);
+        (void)TickEdge(simulation, hs::GameAction::BasicAttack, hs::EdgeKind::Pressed, sequence, held);
+    }
+    Check(test_ui.character_details_page == 4, "last relic page cannot advance");
+    auto empty = simulation.GetObservation();
+    empty.relic_mask = 0;
+    (void)hs::ResolveUiInteraction(empty, test_ui, {}, hs::ReferenceUiCursor({300, 950}, {1920, 1080}));
+    Check(test_ui.character_details_page == 0 && hs::CharacterDetailsPageCount(empty, test_ui) == 1,
+          "empty or reduced detail content clamps a stale page safely");
 
     const auto closed = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
     Check(closed.phase == hs::SessionPhase::Playing && test_ui.page == hs::UiPage::Root,
           "Tab closes the character page");
+    check_remapped_bindings(true, {"Z\n-", "X\n관통 사격", "F2\n다중 사격", "4\n-"});
     held.aim_world = {20.0f, 0.0f, 0.0f};
     (void)TickEdge(simulation, hs::GameAction::SkillW, hs::EdgeKind::Pressed,
                    sequence, held);
@@ -316,9 +596,11 @@ void TestPauseMenuActions()
     Check(simulation.GetObservation().phase == hs::SessionPhase::Paused &&
               test_ui.page == hs::UiPage::PauseSettings,
           "pause settings keeps the game paused");
+    CheckSettingsTelemetry(simulation);
     snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "in-game settings snapshot");
-    Check(contains_text("화면:") && !contains_text("상세 능력치") &&
+    Check(contains_text("품질") && contains_text("화면") &&
+              contains_text("돌아가기") && !contains_text("상세 능력치") &&
               !contains_text("캐릭터 정보") && !contains_text("스킬·강화"),
           "in-game settings does not render the character information page");
 
@@ -354,8 +636,37 @@ void TestSkillUpgradeCardsHaveDescriptions()
     const auto probe = simulation.GetObservation();
     Check(probe.phase == hs::SessionPhase::CardSelection,
           "upgrade description card selection");
+    for (const auto phase : {hs::SessionPhase::CardSelection, hs::SessionPhase::RelicSelection})
+    {
+        auto bounded = probe;
+        bounded.phase = phase;
+        bounded.card_count = 1;
+        bounded.level_rerolls_remaining = bounded.relic_rerolls_remaining = 0;
+        hs::PresentationUiState ui;
+        const auto reroll = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 826}, {1920, 1080}));
+        Check(!reroll.invalid && !reroll.gameplay_action, "exhausted reroll emits no accepted-action cue");
+        const auto empty_card = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 510}, {1920, 1080}));
+        Check(!empty_card.invalid && !empty_card.gameplay_action, "empty card positions are not interactive");
+        bounded.level_rerolls_remaining = bounded.relic_rerolls_remaining = 1;
+        const auto available = hs::ResolveUiInteraction(bounded, ui, {},
+            hs::ReferenceUiCursor({960, 826}, {1920, 1080}));
+        Check(available.gameplay_action && available.gameplay_action->kind == hs::UiActionKind::Reroll,
+              "available reroll keeps its existing action and hit rectangle");
+    }
 
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
+    hs::GameReadModelStorage exhausted;
+    simulation.WriteReadModel(exhausted);
+    exhausted.session.level_rerolls_remaining = 0;
+    Check(hs::ProjectRenderSnapshot(exhausted.View(), DefaultContent().presentation, {}, {}, snapshot),
+          "exhausted reroll snapshot");
+    Check(std::ranges::any_of(snapshot.View().ui, [](const hs::UiModel &entry) {
+        return entry.kind == hs::UiModel::Kind::Text && entry.anchor_pixels.x == 760 &&
+               entry.anchor_pixels.y == 790 && std::string_view(entry.utf8_text.data()) == "재추첨 0";
+    }), "exhausted reroll is visibly disabled at its existing position");
+    snapshot.Clear();
     Check(WriteSnapshot(simulation, snapshot), "upgrade description snapshot");
     bool checked_upgrade{};
     for (std::size_t card_index = 0; card_index < probe.card_count; ++card_index)
@@ -648,7 +959,7 @@ void TestAuthoredEnvironmentProjection()
     Check(simulation.Initialize({seed}, rules).Succeeded(), "environment initialize");
     hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
     Check(WriteSnapshot(simulation, snapshot), "environment snapshot capacity");
-    const auto instances = snapshot.View().instances;
+    const auto &instances = snapshot.View().static_scene->instances;
     std::size_t trees{}, grass{}, ground{};
     for (std::size_t i = 0; i < instances.size(); ++i)
     {
@@ -676,17 +987,27 @@ void TestAuthoredEnvironmentProjection()
         if (item.mesh == hs::RenderMesh::Grass)
         {
             ++grass;
+            const bool meadow = hs::MeadowContains({item.position.x, item.position.z});
             Check(item.environment_variant < 4 && item.scale.x == item.scale.z &&
-                      item.scale.x >= 0.55f && item.scale.x <= 1.2f &&
-                      item.scale.y >= 0.18f && item.scale.y <= 0.4f,
-                  "grass retains dense horizontal coverage at the reduced meter-scale height");
+                      item.scale.x >= (meadow ? (hs::MeadowRoadCoverage({item.position.x, item.position.z}) > 0 ? .35f : .45f) : .55f) && item.scale.x <= 1.2f &&
+                      item.scale.y >= (meadow ? .07f : (hs::MeadowRoadCoverage({item.position.x, item.position.z}, -.25f) > .02f ? .09f : .18f)) && item.scale.y <= .65f,
+                  "grass retains low ground coverage and bounded long meadow clumps");
         }
     }
     Check(trees > 0 && grass > 0 && ground > 0, "authored environment is present in normal gameplay");
-    Check(ground == 1, "exterior environment uses one continuous floor");
-    const auto &floor = std::ranges::find_if(instances, [](const auto &item) { return item.mesh == hs::RenderMesh::Ground; });
-    Check(floor != instances.end() && floor->scale.x >= 52.0f && floor->scale.z >= 52.0f,
-          "continuous floor covers exterior tree rows");
+    Check(ground == 4, "exterior ground must leave the authored meadow interior uncovered");
+    for (const auto &floor : instances) {
+        if (floor.mesh != hs::RenderMesh::Ground) continue;
+        Check(std::abs(floor.position.x) - floor.scale.x * .5f >= 12.0f - 1e-5f ||
+              std::abs(floor.position.z) - floor.scale.z * .5f >= 12.0f - 1e-5f,
+              "flat exterior slab overlaps a meadow depression");
+        Check(floor.scale.x >= 52.0f || floor.scale.z >= 24.0f,
+              "exterior slab no longer covers border trees");
+    }
+    for (std::uint32_t variant = 0; variant < 2; ++variant)
+        Check(std::ranges::count_if(instances, [=](const auto &item) {
+            return item.mesh == hs::RenderMesh::MeadowSurface && item.environment_variant == variant;
+        }) == 1, "representative meadow needs exactly one ground and one water surface");
 }
 
 void TestDenseGrassProjection()
@@ -707,7 +1028,7 @@ void TestDenseGrassProjection()
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
                                        test_ui, hs::SettingsData{}, snapshot), "dense grass snapshot");
         std::vector<hs::RenderInstance> result;
-        for (const auto &instance : snapshot.View().instances)
+        for (const auto &instance : snapshot.View().static_scene->instances)
             if (instance.mesh == hs::RenderMesh::Grass) result.push_back(instance);
         return result;
     };
@@ -715,17 +1036,47 @@ void TestDenseGrassProjection()
     const auto repeated = project_grass();
     Check(grass.size() > 600 && grass.size() == repeated.size(), "grass forms dense patches within allowed terrain");
     std::array<bool, 4> variants{};
-    std::size_t grouped{};
+    std::size_t grouped{}, central_grass{}, pressed_grass{}, tall_grass{}, low_grass{}, meadow_fill{}, long_fill{}, short_fill{}, dry_grass{};
+    std::array<bool, 31> central_segments{};
+    std::unordered_set<std::uint32_t> grass_colors;
     for (std::size_t i = 0; i < grass.size(); ++i)
     {
         const auto &item = grass[i];
         Check(item.position.x == repeated[i].position.x && item.position.z == repeated[i].position.z &&
                   item.yaw == repeated[i].yaw && item.scale.x == repeated[i].scale.x &&
+                  item.scale.y == repeated[i].scale.y && item.color_rgba == repeated[i].color_rgba &&
                   item.environment_variant == repeated[i].environment_variant,
               "grass placement is deterministic for the map seed");
+        const hs::Float2 position{item.position.x, item.position.z};
+        const bool meadow = hs::MeadowContains(position);
+        const auto across = std::abs(item.position.x - hs::MeadowCartCenter(item.position.z));
         Check(std::abs(item.position.x) <= 14 && std::abs(item.position.z) <= 14 &&
-                  std::abs(item.position.x - std::sin(item.position.z * 0.085f) * 6.5f) >= 4.8f,
-              "dense grass preserves arena inset and open path");
+                  (hs::MeadowRoadCoverage(position) == 0.0f || across <= .35f) &&
+                  (!meadow || (hs::MeadowPressed(position) <= .2f && !std::isfinite(hs::MeadowWaterLevel(position)))),
+              "grass preserves arena inset, worn wheel/foot paths and actual water");
+        if (meadow && hs::MeadowRoadCoverage(position, -.25f) == 0.0f && hs::MeadowPressed(position) <= .02f) {
+            tall_grass += item.scale.y > .27f;
+            low_grass += item.scale.y < .21f;
+            grass_colors.insert(item.color_rgba);
+        }
+        if ((item.stable_id >> 56u) == 0x6Au) {
+            ++meadow_fill;
+            short_fill += item.scale.y <= .18f;
+            long_fill += item.scale.y >= .5f;
+            Check(meadow && item.scale.y <= .65f, "bounded meadow fill escaped its visible area or height contract");
+        }
+        dry_grass += item.color_rgba == 0xFF2869E0u;
+        if (meadow && hs::MeadowRoadCoverage(position) > 0.0f) {
+            Check(across <= .12f && item.scale.x == .35f && item.scale.y <= .11f,
+                  "central weeds must leave both wheel tracks clear and stay below the path edge");
+            central_segments[static_cast<std::size_t>((position.y + 12.0f) * 1.25f)] = true;
+        }
+        if (meadow && across < .4f) ++central_grass;
+        if (meadow && hs::MeadowPressed(position) > .02f) {
+            ++pressed_grass;
+            Check(item.scale.y >= .07f && item.scale.y <= .11f,
+                  "worn path edge must retain shorter pressed grass");
+        }
         const auto dx = item.position.x - 9.0f;
         Check(dx * dx + item.position.z * item.position.z >= 2.45f * 2.45f,
               "dense grass preserves obstacle clearance");
@@ -740,6 +1091,14 @@ void TestDenseGrassProjection()
         }
         if (neighbours >= 3) ++grouped;
     }
+    Check(meadow_fill > 1000 && meadow_fill <= 3072 && short_fill > 800 && long_fill > 50 && dry_grass > 10,
+          "visible meadow needs a bounded dense short floor, longer clumps and dry colonies");
+    const auto covered_segments = std::ranges::count(central_segments, true);
+    Check(covered_segments > 5 && covered_segments < 25, "central weed strip must retain visible breaks");
+    Check(tall_grass > 20 && low_grass > 20 && grass_colors.size() >= 3,
+          "meadow needs taller stands, low openings and broad foliage color variation");
+    Check(pressed_grass > 0, "representative route omits all pressed-grass transitions");
+    Check(central_grass > 0, "cart route must retain grass between its worn wheel tracks");
     Check(grouped * 4 > grass.size() * 3, "most grass has several nearby neighbours instead of isolated tufts");
     Check(std::ranges::all_of(variants, [](bool present) { return present; }), "all four grass variants populate patches");
     model.seed ^= 1ull << 40;
@@ -779,6 +1138,223 @@ void TestProjectileProjectionCarriesAuthoritativeOwner()
               head->projectile_spawned_tick == 10 &&
               head->effect_asset.value == hs::MakeAssetId("particle.skill.charged_shot").value,
           "projectile head dropped authoritative owner fields");
+}
+
+void TestMeadowPresentationGrounding()
+{
+    for (int step = -48; step <= 48; ++step) {
+        const float along = float(step) * .25f;
+        for (const hs::Float2 point : {hs::Float2{-12,along}, {12,along}, {along,-12}, {along,12}}) {
+            Check(hs::MeadowGroundHeight(point) == 0.0f, "meadow perimeter must meet the flat outer slab");
+            constexpr float e=.002f;
+            const float dx=(hs::MeadowGroundHeight({point.x+e,point.y})-hs::MeadowGroundHeight({point.x-e,point.y}))/(2*e);
+            const float dz=(hs::MeadowGroundHeight({point.x,point.y+e})-hs::MeadowGroundHeight({point.x,point.y-e}))/(2*e);
+            Check(std::hypot(dx,dz)<1e-4f, "meadow edge slope must meet the horizontal slab normal");
+        }
+    }
+    hs::Float2 low{};
+    for (int z = -44; z <= 44; ++z)
+        for (int x = -44; x <= 44; ++x) {
+            const hs::Float2 point{float(x) * .25f, float(z) * .25f};
+            if (hs::MeadowGroundHeight(point) < hs::MeadowGroundHeight(low)) low = point;
+        }
+    Check(hs::MeadowGroundHeight(low) < -.005f, "meadow grounding test requires a real depression");
+    hs::DomainSignal signal{};
+    signal.kind = hs::DomainSignalKind::ExperienceCollected;
+    signal.position = {low.x, .3f, low.y};
+    signal.target = {low.x + .5f, .55f, low.y};
+    signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
+    for (const float extent : {0.0f, 8.0f, 16.0f}) {
+        std::array<hs::PresentationEvent, 3> events{};
+        const auto count = extent == 0 ? hs::ProjectDomainSignal(signal, events) :
+            hs::ProjectDomainSignal(signal, events, extent);
+        const auto h = extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
+        const auto target_h = extent >= 14 ? hs::MeadowGroundHeight({signal.target.x, signal.target.z}) : 0.0f;
+        const auto parameters = hs::DecodeVfxParameters(events[0].parameters);
+        Check(count == 2 && std::abs(events[0].position.y - (.3f + h)) < 1e-6f &&
+              events[1].position.y == events[0].position.y &&
+              std::abs(parameters.target.y - (.55f + target_h)) < 1e-6f,
+              "one-shot VFX/audio/target grounding must be explicit and independently sampled");
+        auto line = signal;
+        line.kind = hs::DomainSignalKind::RangedEnemyTelegraphed;
+        line.geometry.kind = hs::DomainSignalGeometryKind::Line;
+        line.geometry.end_position = signal.target;
+        Check(hs::ProjectDomainSignal(line, events, extent) == 1 &&
+              std::abs(events[0].geometry.end_position.y - (.55f + target_h)) < 1e-6f,
+              "line endpoint grounding must match its own world location");
+    }
+    Check(signal.position.y == .3f && signal.target.y == .55f, "one-shot projection mutated its source signal");
+
+    hs::GameReadModelStorage model;
+    model.arena_half_extent = 16;
+    model.arena_boundary.count = 4;
+    model.arena_boundary.points[0] = {-16,-16}; model.arena_boundary.points[1] = {-16,16};
+    model.arena_boundary.points[2] = {16,16}; model.arena_boundary.points[3] = {16,-16};
+    model.player.position = low;
+    hs::ProjectileView projectile{};
+    projectile.id = {42}; projectile.player_owned = true; projectile.radius = .15f;
+    projectile.position = low; projectile.previous_position = {low.x + .5f, low.y};
+    model.AddProjectile(projectile);
+    const auto project = [&] {
+        hs::RenderSnapshotStorage snapshot(16, 4, 4, 16);
+        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+            test_ui, hs::SettingsData{}, snapshot), "meadow grounded projection");
+        const auto view = snapshot.View();
+        const auto actor = std::ranges::find_if(view.instances, [](const auto &v) { return v.mesh == hs::RenderMesh::Archer; });
+        const auto head = std::ranges::find_if(view.persistent_vfx, [](const auto &v) { return v.kind == hs::PersistentVfxKind::ProjectileHead; });
+        const auto height = model.arena_half_extent >= 14 ? hs::MeadowGroundHeight(low) : 0.0f;
+        Check(actor != view.instances.end() && std::abs(actor->position.y - height) < 1e-6f &&
+              std::abs(snapshot.camera.target.y - height) < 1e-6f, "actor/camera lost terrain contact or double-offset");
+        Check(head != view.persistent_vfx.end() && std::abs(head->position.y - (1.05f + height)) < 1e-6f &&
+              head->projectile_current_position.y == head->position.y &&
+              std::abs(head->projectile_previous_position.y - (1.05f + (model.arena_half_extent >= 14 ?
+                  hs::MeadowGroundHeight(projectile.previous_position) : 0.0f))) < 1e-6f,
+              "projectile endpoints must independently follow their sampled ground heights");
+        Check(model.player.position.x == low.x && model.player.position.y == low.y,
+              "terrain presentation mutated 2D simulation coordinates");
+        if (model.arena_half_extent >= 14) {
+            std::size_t slabs=0;
+            for (const auto &ground : view.static_scene->instances) {
+                if (ground.mesh != hs::RenderMesh::Ground) continue;
+                ++slabs;
+                const float raster_top=ground.position.y + ground.scale.y * .5f + .5f * .1f * ground.scale.y;
+                Check(std::abs(raster_top)<1e-7f, "outer ground raster surface must meet meadow at height zero");
+            }
+            Check(slabs==4, "meadow perimeter requires exactly four non-overlapping outer slabs");
+            for (const auto &grass : view.static_scene->instances) {
+                if (grass.mesh != hs::RenderMesh::Grass) continue;
+                for (const auto &prop : view.static_scene->instances) {
+                    if (prop.mesh != hs::RenderMesh::GroundDetail || prop.environment_variant < 7) continue;
+                    constexpr std::array<float, 12> radii{1,1.3f,.75f,.75f,.65f,.65f,2,1.35f,1.4f,.5f,1.75f,1.05f};
+                    const auto required = radii[prop.environment_variant - 7] * prop.scale.x + .45f;
+                    Check(std::hypot(grass.position.x-prop.position.x, grass.position.z-prop.position.z) >= required - 1e-5f,
+                          "grass intersects an authored prop footprint");
+                }
+            }
+        }
+    };
+    project();
+    model.arena_half_extent = 8;
+    project();
+}
+
+void TestStaticEnvironmentSceneLease()
+{
+    hs::GameReadModelStorage model;
+    model.seed = 19;
+    model.session_id = 3;
+    model.arena_half_extent = 16.0f;
+    model.arena_boundary.count = 4;
+    model.arena_boundary.points[0] = {-16, -16};
+    model.arena_boundary.points[1] = {-16, 16};
+    model.arena_boundary.points[2] = {16, 16};
+    model.arena_boundary.points[3] = {16, -16};
+    hs::StaticEnvironmentSceneCache cache("test-generation");
+    hs::RenderSnapshotStorage snapshot(4, 4, 2, 128);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+                                    test_ui, hs::SettingsData{}, snapshot, 0xFF,
+                                    nullptr, &cache), "static scene projection");
+    const auto first = snapshot.View().static_scene;
+    Check(first && first->content_generation_id == "test-generation" &&
+              first->instances.size() > 1 && snapshot.View().instances.size() == 1 &&
+              snapshot.View().poses.size() == 1 &&
+              snapshot.View().poses[0].instance_index == 0,
+          "static scene lease preserves dynamic pose indices and content identity");
+    std::array<bool, hs::kGroundDetailVariantCount> detail_variants{};
+    std::unordered_set<std::uint64_t> identities;
+    std::size_t details{}, pebbles{}, short_tufts{}, clover_links{}, stacked_crates{}, roadside_details{}, packing_tufts{};
+    for (const auto &instance : first->instances)
+    {
+        Check(instance.stable_id && identities.insert(instance.stable_id).second,
+              "appended ground details collide with existing placement provenance");
+        if (instance.mesh == hs::RenderMesh::GroundDetail)
+        {
+            ++details;
+            if ((instance.stable_id & 0xFFF00000ull) == 0x400000ull) {
+                ++clover_links;
+                Check(instance.environment_variant == 3u, "colony links must retain low clover geometry");
+            }
+            const auto detail_key = instance.stable_id & 0xFFFFFFull;
+            if ((detail_key & 0xFFF00000ull) == 0x500000ull || (detail_key & 0xFFF00000ull) == 0x600000ull) {
+                ++roadside_details;
+                if (detail_key == 0x500012ull) {
+                    ++stacked_crates;
+                    const auto base = std::ranges::find(first->instances,
+                        (instance.stable_id & ~0xFFFFFFull) | 0x500010ull, &hs::RenderInstance::stable_id);
+                    Check(base != first->instances.end() && base->environment_variant == 9u &&
+                              instance.environment_variant == 9u && instance.position.x == base->position.x &&
+                              instance.position.z == base->position.z && instance.yaw == base->yaw &&
+                              std::abs(instance.position.y - base->position.y - .658665597f) < 1e-6f,
+                          "stacked crate must rest on the actual authored base height with aligned supports");
+                    const auto member = std::ranges::find(first->eligible_static_members,
+                        instance.stable_id, &hs::StaticRenderScene::EligibleStaticMember::stable_id);
+                    Check(member != first->eligible_static_members.end() && member->object_id == base->stable_id,
+                          "a crate stack must remain one HLOD object");
+                } else {
+                    Check(std::abs(instance.position.y - hs::MeadowGroundHeight({instance.position.x, instance.position.z})) < 1e-6f,
+                          "roadside debris and props must retain terrain contact");
+                }
+            }
+            Check(instance.environment_variant < detail_variants.size() &&
+                  instance.asset_id.value && instance.material_id.value == hs::MakeAssetId("render/material/ground_detail.rpkg").value,
+                  "detail geometry is not bound to the actual shared material product");
+            detail_variants[instance.environment_variant] = true;
+            const auto variant = instance.environment_variant;
+            constexpr std::array<float, hs::kGroundDetailVariantCount> minimum_scale{1.2f, 1.2f, 1.6f, .8f, .8f, 1.2f, 1.35f, 1,1,1,1,1,1,1,1,1,1,1,1};
+            constexpr std::array<float, hs::kGroundDetailVariantCount> maximum_scale{1.725f, 1.725f, 2.3f, 1.15f, 1.1f, 1.65f, 1.575f, 1,1,1,1,1,1,1,1,1,1,1,1};
+            Check(instance.scale.x >= minimum_scale[variant] - 1e-5f &&
+                  instance.scale.x <= maximum_scale[variant] + 1e-5f,
+                  "ground-detail species lost its player-relative placement scale");
+            constexpr std::array<float, hs::kGroundDetailVariantCount> footprint{.58f,.58f,.58f,.58f,.58f,.58f,1.05f,1,1.3f,.75f,.75f,.65f,.65f,2,1.35f,1.4f,.5f,1.75f,1.05f};
+            const auto radius = footprint[variant] * instance.scale.x;
+            Check((variant == 13u || hs::MeadowRoadCoverage({instance.position.x, instance.position.z}, -radius) == 0.0f) &&
+                  instance.scale.x == instance.scale.y && instance.scale.y == instance.scale.z,
+                  "scaled static detail enters the clear path or loses uniform transforms");
+        }
+        if (instance.mesh == hs::RenderMesh::Grass && (instance.stable_id & 0xFFFFFCull) == 0x500200ull) {
+            ++packing_tufts;
+            const hs::Float2 point{instance.position.x, instance.position.z};
+            Check(instance.scale.y == .07f && instance.scale.x == instance.scale.z && instance.scale.x == 1.05f &&
+                      instance.color_rgba == 0xFF1865F0u && hs::MeadowWetness(point) <= .05f &&
+                      !std::isfinite(hs::MeadowWaterLevel(point)) && hs::MeadowRoadCoverage(point, -.55f) == 0.0f,
+                  "packing litter must remain low, dry and clear of the road");
+        }
+        if (instance.mesh == hs::RenderMesh::Rock && instance.scale.x <= .1f) ++pebbles;
+        if (instance.mesh == hs::RenderMesh::Grass && instance.scale.y == .18f) ++short_tufts;
+    }
+    Check(details > 0 && details <= 320 && pebbles > 0 && pebbles <= 64 && short_tufts > 0 && short_tufts <= 64,
+          "new detail, small-rock, or short-grass population escaped its explicit budget");
+    Check(stacked_crates == 1 && packing_tufts == 3 && roadside_details >= 14 && roadside_details <= 18,
+          "bounded roadside stories need their supply stack and broken-edge debris");
+    Check(clover_links > 0 && clover_links <= 16,
+          "large colonies need bounded clover links instead of a uniform flower border");
+    for (std::size_t variant = 0; variant < detail_variants.size(); ++variant)
+        Check(detail_variants[variant], std::format("normal play scene omits ground-detail variant {}", variant));
+    auto cook_model = model;
+    cook_model.seed = 0;
+    hs::StaticEnvironmentSceneCache cook_cache("test-generation");
+    const auto cook_scene = cook_cache.Resolve(cook_model.View());
+    Check(cook_scene->eligible_layout_digest == first->eligible_layout_digest &&
+          cook_scene->eligible_static_members.size() == first->eligible_static_members.size(),
+          "seed-zero scene cooking differs from runtime detail/HLOD placement");
+    snapshot.Clear();
+    Check(!snapshot.View().static_scene && first->instances.size() > 1,
+          "clearing a slot releases only its own scene lease");
+    Check(cache.Resolve(model.View()) == first, "unchanged layout reuses static scene");
+    model.arena_half_extent = 17.0f;
+    const auto extent = cache.Resolve(model.View());
+    Check(extent != first, "arena extent invalidates static scene");
+    model.arena_boundary.points[0].x = -17.0f;
+    const auto boundary = cache.Resolve(model.View());
+    Check(boundary != extent, "boundary invalidates static scene");
+    model.arena_obstacle_count = 1;
+    model.arena_obstacles[0].center = {8.0f, 0.0f};
+    model.arena_obstacles[0].radius = 1.0f;
+    const auto obstacles = cache.Resolve(model.View());
+    Check(obstacles != boundary, "obstacle list invalidates static scene");
+    model.session_id = 4;
+    Check(cache.Resolve(model.View()) != obstacles,
+          "new simulation session invalidates static scene");
 }
 
 void TestProjectileUpgradeAttachmentEpisodes()
@@ -1240,10 +1816,12 @@ void TestPickupCollectionEndpointProjection()
         signal.position = {4.0f, 0.3f, -2.0f};
         signal.target = {-1.0f, 0.3f, 6.0f};
         signal.flags = static_cast<std::uint8_t>(hs::DomainSignalFlag::HasTarget);
-        std::array<hs::PresentationEvent, 2> output{};
+        std::array<hs::PresentationEvent, 3> output{};
         const auto count = hs::ProjectDomainSignal(signal, output);
         const auto parameters = hs::DecodeVfxParameters(output[0].parameters);
-        Check(count == 2 && output[0].kind == hs::PresentationKind::Vfx &&
+        const bool opens_chest = pickup.kind == hs::DomainSignalKind::RelicCollected;
+        const auto audio_index = opens_chest ? 2u : 1u;
+        Check(count == audio_index + 1 && output[0].kind == hs::PresentationKind::Vfx &&
                   output[0].asset.value == hs::MakeAssetId(pickup.asset).value &&
                   output[0].position.x == signal.position.x &&
                   output[0].position.y == signal.position.y &&
@@ -1252,8 +1830,10 @@ void TestPickupCollectionEndpointProjection()
                   parameters.target.x == signal.target.x &&
                   parameters.target.y == signal.target.y &&
                   parameters.target.z == signal.target.z &&
-                  output[1].kind == hs::PresentationKind::Audio &&
-                  output[1].asset.value == hs::MakeAssetId(pickup.audio).value,
+                  (!opens_chest || (output[1].kind == hs::PresentationKind::Vfx &&
+                      output[1].asset.value == hs::MakeAssetId("particle.pickup.relic_chest.open").value)) &&
+                  output[audio_index].kind == hs::PresentationKind::Audio &&
+                  output[audio_index].asset.value == hs::MakeAssetId(pickup.audio).value,
               "pickup projection preserves source, player endpoint, and existing audio");
     }
 }
@@ -1466,8 +2046,103 @@ void TestPlayerAttachmentOwnerWindows()
         "a new session reused the previous player owner");
 }
 
+void TestPresentationSceneDeltaPublication()
+{
+    hs::GameReadModelStorage model;
+    model.session_id = 41;
+    model.tick = 1;
+    hs::RenderSnapshotStorage snapshot(64, 8, 4, 16);
+    hs::RenderSceneProjectionState scene_state;
+    const auto project = [&] {
+        snapshot.Clear();
+        return hs::ProjectRenderSnapshot(
+            model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{},
+            snapshot, 0xFF, nullptr, nullptr, &scene_state);
+    };
+
+    Check(project(), "initial scene delta projection");
+    const auto initial = snapshot.View().scene_delta;
+    Check(initial.published && initial.base_generation == 0 &&
+              initial.generation == 1 && initial.created == snapshot.View().instances.size() &&
+              initial.updated == 0 && initial.unchanged == 0,
+          "Presentation publishes a fresh generation-1 scene delta");
+    scene_state.Commit();
+
+    ++model.tick;
+    Check(project(), "unchanged scene delta projection");
+    const auto unchanged = snapshot.View().scene_delta;
+    Check(unchanged.published && unchanged.base_generation == 1 &&
+              unchanged.generation == 2 && unchanged.created == 0 &&
+              unchanged.updated + unchanged.unchanged ==
+                  snapshot.View().instances.size(),
+          "Presentation scene delta advances from the committed generation");
+    scene_state.Abort();
+
+    ++model.tick;
+    Check(project(), "scene delta after abort");
+    const auto after_abort = snapshot.View().scene_delta;
+    Check(after_abort.base_generation == 1 && after_abort.generation == 2,
+          "abandoned snapshot cannot advance Presentation scene history");
+    scene_state.Commit();
+
+    model.session_id = 42;
+    ++model.tick;
+    Check(project(), "new-session scene delta projection");
+    const auto reset = snapshot.View().scene_delta;
+    Check(reset.base_generation == 0 && reset.generation == 1 &&
+              reset.created == snapshot.View().instances.size() &&
+              reset.destroyed.empty(),
+          "new session publishes a fresh SceneDelta generation");
+    scene_state.Abort();
+}
+
+void TestBossDeathCaptureWithoutPriorSnapshot()
+{
+    hs::GameReadModelStorage model;
+    model.session_id = 9; model.tick = 37;
+    hs::BossDeathVisualView death;
+    death.sequence = 71; death.tick = 37;
+    death.enemy.id = {55}; death.enemy.boss = hs::BossKind::Final;
+    death.enemy.position = {8, -3}; death.enemy.velocity = {2, 1};
+    death.enemy.max_health = 100; death.enemy.health = 0;
+    death.has_action = true; death.action.boss_id = 55;
+    death.action.animation_started = 30; death.action.execute_tick = 50;
+    death.action.kind = hs::BossActionViewKind::Area;
+    model.AddEnemy(death.enemy); model.AddBossAction(death.action);
+    hs::RenderSnapshotStorage live(4, 4, 1, 16);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{}, live),
+          "live boss reference projection");
+    const auto reference = live.View();
+    const auto boss = std::ranges::find(reference.instances, hs::RenderMesh::BossFinal,
+                                       &hs::RenderInstance::mesh);
+    Check(boss != reference.instances.end(), "live boss reference instance missing");
+    const auto boss_index = static_cast<std::uint32_t>(boss - reference.instances.begin());
+    const auto boss_pose = std::ranges::find(reference.poses, boss_index,
+                                            &hs::AnimationPoseRef::instance_index);
+    Check(boss_pose != reference.poses.end(), "live boss reference pose missing");
+    const auto actual = *boss;
+    const auto pose = *boss_pose;
+    model.Clear(); model.tick = 900; model.AddBossDeathVisual(death);
+    hs::RenderSnapshotStorage captured(4, 4, 1, 16);
+    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{}, captured),
+          "boss capture projection without live snapshot history");
+    Check(captured.View().captured_instances.size() == 1, "boss capture missing after actor removal");
+    const auto &record = captured.View().captured_instances.front();
+    Check(record.session_id == 9 && record.source_entity_id == 55 && record.sequence == 71 && record.tick == 37 &&
+          record.instance.stable_id == actual.stable_id && record.instance.asset_id.value == actual.asset_id.value &&
+          record.instance.material_id.value == actual.material_id.value && record.instance.mesh == hs::RenderMesh::BossFinal &&
+          record.instance.position.x == actual.position.x && record.instance.scale.x == actual.scale.x &&
+          record.instance.yaw == actual.yaw && record.animation_pose.clip == pose.clip &&
+          record.animation_pose.normalized_time == pose.normalized_time,
+          "death capture substituted mesh, transform, provenance or death-tick pose");
+    Check(std::ranges::none_of(captured.View().instances, [&](const auto &value) { return value.stable_id == actual.stable_id; }),
+          "capture inserted a dead actor into the ordinary snapshot scene");
+}
+
 void RunGameplayPresentationTests()
 {
+    TestBossDeathCaptureWithoutPriorSnapshot();
+    TestPresentationSceneDeltaPublication();
     TestPlayerAttachmentOwnerWindows();
     TestStatusEpisodeSnapshot();
     TestCircleWarningProjection();
@@ -1486,6 +2161,8 @@ void RunGameplayPresentationTests()
     TestEnemyAnimationStateSignals();
     TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();
+    TestStaticEnvironmentSceneLease();
+    TestMeadowPresentationGrounding();
     TestArrowReleaseProjectsVfxAndAudio();
     TestBossTelegraphProjectsGeometryAndAudio();
     TestDenseGrassProjection();
