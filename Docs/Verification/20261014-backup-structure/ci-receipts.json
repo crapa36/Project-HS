@@ -1,0 +1,263 @@
+{
+  "source_commit": "505272f5254390687f5462bb6a686f02127bcae4",
+  "prior_runs": [
+    {
+      "run_id": 38575153846,
+      "url": "https://github.com/crapa36/Project-HS/actions/runs/38575153846",
+      "jobs": [
+        {
+          "id": 115890185024,
+          "name": "linux-core",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115890185457,
+          "name": "runtime-compile",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115890186078,
+          "name": "test",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "run_id": 38575696579,
+      "url": "https://github.com/crapa36/Project-HS/actions/runs/38575696579",
+      "jobs": [
+        {
+          "id": 115892071097,
+          "name": "test",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115892071494,
+          "name": "runtime-compile",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115892072349,
+          "name": "linux-core",
+          "status": "completed",
+          "conclusion": "success"
+        }
+      ]
+    },
+    {
+      "run_id": 38576212038,
+      "url": "https://github.com/crapa36/Project-HS/actions/runs/38576212038",
+      "jobs": [
+        {
+          "id": 115893885963,
+          "name": "test",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115893886089,
+          "name": "linux-core",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        {
+          "id": 115893886274,
+          "name": "runtime-compile",
+          "status": "in_progress",
+          "conclusion": null
+        }
+      ]
+    }
+  ],
+  "final_run": {
+    "run_id": 38577118658,
+    "url": "https://github.com/crapa36/Project-HS/actions/runs/38577118658",
+    "source_commit": "505272f5254390687f5462bb6a686f02127bcae4",
+    "status": "completed",
+    "conclusion": "success",
+    "jobs": [
+      {
+        "id": 115897040941,
+        "name": "runtime-compile",
+        "status": "completed",
+        "conclusion": "success",
+        "run_id": 38577118658,
+        "logs_url": null,
+        "steps": [
+          {
+            "name": "Set up job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 1
+          },
+          {
+            "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 2
+          },
+          {
+            "name": "Run ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 3
+          },
+          {
+            "name": "Configure runtime compilation",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 4
+          },
+          {
+            "name": "Compile HZB readback probe",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 5
+          },
+          {
+            "name": "Verify compiled HZB helper on explicit WARP",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 6
+          },
+          {
+            "name": "Compile runtime and renderer",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 7
+          },
+          {
+            "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 14
+          },
+          {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 15
+          }
+        ]
+      },
+      {
+        "id": 115897041663,
+        "name": "test",
+        "status": "completed",
+        "conclusion": "success",
+        "run_id": 38577118658,
+        "logs_url": null,
+        "steps": [
+          {
+            "name": "Set up job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 1
+          },
+          {
+            "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 2
+          },
+          {
+            "name": "Run ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 3
+          },
+          {
+            "name": "Verify core",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 4
+          },
+          {
+            "name": "Retain full core failure details",
+            "status": "completed",
+            "conclusion": "skipped",
+            "number": 5
+          },
+          {
+            "name": "Verify portable render data and asset pipeline",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 6
+          },
+          {
+            "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 12
+          },
+          {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 13
+          }
+        ]
+      },
+      {
+        "id": 115897041807,
+        "name": "linux-core",
+        "status": "completed",
+        "conclusion": "success",
+        "run_id": 38577118658,
+        "logs_url": null,
+        "steps": [
+          {
+            "name": "Set up job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 1
+          },
+          {
+            "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 2
+          },
+          {
+            "name": "Install isolated verification tools",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 3
+          },
+          {
+            "name": "Verify core and portable correctness helpers",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 4
+          },
+          {
+            "name": "Verify Linux render data and asset pipeline",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 5
+          },
+          {
+            "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 10
+          },
+          {
+            "name": "Complete job",
+            "status": "completed",
+            "conclusion": "success",
+            "number": 11
+          }
+        ]
+      }
+    ],
+    "linux_core_tests": 18,
+    "linux_portable_tests": 33,
+    "windows_portable_tests": 35
+  }
+}

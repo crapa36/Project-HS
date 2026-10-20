@@ -1,0 +1,2829 @@
+{
+  "schema": 1,
+  "source": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\performance-actual\\options-highest-capture",
+  "selection": {
+    "warmup_seconds": 10,
+    "playing_only": true,
+    "tick_start": 0,
+    "tick_end_exclusive": null
+  },
+  "primary_config_revision": 2,
+  "cpu_frames_selected": 5,
+  "gpu_frames_missing_cpu_identity": 0,
+  "gpu_frames_incomplete_rejected": 0,
+  "configurations": [
+    {
+      "config_revision": 2,
+      "completed_frames": 2,
+      "gpu_critical_path_ms": {
+        "count": 2,
+        "mean": 471.707136,
+        "p50": 320.84992,
+        "p95": 622.564352,
+        "p99": 622.564352,
+        "max": 622.564352
+      },
+      "options": [
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "1",
+          "key": "preset",
+          "requested": "custom",
+          "effective": "custom",
+          "requested_available": "-1",
+          "native_effective": "custom",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "configuration",
+          "cost_status": "configuration",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Quality preset selects several controls; no separate GPU pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "2",
+          "key": "display_mode",
+          "requested": "windowed",
+          "effective": "windowed",
+          "requested_available": "-1",
+          "native_effective": "windowed",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "presentation",
+          "cost_status": "presentation",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Window/presentation policy; no isolated graph pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "3",
+          "key": "display_output",
+          "requested": "auto",
+          "effective": "dxgi:000000000000f3c1:\\\\.\\DISPLAY1",
+          "requested_available": "-1",
+          "native_effective": "dxgi:000000000000f3c1:\\\\.\\DISPLAY1",
+          "native_reason": "현재 창이 있는 모니터에 적용했습니다",
+          "kind": "presentation",
+          "cost_status": "presentation",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Monitor selection; no isolated graph pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "4",
+          "key": "output_extent",
+          "requested": "1920x1080",
+          "effective": "1920x1080",
+          "requested_available": "-1",
+          "native_effective": "1920x1080",
+          "native_reason": "실제로 출력하는 해상도입니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "surface",
+            "lighting",
+            "reconstruction",
+            "post"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "lighting",
+            "reconstruction",
+            "post"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Output size affects several stages."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "5",
+          "key": "vsync",
+          "requested": "false",
+          "effective": "false",
+          "requested_available": "-1",
+          "native_effective": "false",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "presentation",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Presentation pacing; compare QPC intervals and Present CPU wall time."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "6",
+          "key": "frame_limit_fps",
+          "requested": "0",
+          "effective": "0",
+          "requested_available": "-1",
+          "native_effective": "0",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "presentation",
+          "cost_status": "presentation",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "CPU pacing limit; no GPU work pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "7",
+          "key": "hdr_mode",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "1",
+          "native_effective": "off",
+          "native_reason": "일반 SDR 화면으로 출력합니다",
+          "kind": "shared",
+          "cost_status": "off",
+          "feature_groups": [
+            "post"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "HDR output shares color conversion and presentation."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "8",
+          "key": "hdr_paper_white_nits",
+          "requested": "200",
+          "effective": "200",
+          "requested_available": "-1",
+          "native_effective": "200",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "off",
+          "feature_groups": [
+            "post"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Color parameter inside shared output shaders."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "9",
+          "key": "hdr_peak_nits",
+          "requested": "auto",
+          "effective": "1000",
+          "requested_available": "-1",
+          "native_effective": "1000",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "off",
+          "feature_groups": [
+            "post"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Color parameter inside shared output shaders."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "10",
+          "key": "reconstruction_provider",
+          "requested": "internal_taau",
+          "effective": "internal_taau",
+          "requested_available": "1",
+          "native_effective": "internal_taau",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared_policy",
+          "cost_status": "shared_policy",
+          "feature_groups": [
+            "reconstruction"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "reconstruction"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Active provider's reconstruction group; mutually exclusive providers are not compared."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "11",
+          "key": "reconstruction_quality",
+          "requested": "native",
+          "effective": "manual",
+          "requested_available": "1",
+          "native_effective": "manual",
+          "native_reason": "",
+          "kind": "shared_policy",
+          "cost_status": "shared_policy",
+          "feature_groups": [
+            "reconstruction",
+            "surface",
+            "lighting"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "reconstruction",
+            "surface",
+            "lighting"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Provider quality also changes render resolution."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "12",
+          "key": "resolution_mode",
+          "requested": "manual",
+          "effective": "manual",
+          "requested_available": "-1",
+          "native_effective": "manual",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared_policy",
+          "cost_status": "shared_policy",
+          "feature_groups": [
+            "surface",
+            "lighting",
+            "reconstruction"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "lighting",
+            "reconstruction"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Resolution policy affects most image stages."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "13",
+          "key": "manual_scale_percent",
+          "requested": "100",
+          "effective": "100",
+          "requested_available": "-1",
+          "native_effective": "100",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared_policy",
+          "cost_status": "shared_policy",
+          "feature_groups": [
+            "surface",
+            "lighting",
+            "reconstruction"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "lighting",
+            "reconstruction"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Resolution affects most image stages."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "14",
+          "key": "dynamic_resolution",
+          "requested": "false",
+          "effective": "false",
+          "requested_available": "-1",
+          "native_effective": "false",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "configuration",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Resolution controller; no separate GPU pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "15",
+          "key": "target_render_fps",
+          "requested": "60",
+          "effective": "60",
+          "requested_available": "-1",
+          "native_effective": "60",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "configuration",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Dynamic resolution controller target."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "16",
+          "key": "dynamic_min_percent",
+          "requested": "50",
+          "effective": "50",
+          "requested_available": "-1",
+          "native_effective": "50",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "configuration",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Dynamic resolution controller bound."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "17",
+          "key": "dynamic_max_percent",
+          "requested": "100",
+          "effective": "100",
+          "requested_available": "-1",
+          "native_effective": "100",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "configuration",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Dynamic resolution controller bound."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "18",
+          "key": "sharpening",
+          "requested": "0.200000003",
+          "effective": "0.200000003",
+          "requested_available": "-1",
+          "native_effective": "0.200000003",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "reconstruction",
+            "post"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "reconstruction",
+            "post"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Parameter inside reconstruction/output shader."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "19",
+          "key": "frame_generation_provider",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "1",
+          "native_effective": "off",
+          "native_reason": "현재 장치와 설정에 맞춰 자동으로 선택합니다",
+          "kind": "external",
+          "cost_status": "off",
+          "feature_groups": [
+            "frame_generation_guides"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Graph timestamps cover prepare/guides only; SDK-generated frames outside graph are unmeasured."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "20",
+          "key": "frame_generation_mode",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "0",
+          "native_effective": "off",
+          "native_reason": "필요한 기능이 아직 준비되지 않았습니다",
+          "kind": "external",
+          "cost_status": "requested_unavailable_effective_off",
+          "feature_groups": [
+            "frame_generation_guides"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Generated presentation rate is separate from base render FPS."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "21",
+          "key": "frame_generation_multiplier",
+          "requested": "2",
+          "effective": "2",
+          "requested_available": "0",
+          "native_effective": "0",
+          "native_reason": "프레임 생성을 켜면 지원하는 배수를 확인합니다",
+          "kind": "external",
+          "cost_status": "requested_unavailable_effective_off",
+          "feature_groups": [
+            "frame_generation_guides"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "No total SDK generation GPU duration from current graph timestamps."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "22",
+          "key": "low_latency",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "1",
+          "native_effective": "off",
+          "native_reason": "현재 장치와 설정에 맞춰 자동으로 선택합니다",
+          "kind": "presentation",
+          "cost_status": "off",
+          "feature_groups": [],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Native scheduling/input latency control; no isolated graph pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "23",
+          "key": "texture_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "texture_streaming",
+            "surface",
+            "transparency"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "transparency"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Texture sampling is shared with surface/material shading; uploads are transient."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "24",
+          "key": "texture_budget_mib",
+          "requested": "0",
+          "effective": "0",
+          "requested_available": "-1",
+          "native_effective": "0",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "resource",
+          "cost_status": "resource",
+          "feature_groups": [
+            "texture_streaming"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Residency budget; upload cost is not the total texture shading cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "25",
+          "key": "anisotropic_filtering",
+          "requested": "16",
+          "effective": "16",
+          "requested_available": "-1",
+          "native_effective": "16",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "surface",
+            "transparency",
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "transparency",
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Sampler setting inside shared draw passes."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "26",
+          "key": "geometry_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "geometry",
+            "surface",
+            "shadows",
+            "ray_scene"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "geometry",
+            "surface",
+            "shadows",
+            "ray_scene"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "LOD/geometry affects several stages; geometry group is preparation only."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "27",
+          "key": "foliage_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "geometry",
+            "surface",
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "geometry",
+            "surface",
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Density and draw cost share scene passes."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "28",
+          "key": "material_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "surface",
+            "lighting",
+            "subsurface"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface",
+            "lighting",
+            "subsurface"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Material choices share surface and lighting shaders."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "29",
+          "key": "pom_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "surface"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "surface"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Parallax work inside surface shader; no exclusive timing."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "30",
+          "key": "lighting_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "lighting",
+            "volumetrics",
+            "light_lists"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "lighting",
+            "volumetrics",
+            "light_lists"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Several light/shading quality controls share groups."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "31",
+          "key": "shadow_mode",
+          "requested": "hybrid_rt",
+          "effective": "hybrid_rt",
+          "requested_available": "1",
+          "native_effective": "hybrid_rt",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {
+            "shadows": {
+              "count": 2,
+              "mean": 39.191536,
+              "p50": 29.77536,
+              "p95": 48.60771200000001,
+              "p99": 48.60771200000001,
+              "max": 48.60771200000001
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Directional/local/virtual/ray shadow work; shared shadow controls reference this same group."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "32",
+          "key": "shadow_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {
+            "shadows": {
+              "count": 2,
+              "mean": 39.191536,
+              "p50": 29.77536,
+              "p95": 48.60771200000001,
+              "p99": 48.60771200000001,
+              "max": 48.60771200000001
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Same shadow group as mode/distance, not an independent additive cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "33",
+          "key": "shadow_distance_m",
+          "requested": "500",
+          "effective": "500",
+          "requested_available": "-1",
+          "native_effective": "500",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {
+            "shadows": {
+              "count": 2,
+              "mean": 39.191536,
+              "p50": 29.77536,
+              "p95": 48.60771200000001,
+              "p99": 48.60771200000001,
+              "max": 48.60771200000001
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Same shadow group; no marginal distance comparison in a single capture."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "34",
+          "key": "contact_shadows",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "-1",
+          "native_effective": "true",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "contact_shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "contact_shadows"
+          ],
+          "feature_group_gpu_work_ms": {
+            "contact_shadows": {
+              "count": 2,
+              "mean": 0.374272,
+              "p50": 0.227328,
+              "p95": 0.521216,
+              "p99": 0.521216,
+              "max": 0.521216
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Dedicated contact shadow pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "35",
+          "key": "ao_mode",
+          "requested": "rtao",
+          "effective": "rtao",
+          "requested_available": "1",
+          "native_effective": "rtao",
+          "native_reason": "",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "ao"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "ao"
+          ],
+          "feature_group_gpu_work_ms": {
+            "ao": {
+              "count": 2,
+              "mean": 13.883392,
+              "p50": 13.624319999999999,
+              "p95": 14.142464,
+              "p99": 14.142464,
+              "max": 14.142464
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Active GTAO/RTAO group."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "36",
+          "key": "ao_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "ao"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "ao"
+          ],
+          "feature_group_gpu_work_ms": {
+            "ao": {
+              "count": 2,
+              "mean": 13.883392,
+              "p50": 13.624319999999999,
+              "p95": 14.142464,
+              "p99": 14.142464,
+              "max": 14.142464
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Same AO group as mode, not an additive cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "37",
+          "key": "gi_mode",
+          "requested": "ray_traced",
+          "effective": "ray_traced",
+          "requested_available": "1",
+          "native_effective": "ray_traced",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "gi",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "gi",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "feature_group_gpu_work_ms": {
+            "gi": {
+              "count": 2,
+              "mean": 55.315008,
+              "p50": 51.434624,
+              "p95": 59.195392,
+              "p99": 59.195392,
+              "max": 59.195392
+            },
+            "shared_probes": {
+              "count": 2,
+              "mean": 59.415552,
+              "p50": 0,
+              "p95": 118.831104,
+              "p99": 118.831104,
+              "max": 118.831104
+            },
+            "shared_ray_compose": {
+              "count": 2,
+              "mean": 0.210944,
+              "p50": 0.210944,
+              "p95": 0.210944,
+              "p99": 0.210944,
+              "max": 0.210944
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Active probe/software/RT GI work; ray-scene/denoising can be shared."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "38",
+          "key": "gi_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "gi",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "gi",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "feature_group_gpu_work_ms": {
+            "gi": {
+              "count": 2,
+              "mean": 55.315008,
+              "p50": 51.434624,
+              "p95": 59.195392,
+              "p99": 59.195392,
+              "max": 59.195392
+            },
+            "shared_probes": {
+              "count": 2,
+              "mean": 59.415552,
+              "p50": 0,
+              "p95": 118.831104,
+              "p99": 118.831104,
+              "max": 118.831104
+            },
+            "shared_ray_compose": {
+              "count": 2,
+              "mean": 0.210944,
+              "p50": 0.210944,
+              "p95": 0.210944,
+              "p99": 0.210944,
+              "max": 0.210944
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Same GI group; shared ray-scene/denoising reported separately."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "39",
+          "key": "reflection_mode",
+          "requested": "hybrid_rt",
+          "effective": "hybrid_rt",
+          "requested_available": "1",
+          "native_effective": "hybrid_rt",
+          "native_reason": "",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "reflections",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "reflections",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "feature_group_gpu_work_ms": {
+            "reflections": {
+              "count": 2,
+              "mean": 67.84488,
+              "p50": 64.606752,
+              "p95": 71.083008,
+              "p99": 71.083008,
+              "max": 71.083008
+            },
+            "shared_probes": {
+              "count": 2,
+              "mean": 59.415552,
+              "p50": 0,
+              "p95": 118.831104,
+              "p99": 118.831104,
+              "max": 118.831104
+            },
+            "shared_ray_compose": {
+              "count": 2,
+              "mean": 0.210944,
+              "p50": 0.210944,
+              "p95": 0.210944,
+              "p99": 0.210944,
+              "max": 0.210944
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Active probe/SSR/RT reflection work; shared probes/denoising reported separately."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "40",
+          "key": "reflection_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "reflections",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "reflections",
+            "shared_probes",
+            "shared_ray_compose"
+          ],
+          "feature_group_gpu_work_ms": {
+            "reflections": {
+              "count": 2,
+              "mean": 67.84488,
+              "p50": 64.606752,
+              "p95": 71.083008,
+              "p99": 71.083008,
+              "max": 71.083008
+            },
+            "shared_probes": {
+              "count": 2,
+              "mean": 59.415552,
+              "p50": 0,
+              "p95": 118.831104,
+              "p99": 118.831104,
+              "max": 118.831104
+            },
+            "shared_ray_compose": {
+              "count": 2,
+              "mean": 0.210944,
+              "p50": 0.210944,
+              "p95": 0.210944,
+              "p99": 0.210944,
+              "max": 0.210944
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Same reflection group, not an independent additive cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "41",
+          "key": "ray_tracing_enabled",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "1",
+          "native_effective": "true",
+          "native_reason": "현재 장치에서 레이 트레이싱을 지원합니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "ray_scene",
+            "gi",
+            "reflections",
+            "ao",
+            "shadows",
+            "denoising"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "ray_scene",
+            "gi",
+            "reflections",
+            "ao",
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Master switch controls multiple consumers; TLAS/BLAS are shared."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "42",
+          "key": "rt_trace_distance_m",
+          "requested": "500",
+          "effective": "500",
+          "requested_available": "-1",
+          "native_effective": "500",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "gi",
+            "reflections",
+            "ao",
+            "shadows"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "gi",
+            "reflections",
+            "ao",
+            "shadows"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Distance parameter across multiple ray consumers."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "43",
+          "key": "neural_ray_reconstruction",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "1",
+          "native_effective": "off",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "off",
+          "feature_groups": [
+            "denoising"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Active denoiser group can serve multiple ray signals."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "44",
+          "key": "ray_reconstruction_provider",
+          "requested": "auto",
+          "effective": "off",
+          "requested_available": "1",
+          "native_effective": "off",
+          "native_reason": "현재 장치와 설정에 맞춰 자동으로 선택합니다",
+          "kind": "feature",
+          "cost_status": "off",
+          "feature_groups": [
+            "denoising"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Same shared radiance/occlusion denoiser group; provider alternatives are untested."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "45",
+          "key": "transparency_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "transparency"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "transparency"
+          ],
+          "feature_group_gpu_work_ms": {
+            "transparency": {
+              "count": 2,
+              "mean": 0.095744,
+              "p50": 0.08601600000000001,
+              "p95": 0.105472,
+              "p99": 0.105472,
+              "max": 0.105472
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "OIT/transparent drawing; refraction may share composition."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "46",
+          "key": "refraction_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "refraction"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "refraction"
+          ],
+          "feature_group_gpu_work_ms": {
+            "refraction": {
+              "count": 2,
+              "mean": 0.67584,
+              "p50": 0.38809599999999994,
+              "p95": 0.963584,
+              "p99": 0.963584,
+              "max": 0.963584
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Hero peel/composite group; not all transparent shading."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "47",
+          "key": "volumetric_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "volumetrics"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "volumetrics"
+          ],
+          "feature_group_gpu_work_ms": {
+            "volumetrics": {
+              "count": 2,
+              "mean": 9.111040000000001,
+              "p50": 1.296384,
+              "p95": 16.925696000000002,
+              "p99": 16.925696000000002,
+              "max": 16.925696000000002
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Dedicated froxel density/light/filter/resolve passes."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "48",
+          "key": "particle_quality",
+          "requested": "ultra",
+          "effective": "ultra",
+          "requested_available": "-1",
+          "native_effective": "ultra",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "particles",
+            "transparency",
+            "distortion",
+            "volumetrics"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "particles",
+            "transparency",
+            "distortion",
+            "volumetrics"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Simulation group excludes shared particle rendering/light/volume cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "49",
+          "key": "bloom",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "-1",
+          "native_effective": "true",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "bloom"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "bloom"
+          ],
+          "feature_group_gpu_work_ms": {
+            "bloom": {
+              "count": 2,
+              "mean": 0.057344,
+              "p50": 0.054272,
+              "p95": 0.060416,
+              "p99": 0.060416,
+              "max": 0.060416
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Dedicated bloom chain."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "50",
+          "key": "bloom_strength",
+          "requested": "1",
+          "effective": "1",
+          "requested_available": "-1",
+          "native_effective": "1",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "bloom"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "bloom"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Strength parameter inside same bloom chain; no exclusive cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "51",
+          "key": "motion_blur",
+          "requested": "high",
+          "effective": "high",
+          "requested_available": "-1",
+          "native_effective": "high",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "motion_blur",
+            "shared_post_guides"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "motion_blur",
+            "shared_post_guides"
+          ],
+          "feature_group_gpu_work_ms": {
+            "motion_blur": {
+              "count": 2,
+              "mean": 0.21760000000000002,
+              "p50": 0.200704,
+              "p95": 0.234496,
+              "p99": 0.234496,
+              "max": 0.234496
+            },
+            "shared_post_guides": {
+              "count": 2,
+              "mean": 0.079872,
+              "p50": 0.075776,
+              "p95": 0.083968,
+              "p99": 0.083968,
+              "max": 0.083968
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Dedicated motion blur; nearest guides shared with DOF."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "52",
+          "key": "depth_of_field",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "-1",
+          "native_effective": "true",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "depth_of_field",
+            "shared_post_guides"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "depth_of_field",
+            "shared_post_guides"
+          ],
+          "feature_group_gpu_work_ms": {
+            "depth_of_field": {
+              "count": 2,
+              "mean": 4.997632,
+              "p50": 4.1994240000000005,
+              "p95": 5.79584,
+              "p99": 5.79584,
+              "max": 5.79584
+            },
+            "shared_post_guides": {
+              "count": 2,
+              "mean": 0.079872,
+              "p50": 0.075776,
+              "p95": 0.083968,
+              "p99": 0.083968,
+              "max": 0.083968
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "CoC/dilation/DOF passes; nearest guides shared with motion blur."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "53",
+          "key": "outline",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "-1",
+          "native_effective": "true",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "outline"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "outline"
+          ],
+          "feature_group_gpu_work_ms": {
+            "outline": {
+              "count": 2,
+              "mean": 0.108032,
+              "p50": 0.099328,
+              "p95": 0.116736,
+              "p99": 0.116736,
+              "max": 0.116736
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Dedicated screen-space outline pass."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "54",
+          "key": "outline_width_px",
+          "requested": "1",
+          "effective": "1",
+          "requested_available": "-1",
+          "native_effective": "1",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "shared",
+          "cost_status": "shared",
+          "feature_groups": [
+            "outline"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "outline"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Parameter inside outline pass; no exclusive cost."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "55",
+          "key": "color_grading",
+          "requested": "true",
+          "effective": "true",
+          "requested_available": "-1",
+          "native_effective": "true",
+          "native_reason": "요청한 설정으로 적용했습니다",
+          "kind": "feature",
+          "cost_status": "measured_group",
+          "feature_groups": [
+            "color_grading"
+          ],
+          "actual_stage_availability": null,
+          "measured_groups": [
+            "color_grading"
+          ],
+          "feature_group_gpu_work_ms": {
+            "color_grading": {
+              "count": 2,
+              "mean": 0.022528,
+              "p50": 0.021504,
+              "p95": 0.023552,
+              "p99": 0.023552,
+              "max": 0.023552
+            }
+          },
+          "isolated_option_ms": null,
+          "note": "Color grade plus transient LUT initialization."
+        },
+        {
+          "config_revision": "2",
+          "settings_generation": "0",
+          "pipeline_revision": "1",
+          "setting_id": "56",
+          "key": "adaptive_shading",
+          "requested": "on",
+          "effective": "on",
+          "requested_available": "1",
+          "native_effective": "래스터 켜짐 · 연산 꺼짐",
+          "native_reason": "현재 장치와 설정에서 가능한 값으로 적용했습니다",
+          "kind": "shared_policy",
+          "cost_status": "policy_with_stage_evidence",
+          "feature_groups": [
+            "adaptive",
+            "surface",
+            "ao",
+            "reflections"
+          ],
+          "actual_stage_availability": {
+            "native_effective": "래스터 켜짐 · 연산 꺼짐",
+            "scheduled_frames": 2,
+            "measured_gpu_work_available": true
+          },
+          "measured_groups": [
+            "adaptive",
+            "surface",
+            "ao",
+            "reflections"
+          ],
+          "feature_group_gpu_work_ms": {},
+          "isolated_option_ms": null,
+          "note": "Classification/rate generation is overhead; savings in affected shared passes need a comparison."
+        }
+      ],
+      "gpu_work_partial": true,
+      "copy_transfer_groups": [
+        {
+          "group": "scene_upload_initialization_copy_transfer",
+          "gpu_work_ms_per_completed_frame": null,
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 0,
+          "measurement_scope": "copy_transfer",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 0,
+              "name": "Scene Buffer Upload"
+            }
+          ]
+        },
+        {
+          "group": "ui_copy_transfer",
+          "gpu_work_ms_per_completed_frame": null,
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 0,
+          "measurement_scope": "copy_transfer",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 23,
+              "name": "UI Upload"
+            }
+          ]
+        },
+        {
+          "group": "geometry_copy_transfer",
+          "gpu_work_ms_per_completed_frame": null,
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 0,
+          "measurement_scope": "copy_transfer",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 39,
+              "name": "ClusterPageUpload"
+            },
+            {
+              "id": 50,
+              "name": "ClusterDemandStatusReadback"
+            },
+            {
+              "id": 190,
+              "name": "HlodUpload"
+            },
+            {
+              "id": 196,
+              "name": "HlodDemandStatusReadback"
+            }
+          ]
+        },
+        {
+          "group": "shadows_copy_transfer",
+          "gpu_work_ms_per_completed_frame": null,
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 0,
+          "measurement_scope": "copy_transfer",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 147,
+              "name": "VirtualShadow.SnapshotUpload"
+            },
+            {
+              "id": 220,
+              "name": "LocalShadow.UploadCommands"
+            }
+          ]
+        }
+      ],
+      "ranked_feature_groups": [
+        {
+          "group": "ray_scene",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 139.388912,
+            "p50": 71.095392,
+            "p95": 207.682432,
+            "p99": 207.682432,
+            "max": 207.682432
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 123,
+              "name": "RaySceneDynamicBLASBuildUpdate"
+            },
+            {
+              "id": 124,
+              "name": "RaySceneMetadataUpload"
+            },
+            {
+              "id": 125,
+              "name": "RaySceneTLASBuild"
+            },
+            {
+              "id": 142,
+              "name": "RayGeometryDeformation"
+            },
+            {
+              "id": 143,
+              "name": "RayGeometryUpload"
+            },
+            {
+              "id": 300,
+              "name": "OpacityMicromapInputUpload"
+            },
+            {
+              "id": 301,
+              "name": "OpacityMicromapArrayBuild"
+            }
+          ],
+          "option_keys": [
+            "geometry_quality",
+            "ray_tracing_enabled"
+          ]
+        },
+        {
+          "group": "reflections",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 67.84488,
+            "p50": 64.606752,
+            "p95": 71.083008,
+            "p99": 71.083008,
+            "max": 71.083008
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 159,
+              "name": "HybridReflectionDepth"
+            },
+            {
+              "id": 160,
+              "name": "HybridReflectionTrace"
+            },
+            {
+              "id": 161,
+              "name": "HybridReflectionTemporal"
+            },
+            {
+              "id": 162,
+              "name": "HybridReflectionSpatial"
+            }
+          ],
+          "option_keys": [
+            "reflection_mode",
+            "reflection_quality",
+            "ray_tracing_enabled",
+            "rt_trace_distance_m",
+            "adaptive_shading"
+          ]
+        },
+        {
+          "group": "shared_probes",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 59.415552,
+            "p50": 0,
+            "p95": 118.831104,
+            "p99": 118.831104,
+            "max": 118.831104
+          },
+          "scheduled_frames": 1,
+          "fully_measured_scheduled_frames": 1,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 180,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 181,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 182,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 183,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 184,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 185,
+              "name": "LocalProbeStaticCubeCapture"
+            },
+            {
+              "id": 187,
+              "name": "LocalProbeCosineShIntegration"
+            },
+            {
+              "id": 188,
+              "name": "LocalProbeGgxPrefilter"
+            }
+          ],
+          "option_keys": [
+            "gi_mode",
+            "gi_quality",
+            "reflection_mode",
+            "reflection_quality"
+          ]
+        },
+        {
+          "group": "gi",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 55.315008,
+            "p50": 51.434624,
+            "p95": 59.195392,
+            "p99": 59.195392,
+            "max": 59.195392
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 156,
+              "name": "RTGITrace"
+            },
+            {
+              "id": 157,
+              "name": "RTGITemporal"
+            },
+            {
+              "id": 158,
+              "name": "RTGISpatial"
+            }
+          ],
+          "option_keys": [
+            "gi_mode",
+            "gi_quality",
+            "ray_tracing_enabled",
+            "rt_trace_distance_m"
+          ]
+        },
+        {
+          "group": "shadows",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 39.191536,
+            "p50": 29.77536,
+            "p95": 48.60771200000001,
+            "p99": 48.60771200000001,
+            "max": 48.60771200000001
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": true,
+          "passes": [
+            {
+              "id": 2,
+              "name": "3-cascade Directional Shadow"
+            },
+            {
+              "id": 148,
+              "name": "VirtualShadow.InitializeFeedback"
+            },
+            {
+              "id": 149,
+              "name": "VirtualShadow.ReceiverFeedback"
+            },
+            {
+              "id": 150,
+              "name": "VirtualShadow.ResidentAndDirty"
+            },
+            {
+              "id": 151,
+              "name": "VirtualShadow.CullAndCommands"
+            },
+            {
+              "id": 152,
+              "name": "VirtualShadow.StaticBank"
+            },
+            {
+              "id": 153,
+              "name": "VirtualShadow.DynamicBank"
+            },
+            {
+              "id": 154,
+              "name": "VirtualShadow.Publish"
+            },
+            {
+              "id": 155,
+              "name": "VirtualShadow.ShadowDataReady"
+            },
+            {
+              "id": 177,
+              "name": "LocalProbeStaticDirectionalShadow"
+            },
+            {
+              "id": 221,
+              "name": "LocalShadow.StaticBank"
+            },
+            {
+              "id": 222,
+              "name": "LocalShadow.DynamicBank"
+            },
+            {
+              "id": 223,
+              "name": "LocalShadow.ShadowDataReady"
+            },
+            {
+              "id": 224,
+              "name": "VirtualShadow.CountPageDraws"
+            },
+            {
+              "id": 225,
+              "name": "VirtualShadow.AdmitCompletePages"
+            },
+            {
+              "id": 242,
+              "name": "RayShadow.InitializeOpaqueOutputs"
+            },
+            {
+              "id": 243,
+              "name": "RayShadow.OpaqueVisibilityReady"
+            }
+          ],
+          "option_keys": [
+            "anisotropic_filtering",
+            "geometry_quality",
+            "foliage_quality",
+            "shadow_mode",
+            "shadow_quality",
+            "shadow_distance_m",
+            "ray_tracing_enabled",
+            "rt_trace_distance_m"
+          ]
+        },
+        {
+          "group": "ao",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 13.883392,
+            "p50": 13.624319999999999,
+            "p95": 14.142464,
+            "p99": 14.142464,
+            "max": 14.142464
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 144,
+              "name": "RTAOTrace"
+            },
+            {
+              "id": 145,
+              "name": "RTAOTemporal"
+            },
+            {
+              "id": 146,
+              "name": "RTAOResolve"
+            }
+          ],
+          "option_keys": [
+            "ao_mode",
+            "ao_quality",
+            "ray_tracing_enabled",
+            "rt_trace_distance_m",
+            "adaptive_shading"
+          ]
+        },
+        {
+          "group": "surface",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 9.656832,
+            "p50": 5.033983999999999,
+            "p95": 14.27968,
+            "p99": 14.27968,
+            "max": 14.27968
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 4,
+              "name": "GBuffer+Depth"
+            },
+            {
+              "id": 20,
+              "name": "GBuffer Retest"
+            }
+          ],
+          "option_keys": [
+            "output_extent",
+            "reconstruction_quality",
+            "resolution_mode",
+            "manual_scale_percent",
+            "texture_quality",
+            "anisotropic_filtering",
+            "geometry_quality",
+            "foliage_quality",
+            "material_quality",
+            "pom_quality",
+            "adaptive_shading"
+          ]
+        },
+        {
+          "group": "volumetrics",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 9.111040000000001,
+            "p50": 1.296384,
+            "p95": 16.925696000000002,
+            "p99": 16.925696000000002,
+            "max": 16.925696000000002
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 170,
+              "name": "VolumetricDensity"
+            },
+            {
+              "id": 171,
+              "name": "VolumetricLighting"
+            },
+            {
+              "id": 172,
+              "name": "VolumetricTemporal"
+            },
+            {
+              "id": 173,
+              "name": "VolumetricSpatial"
+            },
+            {
+              "id": 174,
+              "name": "VolumetricIntegrate"
+            },
+            {
+              "id": 175,
+              "name": "VolumetricResolve"
+            }
+          ],
+          "option_keys": [
+            "lighting_quality",
+            "volumetric_quality",
+            "particle_quality"
+          ]
+        },
+        {
+          "group": "geometry",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 8.225008,
+            "p50": 7.102431999999999,
+            "p95": 9.347584000000001,
+            "p99": 9.347584000000001,
+            "max": 9.347584000000001
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": true,
+          "passes": [
+            {
+              "id": 3,
+              "name": "Static Visibility"
+            },
+            {
+              "id": 18,
+              "name": "Depth Pyramid"
+            },
+            {
+              "id": 19,
+              "name": "Visibility Retest"
+            },
+            {
+              "id": 21,
+              "name": "Final Depth Pyramid"
+            },
+            {
+              "id": 22,
+              "name": "Skin Cache"
+            },
+            {
+              "id": 40,
+              "name": "ClusterCutCount"
+            },
+            {
+              "id": 41,
+              "name": "ClusterCutPrefix0"
+            },
+            {
+              "id": 42,
+              "name": "ClusterCutPrefix1"
+            },
+            {
+              "id": 43,
+              "name": "ClusterCutPrefix2"
+            },
+            {
+              "id": 44,
+              "name": "ClusterCutEmit"
+            },
+            {
+              "id": 52,
+              "name": "ClusterPreviousHzbOcclusion"
+            },
+            {
+              "id": 53,
+              "name": "ClusterCurrentDepthRetest"
+            },
+            {
+              "id": 191,
+              "name": "HlodClear"
+            },
+            {
+              "id": 192,
+              "name": "HlodSelect"
+            },
+            {
+              "id": 193,
+              "name": "HlodEmit"
+            },
+            {
+              "id": 194,
+              "name": "HlodPublish"
+            },
+            {
+              "id": 195,
+              "name": "HlodHistory"
+            }
+          ],
+          "option_keys": [
+            "geometry_quality",
+            "foliage_quality"
+          ]
+        },
+        {
+          "group": "depth_of_field",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 4.997632,
+            "p50": 4.1994240000000005,
+            "p95": 5.79584,
+            "p99": 5.79584,
+            "max": 5.79584
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 112,
+              "name": "HdrPostSignedCoC"
+            },
+            {
+              "id": 113,
+              "name": "HdrPostForegroundDilation"
+            },
+            {
+              "id": 114,
+              "name": "HdrPostDepthOfField"
+            }
+          ],
+          "option_keys": [
+            "depth_of_field"
+          ]
+        },
+        {
+          "group": "lighting",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 1.0296319999999999,
+            "p50": 0.928768,
+            "p95": 1.130496,
+            "p99": 1.130496,
+            "max": 1.130496
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 5,
+              "name": "Deferred Cel Lighting"
+            }
+          ],
+          "option_keys": [
+            "output_extent",
+            "reconstruction_quality",
+            "resolution_mode",
+            "manual_scale_percent",
+            "material_quality",
+            "lighting_quality"
+          ]
+        },
+        {
+          "group": "adaptive",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.7127039999999999,
+            "p50": 0.106496,
+            "p95": 1.3189119999999999,
+            "p99": 1.3189119999999999,
+            "max": 1.3189119999999999
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 280,
+              "name": "Adaptive.ClassifyActualGuides"
+            },
+            {
+              "id": 281,
+              "name": "Adaptive.ReduceNativeVrsTiles"
+            }
+          ],
+          "option_keys": [
+            "adaptive_shading"
+          ]
+        },
+        {
+          "group": "refraction",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.67584,
+            "p50": 0.38809599999999994,
+            "p95": 0.963584,
+            "p99": 0.963584,
+            "max": 0.963584
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 90,
+              "name": "HeroPeelFront"
+            },
+            {
+              "id": 91,
+              "name": "HeroPeelExit"
+            },
+            {
+              "id": 92,
+              "name": "HeroPeelFront"
+            },
+            {
+              "id": 93,
+              "name": "HeroPeelExit"
+            },
+            {
+              "id": 94,
+              "name": "HeroPeelFront"
+            },
+            {
+              "id": 95,
+              "name": "HeroPeelExit"
+            },
+            {
+              "id": 96,
+              "name": "HeroPeelFront"
+            },
+            {
+              "id": 97,
+              "name": "HeroPeelExit"
+            },
+            {
+              "id": 98,
+              "name": "HeroClearOverflow"
+            },
+            {
+              "id": 99,
+              "name": "HeroOitTail"
+            },
+            {
+              "id": 100,
+              "name": "HeroNearestFrontGuides"
+            },
+            {
+              "id": 101,
+              "name": "HeroCopyBackground"
+            },
+            {
+              "id": 102,
+              "name": "HeroLayerComposite"
+            },
+            {
+              "id": 103,
+              "name": "HeroCopyBackground"
+            },
+            {
+              "id": 104,
+              "name": "HeroLayerComposite"
+            },
+            {
+              "id": 105,
+              "name": "HeroCopyBackground"
+            },
+            {
+              "id": 106,
+              "name": "HeroLayerComposite"
+            },
+            {
+              "id": 107,
+              "name": "HeroCopyBackground"
+            },
+            {
+              "id": 108,
+              "name": "HeroLayerComposite"
+            }
+          ],
+          "option_keys": [
+            "refraction_quality"
+          ]
+        },
+        {
+          "group": "contact_shadows",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.374272,
+            "p50": 0.227328,
+            "p95": 0.521216,
+            "p99": 0.521216,
+            "max": 0.521216
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 48,
+              "name": "ContactShadows"
+            }
+          ],
+          "option_keys": [
+            "contact_shadows"
+          ]
+        },
+        {
+          "group": "reconstruction",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.21760000000000002,
+            "p50": 0.21504,
+            "p95": 0.22016,
+            "p99": 0.22016,
+            "max": 0.22016
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 9,
+              "name": "Temporal Resolve"
+            }
+          ],
+          "option_keys": [
+            "output_extent",
+            "reconstruction_provider",
+            "reconstruction_quality",
+            "resolution_mode",
+            "manual_scale_percent",
+            "sharpening"
+          ]
+        },
+        {
+          "group": "motion_blur",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.21760000000000002,
+            "p50": 0.200704,
+            "p95": 0.234496,
+            "p99": 0.234496,
+            "max": 0.234496
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 111,
+              "name": "HdrPostMotionBlur"
+            }
+          ],
+          "option_keys": [
+            "motion_blur"
+          ]
+        },
+        {
+          "group": "shared_ray_compose",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.210944,
+            "p50": 0.210944,
+            "p95": 0.210944,
+            "p99": 0.210944,
+            "max": 0.210944
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 169,
+              "name": "RayTransportCompose"
+            }
+          ],
+          "option_keys": [
+            "gi_mode",
+            "gi_quality",
+            "reflection_mode",
+            "reflection_quality"
+          ]
+        },
+        {
+          "group": "post",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.19251200000000002,
+            "p50": 0.19251200000000002,
+            "p95": 0.19251200000000002,
+            "p99": 0.19251200000000002,
+            "max": 0.19251200000000002
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 14,
+              "name": "ToneMap"
+            },
+            {
+              "id": 16,
+              "name": "FXAA"
+            },
+            {
+              "id": 33,
+              "name": "PreExposure"
+            },
+            {
+              "id": 34,
+              "name": "ExposureHistogramClear"
+            },
+            {
+              "id": 35,
+              "name": "ExposureHistogramBuild"
+            },
+            {
+              "id": 36,
+              "name": "ExposureReduce"
+            }
+          ],
+          "option_keys": [
+            "output_extent",
+            "hdr_mode",
+            "hdr_paper_white_nits",
+            "hdr_peak_nits",
+            "sharpening"
+          ]
+        },
+        {
+          "group": "subsurface",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.13312000000000002,
+            "p50": 0.131072,
+            "p95": 0.135168,
+            "p99": 0.135168,
+            "max": 0.135168
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 60,
+              "name": "SubsurfaceHorizontal"
+            },
+            {
+              "id": 61,
+              "name": "SubsurfaceVertical"
+            }
+          ],
+          "option_keys": [
+            "material_quality"
+          ]
+        },
+        {
+          "group": "outline",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.108032,
+            "p50": 0.099328,
+            "p95": 0.116736,
+            "p99": 0.116736,
+            "max": 0.116736
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 15,
+              "name": "Screen-space Outline"
+            }
+          ],
+          "option_keys": [
+            "outline",
+            "outline_width_px"
+          ]
+        },
+        {
+          "group": "light_lists",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.097792,
+            "p50": 0.07680000000000001,
+            "p95": 0.118784,
+            "p99": 0.118784,
+            "max": 0.118784
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 130,
+              "name": "LightListUpload"
+            },
+            {
+              "id": 131,
+              "name": "LightListClusters"
+            }
+          ],
+          "option_keys": [
+            "lighting_quality"
+          ]
+        },
+        {
+          "group": "transparency",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.095744,
+            "p50": 0.08601600000000001,
+            "p95": 0.105472,
+            "p99": 0.105472,
+            "max": 0.105472
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 7,
+              "name": "Forward Transparent/OIT"
+            },
+            {
+              "id": 8,
+              "name": "OIT Composite"
+            }
+          ],
+          "option_keys": [
+            "texture_quality",
+            "anisotropic_filtering",
+            "transparency_quality",
+            "particle_quality"
+          ]
+        },
+        {
+          "group": "shared_post_guides",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.079872,
+            "p50": 0.075776,
+            "p95": 0.083968,
+            "p99": 0.083968,
+            "max": 0.083968
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 110,
+              "name": "HdrPostNearestGuides"
+            }
+          ],
+          "option_keys": [
+            "motion_blur",
+            "depth_of_field"
+          ]
+        },
+        {
+          "group": "particles",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.068096,
+            "p50": 0.048128,
+            "p95": 0.088064,
+            "p99": 0.088064,
+            "max": 0.088064
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 1,
+              "name": "GPU Particle Spawn/Update"
+            }
+          ],
+          "option_keys": [
+            "particle_quality"
+          ]
+        },
+        {
+          "group": "bloom",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.057344,
+            "p50": 0.054272,
+            "p95": 0.060416,
+            "p99": 0.060416,
+            "max": 0.060416
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 10,
+              "name": "Bloom Half Extract"
+            },
+            {
+              "id": 11,
+              "name": "Bloom Quarter Downsample"
+            },
+            {
+              "id": 12,
+              "name": "Bloom Half Upsample"
+            },
+            {
+              "id": 13,
+              "name": "Bloom"
+            }
+          ],
+          "option_keys": [
+            "bloom",
+            "bloom_strength"
+          ]
+        },
+        {
+          "group": "color_grading",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.022528,
+            "p50": 0.021504,
+            "p95": 0.023552,
+            "p99": 0.023552,
+            "max": 0.023552
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 116,
+              "name": "HdrPostColorGrade"
+            }
+          ],
+          "option_keys": [
+            "color_grading"
+          ]
+        },
+        {
+          "group": "ui",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.020479999999999998,
+            "p50": 0.019456,
+            "p95": 0.021504,
+            "p99": 0.021504,
+            "max": 0.021504
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": true,
+          "passes": [
+            {
+              "id": 17,
+              "name": "Game UI"
+            }
+          ],
+          "option_keys": []
+        },
+        {
+          "group": "distortion",
+          "gpu_work_ms_per_completed_frame": {
+            "count": 2,
+            "mean": 0.010239999999999999,
+            "p50": 0.007168,
+            "p95": 0.013312,
+            "p99": 0.013312,
+            "max": 0.013312
+          },
+          "scheduled_frames": 2,
+          "fully_measured_scheduled_frames": 2,
+          "measurement_scope": "direct_compute_passes",
+          "excludes_copy_transfer": false,
+          "passes": [
+            {
+              "id": 6,
+              "name": "VFX Distortion Vectors"
+            }
+          ],
+          "option_keys": [
+            "particle_quality"
+          ]
+        }
+      ]
+    }
+  ],
+  "limits": [
+    "One configuration run measures active feature work, not marginal option savings or unselected providers.",
+    "GPU work sums pass durations inside a feature group. Async queue overlap means these sums are not elapsed frame time or GPU busy percentage.",
+    "Feature groups are shared by multiple controls; do not add the same group once per option.",
+    "Measured Direct/Compute feature work excludes separate Copy transfers. Unsupported/unmeasured Copy work remains N/A, so overall GPU work is partial.",
+    "Canonical reconstruction/adaptive settings describe policy. Native status and scheduled stage evidence are separate from policy and do not prove marginal savings.",
+    "Critical path is reported independently. Off/unavailable/unscheduled work has no claimed isolated timing.",
+    "Frame generation prepare/guides exclude SDK-generated work and generated output FPS.",
+    "Use the separate QPC frame report and per-process GPU sampler for base FPS and utilization."
+  ]
+}

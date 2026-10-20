@@ -1,0 +1,221 @@
+{
+  "code_commit": "1ac2d71abdd4539aafcad4666063a711c025d483",
+  "run_id": 38362247340,
+  "url": "https://github.com/crapa36/Project-HS/actions/runs/38362247340",
+  "jobs": [
+    {
+      "id": 115178944468,
+      "name": "runtime-compile",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 38362247340,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Run ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Configure runtime compilation",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Compile HZB readback probe",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5
+        },
+        {
+          "name": "Verify compiled HZB helper on explicit WARP",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Compile runtime and renderer",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7
+        },
+        {
+          "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15
+        }
+      ]
+    },
+    {
+      "id": 115178944801,
+      "name": "test",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 38362247340,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Run ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Verify core",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Retain full core failure details",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 5
+        },
+        {
+          "name": "Verify portable render data and asset pipeline",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6
+        },
+        {
+          "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13
+        }
+      ]
+    },
+    {
+      "id": 115178944949,
+      "name": "linux-core",
+      "status": "completed",
+      "conclusion": "success",
+      "run_id": 38362247340,
+      "logs_url": null,
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1
+        },
+        {
+          "name": "Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2
+        },
+        {
+          "name": "Install isolated verification tools",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3
+        },
+        {
+          "name": "Verify core and portable correctness helpers",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4
+        },
+        {
+          "name": "Post Run actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "linux_core": 16,
+    "windows_core": 17,
+    "windows_portable": 31,
+    "windows_warp": 1
+  },
+  "warp_mode": "explicit software WARP, Debug layer and GPU-based validation required",
+  "production_build": {
+    "configuration": "msvc-validation / RelWithDebInfo",
+    "content_tools": false,
+    "targets": [
+      "hs_runtime",
+      "hs_renderer_d3d12"
+    ],
+    "passed": true
+  },
+  "remaining": [
+    "Target hardware HZB scenes, DRS and cluster comparisons",
+    "Full verify with proprietary FBX SDK and generated content",
+    "UI and diagnostics runtime integration",
+    "Unresolved prior full-FHD DeviceHung",
+    "Sanitizer run with accessible /proc"
+  ],
+  "log_excerpt": {
+    "test": [
+      "2026-10-13T07:24:00.8025436Z Total Test time (real) =   4.72 sec\r",
+      "2026-10-13T07:24:01.5300877Z -- The C compiler identification is MSVC 19.44.35229.0\r",
+      "2026-10-13T07:24:01.6557792Z -- The CXX compiler identification is MSVC 19.44.35229.0\r",
+      "2026-10-13T07:26:06.1614249Z 100% tests passed out of 31\r",
+      "2026-10-13T07:26:06.1616514Z Total Test time (real) =  59.50 sec\r"
+    ],
+    "linux-core": [
+      "2026-10-13T07:22:53.4508670Z -- The C compiler identification is GNU 13.3.0",
+      "2026-10-13T07:22:53.5611943Z -- The CXX compiler identification is GNU 13.3.0",
+      "2026-10-13T07:23:14.4282910Z 100% tests passed out of 16",
+      "2026-10-13T07:23:14.4284167Z Total Test time (real) =   2.56 sec"
+    ],
+    "runtime-compile": [
+      "2026-10-13T07:23:21.5691182Z -- The C compiler identification is MSVC 19.44.35229.0\r",
+      "2026-10-13T07:23:22.3592485Z -- The CXX compiler identification is MSVC 19.44.35229.0\r",
+      "2026-10-13T07:23:59.9475762Z 100% tests passed out of 1\r",
+      "2026-10-13T07:23:59.9477318Z Total Test time (real) =   3.84 sec\r",
+      "2026-10-13T07:31:09.4722578Z [174/198] Linking CXX static library hs_renderer_d3d12.lib\r",
+      "2026-10-13T07:32:20.8236960Z [198/198] Linking CXX static library hs_runtime.lib\r"
+    ]
+  }
+}

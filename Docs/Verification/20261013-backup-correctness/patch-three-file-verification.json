@@ -1,0 +1,32 @@
+[
+  {
+    "case": "original-lf",
+    "expected_rejection": false,
+    "exit_code": 0,
+    "verified": true
+  },
+  {
+    "case": "original-crlf",
+    "expected_rejection": false,
+    "exit_code": 0,
+    "verified": true
+  },
+  {
+    "case": "patched-crlf",
+    "expected_rejection": false,
+    "exit_code": 0,
+    "verified": true
+  },
+  {
+    "case": "incremental-admission",
+    "expected_rejection": false,
+    "exit_code": 0,
+    "verified": true
+  },
+  {
+    "case": "tampered-graph",
+    "expected_rejection": true,
+    "exit_code": 1,
+    "verified": true
+  }
+]

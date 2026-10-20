@@ -1,0 +1,16 @@
+{
+  "commit": "e099ef994fc09851e68b44be7c802bbc39d70be9",
+  "run": 38358018633,
+  "linux_core": "success",
+  "windows_core": {
+    "passed": 15,
+    "total": 17,
+    "timeout_seconds": 30,
+    "timeouts": [
+      "foundation.task-system-failure-injection",
+      "foundation.taskflow-admission-failure"
+    ],
+    "patch_configuration": "passed"
+  },
+  "next": "Add stderr checkpoints outside allocation-failure windows to localize Windows-only timeout; timeout remains 30 seconds."
+}

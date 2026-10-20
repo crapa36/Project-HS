@@ -1,0 +1,14 @@
+[
+  {
+    "autocrlf": false,
+    "sha256": "a6a724648ec6fcbbb2ea4fd0336110b59906e876883150026114ecd54a294bf3",
+    "crlf": 0,
+    "lf_normalized_sha256": "a6a724648ec6fcbbb2ea4fd0336110b59906e876883150026114ecd54a294bf3"
+  },
+  {
+    "autocrlf": true,
+    "sha256": "dd7a37355dc670d99d3afbd7ab6388a50adf7c4c1cc38345f9911ea681619d1a",
+    "crlf": 443,
+    "lf_normalized_sha256": "a6a724648ec6fcbbb2ea4fd0336110b59906e876883150026114ecd54a294bf3"
+  }
+]

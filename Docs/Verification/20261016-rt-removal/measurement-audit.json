@@ -1,0 +1,1645 @@
+{
+  "schema": 1,
+  "capture": "Build/play-captures/20261016-nonrt-ultra-01",
+  "analysis_status": "partial",
+  "session_complete": false,
+  "runtime_capture_complete": true,
+  "original_input_sha256": "b2cc7dc92bdc6883990ce9523b45dd3f8d163aab2b6024a134bde1d1e225f246",
+  "replay_input_sha256": "b2cc7dc92bdc6883990ce9523b45dd3f8d163aab2b6024a134bde1d1e225f246",
+  "simulation_checksum": 14666118289919368357,
+  "playing_frames": 742,
+  "all_playing_frames_foreground": true,
+  "base_fps": {
+    "available": true,
+    "frame_intervals": 740,
+    "wall_seconds": 22.463360100000045,
+    "fps": 32.942533828676794,
+    "interval_ms": {
+      "mean": 30.35589202702709,
+      "min": 20.162599999935082,
+      "max": 117.10579999999027
+    }
+  },
+  "sdk_present": {
+    "available": true,
+    "observations": 740,
+    "sdk_reported_present_count": 1474,
+    "observed_query_interval_seconds": 22.381067700000017,
+    "sdk_reported_present_fps": 65.85923512487292,
+    "transition_or_window_observations_excluded": 0,
+    "invalid_observations": 0,
+    "physical_display_cadence_verified": false,
+    "source": "Streamline numFramesActuallyPresented since preceding native GetState; excludes FSR generated/XeSS queued counts"
+  },
+  "cpu_stage_wall_ms": {
+    "adapter": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 2.0716671159029625,
+      "weighted_mean": 2.0716671159029625,
+      "min": 0.148,
+      "max": 413.63
+    },
+    "render": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 28.783696765498643,
+      "weighted_mean": 28.783696765498643,
+      "min": 14.2515,
+      "max": 113.3007
+    },
+    "wait": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.2470498652291103,
+      "weighted_mean": 0.2470498652291103,
+      "min": 0.004,
+      "max": 11.679
+    },
+    "streaming": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.40698247978436597,
+      "weighted_mean": 0.40698247978436597,
+      "min": 0.244,
+      "max": 2.425
+    },
+    "scene_prepare": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 1.456725067385443,
+      "weighted_mean": 1.456725067385443,
+      "min": 0.981,
+      "max": 5.917
+    },
+    "ui": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.3162816711590307,
+      "weighted_mean": 0.3162816711590307,
+      "min": 0.0,
+      "max": 8.559
+    },
+    "constants_upload": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 2.284041778975741,
+      "weighted_mean": 2.284041778975741,
+      "min": 1.833,
+      "max": 5.724
+    },
+    "graph_build": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 4.8074272237196745,
+      "weighted_mean": 4.8074272237196745,
+      "min": 4.199,
+      "max": 24.133
+    },
+    "graph_prepare": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.981807277628032,
+      "weighted_mean": 0.981807277628032,
+      "min": 0.875,
+      "max": 1.598
+    },
+    "descriptors": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.05165902964959545,
+      "weighted_mean": 0.05165902964959545,
+      "min": 0.043,
+      "max": 0.178
+    },
+    "graph_plan": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.571053908355795,
+      "weighted_mean": 0.571053908355795,
+      "min": 0.302,
+      "max": 78.13
+    },
+    "graph_record": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 1.3211185983827476,
+      "weighted_mean": 1.3211185983827476,
+      "min": 1.078,
+      "max": 11.133
+    },
+    "graph_submit": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 3.567923180592991,
+      "weighted_mean": 3.567923180592991,
+      "min": 3.12,
+      "max": 5.989
+    },
+    "post_submit": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.05318194070080843,
+      "weighted_mean": 0.05318194070080843,
+      "min": 0.043,
+      "max": 0.237
+    },
+    "present": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 12.284637466307288,
+      "weighted_mean": 12.284637466307288,
+      "min": 0.081,
+      "max": 41.363
+    },
+    "diagnostics": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.05263477088948769,
+      "weighted_mean": 0.05263477088948769,
+      "min": 0.038,
+      "max": 0.248
+    },
+    "wrapper": {
+      "available": true,
+      "count": 742,
+      "rejected": 0,
+      "mean": 0.28894204851751965,
+      "weighted_mean": 0.28894204851751965,
+      "min": 0.132,
+      "max": 29.998
+    }
+  },
+  "gpu_critical_path_ms": {
+    "available": true,
+    "count": 742,
+    "rejected": 0,
+    "mean": 27.10094939083558,
+    "weighted_mean": 27.10094939083558,
+    "min": 24.691712,
+    "max": 33.907712
+  },
+  "utilization": {
+    "available": true,
+    "sampling_metadata": {
+      "schema": 3,
+      "complete": true,
+      "process_id": 28204,
+      "process_start_utc": "2026-10-16T01:19:24.5140679Z",
+      "start_utc": "2026-10-16T01:19:25.2260887Z",
+      "end_utc": "2026-10-16T01:20:25.5311247Z",
+      "start_qpc": 8140713569,
+      "end_qpc": 8743764501,
+      "qpc_frequency": 10000000,
+      "logical_processors": 20,
+      "samples": 55,
+      "reason": "process_exit",
+      "error": null,
+      "max_seconds": 90,
+      "unlimited": false,
+      "pdh_query_retries": 0,
+      "invalid_sample_errors": 1,
+      "counter_errors_total": 2,
+      "pdh_query_refreshes": 0,
+      "pdh_refresh_missing_target": 0,
+      "pdh_refresh_periodic": 0,
+      "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+      "issues_total": 0,
+      "recent_issues": [],
+      "issues_stream": "sampling-errors.jsonl",
+      "pdh_worker": {
+        "schema": 3,
+        "complete": true,
+        "process_id": 28204,
+        "process_start_utc": "2026-10-16T01:19:24.5140679Z",
+        "start_utc": "2026-10-16T01:19:25.8410127Z",
+        "end_utc": "2026-10-16T01:20:25.4015061Z",
+        "start_qpc": 8146857582,
+        "end_qpc": 8742465491,
+        "qpc_frequency": 10000000,
+        "logical_processors": 20,
+        "samples": 37,
+        "reason": "process_exit",
+        "error": null,
+        "max_seconds": 90,
+        "unlimited": false,
+        "pdh_query_retries": 0,
+        "invalid_sample_errors": 1,
+        "counter_errors_total": 2,
+        "pdh_query_refreshes": 0,
+        "pdh_refresh_missing_target": 0,
+        "pdh_refresh_periodic": 0,
+        "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+        "issues_total": 2,
+        "recent_issues": [
+          {
+            "utc": "2026-10-16T01:20:24.1310521Z",
+            "qpc": 8729756363,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          },
+          {
+            "utc": "2026-10-16T01:20:25.3786890Z",
+            "qpc": 8742239883,
+            "component": "pdh",
+            "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+            "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+          }
+        ],
+        "issues_stream": "pdh-errors.jsonl",
+        "pdh_worker": null,
+        "pdh_worker_stopped_by_owner": false,
+        "counter_worker_process_id": 30824,
+        "counter_initialization_pending": false,
+        "first_counter_qpc": 8291758631,
+        "counter_initialization_latency_seconds": 14.4901049,
+        "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+        "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+        "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\renderer_features.jsonl",
+        "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+        "gpu_ready_wait_state": "ready",
+        "gpu_ready_observed_qpc": 8230565962,
+        "first_gpu_sample_is_warmup": true,
+        "gpu_counters_enabled": true,
+        "gpu_adapter_preference": "",
+        "observed_target_luids": [
+          "0x00000000_0x0000f494",
+          "0x00000000_0x00010d50"
+        ],
+        "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+        "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+        "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+        "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+        "nvidia_requested": false,
+        "nvidia_worker": {
+          "complete": true,
+          "error": null,
+          "whole_device_includes_other_apps": true,
+          "samples": 58,
+          "reason": "target_exit_or_limit"
+        },
+        "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+      },
+      "pdh_worker_stopped_by_owner": false,
+      "counter_worker_process_id": 30824,
+      "counter_initialization_pending": false,
+      "first_counter_qpc": 8291758631,
+      "counter_initialization_latency_seconds": 15.1045062,
+      "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+      "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+      "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\renderer_features.jsonl",
+      "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+      "gpu_ready_wait_state": "ready",
+      "gpu_ready_observed_qpc": 8230565962,
+      "first_gpu_sample_is_warmup": true,
+      "gpu_counters_enabled": true,
+      "gpu_adapter_preference": "",
+      "observed_target_luids": [
+        "0x00000000_0x0000f494",
+        "0x00000000_0x00010d50"
+      ],
+      "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+      "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+      "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+      "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+      "nvidia_requested": true,
+      "nvidia_worker": {
+        "complete": true,
+        "error": null,
+        "whole_device_includes_other_apps": true,
+        "samples": 58,
+        "reason": "target_exit_or_limit"
+      },
+      "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+    },
+    "process_cpu": {
+      "samples": 20,
+      "sampled_wall_seconds": 21.135188799999998,
+      "process_cpu_seconds": 17.765625,
+      "weighted_core_equivalents": 0.8405709155529285,
+      "machine_percent": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 4.199339805106902,
+        "weighted_mean": 4.202854577764643,
+        "min": 2.8072387792996825,
+        "max": 6.00301804062576
+      },
+      "logical_processors": [
+        20
+      ]
+    },
+    "system_cpu_percent": {
+      "available": true,
+      "count": 18,
+      "rejected": 0,
+      "mean": 11.30719120872272,
+      "weighted_mean": 11.323340621289452,
+      "min": 8.23856020933249,
+      "max": 16.5892317715854
+    },
+    "process_and_system_metrics": {
+      "working_set_bytes": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 2890514022.4,
+        "weighted_mean": 2890074326.1131687,
+        "min": 2833059840.0,
+        "max": 2970746880.0
+      },
+      "private_memory_bytes": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 6821337292.8,
+        "weighted_mean": 6820330502.585926,
+        "min": 6434983936.0,
+        "max": 7125049344.0
+      },
+      "handle_count": {
+        "available": true,
+        "count": 20,
+        "rejected": 0,
+        "mean": 1053.3,
+        "weighted_mean": 1053.279825827721,
+        "min": 1050.0,
+        "max": 1059.0
+      },
+      "system_busy_core_equivalents": {
+        "available": true,
+        "count": 18,
+        "rejected": 2,
+        "mean": 2.2568634848368543,
+        "weighted_mean": 2.264564645624049,
+        "min": 1.6477120418664981,
+        "max": 3.3178463543170755
+      }
+    },
+    "logical_cpu_percent": {
+      "0,0": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 20.52720795603341,
+        "weighted_mean": 20.526271709903554,
+        "min": 11.1817748338435,
+        "max": 29.5102393990167
+      },
+      "0,1": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 0.6675772974639382,
+        "weighted_mean": 0.667893217824045,
+        "min": 0.0,
+        "max": 2.56421470353081
+      },
+      "0,10": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 24.485189141467668,
+        "weighted_mean": 24.492152583481175,
+        "min": 12.7840905622094,
+        "max": 35.468517317911
+      },
+      "0,11": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 0.4510390676150823,
+        "weighted_mean": 0.4509230768885065,
+        "min": 0.0,
+        "max": 1.41030994938094
+      },
+      "0,12": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 15.096456086143766,
+        "weighted_mean": 15.116315085480437,
+        "min": 5.29251773318467,
+        "max": 28.1589849053406
+      },
+      "0,13": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 2.6375659661334523,
+        "weighted_mean": 2.6635277316863646,
+        "min": 0.0,
+        "max": 11.3997909561605
+      },
+      "0,14": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 1.9442386266397296,
+        "weighted_mean": 1.9548513572770083,
+        "min": 0.0,
+        "max": 7.60263913999595
+      },
+      "0,15": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 1.1503299024916975,
+        "weighted_mean": 1.1656306735343411,
+        "min": 0.0,
+        "max": 8.86835641205079
+      },
+      "0,16": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 23.414217803633843,
+        "weighted_mean": 23.48051924459451,
+        "min": 14.0956733874602,
+        "max": 45.5741573016414
+      },
+      "0,17": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 12.829815078896537,
+        "weighted_mean": 12.88032722213448,
+        "min": 3.68302773745539,
+        "max": 23.3505155667776
+      },
+      "0,18": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 8.261304996796696,
+        "weighted_mean": 8.2775149331751,
+        "min": 0.0,
+        "max": 20.7522279588717
+      },
+      "0,19": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 5.961146376090744,
+        "weighted_mean": 6.018128114078589,
+        "min": 0.0,
+        "max": 21.5255291325993
+      },
+      "0,2": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 23.724555857867003,
+        "weighted_mean": 23.769512391046476,
+        "min": 10.4899841451435,
+        "max": 33.0895294213368
+      },
+      "0,3": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 0.9155767755470612,
+        "weighted_mean": 0.9057462940743825,
+        "min": 0.0,
+        "max": 5.12651600029611
+      },
+      "0,4": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 20.294405175902334,
+        "weighted_mean": 20.30977792498269,
+        "min": 6.03289221551558,
+        "max": 32.0735034208706
+      },
+      "0,5": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 0.3305859856106888,
+        "weighted_mean": 0.3287750122392196,
+        "min": 0.0,
+        "max": 1.88210188248563
+      },
+      "0,6": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 43.4438709496702,
+        "weighted_mean": 43.459249940300644,
+        "min": 35.5001356340005,
+        "max": 50.0163515738482
+      },
+      "0,7": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 1.6844837168889346,
+        "weighted_mean": 1.6979538894327841,
+        "min": 0.0,
+        "max": 24.3103590966982
+      },
+      "0,8": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 23.24857313755362,
+        "weighted_mean": 23.266762055073325,
+        "min": 9.12104785612917,
+        "max": 31.8027896025164
+      },
+      "0,9": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 0.5515852220446245,
+        "weighted_mean": 0.547636559689939,
+        "min": 0.0,
+        "max": 2.59596716955036
+      }
+    },
+    "cpu_total_and_group_percent": {
+      "0,_total": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 11.30719120872272,
+        "weighted_mean": 11.323340621289452,
+        "min": 8.23856020933249,
+        "max": 16.5892317715854
+      },
+      "_total": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 11.30719120872272,
+        "weighted_mean": 11.323340621289452,
+        "min": 8.23856020933249,
+        "max": 16.5892317715854
+      }
+    },
+    "system_cpu_summary_source": "Independent PDH sample QPC intervals; cached CPU-row summary percentages are not repeated",
+    "busiest_threads": [
+      {
+        "thread_id": 23476,
+        "cpu_seconds": 9.84375,
+        "core_equivalents": 0.4657516946335488
+      },
+      {
+        "thread_id": 14132,
+        "cpu_seconds": 0.796875,
+        "core_equivalents": 0.03770370861319205
+      },
+      {
+        "thread_id": 3008,
+        "cpu_seconds": 0.78125,
+        "core_equivalents": 0.03696442020901181
+      },
+      {
+        "thread_id": 22912,
+        "cpu_seconds": 0.71875,
+        "core_equivalents": 0.03400726659229086
+      },
+      {
+        "thread_id": 6056,
+        "cpu_seconds": 0.71875,
+        "core_equivalents": 0.03400726659229086
+      },
+      {
+        "thread_id": 26824,
+        "cpu_seconds": 0.71875,
+        "core_equivalents": 0.03400726659229086
+      },
+      {
+        "thread_id": 12428,
+        "cpu_seconds": 0.703125,
+        "core_equivalents": 0.03326797818811063
+      },
+      {
+        "thread_id": 10632,
+        "cpu_seconds": 0.703125,
+        "core_equivalents": 0.03326797818811063
+      },
+      {
+        "thread_id": 29320,
+        "cpu_seconds": 0.6875,
+        "core_equivalents": 0.03252868978393039
+      },
+      {
+        "thread_id": 28996,
+        "cpu_seconds": 0.6875,
+        "core_equivalents": 0.03252868978393039
+      },
+      {
+        "thread_id": 15744,
+        "cpu_seconds": 0.296875,
+        "core_equivalents": 0.014046479679424488
+      },
+      {
+        "thread_id": 25024,
+        "cpu_seconds": 0.265625,
+        "core_equivalents": 0.012567902871064015
+      },
+      {
+        "thread_id": 5648,
+        "cpu_seconds": 0.25,
+        "core_equivalents": 0.01182861446688378
+      },
+      {
+        "thread_id": 6124,
+        "cpu_seconds": 0.171875,
+        "core_equivalents": 0.008132172445982598
+      },
+      {
+        "thread_id": 11936,
+        "cpu_seconds": 0.171875,
+        "core_equivalents": 0.008132172445982598
+      },
+      {
+        "thread_id": 3336,
+        "cpu_seconds": 0.125,
+        "core_equivalents": 0.00591430723344189
+      },
+      {
+        "thread_id": 21292,
+        "cpu_seconds": 0.09375,
+        "core_equivalents": 0.004435730425081417
+      },
+      {
+        "thread_id": 17064,
+        "cpu_seconds": 0.015625,
+        "core_equivalents": 0.0007392884041802362
+      },
+      {
+        "thread_id": 25924,
+        "cpu_seconds": 0.015625,
+        "core_equivalents": 0.0007392884041802362
+      },
+      {
+        "thread_id": 3852,
+        "cpu_seconds": 0.0,
+        "core_equivalents": 0.0
+      }
+    ],
+    "process_gpu": {
+      "target_pid": 28204,
+      "busiest_engine_percent": {
+        "available": true,
+        "count": 18,
+        "rejected": 0,
+        "mean": 68.71375077480384,
+        "weighted_mean": 68.70868962870203,
+        "min": 58.40499688508388,
+        "max": 72.49908815766682
+      },
+      "sampled_wall_seconds": 21.665931999999998,
+      "frame_window_seconds": 22.960304500000007,
+      "initial_target_observation_gap_seconds": 0.8339014999999108,
+      "window_coverage_fraction": 0.9436256387627608,
+      "sources": [
+        {
+          "directory": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\utilization",
+          "supplemental": false,
+          "sampled_wall_seconds": 21.665931999999998,
+          "accepted_intervals": 18,
+          "overlapping_intervals_excluded": 0,
+          "metadata": {
+            "pdh-worker.json": {
+              "schema": 3,
+              "complete": true,
+              "process_id": 28204,
+              "process_start_utc": "2026-10-16T01:19:24.5140679Z",
+              "start_utc": "2026-10-16T01:19:25.8410127Z",
+              "end_utc": "2026-10-16T01:20:25.4015061Z",
+              "start_qpc": 8146857582,
+              "end_qpc": 8742465491,
+              "qpc_frequency": 10000000,
+              "logical_processors": 20,
+              "samples": 37,
+              "reason": "process_exit",
+              "error": null,
+              "max_seconds": 90,
+              "unlimited": false,
+              "pdh_query_retries": 0,
+              "invalid_sample_errors": 1,
+              "counter_errors_total": 2,
+              "pdh_query_refreshes": 0,
+              "pdh_refresh_missing_target": 0,
+              "pdh_refresh_periodic": 0,
+              "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+              "issues_total": 2,
+              "recent_issues": [
+                {
+                  "utc": "2026-10-16T01:20:24.1310521Z",
+                  "qpc": 8729756363,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                },
+                {
+                  "utc": "2026-10-16T01:20:25.3786890Z",
+                  "qpc": 8742239883,
+                  "component": "pdh",
+                  "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                  "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                }
+              ],
+              "issues_stream": "pdh-errors.jsonl",
+              "pdh_worker": null,
+              "pdh_worker_stopped_by_owner": false,
+              "counter_worker_process_id": 30824,
+              "counter_initialization_pending": false,
+              "first_counter_qpc": 8291758631,
+              "counter_initialization_latency_seconds": 14.4901049,
+              "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+              "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+              "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\renderer_features.jsonl",
+              "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+              "gpu_ready_wait_state": "ready",
+              "gpu_ready_observed_qpc": 8230565962,
+              "first_gpu_sample_is_warmup": true,
+              "gpu_counters_enabled": true,
+              "gpu_adapter_preference": "",
+              "observed_target_luids": [
+                "0x00000000_0x0000f494",
+                "0x00000000_0x00010d50"
+              ],
+              "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+              "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+              "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+              "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+              "nvidia_requested": false,
+              "nvidia_worker": {
+                "complete": true,
+                "error": null,
+                "whole_device_includes_other_apps": true,
+                "samples": 58,
+                "reason": "target_exit_or_limit"
+              },
+              "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+            },
+            "sampling.json": {
+              "schema": 3,
+              "complete": true,
+              "process_id": 28204,
+              "process_start_utc": "2026-10-16T01:19:24.5140679Z",
+              "start_utc": "2026-10-16T01:19:25.2260887Z",
+              "end_utc": "2026-10-16T01:20:25.5311247Z",
+              "start_qpc": 8140713569,
+              "end_qpc": 8743764501,
+              "qpc_frequency": 10000000,
+              "logical_processors": 20,
+              "samples": 55,
+              "reason": "process_exit",
+              "error": null,
+              "max_seconds": 90,
+              "unlimited": false,
+              "pdh_query_retries": 0,
+              "invalid_sample_errors": 1,
+              "counter_errors_total": 2,
+              "pdh_query_refreshes": 0,
+              "pdh_refresh_missing_target": 0,
+              "pdh_refresh_periodic": 0,
+              "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+              "issues_total": 0,
+              "recent_issues": [],
+              "issues_stream": "sampling-errors.jsonl",
+              "pdh_worker": {
+                "schema": 3,
+                "complete": true,
+                "process_id": 28204,
+                "process_start_utc": "2026-10-16T01:19:24.5140679Z",
+                "start_utc": "2026-10-16T01:19:25.8410127Z",
+                "end_utc": "2026-10-16T01:20:25.4015061Z",
+                "start_qpc": 8146857582,
+                "end_qpc": 8742465491,
+                "qpc_frequency": 10000000,
+                "logical_processors": 20,
+                "samples": 37,
+                "reason": "process_exit",
+                "error": null,
+                "max_seconds": 90,
+                "unlimited": false,
+                "pdh_query_retries": 0,
+                "invalid_sample_errors": 1,
+                "counter_errors_total": 2,
+                "pdh_query_refreshes": 0,
+                "pdh_refresh_missing_target": 0,
+                "pdh_refresh_periodic": 0,
+                "pdh_refresh_policy": "reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic",
+                "issues_total": 2,
+                "recent_issues": [
+                  {
+                    "utc": "2026-10-16T01:20:24.1310521Z",
+                    "qpc": 8729756363,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  },
+                  {
+                    "utc": "2026-10-16T01:20:25.3786890Z",
+                    "qpc": 8742239883,
+                    "component": "pdh",
+                    "kind": "CounterApiError,Microsoft.PowerShell.Commands.GetCounterCommand",
+                    "message": "성능 카운터 샘플 중 하나에 있는 데이터가 잘못되었습니다. 각 PerformanceCounterSample 개체의 Status 속성에 올바른 데이터가 포함되어 있는지 확인하십시오."
+                  }
+                ],
+                "issues_stream": "pdh-errors.jsonl",
+                "pdh_worker": null,
+                "pdh_worker_stopped_by_owner": false,
+                "counter_worker_process_id": 30824,
+                "counter_initialization_pending": false,
+                "first_counter_qpc": 8291758631,
+                "counter_initialization_latency_seconds": 14.4901049,
+                "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+                "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+                "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\renderer_features.jsonl",
+                "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+                "gpu_ready_wait_state": "ready",
+                "gpu_ready_observed_qpc": 8230565962,
+                "first_gpu_sample_is_warmup": true,
+                "gpu_counters_enabled": true,
+                "gpu_adapter_preference": "",
+                "observed_target_luids": [
+                  "0x00000000_0x0000f494",
+                  "0x00000000_0x00010d50"
+                ],
+                "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+                "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+                "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+                "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+                "nvidia_requested": false,
+                "nvidia_worker": {
+                  "complete": true,
+                  "error": null,
+                  "whole_device_includes_other_apps": true,
+                  "samples": 58,
+                  "reason": "target_exit_or_limit"
+                },
+                "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+              },
+              "pdh_worker_stopped_by_owner": false,
+              "counter_worker_process_id": 30824,
+              "counter_initialization_pending": false,
+              "first_counter_qpc": 8291758631,
+              "counter_initialization_latency_seconds": 15.1045062,
+              "counter_time": "raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing",
+              "counter_join": "GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable",
+              "gpu_ready_file": "C:\\Users\\crapa\\.codex\\worktrees\\cpu-gpu-utilization\\Project-HS\\Build\\play-captures\\20261016-nonrt-ultra-01\\renderer_features.jsonl",
+              "pdh_start_policy": "wait_for_nonempty_gpu_ready_file",
+              "gpu_ready_wait_state": "ready",
+              "gpu_ready_observed_qpc": 8230565962,
+              "first_gpu_sample_is_warmup": true,
+              "gpu_counters_enabled": true,
+              "gpu_adapter_preference": "",
+              "observed_target_luids": [
+                "0x00000000_0x0000f494",
+                "0x00000000_0x00010d50"
+              ],
+              "adapter_selection": "explicit AdapterLuid, otherwise busiest valid target-PID engine",
+              "cpu_denominator": "process CPU seconds / QPC wall seconds; machine percent divides by logical processors",
+              "system_cpu": "PDH Processor Information percent per logical processor and _Total; raw status retained",
+              "gpu_summary": "busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications",
+              "nvidia_requested": true,
+              "nvidia_worker": {
+                "complete": true,
+                "error": null,
+                "whole_device_includes_other_apps": true,
+                "samples": 58,
+                "reason": "target_exit_or_limit"
+              },
+              "nvidia_scope": "whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID"
+            }
+          }
+        }
+      ],
+      "engines": [
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "0",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 68.71375077480384,
+            "weighted_mean": 68.70868962870203,
+            "min": 58.40499688508388,
+            "max": 72.49908815766682
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "10",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "11",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "12",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "13",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "14",
+          "engine_type": "security_1",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "1",
+          "engine_type": "legacyoverlay",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "2",
+          "engine_type": "videodecode",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "3",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "4",
+          "engine_type": "copy",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 1.4318739688448126,
+            "weighted_mean": 1.4317380097525256,
+            "min": 1.2737449572811306,
+            "max": 1.6389831940263162
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "5",
+          "engine_type": "security",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "6",
+          "engine_type": "videoencode",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "7",
+          "engine_type": "videoencode",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "8",
+          "engine_type": "ofa_0",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x0000f494",
+          "physical_adapter": "0",
+          "engine": "9",
+          "engine_type": "vr",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "0",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "10",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.14762133510781392,
+            "weighted_mean": 0.14747904303010648,
+            "min": 0.04309514167892353,
+            "max": 0.29761825575996714
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "11",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "12",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "13",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "14",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "15",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "16",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "17",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "18",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "19",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "1",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "20",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "2",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "3",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "4",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "5",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "6",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "7",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "8",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "luid": "0x00000000_0x00010d50",
+          "physical_adapter": "0",
+          "engine": "9",
+          "engine_type": "3d",
+          "percent": {
+            "available": true,
+            "count": 18,
+            "rejected": 0,
+            "mean": 0.0,
+            "weighted_mean": 0.0,
+            "min": 0.0,
+            "max": 0.0
+          }
+        }
+      ],
+      "note": "Original plus optional supplemental GPU-only segments use independent PDH QPC intervals. Intervals before and after every query warmup, gaps and overlaps are N/A; original System/CPU/NVIDIA are not duplicated. Target PID only, maximum engine, no engine sum."
+    },
+    "nvidia_device_context": [
+      {
+        "uuid": " GPU-bc269b7d-8628-6f57-6a33-88e466eeb257",
+        "pci_bus_id": " 00000000:01:00.0",
+        "name": " NVIDIA GeForce RTX 4080",
+        "metrics": {
+          "gpu_percent": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 92.0909090909091,
+            "weighted_mean": 92.0909090909091,
+            "min": 39.0,
+            "max": 97.0
+          },
+          "memory_controller_percent": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 17.0,
+            "weighted_mean": 17.0,
+            "min": 7.0,
+            "max": 20.0
+          },
+          "graphics_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 2805.0,
+            "weighted_mean": 2805.0,
+            "min": 2805.0,
+            "max": 2805.0
+          },
+          "sm_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 2805.0,
+            "weighted_mean": 2805.0,
+            "min": 2805.0,
+            "max": 2805.0
+          },
+          "memory_clock_mhz": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 11201.0,
+            "weighted_mean": 11201.0,
+            "min": 11201.0,
+            "max": 11201.0
+          },
+          "memory_used_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 5773.318181818182,
+            "weighted_mean": 5773.318181818182,
+            "min": 5665.0,
+            "max": 5883.0
+          },
+          "memory_total_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 16376.0,
+            "weighted_mean": 16376.0,
+            "min": 16376.0,
+            "max": 16376.0
+          },
+          "memory_free_mib": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 10275.681818181818,
+            "weighted_mean": 10275.681818181818,
+            "min": 10166.0,
+            "max": 10384.0
+          },
+          "temperature_c": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 62.22727272727273,
+            "weighted_mean": 62.22727272727273,
+            "min": 52.0,
+            "max": 64.0
+          },
+          "power_watts": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 254.53227272727278,
+            "weighted_mean": 254.53227272727278,
+            "min": 169.17,
+            "max": 262.65
+          },
+          "power_limit_watts": {
+            "available": true,
+            "count": 22,
+            "rejected": 0,
+            "mean": 340.0,
+            "weighted_mean": 340.0,
+            "min": 340.0,
+            "max": 340.0
+          }
+        },
+        "scope": "Whole physical device, includes other processes; no Windows LUID mapping is assumed from NVIDIA index."
+      }
+    ],
+    "scope": "Only intervals fully contained in contiguous Playing CPU-frame QPC windows; no interpolation across menus or transitions. NVIDIA samples use their own timestamps.",
+    "windows_qpc_seconds": [
+      [
+        843.2018983,
+        866.1622028
+      ]
+    ],
+    "window_seconds": 22.960304500000007,
+    "issues": [
+      "GPU segment utilization worker partial/counter errors: complete=True, reason=process_exit, counter_errors=2; invalid/warmup intervals excluded"
+    ]
+  },
+  "features": {
+    "settings_generation": 0,
+    "pipeline_revision": 1,
+    "requested": {
+      "ao": "gtao",
+      "gi": "software_hybrid",
+      "reflection": "screen_space",
+      "shadow": "raster"
+    },
+    "active": {
+      "ao": "gtao",
+      "gi": "probe",
+      "reflection": "screen_space",
+      "shadow": "raster"
+    },
+    "fallback": {
+      "ao": "",
+      "gi": "consumer_unavailable",
+      "reflection": "",
+      "shadow": ""
+    },
+    "reconstruction": {
+      "requested": "internal_taau",
+      "active": "internal_taau",
+      "availability": "available"
+    },
+    "pso_cache": {
+      "library": true,
+      "mesh_library": true,
+      "hits": 24,
+      "misses": 154,
+      "native_creates": 154,
+      "store_failures": 0,
+      "load_failures": 0,
+      "io_failures": 0,
+      "discarded_files": 0
+    }
+  },
+  "limits": [
+    "Stationary early combat, no movement; no sustained 144 FPS claim.",
+    "Brixelizer is compiled OFF; requested software GI falls back to probes.",
+    "PDH returned two counter errors; raw session remains incomplete and analysis partial.",
+    "Session foreground flag was not updated by the harness; derived audit uses all 742 Playing CSV frame samples.",
+    "summary capture_provenance is a pre-finalization snapshot; use final capture-session.json for session status.",
+    "SDK present count is not independently verified physical display cadence."
+  ]
+}
