@@ -1,9 +1,10 @@
-// v9 environment materials. All colors are sampled through sRGB resource views.
-Texture2DArray<float4> TerrainGaussian : register(t0, space2);
-Texture2DArray<float4> TerrainSurface : register(t1, space2);
-Texture2DArray<float4> TerrainNormal : register(t2, space2);
-Texture2DArray<float4> TerrainDetail : register(t3, space2);
-Texture2DArray<float> TerrainHeight : register(t4, space2);
+// Environment colors use sRGB views; the Gaussian terrain source stays linear.
+#include "material_surface.hlsli"
+#include "bsdf_metallic_roughness.hlsli"
+#include "light_list.hlsli"
+#include "probe_ibl.hlsli"
+#include "local_probe_sampling.hlsli"
+Texture2D<float2> EnvironmentBrdfLut : register(t4, space2);
 Texture2DArray<float4> RockBase : register(t5, space2);
 Texture2DArray<float4> RockSurface : register(t6, space2);
 Texture2DArray<float4> RockNormal : register(t7, space2);
@@ -18,8 +19,8 @@ Texture2DArray<float> GrassRoughness : register(t15, space2);
 Texture2DArray<float4> LeafBase : register(t16, space2);
 Texture2DArray<float4> LeafNormal : register(t17, space2);
 Texture2DArray<float> LeafRoughness : register(t18, space2);
-Texture2DArray<float4> TerrainHistogram : register(t19, space2);
 Texture2D<float4> GBufferMaterial : register(t20, space2);
+Texture2D<float2> GBufferMotion : register(t21, space2);
 SamplerState EnvironmentWrap : register(s3);
 SamplerState FoliageClamp : register(s4);
 uint EnvHash(uint x) { x ^= x >> 16; x *= 0x7feb352d; x ^= x >> 15; x *= 0x846ca68b; return x ^ (x >> 16); }
@@ -34,118 +35,38 @@ float EnvNoise(float2 p, uint seed)
 float2 EnvRotate(float2 p,uint r) { return r==0?p:r==1?float2(-p.y,p.x):r==2?-p:float2(p.y,-p.x); }
 float3 EnvDecode(float2 rg) { float2 xy=rg*2-1; return float3(xy,sqrt(saturate(1-dot(xy,xy)))); }
 float3 EnvRNM(float3 n,float3 d) { float3 t=n+float3(0,0,1),u=d*float3(-1,-1,1); return normalize(t*dot(t,u)/max(t.z,0.001)-u); }
-float TerrainTileSize(uint layer) { return layer==3 ? 4.5 : 6.0; }
 struct EnvMaterial { float3 color; float3 normal; float3 detail; float roughness; float ao; float height; };
-EnvMaterial TerrainSample(float2 baseUv, float2 baseDx, float2 baseDy, uint layer, uint seed,float3 viewTs,float distanceToEye,bool pom)
+#ifndef HS_GENERATED_ENVIRONMENT_MATERIAL
+// The generic PSOs retain the same context contract as authored material PSOs.
+HsMaterialSurface HsMaterialEvaluateSurface(HsMaterialContext ctx)
 {
-    uint rotation=EnvHash(seed)&3; float2 offset=float2(EnvRandom(seed+1),EnvRandom(seed+2));
-    float2 uv=EnvRotate(baseUv,rotation)+offset, dx=EnvRotate(baseDx,rotation),dy=EnvRotate(baseDy,rotation);
-    if(pom && distanceToEye<55)
-    {
-        float tile=TerrainTileSize(layer); float heightScale=layer==3?0.05:layer==2?0.035:0.025;
-        uint steps=(uint)lerp(8,24,1-saturate(abs(viewTs.z)));
-        float2 ray=EnvRotate(viewTs.xy,rotation)/max(abs(viewTs.z),0.05)*heightScale/tile*(1-smoothstep(35,55,distanceToEye));
-        float depth=0,previous=0; float2 start=uv;
-        // Trace depth below the highest surface: black=low, white=high.
-        [loop] for(uint j=0;j<steps;++j) { if(depth>=1-TerrainHeight.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy)) break; previous=depth; depth+=1.0/steps; uv=start-ray*depth; }
-        [unroll] for(uint k=0;k<3;++k) { float mid=(previous+depth)*0.5; float2 trial=start-ray*mid; if(mid>=1-TerrainHeight.SampleGrad(EnvironmentWrap,float3(trial,layer),dx,dy)) depth=mid; else previous=mid; }
-        uv=start-ray*((previous+depth)*0.5);
-    }
-    EnvMaterial m=(EnvMaterial)0;
-    m.color=TerrainGaussian.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy).rgb;
-    float2 ra=TerrainSurface.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy).rg; m.roughness=ra.x;m.ao=ra.y;
-    float3 n=EnvDecode(TerrainNormal.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy).rg);
-    float3 d=EnvDecode(TerrainDetail.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy).rg);
-    d=normalize(lerp(float3(0,0,1),d,1-smoothstep(35,55,distanceToEye)));
-    n.xy=EnvRotate(n.xy,(4-rotation)&3);d.xy=EnvRotate(d.xy,(4-rotation)&3);m.normal=n;m.detail=d;
-    m.height=TerrainHeight.SampleGrad(EnvironmentWrap,float3(uv,layer),dx,dy);return m;
+    HsMaterialSurface material = (HsMaterialSurface)0;
+    material.base_color = ctx.sampled_base_color;
+    material.normal = ctx.normal;
+    material.roughness = saturate(ctx.sampled_roughness * ctx.roughness_scale);
+    material.metallic = ctx.metallic;
+    material.ao = ctx.sampled_ao;
+    material.opacity = ctx.sampled_alpha;
+    material.normal_is_world = false;
+    return material;
 }
-float3 DecodeTerrainHistogram(float3 gaussian,uint layer,float lod)
-{
-    float row=(clamp(lod,0,11)+0.5)/16;
-    float3 g=clamp(gaussian,0.5/256,1-0.5/256);
-    float3 p=float3(
-        TerrainHistogram.SampleLevel(LinearClamp,float3(g.x,row,layer),0).r,
-        TerrainHistogram.SampleLevel(LinearClamp,float3(g.y,row,layer),0).g,
-        TerrainHistogram.SampleLevel(LinearClamp,float3(g.z,row,layer),0).b);
-    float3 origin=TerrainHistogram.Load(int4(0,12,layer,0)).rgb;
-    float3 x=TerrainHistogram.Load(int4(0,13,layer,0)).rgb;
-    float3 y=TerrainHistogram.Load(int4(0,14,layer,0)).rgb;
-    float3 z=TerrainHistogram.Load(int4(0,15,layer,0)).rgb;
-    return saturate(origin+x*p.x+y*p.y+z*p.z);
-}
-EnvMaterial TerrainLayer(float3 world,float2 worldDx,float2 worldDy,uint layer,uint seed,float distanceToEye)
-{
-    float tile=TerrainTileSize(layer);
-    float2 uv=world.xz/tile,dx=worldDx/tile,dy=worldDy/tile;
-    float3 ts=normalize(CameraTime.xyz-world).xzy;
-    // Random transforms apply at gameplay distances too. Warp only the blend
-    // lattice, not texture coordinates, to avoid stretching the reference maps.
-    float2 warp=float2(EnvNoise(world.xz/7,seed+413),EnvNoise(world.xz/7,seed+827));
-    float2 p=(world.xz+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
-    float2 a=i,b=i+float2(1,0),c=i+float2(0,1);
-    float3 w=float3(1-f.x-f.y,f.x,f.y);
-    if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);w=float3(f.x+f.y-1,1-f.x,1-f.y);}
-    // Zero derivative at cell edges avoids visible triangular blending lines.
-    w=w*w*(3-2*w);w/=max(w.x+w.y+w.z,1e-5);
-    EnvMaterial x=TerrainSample(uv,dx,dy,layer,EnvCell(a,seed),ts,distanceToEye,true);
-    EnvMaterial y=TerrainSample(uv,dx,dy,layer,EnvCell(b,seed),ts,distanceToEye,true);
-    EnvMaterial z=TerrainSample(uv,dx,dy,layer,EnvCell(c,seed),ts,distanceToEye,true);
-    // Preserve Gaussian variance before the mip-aware inverse histogram transform.
-    float3 gaussian=0.5+(x.color*w.x+y.color*w.y+z.color*w.z-0.5)*rsqrt(dot(w,w));
-    // Isotropic derivative LOD follows the reference LUT prefilter approximation;
-    // the Gaussian and the original PBR maps retain anisotropic texture filtering.
-    float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*2048*2048,1e-8));
-    x.color=DecodeTerrainHistogram(gaussian,layer,lod);
-    x.normal=normalize(x.normal*w.x+y.normal*w.y+z.normal*w.z);
-    x.detail=normalize(x.detail*w.x+y.detail*w.y+z.detail*w.z);
-    x.roughness=x.roughness*w.x+y.roughness*w.y+z.roughness*w.z;
-    x.ao=x.ao*w.x+y.ao*w.y+z.ao*w.z;
-    x.height=x.height*w.x+y.height*w.y+z.height*w.z;
-    return x;
-}
-EnvMaterial EnvTerrain(float3 world,uint mesh,uint seed)
-{
-    float2 worldDx=ddx(world.xz),worldDy=ddy(world.xz);
-    float4 w=max(float4(0.5-EnvNoise(world.xz/12,seed),0.7+EnvNoise(world.xz/16,seed+9),EnvNoise(world.xz/22,seed+31),EnvNoise(world.xz/9,seed+71)),0);
-    w.x=max(w.x,0.05);
-    float edgeNoise=EnvNoise(world.xz/1.7,seed+317)*0.35+EnvNoise(world.xz/5,seed+617)*0.4;
-    float path=1-smoothstep(2.8,5.8,abs(world.x-sin(world.z*0.085)*6.5)+edgeNoise);
-    w=lerp(w,float4(1,0,0,0),path);
-    if(mesh==20) w=float4(1,0,0,0);
-    float distanceToEye=length(CameraTime.xyz-world),total=0;
-    EnvMaterial m=(EnvMaterial)0;
-    // Every positive layer contributes continuously, including three-way junctions.
-    // Dropping a ranked layer structurally creates a seam when ranks exchange.
-    [loop] for(uint layer=0;layer<4;++layer)
-    {
-        if(w[layer]<=0) continue;
-        EnvMaterial n=TerrainLayer(world,worldDx,worldDy,layer,seed,distanceToEye);
-        float weight=w[layer]*exp2((n.height-0.5)*2);
-        m.color+=n.color*weight;m.normal+=n.normal*weight;m.detail+=n.detail*weight;
-        m.roughness+=n.roughness*weight;m.ao+=n.ao*weight;total+=weight;
-    }
-    m.color/=total;m.roughness/=total;m.ao/=total;
-    m.normal=normalize(m.normal);m.detail=normalize(m.detail);
-    float macro=EnvNoise(world.xz/18,seed+173),meso=EnvNoise(world.xz/3,seed+571);
-    m.color*=1+macro*0.08+meso*0.04;m.roughness=saturate(m.roughness+macro*0.04);
-    m.normal=EnvRNM(m.normal,m.detail).xzy;return m;
-}
-EnvMaterial EnvOpaque(float2 uv,uint layer,bool rock,float distanceToEye)
+float HsMaterialEvaluateOpacity(HsMaterialContext ctx) { return ctx.sampled_alpha; }
+#endif
+EnvMaterial EnvOpaque(float2 uv,float2 dx,float2 dy,uint layer,bool rock,float distanceToEye)
 {
     EnvMaterial m=(EnvMaterial)0;
     float3 p=float3(uv,layer);
-    m.color=rock?RockBase.Sample(EnvironmentWrap,p).rgb:BarkBase.Sample(EnvironmentWrap,p).rgb;
-    float2 ra=rock?RockSurface.Sample(EnvironmentWrap,p).rg:BarkSurface.Sample(EnvironmentWrap,p).rg;
-    float3 n=EnvDecode(rock?RockNormal.Sample(EnvironmentWrap,p).rg:BarkNormal.Sample(EnvironmentWrap,p).rg);
-    float3 d=EnvDecode(rock?RockDetail.Sample(EnvironmentWrap,p).rg:BarkDetail.Sample(EnvironmentWrap,p).rg);
+    m.color=rock?RockBase.SampleGrad(EnvironmentWrap,p,dx,dy).rgb:BarkBase.SampleGrad(EnvironmentWrap,p,dx,dy).rgb;
+    float2 ra=rock?RockSurface.SampleGrad(EnvironmentWrap,p,dx,dy).rg:BarkSurface.SampleGrad(EnvironmentWrap,p,dx,dy).rg;
+    float3 n=EnvDecode(rock?RockNormal.SampleGrad(EnvironmentWrap,p,dx,dy).rg:BarkNormal.SampleGrad(EnvironmentWrap,p,dx,dy).rg);
+    float3 d=EnvDecode(rock?RockDetail.SampleGrad(EnvironmentWrap,p,dx,dy).rg:BarkDetail.SampleGrad(EnvironmentWrap,p,dx,dy).rg);
     m.normal=EnvRNM(n,normalize(lerp(float3(0,0,1),d,1-smoothstep(35,55,distanceToEye))));
     m.roughness=ra.x;m.ao=ra.y;
     return m;
 }
 void EnvironmentLodClip(SceneOutput input)
 {
-    if(input.Mesh<16 || input.Mesh>19 || (input.EnvironmentFlags&0x10000)==0) return;
+    if(((input.Mesh<16 || input.Mesh>19) && input.Mesh!=21) || (input.EnvironmentFlags&0x10000)==0) return;
     // Both LOD surfaces use the same coverage decision at a raster sample,
     // even when decimation changes their interpolated world positions.
     uint2 cell=(uint2)input.Position.xy;
@@ -254,24 +175,143 @@ void EnvironmentVertex(inout SceneInput input,InstanceData instance,uint vertex,
     input.Normal=float3(-sin(angle),0,cos(angle)); input.Tangent=float4(tangent,-1);
     input.Uv=float2(uv.x,1-uv.y);
 }
-float3 EnvironmentLighting(float3 base,float3 n,float3 world,float4 material,float visibility)
+Texture2D<float> SceneAmbientOcclusion : register(t5, space9);
+Texture2D<float> SceneContactShadow : register(t6, space9);
+
+float3 EnvironmentSkyRadiance(float3 direction)
 {
-    const float pi=3.14159265;float3 v=normalize(CameraTime.xyz-world),l=normalize(-LightDirectionIntensity.xyz),h=normalize(v+l);
-    float nv=max(saturate(dot(n,v)),0.001),nl=saturate(dot(n,l)),nh=saturate(dot(n,h)),vh=saturate(dot(v,h));
-    float alpha=max(material.r*material.r,0.002),a2=alpha*alpha;
-    float D=a2/(pi*pow(nh*nh*(a2-1)+1,2));
-    float Gv=2*nv/(nv+sqrt(a2+(1-a2)*nv*nv));float Gl=2*nl/max(nl+sqrt(a2+(1-a2)*nl*nl),0.0001);
-    float3 F=0.04+0.96*pow(1-vh,5);
-    float3 direct=((1-F)*base/pi+D*Gv*Gl*F/max(4*nv*nl,0.0001))*nl*LightColor.rgb*LightDirectionIntensity.w*visibility;
-    // Analytic split-sum BRDF fit and a roughness-prefiltered hemispherical sky.
-    // No HDR environment cubemap is shipped with this texture pack.
-    float4 r=material.r*float4(-1,-0.0275,-0.572,0.022)+float4(1,0.0425,1.04,-0.04);
-    float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;float2 AB=float2(-1.04,1.04)*a004+r.zw;
-    float3 reflected=reflect(-v,n);float skyT=lerp(saturate(reflected.y*0.5+0.5),0.5,material.r*material.r);
-    float3 sky=lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),skyT);
-    float3 irradiance=lerp(float3(0.07,0.08,0.055),float3(0.22,0.28,0.36),n.y*0.5+0.5);
-    float3 indirect=(base*0.96*irradiance+sky*(0.04*AB.x+AB.y))*material.g;
-    float transmission=material.a<0.68?0.3:material.a<0.9?0.45:0;
-    direct+=base*transmission*pow(saturate(dot(-n,l)),2)*LightColor.rgb*LightDirectionIntensity.w*visibility;
-    return direct+indirect;
+    return ProbeOptions.w>0.0 ? HsProbeRadiance(direction) :
+        lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),saturate(direction.y*0.5+0.5));
+}
+
+float3 HsSceneProbeRadiance(float3 world,float3 direction)
+{
+#ifdef HS_LOCAL_PROBE_CAPTURE
+    return HsProbeRadiance(direction);
+#else
+    return HsLocalProbeRadiance(world,direction);
+#endif
+}
+float3 HsSceneProbeIrradiance(float3 world,float3 normal)
+{
+#ifdef HS_LOCAL_PROBE_CAPTURE
+    return HsProbeIrradiance(normal);
+#else
+    return HsLocalProbeIrradiance(world,normal);
+#endif
+}
+float3 HsSceneProbePrefiltered(float3 world,float3 direction,float roughness)
+{
+#ifdef HS_LOCAL_PROBE_CAPTURE
+    return HsProbePrefiltered(direction,roughness);
+#else
+    return HsLocalProbePrefiltered(world,direction,roughness);
+#endif
+}
+void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure, float3 world, float3 view_direction,
+    float base_fresnel_override, bool indirect_diffuse_enabled, bool indirect_specular_enabled,
+    out float3 ambient_diffuse, out float3 ambient_specular)
+{
+    float3 v=normalize(view_direction);
+    closure=HsBsdfOrientThinSurface(closure,v);
+    float3 n=normalize(closure.normal),base=closure.base_color;
+    float nv=saturate(dot(n,v));
+    float metallic=saturate(closure.metallic),dielectric=1-metallic;
+    float3 F0=HsBsdfF0(closure);
+    ambient_diffuse=0.0;
+    ambient_specular=0.0;
+    if(closure.coat_weight>0.0 || closure.anisotropy!=0.0 ||
+       (closure.sheen_weight>0.0 && any(closure.sheen_color>0.0)))
+    {
+        // Use the existing matched mixture and its exact sample sequence;
+        // component separation changes neither PDFs nor null-sample accounting.
+        const uint sample_count=32u;
+        [loop] for(uint index=0u;index<sample_count;++index)
+        {
+            float u_lobe=frac((float(index)+0.5)*0.6180339887498948482);
+            float2 u_dir=float2((float(index)+0.5)/float(sample_count),
+                float(HsBsdfReverseBits(index))*2.3283064365386962890625e-10);
+            HsBsdfSampleResult sample=HsBsdfSample(closure,v,u_lobe,u_dir);
+            if(!sample.valid || sample.pdf<=0.0) continue;
+            float3 sample_diffuse,sample_specular;
+            HsBsdfEvaluateComponentsOptical(closure,v,sample.wi,base_fresnel_override,sample_diffuse,sample_specular);
+            float3 baseline_sky=EnvironmentSkyRadiance(sample.wi);
+            float3 diffuse_sky=ProbeOptions.w>0.0 && indirect_diffuse_enabled ?
+                HsSceneProbeRadiance(world,sample.wi) : baseline_sky;
+            float3 specular_sky=ProbeOptions.w>0.0 && indirect_specular_enabled ?
+                HsSceneProbeRadiance(world,sample.wi) : baseline_sky;
+            float3 weight=abs(dot(n,sample.wi))/sample.pdf;
+            ambient_diffuse+=sample_diffuse*diffuse_sky*weight;
+            ambient_specular+=sample_specular*specular_sky*weight;
+        }
+        float normalization=saturate(closure.ao)/float(sample_count);
+        ambient_diffuse*=normalization;
+        ambient_specular*=normalization;
+        return;
+    }
+    float thinWeight=HsBsdfThinTransmissionWeight(closure);
+    float3 irradiance=ProbeOptions.w>0.0 ?
+        (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,n) : HsProbeIrradiance(n))*HsBsdfInvPi :
+        lerp(float3(0.07,0.08,0.055),float3(0.22,0.28,0.36),n.y*0.5+0.5);
+    // Cosine-weighted Schlick transmission averages to (1-F0)*20/21.
+    // Match the entry/exit substrate attenuation in HsBsdfEvaluate.
+    float3 diffuseAlbedo=base*(1-HsBsdfSchlickFresnel(F0,nv))*(1-F0)*(20.0/21.0)*dielectric;
+    ambient_diffuse=diffuseAlbedo*irradiance*saturate(closure.ao);
+    if(thinWeight>0.0)
+    {
+        // A linear hemispherical sky integrates exactly over a cosine sheet
+        // lobe: E[wi.y] = -2*n.y/3. Dense vegetation needs no sample loop.
+        float3 skyBottom=float3(0.055,0.065,0.045),skyTop=float3(0.24,0.31,0.42);
+        float3 backSky=ProbeOptions.w>0.0 ?
+            (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,-n) : HsProbeIrradiance(-n))*HsBsdfInvPi :
+            (skyBottom+skyTop)*0.5-(skyTop-skyBottom)*n.y/3.0;
+        ambient_diffuse=ambient_diffuse*(1.0-thinWeight)+HsBsdfThinTransmissionColor(closure)*
+            thinWeight*backSky*saturate(closure.ao);
+    }
+    // The basic lobe uses the same sampled DFG as the authored GGX cube mips.
+    float2 AB=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,saturate(closure.roughness)),0);
+    float3 reflected=reflect(-v,n);float skyT=lerp(saturate(reflected.y*0.5+0.5),0.5,closure.roughness*closure.roughness);
+    float3 sky=ProbeOptions.w>0.0 ?
+        (indirect_specular_enabled ? HsSceneProbePrefiltered(world,reflected,saturate(closure.roughness)) :
+            HsProbePrefiltered(reflected,saturate(closure.roughness))) :
+        lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),skyT);
+    const float3 integrated_fresnel=base_fresnel_override>=0.0 ?
+        lerp(F0*AB.x+AB.y,saturate(base_fresnel_override).xxx*(AB.x+AB.y),saturate(closure.solid_transmission_weight)) :
+        F0*AB.x+AB.y;
+    ambient_specular=sky*integrated_fresnel*saturate(closure.ao)*(1.0-thinWeight);
+}
+
+void EnvironmentLightingComponents(HsSurfaceClosure closure, float3 world, float visibility,
+    float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular,
+    out float3 ambient_diffuse)
+{
+    const float3 v=normalize(CameraTime.xyz-world);
+    closure=HsBsdfOrientThinSurface(closure,v);
+    HsLightListEvaluateComponentsOptical(closure,world,CameraTime.xyz,visibility,
+        HsLightDirectionalMask,false,base_fresnel_override,diffuse,specular);
+    EnvironmentIndirectLightingComponents(closure,world,v,base_fresnel_override,
+        LightingOptions.z>0.0,LightingOptions.w>0.0,ambient_diffuse,ambient_specular);
+    diffuse+=ambient_diffuse;
+    specular+=ambient_specular;
+}
+
+void EnvironmentLightingComponents(HsSurfaceClosure closure, float3 world, float visibility,
+    float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular)
+{
+    float3 ambient_diffuse;
+    EnvironmentLightingComponents(closure,world,visibility,base_fresnel_override,
+        diffuse,specular,ambient_specular,ambient_diffuse);
+}
+
+void EnvironmentLightingComponents(HsSurfaceClosure closure,float3 world,float visibility,
+    out float3 diffuse,out float3 specular,out float3 ambient_specular)
+{
+    EnvironmentLightingComponents(closure,world,visibility,-1.0,diffuse,specular,ambient_specular);
+}
+
+float3 EnvironmentLighting(HsSurfaceClosure closure,float3 world,float visibility)
+{
+    float3 diffuse,specular,ambient_specular;
+    EnvironmentLightingComponents(closure,world,visibility,diffuse,specular,ambient_specular);
+    return diffuse+specular+closure.emission;
 }

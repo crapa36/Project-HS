@@ -6,18 +6,70 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string_view>
 
 namespace D3D12MA { class Allocator; }
+struct ID3D12Device;
+struct ID3D12CommandQueue;
+struct ID3D12Fence;
 
 namespace hs
 {
+
 
 enum class QueueHint : std::uint8_t
 {
     Direct,
     Compute,
     Copy,
+};
+
+// Fence requirements carried by resources, frame slots, and external work.
+// Values are monotonic per queue; merging keeps the latest requirement on each
+// queue. Native provider fences are bridged onto these owned timelines; provider
+// fence values must never be placed directly in this set.
+struct CompletionSet
+{
+    std::uint64_t direct{};
+    std::uint64_t compute{};
+    std::uint64_t copy{};
+
+    void Include(QueueHint queue, std::uint64_t value) noexcept
+    {
+        auto *target = queue == QueueHint::Direct ? &direct
+            : queue == QueueHint::Compute ? &compute
+            : queue == QueueHint::Copy ? &copy : nullptr;
+        if (target && value > *target) *target = value;
+    }
+
+    void Merge(const CompletionSet &other) noexcept
+    {
+        Include(QueueHint::Direct, other.direct);
+        Include(QueueHint::Compute, other.compute);
+        Include(QueueHint::Copy, other.copy);
+    }
+
+    [[nodiscard]] std::uint64_t Required(QueueHint queue) const noexcept
+    {
+        return queue == QueueHint::Direct ? direct
+            : queue == QueueHint::Compute ? compute
+            : queue == QueueHint::Copy ? copy : 0;
+    }
+
+    [[nodiscard]] bool IsSatisfiedBy(const CompletionSet &completed) const noexcept
+    {
+        return completed.direct >= direct && completed.compute >= compute &&
+               completed.copy >= copy;
+    }
+};
+
+struct QueueScheduleDependency
+{
+    std::uint32_t producer_pass_id{};
+    std::uint32_t consumer_pass_id{};
+    QueueHint producer_queue{};
+    QueueHint consumer_queue{};
 };
 
 enum class Access : std::uint8_t
@@ -33,8 +85,17 @@ enum class Access : std::uint8_t
     UnorderedWrite,
     CopySource,
     CopyDest,
+    VertexBuffer,
+    IndexBuffer,
+    VertexShaderRead,
     IndirectArgs,
     Present,
+    // Combined read-only DSV + SRV access. Keep existing enum ordinals stable.
+    DepthShaderRead,
+    // Material textures shared by raster and compute retain both read states.
+    AllShaderRead,
+    // Native VRS image consumed by rasterization on the direct queue.
+    ShadingRateSource,
 };
 
 enum class ResourceKind : std::uint8_t
@@ -57,6 +118,36 @@ struct ResourceHandle
 using TextureHandle = ResourceHandle;
 using BufferHandle = ResourceHandle;
 
+// A physical resource may be written repeatedly. Ordinal zero is its imported
+// contents (or undefined for a transient); each write produces the next version.
+// A partial write preserves all other ranges from its predecessor. Reads require
+// their complete range to have been initialized in that version. Each successor
+// has one writer; disjoint ranges do not create independent physical resources.
+struct ResourceVersion
+{
+    ResourceHandle resource{};
+    std::uint32_t ordinal{};
+};
+
+// Half-open byte interval. Zero length and out-of-bounds intervals are invalid.
+struct BufferRange
+{
+    std::uint64_t offset{};
+    std::uint64_t size{};
+};
+
+// Mip, array slice, and format plane counts are all nonzero. Transient textures
+// currently have one mip and one array slice; imports use their native extent.
+struct TextureSubresourceRange
+{
+    std::uint32_t first_mip{};
+    std::uint32_t mip_count{};
+    std::uint32_t first_array_slice{};
+    std::uint32_t array_slice_count{};
+    std::uint32_t first_plane{};
+    std::uint32_t plane_count{};
+};
+
 struct TextureDesc
 {
     std::uint32_t width{};
@@ -71,14 +162,82 @@ struct BufferDesc
     std::uint32_t flags{};
 };
 
+// Opaque owners point to retained ID3D12CommandQueue/ID3D12Fence interfaces.
+// The optional lease owns provider command allocators/resources used in flight.
+// Each operation submits only on its declared queue; arbitrary SDK release tokens
+// and ranged external state handoffs are not supported.
+struct ExternalQueueCompletion
+{
+    std::shared_ptr<void> native_fence_owner;
+    std::uint64_t value{};
+    std::shared_ptr<void> resource_lease;
+};
+
+struct ExternalQueueBinding
+{
+    std::shared_ptr<void> native_queue_owner;
+    QueueHint queue_type{QueueHint::Direct};
+    std::shared_ptr<void> resource_lease;
+};
+
+struct ExternalResourceAccess
+{
+    ResourceHandle resource;
+    Access incoming{Access::Common};
+    Access outgoing{Access::Common};
+};
+
 struct ExternalTexture
 {
     void *native_resource{};
+    CompletionSet completion{};
+    QueueHint initial_queue{QueueHint::Direct};
+    ExternalQueueCompletion external_completion{};
 };
 
 struct ExternalBuffer
 {
     void *native_resource{};
+    CompletionSet completion{};
+    QueueHint initial_queue{QueueHint::Direct};
+    ExternalQueueCompletion external_completion{};
+};
+
+class RenderGraphBuilder;
+struct RenderTaskExecutor;
+struct GpuPassTiming;
+
+struct GraphExecutionOptions
+{
+    void *timestamp_query_heap{};
+    void *timestamp_readback{};
+    std::uint32_t timestamp_base{};
+    const RenderTaskExecutor *task_executor{};
+    // Optional capture output in compiled execution order; each recording task owns one element.
+    GpuPassTiming *cpu_pass_timings{};
+    std::size_t cpu_pass_timing_count{};
+};
+
+struct GraphExecutionStats
+{
+    // Native ExecuteCommandLists calls, which may contain several Enhanced lists.
+    std::uint32_t direct_batches{};
+    std::uint32_t compute_batches{};
+    std::uint32_t copy_batches{};
+    std::uint32_t cross_queue_waits{};
+    std::uint32_t record_jobs{};
+    std::uint32_t transient_resource_count{};
+    std::uint32_t transient_block_count{};
+    std::uint32_t alias_activation_count{};
+    std::uint64_t transient_bytes_without_aliasing{};
+    std::uint64_t transient_backing_bytes{};
+    // Sequential wall time: planning/recorder admission, recording plus join,
+    // then retirement setup and native queue submission (including providers).
+    std::uint64_t cpu_plan_us{}, cpu_record_us{}, cpu_submit_us{};
+    // Optional Prepare output: native checks, exact inputs/key, compile/aliases,
+    // then first/last use and transient claims. Published only on success.
+    std::uint64_t cpu_prepare_validation_us{}, cpu_prepare_info_key_us{};
+    std::uint64_t cpu_prepare_compile_us{}, cpu_prepare_transient_us{};
 };
 
 // One pool per frame slot. ResetClaims/Clear require that slot's GPU work to be complete.
@@ -89,13 +248,55 @@ class TransientResourcePool
     ~TransientResourcePool();
     TransientResourcePool(const TransientResourcePool &) = delete;
     TransientResourcePool &operator=(const TransientResourcePool &) = delete;
-    [[nodiscard]] Result Initialize(D3D12MA::Allocator *allocator);
+    // Device must own the allocator and all resources imported into this pool.
+    [[nodiscard]] Result Initialize(D3D12MA::Allocator *allocator, ID3D12Device *device);
+    [[nodiscard]] Result ReserveTexture(const TextureDesc &description);
     void ResetClaims() noexcept;
+    void SetClaimCompletion(const CompletionSet &completion) noexcept;
+    void ResetCompletedClaims(const CompletionSet &completed) noexcept;
     void Clear() noexcept;
+    void Swap(TransientResourcePool &other) noexcept;
+    [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     friend class RenderGraphBuilder;
+};
+
+// Owns the native Direct/Compute/Copy submission timelines used by queued
+// RenderGraph execution. The existing renderer single-list path stays separate
+// until individual production passes are explicitly migrated.
+class RenderGraphQueueExecutor
+{
+  public:
+    RenderGraphQueueExecutor();
+    ~RenderGraphQueueExecutor();
+    RenderGraphQueueExecutor(const RenderGraphQueueExecutor &) = delete;
+    RenderGraphQueueExecutor &operator=(const RenderGraphQueueExecutor &) = delete;
+
+    // An existing Direct queue may be supplied so swap-chain/render work and
+    // graph work share one Direct timeline. Compute and Copy queues are owned by
+    // this executor. Each queue has its own fence timeline.
+    [[nodiscard]] Result Initialize(ID3D12Device *device,
+                                    ID3D12CommandQueue *direct_queue = nullptr,
+                                    std::uint32_t frame_slot_count = 3);
+    [[nodiscard]] Result Execute(RenderGraphBuilder &graph, std::uint32_t frame_slot,
+                                 BarrierMode barriers, CompletionSet &completion,
+                                 const GraphExecutionOptions *options = nullptr);
+    [[nodiscard]] CompletionSet Completed() const noexcept;
+    [[nodiscard]] Result Wait(const CompletionSet &completion);
+    [[nodiscard]] Result Join(const CompletionSet &completion, QueueHint destination);
+    [[nodiscard]] Result Drain();
+    [[nodiscard]] std::uint64_t TimestampFrequency(QueueHint queue) const noexcept;
+    [[nodiscard]] GraphExecutionStats LastExecutionStats() const noexcept;
+    [[nodiscard]] ID3D12CommandQueue *NativeQueue(QueueHint queue) const noexcept;
+    [[nodiscard]] ID3D12Fence *NativeFence(QueueHint queue) const noexcept;
+    [[nodiscard]] Result ReleaseRecordersAfterCompletion();
+    void Clear() noexcept;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 };
 
 class RenderPassContext
@@ -104,26 +305,73 @@ class RenderPassContext
     [[nodiscard]] void *NativeCommandList() const noexcept;
     [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
     void UavBarrier(ResourceHandle handle) const noexcept;
+    // Record a native SDK operation that tags whole resources using legacy
+    // resource states. Enhanced-barrier graphs are bridged through COMMON on
+    // both sides for default-heap buffers and textures; legacy graphs invoke
+    // the callback without extra barriers.
+    [[nodiscard]] Result RecordLegacyResourceCommands(
+        std::span<const ExternalResourceAccess> accesses,
+        const std::function<Result()> &execute) const;
 
   private:
     RenderPassContext(void *native_command_list, void *enhanced_command_list,
-                      BarrierMode barrier_mode, const void *graph) noexcept;
+                      BarrierMode barrier_mode, const void *graph,
+                      QueueHint queue = QueueHint::Direct) noexcept;
 
     void *native_command_list_{};
     void *enhanced_command_list_{};
     BarrierMode barrier_mode_{};
     const void *graph_{};
+    QueueHint queue_{};
 
     friend class RenderGraphBuilder;
+    friend class RenderGraphQueueExecutor;
+};
+
+class RenderExternalPassContext
+{
+  public:
+    [[nodiscard]] void *NativeCommandQueue() const noexcept { return native_queue_; }
+    [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
+
+  private:
+    RenderExternalPassContext(void *native_queue, const void *graph) noexcept
+        : native_queue_(native_queue), graph_(graph) {}
+    void *native_queue_{};
+    const void *graph_{};
+    friend class RenderGraphQueueExecutor;
 };
 
 class PassBuilder
 {
   public:
-    void Read(ResourceHandle resource, Access access);
-    void Write(ResourceHandle resource, Access access);
-    void ReadWrite(ResourceHandle resource, Access access);
+    // Overloads without a range declare the entire resource.
+    void Read(ResourceVersion version, Access access);
+    void Read(ResourceVersion version, Access access, BufferRange range);
+    void Read(ResourceVersion version, Access access, TextureSubresourceRange range);
+    [[nodiscard]] ResourceVersion Write(ResourceVersion predecessor, Access access);
+    [[nodiscard]] ResourceVersion Write(ResourceVersion predecessor, Access access, BufferRange range);
+    [[nodiscard]] ResourceVersion Write(ResourceVersion predecessor, Access access, TextureSubresourceRange range);
+    [[nodiscard]] ResourceVersion ReadWrite(ResourceVersion predecessor, Access access);
+    [[nodiscard]] ResourceVersion ReadWrite(ResourceVersion predecessor, Access access, BufferRange range);
+    [[nodiscard]] ResourceVersion ReadWrite(ResourceVersion predecessor, Access access, TextureSubresourceRange range);
     void SetExecute(std::move_only_function<void(RenderPassContext &)> execute);
+    void SetExecuteChecked(std::move_only_function<Result(RenderPassContext &)> execute);
+    // SDKs with initialization-thread affinity still record ordinary graph
+    // commands. Their checked callback runs on the Execute caller, while other
+    // passes retain worker recording; failure prevents submission of the graph.
+    void SetExecuteOnOwner(std::move_only_function<Result(RenderPassContext &)> execute);
+    // Read/Write still declare graph hazards. Every whole-resource use needs
+    // exactly one physical boundary record. Buffers, Copy-queue resources and
+    // simultaneous-access textures enter/leave COMMON in both barrier modes;
+    // the provider owns transitions inside its submitted work. Outgoing access
+    // must hold even when the callback reports failure after submission.
+    // This callback runs on the submission owner after recording tasks join.
+    // Return any provider fence even on failure after submitting work. The graph
+    // also signals its own fence on the bound queue to establish safe retirement.
+    void SetExternalExecute(ExternalQueueBinding binding,
+        std::span<const ExternalResourceAccess> accesses,
+        std::move_only_function<Result(RenderExternalPassContext &, ExternalQueueCompletion &)> execute);
 
   private:
     PassBuilder(void *graph, std::uint32_t pass) noexcept;
@@ -152,24 +400,47 @@ class RenderGraphBuilder
                                               std::string_view name);
     [[nodiscard]] BufferHandle ImportBuffer(const ExternalBuffer &buffer, Access initial,
                                             std::string_view name);
-    [[nodiscard]] PassBuilder AddPass(std::string_view name, QueueHint queue);
-    void SetFinalAccess(ResourceHandle resource, Access access);
+    [[nodiscard]] ResourceVersion Version(ResourceHandle resource) const noexcept { return {resource, 0}; }
+    [[nodiscard]] PassBuilder AddPass(std::uint32_t pass_id, std::string_view name, QueueHint queue);
+    // Explicit submission ordering for timing/provider boundaries that carry no
+    // artificial resource access. IDs must exist; cycles are compiler errors.
+    void AddOrderingDependency(std::uint32_t producer_id, std::uint32_t consumer_id);
+    [[nodiscard]] std::uint32_t DeclaredPassId(std::uint32_t index) const noexcept;
+    void SetFinalAccess(ResourceVersion version, Access access);
 
-    [[nodiscard]] Result Prepare(TransientResourcePool &pool);
+    // Null output performs no detailed timing clock reads. Non-null output is
+    // cleared at entry, with completed stage durations published only on success.
+    [[nodiscard]] Result Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu = nullptr);
     [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
     [[nodiscard]] Result Execute(void *native_command_list, void *enhanced_command_list,
                                  BarrierMode barriers, void *timestamp_query_heap = nullptr,
                                  void *timestamp_readback = nullptr,
                                  std::uint32_t timestamp_base = 0);
     [[nodiscard]] std::uint32_t PassCount() const noexcept;
+    [[nodiscard]] std::uint32_t CompiledPassId(std::uint32_t execution_index) const noexcept;
+    [[nodiscard]] std::string_view CompiledPassName(std::uint32_t execution_index) const noexcept;
+    [[nodiscard]] QueueHint CompiledPassQueue(std::uint32_t execution_index) const noexcept;
+    [[nodiscard]] std::uint32_t QueuePassCount(QueueHint queue) const noexcept;
+    [[nodiscard]] std::uint32_t CompiledQueuePassId(QueueHint queue,
+                                                    std::uint32_t queue_index) const noexcept;
+    [[nodiscard]] std::uint32_t CrossQueueDependencyCount() const noexcept;
+    [[nodiscard]] QueueScheduleDependency CrossQueueDependency(
+        std::uint32_t dependency_index) const noexcept;
     [[nodiscard]] Access FinalAccess(ResourceHandle resource) const noexcept;
+    [[nodiscard]] CompletionSet ResourceCompletion(ResourceHandle resource) const noexcept;
+    [[nodiscard]] QueueHint FinalQueue(ResourceHandle resource) const noexcept;
 
   private:
+    [[nodiscard]] std::uint64_t PlanCompilationCount() const noexcept;
+    [[nodiscard]] std::uint64_t PlanReuseCount() const noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
+    friend struct RenderGraphTestAccess;
     friend class PassBuilder;
     friend class RenderPassContext;
+    friend class RenderExternalPassContext;
+    friend class RenderGraphQueueExecutor;
 };
 
 } // namespace hs
