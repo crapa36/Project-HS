@@ -15,11 +15,12 @@
 
 #include "renderer_options.hpp"
 #include "renderer_caster_storage.hpp"
+#include "renderer_geometry.hpp"
+#include "renderer_skin_ranges.hpp"
 #include "render_graph.hpp"
 
 #include "d3d12_resources.hpp"
 #include "persistent_gpu_scene.hpp"
-#include "render_scene_extractor.hpp"
 #include "render_instance_lookup.hpp"
 #include "renderer_diagnostics.hpp"
 #include "renderer_lod.hpp"
@@ -28,6 +29,7 @@
 #include "skin_cache.hpp"
 #include "streaming_manager.hpp"
 #include "renderer_asset_io.hpp"
+#include "renderer_startup.hpp"
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
 #include "vfx_persistent_state.hpp"
@@ -195,6 +197,7 @@ constexpr std::uint32_t kTextureDescriptorCount = kBrixelizerFrameTableOffset + 
 constexpr std::uint32_t kArcherGeometryPage =
     static_cast<std::uint32_t>(kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount);
 constexpr std::uint32_t kMonsterGeometryPage = kArcherGeometryPage + 1;
+constexpr std::size_t kGpuVisibilityBucketCount = kMonsterGeometryPage + 6;
 constexpr std::uint32_t kProjectileGeometryPage = kMonsterGeometryPage + 6;
 constexpr std::uint32_t kProceduralGeometryPage = kProjectileGeometryPage + 1;
 static_assert(render_data::kMaterialTextureSlots == 6);
@@ -323,10 +326,8 @@ struct GeometryPageGpu
     AssetId source_asset{};
     std::string source_product;
     std::array<std::byte, 32> source_digest{};
-    AllocationResource vertices;
-    AllocationResource indices;
-    AllocationResource meshlets;
-    AllocationResource auxiliary;
+    AllocationResource storage;
+    std::array<std::uint64_t,4> offsets{}, sizes{};
     ResidencyTicket residency;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_INDEX_BUFFER_VIEW index_view{};
@@ -343,7 +344,7 @@ struct GeometryPageGpu
 
     void Reset() noexcept
     {
-        vertices.Reset(); indices.Reset(); meshlets.Reset(); auxiliary.Reset();
+        storage.Reset(); offsets={}; sizes={};
         residency = {};
         vertex_view = {}; index_view = {};
         vertex_count = index_count = meshlet_count = triangle_offset = remap_offset = 0;
@@ -363,6 +364,17 @@ struct MonsterAsset : GeometryPageGpu
     float ground_offset{};
     std::uint32_t skin_offset{};
     std::array<DirectX::XMUINT4, static_cast<std::size_t>(CharacterAnimationClip::Count)> clip_meta{};
+    std::array<std::byte,32> skeleton_binding{};
+    std::uint32_t deformation_flags{};
+    std::vector<render_data::GeometryMetadata> geometry_lods;
+    std::vector<render_data::CharacterIntervalBound> interval_bounds;
+
+    void Reset() noexcept
+    {
+        GeometryPageGpu::Reset(); material_bindings.clear(); geometry_lods.clear(); interval_bounds.clear();
+        bone_count=material_count=skin_offset=deformation_flags=0; ground_offset=0;
+        clip_meta={}; skeleton_binding={};
+    }
 };
 
 struct FrameConstants
@@ -488,8 +500,17 @@ struct GpuParticleSpawnCommand
 static_assert(sizeof(GpuParticleSpawnCommand) == 208);
 
 
+struct UiTextLayout
+{
+    std::string utf8;
+    UiModel::Kind kind{};
+    float font_size{}, width{}, height{};
+    ComPtr<IDWriteTextLayout> layout;
+};
+
 struct UiCpuSurface
 {
+    bool bitmap_valid{};
     ComPtr<IWICBitmap> bitmap;
     ComPtr<ID2D1RenderTarget> target;
     ComPtr<ID2D1SolidColorBrush> brush;
@@ -542,6 +563,7 @@ struct UiCpuSurface
                                        std::vector<std::byte> &bytes,
                                        std::optional<std::uint64_t> expected_bytes = std::nullopt)
 {
+    StartupOperationScope timing(RendererStartupOperation::CheckedBinaryRead);
     return ReadCheckedBinary(path, bytes, expected_bytes);
 }
 
@@ -579,8 +601,11 @@ constexpr std::array<Vertex, 36> kCubeVertices = {
 
 using namespace renderer_detail;
 
+struct StaticShadowBakeFrame;
+
 struct D3D12Renderer::Impl
 {
+    RendererStartupTimings startup_timings;
     struct ShadowCasterKeyHash
     {
         std::size_t operator()(const std::tuple<bool, std::uint64_t, std::uint32_t> &key) const noexcept
@@ -597,7 +622,33 @@ struct D3D12Renderer::Impl
     };
     using ShadowCasterMap = std::unordered_map<std::tuple<bool, std::uint64_t, std::uint32_t>,
         ShadowCasterRecord, ShadowCasterKeyHash>;
-    using ShadowCasterNodes = ShadowCasterNodeCache<ShadowCasterMap, std::shared_ptr<const StaticRenderScene>>;
+    struct StaticShadowCasterBatch
+    {
+        struct Binding
+        {
+            const GeometryPageGpu *page{};
+            ID3D12PipelineState *pipeline{};
+            UINT material{};
+            VirtualShadowFrontend frontend{};
+            std::uint64_t key{};
+        };
+        std::shared_ptr<const StaticRenderScene> source;
+        std::uint32_t generation{};
+        float density{}, wind_radius{};
+        std::uint64_t material_revision{}, pipeline_revision{}, revision{};
+        std::size_t leaf_count{};
+        std::array<std::uint64_t,kGpuVisibilityBucketCount+1> geometry{};
+        std::array<std::uint32_t,kGpuVisibilityBucketCount+1> passes{};
+        std::vector<VirtualShadowCaster> records;
+        std::vector<ShadowCasterMap::key_type> keys;
+        std::vector<Binding> bindings;
+        std::optional<VirtualShadowReceiver> water;
+        std::vector<VirtualShadowReceiver> receivers;
+        std::vector<ShadowSurfaceReceiver> surface_receivers;
+        std::optional<ShadowSurfaceReceiver> surface_aggregate;
+        std::size_t receiver_proxy_count{};
+        bool settled{}, mesh_shader{};
+    };
     struct UiResources
     {
         ~UiResources();
@@ -630,9 +681,12 @@ struct D3D12Renderer::Impl
     {
         AllocationResource skin_cache_vertices, skin_cache_bounds;
         CompletionSet skin_cache_use_completion;
-        std::size_t skin_cache_vertex_capacity{}, skin_cache_bound_capacity{}, skin_cache_slot_stride{};
+        std::size_t skin_cache_vertex_capacity{}, skin_cache_bound_capacity{};
+        std::uint32_t vertex_stride{SkinVertexRanges::kVertexBytes};
+        SkinVertexRanges vertex_ranges;
         bool skin_cache_valid{};
         std::uint64_t package_id{}, signature{};
+        std::vector<std::byte> identity;
     };
     static AllocationResource RetainViewAllocation(const AllocationResource &source)
     {
@@ -709,11 +763,12 @@ struct D3D12Renderer::Impl
         VolumetricCamera previous_volumetric_camera;
         ShadowCasterMap previous_shadow_casters;
         ShadowCasterMap scratch_shadow_casters;
+        std::shared_ptr<StaticShadowCasterBatch> static_shadow_casters;
+        std::uint64_t static_shadow_caster_revision{};
 #ifndef NDEBUG
         std::unordered_map<ShadowCasterMap::key_type, std::uint64_t, ShadowCasterKeyHash> shadow_caster_key_oracle;
         bool shadow_caster_key_oracle_prepared{};
 #endif
-        ShadowCasterNodes previous_shadow_caster_nodes, scratch_shadow_caster_nodes;
         std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
@@ -746,9 +801,23 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &) const;
     [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &) const;
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
+    struct StaticDrawData
+    {
+        // The leaf prefix is immutable until foliage density changes; HLOD owns only the tail.
+        std::vector<GpuStaticDrawRef> refs;
+        std::size_t leaf_count{};
+        std::array<std::pair<std::size_t, std::size_t>, kEnvironmentMaterialNames.size() * 3> ranges{};
+        std::pair<std::size_t, std::size_t> ground_range{};
+        std::array<std::vector<GpuClusterCandidate>, kEnvironmentMaterialNames.size()> candidates;
+        std::array<std::array<std::uint32_t, 3>, kEnvironmentMaterialNames.size()> candidate_catalogs{};
+        std::array<bool, kEnvironmentMaterialNames.size()> candidates_valid{};
+        float foliage_density{};
+        bool valid{};
+    };
     struct StaticGpuScene
     {
         std::shared_ptr<const StaticRenderScene> source;
+        StaticDrawData draws;
         AllocationResource instances;
         AllocationResource upload;
         GpuSceneTableLayout layout{};
@@ -848,7 +917,6 @@ struct D3D12Renderer::Impl
         std::uint64_t read_bytes{}, last_demand_frame{};
         GeometryPageGpu candidate;
         AllocationResource upload;
-        std::array<std::uint64_t, kGeometryBuffersPerPage> upload_offsets{};
         render_data::GeometryMetadata metadata;
         CompletionSet upload_completion{};
         CompletionSet prior_use{};
@@ -884,7 +952,6 @@ struct D3D12Renderer::Impl
             read_bytes = last_demand_frame = 0;
             upload.Reset();
             upload_completion = {};
-            upload_offsets = {};
             metadata = {};
             prior_use = {};
             retirement = {};
@@ -1022,7 +1089,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result RetireHlodView(ViewId);
     [[nodiscard]] HlodViewRuntime *ActiveHlodView() noexcept;
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
-    [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::vector<RenderInstance> &);
+    [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::span<const RenderInstance> &);
     [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &);
     [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &);
     void ReadHlodFrame(PassBuilder &, const HlodFrameGraph &, bool) const;
@@ -1088,11 +1155,9 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareGeometryPageUpload(
         GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
         std::span<const std::byte> package_bytes, AssetId page_asset,
-        std::uint32_t page_slot, AllocationResource &upload,
-        std::array<std::uint64_t, kGeometryBuffersPerPage> &upload_offsets);
+        std::uint32_t page_slot, AllocationResource &upload);
     void RecordGeometryPageUpload(ID3D12GraphicsCommandList *list,
-        const GeometryPageGpu &page, const AllocationResource &upload,
-        const std::array<std::uint64_t, kGeometryBuffersPerPage> &upload_offsets) const;
+        const GeometryPageGpu &page, const AllocationResource &upload) const;
     [[nodiscard]] const GeometryPageGpu *FindGeometryPage(std::uint32_t page_slot) const noexcept;
     void WriteGeometryPageDescriptors(std::uint32_t frame_slot);
     [[nodiscard]] Result BeginGeometryDrawRecords(std::uint32_t frame_slot);
@@ -1168,6 +1233,7 @@ struct D3D12Renderer::Impl
     RendererFeatureCapabilities feature_capabilities;
     std::string resource_generation_id;
     std::shared_ptr<const void> resident_generation_lease;
+    std::shared_ptr<StaticShadowBakeFrame> pending_static_shadow_bake;
     ComPtr<IDXGIFactory7> factory;
     ComPtr<IDXGIAdapter4> adapter;
     ComPtr<ID3D12Device> device;
@@ -1219,9 +1285,7 @@ struct D3D12Renderer::Impl
     std::uint64_t static_scene_upload_count{};
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     AllocationResource dynamic_instances;
-    RenderSceneExtractor dynamic_scene_extractor;
     RenderInstanceLookup previous_instance_lookup;
-    std::uint64_t dynamic_scene_generation{};
     PersistentGpuSceneSlots dynamic_scene_slots;
     SkinCache skin_cache;
     std::vector<RetiredDynamicInstanceBuffer> retired_dynamic_instance_buffers;
@@ -1258,7 +1322,6 @@ struct D3D12Renderer::Impl
     std::uint32_t vfx_gradient_rows{};
     AllocationResource ribbon_history;
     AllocationResource ribbon_previous;
-    AllocationResource ribbon_arguments;
     AllocationResource ribbon_detail;
     AllocationResource vfx_authored_mask;
     AllocationResource vfx_noise_basis;
@@ -1299,6 +1362,9 @@ struct D3D12Renderer::Impl
     bool material_parameter_upload_pending{};
     std::uint32_t material_parameter_slot_count{};
     std::uint64_t material_parameter_revision{};
+    std::uint64_t baked_generation_material_revision{};
+    std::uint64_t baked_generation_pipeline_revision{};
+    mutable std::shared_ptr<const VirtualShadowBakeData> baked_shadow_source;
     std::uint64_t pipeline_revision{};
     std::uint32_t material_parameter_candidate_slot_count{};
     std::array<std::uint32_t, kResidentMaterialCount> material_parameter_bases{};
@@ -1316,9 +1382,7 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12PipelineState> hero_scene_pipeline, hero_visibility_pipeline, hero_shadow_pipeline;
     ComPtr<ID3D12PipelineState> hero_resolve_pipeline, hero_translucent_pipeline;
     AllocationResource environment_brdf_candidate;
-    ComPtr<ID3D12RootSignature> environment_brdf_init_root;
-    ComPtr<ID3D12PipelineState> environment_brdf_init_pipeline;
-    ComPtr<ID3D12DescriptorHeap> environment_brdf_init_heap;
+    AllocationResource environment_brdf_init_upload;
     ComPtr<ID3D12Device5> environment_brdf_init_device;
     bool environment_brdf_init_pending{};
     std::array<std::string, kEnvironmentTextureCount> environment_texture_ids;
@@ -1369,7 +1433,6 @@ struct D3D12Renderer::Impl
     std::uint64_t volumetric_revision{};
     VolumetricCamera previous_volumetric_camera;
     ShadowCasterMap previous_shadow_casters;
-    ShadowCasterNodes previous_shadow_caster_nodes;
     LightListSystem light_list;
     DecalSurfaceSystem decal_surface;
     ScreenReflectionsSystem screen_reflections;
@@ -1453,6 +1516,9 @@ struct D3D12Renderer::Impl
     mutable std::vector<GpuPassTimings> pending_gpu_timings;
     mutable std::size_t pending_gpu_timing_passes{};
     mutable bool gpu_timing_stream_overflowed{};
+    std::vector<RendererHeroWorkSample> hero_work_pending;
+    RendererHeroWorkStatus hero_work_retired;
+    [[nodiscard]] Result ArchiveHeroWork(HeroTransparencySystem &);
     std::uint64_t dynamic_resolution_sample_id{};
     std::array<AllocationResource, 2> hzb_history;
     HzbLayout hzb_layout{};
@@ -1470,10 +1536,12 @@ struct D3D12Renderer::Impl
     std::array<AllocationResource, kFrameCount> ui_textures;
     std::array<UiCpuSurface, kFrameCount> ui_surfaces;
     std::array<std::vector<UiModel>, kFrameCount> ui_raster_models;
+    std::vector<UiTextLayout> ui_text_layouts;
     std::array<bool, kFrameCount> ui_dirty{};
     ComPtr<IWICImagingFactory> ui_wic_factory;
     ComPtr<ID2D1Factory> ui_d2d_factory;
     ComPtr<IDWriteFactory5> ui_dwrite_factory;
+    ComPtr<IDWriteInMemoryFontFileLoader> ui_font_loader;
     ComPtr<IDWriteFontCollection1> ui_font_collection;
     std::wstring ui_font_family;
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT ui_footprint{};

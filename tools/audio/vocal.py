@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import random
 import wave
 from pathlib import Path
@@ -48,7 +49,13 @@ def _audio_values(audio) -> list[float]:
             values = audio.reshape(-1).tolist()
         except AttributeError:
             values = list(audio)
-    return [max(-1.0, min(1.0, float(v))) for v in values]
+    result = []
+    for value in values:
+        value = float(value)
+        if not math.isfinite(value):
+            raise RuntimeError("Chatterbox candidate contains non-finite samples")
+        result.append(max(-1.0, min(1.0, value)))
+    return result
 
 
 def _extract_event(values: list[float], sample_rate: int) -> list[float]:
@@ -106,7 +113,10 @@ def generate(*, event: str = "groan", count: int = 1, seed: int = 0,
         model = _load_model()
     except AssertionError as exc:
         raise RuntimeError("Chatterbox Turbo requires a reference voice longer than 5 seconds for this path") from exc
-    sample_rate = int(getattr(model, "sr", 24_000))
+    sample_rate = getattr(model, "sr", 24_000)
+    if not math.isfinite(sample_rate) or sample_rate <= 0 or int(sample_rate) != sample_rate:
+        raise ValueError("sample rate must be a finite positive integer")
+    sample_rate = int(sample_rate)
     results: list[Path] = []
     event_tag = f"[{event}]"
     folder = Path(output_dir)

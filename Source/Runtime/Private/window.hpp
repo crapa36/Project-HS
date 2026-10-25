@@ -15,6 +15,26 @@
 
 namespace hs
 {
+namespace runtime_detail
+{
+inline bool PeekMainMessage(MSG &message, bool sample_input, UINT flags = PM_REMOVE) noexcept
+{
+    if (sample_input) return PeekMessageW(&message, nullptr, 0, 0, flags) != 0;
+    // Keep raw/key/client-mouse input for the renderer's sampling token. System
+    // close/focus/DPI/size messages remain serviceable while that token is parked.
+    return PeekMessageW(&message, nullptr, 0, WM_INPUT - 1, flags) ||
+        PeekMessageW(&message, nullptr, WM_KEYLAST + 1, WM_MOUSEFIRST - 1, flags) ||
+        PeekMessageW(&message, nullptr, WM_MOUSELAST + 1, 0xffffffffu, flags);
+}
+inline DWORD MainMessageMask(bool input_gated) noexcept
+{ return input_gated ? (QS_ALLINPUT & ~QS_INPUT) : QS_ALLINPUT; }
+inline DWORD MainMessageFlags(bool input_gated) noexcept
+{
+    // System peeking has marked deferred input old. Do not repeatedly wake on
+    // that retained input; the native request event restores the normal mask.
+    return input_gated ? 0 : MWMO_INPUTAVAILABLE;
+}
+}
 
 // Desktop placement only: IDs and physical rectangles are valid; native HDR
 // and presentation modes are queried by the initialized renderer separately.
@@ -37,7 +57,7 @@ class Window
 
     [[nodiscard]] Result Create(std::uint32_t width, std::uint32_t height, bool visible,
                                 bool borderless);
-    [[nodiscard]] bool PumpMessages(Result *failure = nullptr);
+    [[nodiscard]] bool PumpMessages(Result *failure = nullptr, bool sample_input = true);
     [[nodiscard]] HWND Handle() const noexcept;
     void StopInput() noexcept;
     void BeginSkillRebind(std::uint32_t slot) noexcept;

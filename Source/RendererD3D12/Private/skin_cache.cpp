@@ -21,18 +21,15 @@ SkinCacheSample SkinCache::Resolve(RenderSceneInstanceKey key,
                                    float undeformed_radius)
 {
     if (key.stable_id != 0) key.fallback_ordinal = 0;
-    const auto pose_revision = instance.animation_clip_id.value != 0
-        ? DeriveNamedAnimationPoseRevision(instance)
-        : pose ? (pose->revision != 0 ? pose->revision : DeriveAnimationPoseRevision(*pose))
-               : instance.revisions.pose;
+    const auto pose_key = MakeRenderPoseKey(instance, pose);
     const auto clip = pose ? pose->clip : CharacterAnimationClip::Idle;
     const auto time = pose ? pose->normalized_time : 0.0f;
 
     SkinCacheSample sample;
-    sample.current_pose_revision = pose_revision;
+    sample.current_pose = pose_key;
     sample.current_clip = clip;
     sample.current_time = time;
-    sample.previous_pose_revision = pose_revision;
+    sample.previous_pose = pose_key;
     sample.previous_clip = clip;
     sample.previous_time = time;
     const auto scale = std::max({std::abs(instance.scale.x), std::abs(instance.scale.y),
@@ -43,14 +40,14 @@ SkinCacheSample SkinCache::Resolve(RenderSceneInstanceKey key,
     if (found != entries_.end())
     {
         const auto &entry = found->second;
-        sample.previous_pose_revision = entry.pose_revision;
+        sample.previous_pose = entry.pose;
         sample.previous_clip = entry.clip;
         sample.previous_time = entry.time;
         sample.history_valid =
-            key.stable_id != 0 && entry.content_revision == instance.revisions.content;
+            key.stable_id != 0 && entry.content == MakeRenderContentKey(instance);
     }
     const auto [entry, inserted] = pending_.insert_or_assign(
-        key, Entry{pose_revision, instance.revisions.content, clip, time});
+        key, Entry{pose_key, MakeRenderContentKey(instance), clip, time});
     static_cast<void>(entry);
     if (inserted)
     {

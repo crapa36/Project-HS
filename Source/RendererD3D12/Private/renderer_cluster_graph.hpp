@@ -13,7 +13,7 @@ struct ClusterGraphBuffer
 struct ClusterGraphPage
 {
     std::uint32_t logical_slot{};
-    std::array<ClusterGraphBuffer, 4> buffers;
+    ClusterGraphBuffer buffer{};
     bool resident{}, upload{};
 };
 struct ClusterGraphCut

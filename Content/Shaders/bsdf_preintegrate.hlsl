@@ -1,6 +1,6 @@
 #include "bsdf_metallic_roughness.hlsli"
 
-RWTexture2D<float2> output : register(u0);
+RWTexture2D<float4> output : register(u0);
 
 uint HsPreintegrateReverseBits(uint bits)
 {
@@ -45,7 +45,7 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
     surface.opacity = 1.0;
     surface.normal_is_world = true;
 
-    float2 accumulated = float2(0.0, 0.0);
+    float4 accumulated = 0.0;
     [loop]
     for (uint sample_index = 0; sample_index < sample_count; ++sample_index)
     {
@@ -72,7 +72,9 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
         float3 half_vector = half_vector_sum * rsqrt(half_vector_length_squared);
         float fresnel_weight = pow(1.0 - saturate(dot(view, half_vector)), 5.0);
         float weighted_brdf = sample.f.x * cosine / pdf;
-        accumulated += weighted_brdf * float2(1.0 - fresnel_weight, fresnel_weight);
+        const float2 dfg = weighted_brdf * float2(1.0 - fresnel_weight, fresnel_weight);
+        accumulated.xy += dfg;
+        accumulated.zw += dfg * (0.04 + 0.96 * pow(1.0 - cosine, 5.0));
     }
 
     output[dispatch_thread_id.xy] = accumulated / float(sample_count);

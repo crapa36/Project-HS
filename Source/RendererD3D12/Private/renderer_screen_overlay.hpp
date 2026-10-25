@@ -9,6 +9,7 @@
 
 namespace hs
 {
+class RendererPipelineCache;
 struct ScreenOverlayTargets;
 class ScreenOverlayCandidate
 {
@@ -44,7 +45,7 @@ class ScreenOverlaySystem
   public:
     using ShaderReader=std::function<Result(std::string_view,std::vector<std::byte>&)>;
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,ViewExtent,
-        std::uint32_t,const ShaderReader &,bool enabled,ScreenOverlayCandidate &) const;
+        std::uint32_t,const ShaderReader &,bool enabled,RendererPipelineCache &,ScreenOverlayCandidate &) const;
     [[nodiscard]] Result Commit(ScreenOverlayCandidate &&,const CompletionSet &);
     [[nodiscard]] Result RegisterMask(RenderGraphBuilder &,const ScreenOverlayInputs &,ScreenOverlayOutputs &);
     void Draw(ID3D12GraphicsCommandList *,std::uint32_t,D3D12_CPU_DESCRIPTOR_HANDLE) const;

@@ -13,10 +13,10 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
                          actors->player.position.y};
         signal.flags |= static_cast<std::uint8_t>(DomainSignalFlag::HasTarget);
     };
+    progression->pickup_work.OnCollected(pickup.id.value);
     pickup.dead = true;
-    for (const auto &rule : combat_state->relic_rules.RulesFor(RelicRuleHook::OnPickup))
-        if (rule.handler == RelicRuleHandlerId::PickupReward)
-            HandlePickupReward(pickup.kind);
+    if (HasRelic(actors->player.relic_mask, RelicKind::PickupReward))
+        HandlePickupReward(pickup.kind);
     ++Metrics().pickup_collected[static_cast<std::size_t>(pickup.kind)];
     if (pickup.attracted_by_magnet_stat)
         ++Metrics().stat_utility[static_cast<std::size_t>(StatKind::MagnetRadius)];
@@ -93,17 +93,22 @@ void GameSimulation::SimulationWorld::WeightedShuffle(std::vector<CardView> &can
                                             card.upgrade);
         return 1u + std::popcount(static_cast<unsigned>(tags & build_tags));
     };
+    constexpr auto maximum_candidates = kCombatSkillCount * kUpgradeCount + kCombatSkillCount - 1;
+    std::array<std::uint32_t, maximum_candidates> weights{};
+    assert(candidates.size() <= weights.size());
+    std::uint32_t total{};
+    for (std::size_t index = 0; index < candidates.size(); ++index)
+        total += weights[index] = weight(candidates[index]);
     for (std::size_t first = 0; first + 1 < candidates.size(); ++first)
     {
-        std::uint32_t total{};
-        for (std::size_t index = first; index < candidates.size(); ++index)
-            total += weight(candidates[index]);
         auto roll = static_cast<std::uint32_t>(
             Random(actors->player.level ^ Mix(sequence), purpose + first) % total);
         auto selected = first;
-        while (roll >= weight(candidates[selected]))
-            roll -= weight(candidates[selected++]);
+        while (roll >= weights[selected])
+            roll -= weights[selected++];
         std::swap(candidates[first], candidates[selected]);
+        std::swap(weights[first], weights[selected]);
+        total -= weights[first];
     }
 }
 
@@ -112,10 +117,10 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     const auto previous_cards = progression->cards;
     const auto previous_count = progression->card_count;
     std::vector<CardView> candidates;
+    const auto active_count = static_cast<std::size_t>(std::ranges::count_if(
+        actors->player.loadout, [](SkillKind value) { return value != SkillKind::Count; }));
     for (std::size_t index = 1; index < kCombatSkillCount; ++index)
     {
-        const auto active_count = static_cast<std::size_t>(std::ranges::count_if(
-            actors->player.loadout, [](SkillKind value) { return value != SkillKind::Count; }));
         if (actors->player.skill_levels[index] == 0 &&
             active_count < rules.progression.active_slot_count)
         {
@@ -160,8 +165,6 @@ void GameSimulation::SimulationWorld::GenerateLevelCards(bool exclude_current)
     });
     WeightedShuffle(candidates, progression->level_reroll_sequence, 0x43415244ull);
     progression->card_count = 0;
-    const auto active_count = static_cast<std::size_t>(std::ranges::count_if(
-        actors->player.loadout, [](SkillKind value) { return value != SkillKind::Count; }));
     if (active_count < rules.progression.active_slot_count)
     {
         const auto guaranteed = std::ranges::find(candidates, CardKind::LearnSkill,
@@ -271,7 +274,6 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     else
     {
         actors->player.relic_mask |= RelicMask{1} << card.subject;
-        combat_state->relic_rules.Rebuild(actors->player.relic_mask);
         progression->card_count = 0;
         session_phase = SessionPhase::Playing;
         return true;
@@ -352,9 +354,17 @@ void GameSimulation::SimulationWorld::AssignAutomaticStats()
 void GameSimulation::SimulationWorld::XpCardPhase()
 {
     if (session_phase != SessionPhase::Playing) return;
-    for (auto &pickup : actors->pickups)
+    auto &work = progression->pickup_work;
+    work.Begin(actors->pickups, actors->player.position, EffectiveMagnetRadius(),
+               rules.growth.experience_pickup_radius,
+               config.scenario.auto_collect_progression, rules.arena_half_extent);
+    while (const auto id = work.Next())
     {
-        if (pickup.dead) continue;
+        auto found = std::lower_bound(actors->pickups.begin(), actors->pickups.end(), *id,
+            [](const PickupActor &pickup, std::uint64_t value) { return pickup.id.value < value; });
+        if (found == actors->pickups.end() || found->id.value != *id || found->dead) continue;
+        work.Visit(*id);
+        auto &pickup = *found;
         if (config.scenario.auto_collect_progression &&
             (pickup.kind == PickupKind::Experience ||
              pickup.kind == PickupKind::RelicChest))
@@ -362,30 +372,35 @@ void GameSimulation::SimulationWorld::XpCardPhase()
             pickup.position = actors->player.position;
         }
         const auto delta = Subtract(actors->player.position, pickup.position);
+        const auto distance_squared = LengthSquared(delta);
         const auto global_experience_magnet =
             pickup.kind == PickupKind::Experience && pickup.globally_attracted;
         const auto radius = global_experience_magnet
                                 ? rules.arena_half_extent * 3.0f
                                 : EffectiveMagnetRadius();
-        if (LengthSquared(delta) <= radius * radius)
+        const auto attracted = distance_squared <= radius * radius;
+        if (attracted)
         {
+            const auto distance = std::sqrt(distance_squared);
             if (!global_experience_magnet &&
-                LengthSquared(delta) > rules.stats.base_magnet_radius_m *
+                distance_squared > rules.stats.base_magnet_radius_m *
                                                rules.stats.base_magnet_radius_m)
                 pickup.attracted_by_magnet_stat = true;
-            if (pickup.kind == PickupKind::Experience && LengthSquared(delta) > 0.0f &&
+            if (pickup.kind == PickupKind::Experience && distance_squared > 0.0f &&
                 rules.growth.experience_pickup_speed > 0.0f)
             {
                 if (pickup.visual_motion_started == 0 ||
                     pickup.visual_motion_updated + 1 != tick)
                 {
                     pickup.visual_motion_started = tick;
-                    pickup.visual_motion_initial_distance = Length(delta);
+                    pickup.visual_motion_initial_distance = distance;
                 }
                 pickup.visual_motion_updated = tick;
             }
+            const auto direction = distance <= 0.00001f ? Float2{0.0f, 1.0f}
+                : Float2{delta.x / distance, delta.y / distance};
             pickup.position = Add(pickup.position,
-                                  Multiply(Normalize(delta),
+                                  Multiply(direction,
                                            rules.growth.experience_pickup_speed *
                                                kTickSeconds));
         }
@@ -393,14 +408,22 @@ void GameSimulation::SimulationWorld::XpCardPhase()
             rules.growth.experience_pickup_radius *
                 rules.growth.experience_pickup_radius)
         {
+            const auto magnet = pickup.kind == PickupKind::Magnet;
             CollectPickup(pickup);
-            if (session_phase != SessionPhase::Playing) break;
+            if (magnet) work.AfterMagnet(actors->pickups, *id, rules.arena_half_extent);
         }
+        // Collection callbacks may append actors; resolve the logical ID again.
+        found = std::lower_bound(actors->pickups.begin(), actors->pickups.end(), *id,
+            [](const PickupActor &value, std::uint64_t target) { return value.id.value < target; });
+        if (found != actors->pickups.end() && found->id.value == *id)
+            work.Update(*found, attracted && rules.growth.experience_pickup_speed > 0.0f);
+        if (session_phase != SessionPhase::Playing) break;
     }
-    while (config.scenario.progression_enabled &&
-           actors->player.experience >= ExperienceForLevel(rules, actors->player.level))
+    while (config.scenario.progression_enabled)
     {
-        actors->player.experience -= ExperienceForLevel(rules, actors->player.level);
+        const auto required_xp = ExperienceForLevel(rules, actors->player.level);
+        if (actors->player.experience < required_xp) break;
+        actors->player.experience -= required_xp;
         ++actors->player.level;
         ++actors->player.pending_levels;
         EmitSignal(DomainSignalKind::PlayerLevelUp, actors->player.position);

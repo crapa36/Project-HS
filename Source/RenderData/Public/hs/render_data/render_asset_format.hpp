@@ -38,6 +38,7 @@ struct ExpandedVertex
     std::uint16_t reserved{};
 };
 
+void ValidateExpandedVertices(std::span<const ExpandedVertex> vertices);
 [[nodiscard]] std::vector<std::byte> EncodeExpandedVertices(
     std::span<const ExpandedVertex> vertices);
 [[nodiscard]] std::vector<ExpandedVertex> DecodeExpandedVertices(
@@ -73,6 +74,10 @@ enum class ChunkType : std::uint32_t
     CharacterNamedClips = 34,
     CharacterAnimationNames = 35,
     CharacterAnimationSockets = 36,
+    CharacterDeformationMetadata = 37,
+    CharacterFinalMatrices = 38,
+    CharacterIntervalBounds = 39,
+    CharacterLodDirectory = 40,
     DecalMaterialMetadata = 43,
     QualityProfiles = 44,
     AutoFgCadence = 45,

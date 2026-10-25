@@ -6,6 +6,12 @@ cbuffer VirtualShadowConstants : register(b0, space21)
     float4 Clipmaps[3];
     int4 Windows[3];
     uint4 Counts, Limits, Identity, Frame, Options;
+    float4 BakedDepth; // Archive Z minimum/maximum, compatible enabled, actual CSM available.
+    int4 BakedDirectory; // Coarse minimum XY, width, height.
+    float4 RootBounds; // Fixed light-space XY minimum and maximum of the flattened root.
+    float4 RootExtent; // Texel width/height, world texel size, filter guard.
+    float4 RootDepth; // Fixed root Z minimum, inverse span, span.
+    uint4 RootOptions; // Root resource present, ready, compatible.
 };
 cbuffer ClearConstants : register(b1, space21) { uint ClearEntry; };
 struct PageEntry
@@ -32,6 +38,10 @@ StructuredBuffer<Caster> Casters : register(t2, space21);
 StructuredBuffer<Receiver> Receivers : register(t3, space21);
 StructuredBuffer<PageEntry> ClearPageTable : register(t4, space21);
 RWStructuredBuffer<PageEntry> PageTable : register(u0, space21);
+ByteAddressBuffer BakedPages : register(t5, space21);
+// Per-frame {first command, capacity}; CPU and ExecuteIndirect use this same
+// prefix partition of the unchanged fixed command allocation.
+ByteAddressBuffer CommandSegments : register(t6, space21);
 RWStructuredBuffer<PageEntry> Residents : register(u1, space21);
 RWByteAddressBuffer Requests : register(u2, space21);
 RWStructuredBuffer<DrawRecord> DrawRecords : register(u3, space21);
@@ -52,6 +62,23 @@ uint EntryForKey(int2 key, uint level)
     const int2 local = key - Windows[level].xy;
     if (any(local < 0) || any(local >= Windows[level].z)) return 0xffffffffu;
     return uint(Windows[level].w + local.y * Windows[level].z + local.x);
+}
+// UINT_MAX is unavailable; zero is a complete empty page. Out-of-archive
+// coarse pages are complete empty because the bake covers every fixed caster.
+uint BakedPageOffset(PageEntry page)
+{
+    if(BakedDepth.z==0.0 || page.level!=2u) return 0xffffffffu;
+    const int2 cell=int2(page.x,page.y)-BakedDirectory.xy;
+    if(any(cell<0) || any(cell>=BakedDirectory.zw)) return 0u;
+    return BakedPages.Load(uint(cell.y*BakedDirectory.z+cell.x)*4u);
+}
+uint RequestWord(uint rank)
+{
+    if(BakedDepth.z==0.0) return rank;
+    // Current native windows are 32x32,8x8,8x8: each range is word-aligned.
+    // Coarse first reserves both physical slots and each group's command budget.
+    const uint coarse=uint(Windows[2].w)>>5u;
+    return rank<Frame.z-coarse ? coarse+rank : rank-(Frame.z-coarse);
 }
 bool Requested(uint entry)
 {
@@ -107,7 +134,14 @@ uint PageDrawCountOffset(uint entry, uint segment)
 void InitCS(uint3 tid : SV_DispatchThreadID)
 {
     const uint id = tid.x;
-    if (id < Frame.z) Requests.Store(id * 4u, 0u);
+    if (id < Frame.z)
+    {
+        // CPU proof reserves every coarse slot and conservative command bound.
+        // This is a current-frame request, including the verified-empty case.
+        const uint coarse_word = uint(Windows[2].w) >> 5u;
+        const bool guaranteed = BakedDepth.z != 0.0 && BakedDepth.w == 0.0 && Options.y != 0u;
+        Requests.Store(id * 4u, guaranteed && id >= coarse_word ? 0xffffffffu : 0u);
+    }
     if (id < Frame.w + 2u) CommandCounts.Store(id * 4u, 0u);
     if (id < Counts.z)
     {
@@ -149,6 +183,7 @@ void FeedbackCS(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
             if (abs(position.w) > 1e-8 && all(isfinite(position)))
             {
                 const float3 light = LightPosition(position.xyz / position.w + ViewOrigin.xyz);
+                if(BakedDepth.z!=0.0) Request(EntryForKey(int2(floor(light.xy/Clipmaps[2].x)),2u));
                 [unroll] for (uint level = 0; level < 3; ++level)
                 {
                     const uint entry = EntryForKey(int2(floor(light.xy / Clipmaps[level].x)), level);
@@ -234,8 +269,9 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
     uint free_cursor = 0u;
     // Requests are immutable here. Preserve ascending entry/allocation order,
     // while reading each request word once and skipping its unrequested pages.
-    for (uint word = 0u; word < Frame.z; ++word)
+    for (uint rank = 0u; rank < Frame.z; ++rank)
     {
+        const uint word=RequestWord(rank);
         uint mask = Requests.Load(word * 4u);
         while (mask != 0u)
         {
@@ -252,7 +288,11 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
                     // Do not evict a resident requested anywhere in this frame.
                     const uint old_entry = old.epoch == Identity.w
                         ? EntryForKey(int2(old.x, old.y), old.level) : 0xffffffffu;
-                    if (!Requested(old_entry)) { physical = p; ++free_cursor; break; }
+                    if (!Requested(old_entry) || (BakedDepth.z!=0.0 && page.level==2u && old.level!=2u))
+                    {
+                        if(old_entry!=0xffffffffu) PageTable[old_entry].physical=0xffffffffu;
+                        physical = p; ++free_cursor; break;
+                    }
                 }
                 if (physical == 0xffffffffu) continue; // budget: remains invalid
                 PageEntry resident = page; resident.physical = physical; resident.flags = 0u;
@@ -281,6 +321,7 @@ bool DrawCandidate(PageEntry page, Caster caster, out uint layer, out uint segme
     segment = layer * (Frame.w / 2u) + caster.indexed.x;
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u ||
         (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
+    if(layer==0u && (caster.properties.x & 64u)!=0u && BakedPageOffset(page)!=0xffffffffu) return false;
     return SphereOverlaps(caster.current_bounds, page);
 }
 void CullPageCaster(uint entry, uint caster_index)
@@ -302,14 +343,15 @@ void CullPageCaster(uint entry, uint caster_index)
     if ((page.flags & 8u) != 0u) return;
     uint slot;
     CommandCounts.InterlockedAdd(segment * 4u, 1u, slot);
-    if (slot >= Options.z)
+    const uint2 layout=CommandSegments.Load2(segment*8u);
+    if (slot >= layout.y || layout.x >= Options.z || slot >= Options.z-layout.x)
     {
         // Unreachable when the shared candidate predicate matches the counts.
         uint ignored;
         InterlockedOr(PageTable[entry].flags, 8u, ignored);
         return;
     }
-    const uint record_index = segment * Options.z + slot;
+    const uint record_index = layout.x + slot;
     DrawRecord record;
     record.geometry_record = caster.draw.w; record.source_ref = caster.draw.z;
     record.instance_index = caster.draw.x; record.instance_generation = caster.draw.y;
@@ -332,9 +374,10 @@ void CullCS(uint3 tid : SV_DispatchThreadID)
     {
         const uint segment = tid.x;
         if (segment >= Frame.w) return;
-        uint remaining = Options.z;
-        for (uint word = 0u; word < Frame.z; ++word)
+        uint remaining = CommandSegments.Load2(segment*8u).y;
+        for (uint rank = 0u; rank < Frame.z; ++rank)
         {
+            const uint word=RequestWord(rank);
             uint mask = Requests.Load(word * 4u);
             while (mask != 0u)
             {
@@ -389,3 +432,16 @@ ClearOutput ClearVS(uint vertex : SV_VertexID)
     return output;
 }
 float ClearPS() : SV_Depth { return 0.0; }
+
+float SeedPS(ClearOutput input) : SV_Depth
+{
+    const PageEntry page=ClearPageTable[ClearEntry];
+    const uint offset=BakedPageOffset(page);
+    if(offset==0xffffffffu || offset==0u) return 0.0;
+    const uint2 origin=uint2(page.physical%uint(Bank.z),page.physical/uint(Bank.z))*132u;
+    const uint2 texel=uint2(input.position.xy)-origin;
+    const float value=asfloat(BakedPages.Load(offset+(texel.y*132u+texel.x)*4u));
+    if(value==0.0) return 0.0;
+    const float world_z=BakedDepth.y-value*(BakedDepth.y-BakedDepth.x);
+    return 1.0-(world_z-Depth.x)*Depth.y;
+}

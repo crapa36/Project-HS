@@ -43,7 +43,8 @@ StructuredBuffer<SkinMatrixElement> SkinMatrices : register(t2, space3);
 RWByteAddressBuffer SkinOutput : register(u0);
 RWByteAddressBuffer SkinBounds : register(u1, space3);
 
-static const uint kVertexStride = 76;
+static const uint kSourceVertexStride = 76;
+static const uint kDeformedVertexStride = 36;
 
 uint4 LoadBoneIndices(uint base)
 {
@@ -61,7 +62,7 @@ void SkinCacheCS(uint3 dispatch_id : SV_DispatchThreadID)
     const uint vertex = dispatch_id.x;
     if (vertex >= vertex_count) return;
 
-    const uint base = vertex * kVertexStride;
+    const uint base = vertex * kSourceVertexStride;
     const float3 source_position = asfloat(SkinSource.Load3(base));
     float3 position = source_position;
     float3 normal = asfloat(SkinSource.Load3(base + 12));
@@ -138,13 +139,10 @@ void SkinCacheCS(uint3 dispatch_id : SV_DispatchThreadID)
         }
     }
 
-    SkinOutput.Store3(base, asuint(position));
-    SkinOutput.Store3(base + 12, asuint(normal));
-    SkinOutput.Store2(base + 24, SkinSource.Load2(base + 24));
-    SkinOutput.Store4(base + 32, SkinSource.Load4(base + 32));
-    SkinOutput.Store2(base + 48, SkinSource.Load2(base + 48));
-    SkinOutput.Store4(base + 56, uint4(asuint(tangent), tangent_bits.w));
-    SkinOutput.Store(base + 72, SkinSource.Load(base + 72));
+    const uint output_base = vertex * kDeformedVertexStride;
+    SkinOutput.Store3(output_base, asuint(position));
+    SkinOutput.Store3(output_base + 12, asuint(normal));
+    SkinOutput.Store3(output_base + 24, asuint(tangent));
 }
 
 groupshared float3 BoundMinimum[64];
@@ -158,7 +156,7 @@ void SkinBoundsCS(uint thread_id : SV_GroupIndex)
     float3 maximum = -minimum;
     for (uint vertex = thread_id; vertex < vertex_count; vertex += 64u)
     {
-        const float3 position = asfloat(SkinOutput.Load3(vertex * kVertexStride));
+        const float3 position = asfloat(SkinOutput.Load3(vertex * kDeformedVertexStride));
         minimum = min(minimum, position);
         maximum = max(maximum, position);
     }

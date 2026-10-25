@@ -306,6 +306,7 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     unresolved_resident_candidates.clear();
     resident_utility_submissions.clear();
 
+    if (auto archived = ArchiveHeroWork(hero_transparency); !archived) return reject(archived);
     // No allocation, native preparation or fallible Commit below this boundary.
     PublishResidentAssetDescriptors(*next);
     SwapResidentAssetData(*next);
@@ -327,6 +328,8 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     if (replace_vfx_execution) particles_initialized = false;
     ++pipeline_revision;
     ++material_parameter_revision;
+    baked_generation_material_revision = material_parameter_revision;
+    baked_generation_pipeline_revision = pipeline_revision;
     static_gpu_scene.reset();
     InvalidateCanonicalDeformationAfterCompletion();
     previous_geometry_page_versions.fill(0);

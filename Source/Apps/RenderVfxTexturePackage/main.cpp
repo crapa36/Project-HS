@@ -2,6 +2,7 @@
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/dds_texture.hpp>
 #include <hs/render_data/volume_texture_package.hpp>
 
 #include <algorithm>
@@ -79,86 +80,20 @@ std::string ProductId(const TextureSpec &texture)
     return "render/texture/" + std::string(texture.name) + ".rpkg";
 }
 
-std::uint32_t U32(std::span<const std::byte> bytes, std::size_t offset)
+rd::TextureDescription ParseDds(std::span<const std::byte> bytes, const TextureSpec &texture)
 {
-    Require(offset <= bytes.size() && 4 <= bytes.size() - offset,
-            "truncated DDS header");
-    std::uint32_t value = 0;
-    for (std::size_t i = 0; i < 4; ++i)
-        value |= std::uint32_t(std::to_integer<unsigned>(bytes[offset + i])) << (8 * i);
-    return value;
+    const auto decoded = rd::DecodeDdsTexture(bytes);
+    rd::ValidateDdsTextureRole(decoded, rd::DdsTextureRole::VfxTexture, texture.description);
+    return decoded.description;
 }
 
-rd::TextureDescription ParseDds(std::span<const std::byte> bytes,
-                                const TextureSpec &texture)
+rd::VolumeTextureDescription ParseVolumeDds(std::span<const std::byte> bytes, const TextureSpec &texture)
 {
-    Require(bytes.size() >= 148 && U32(bytes, 0) == 0x20534444 &&
-            U32(bytes, 4) == 124 && U32(bytes, 76) == 32 &&
-            U32(bytes, 80) == 4 && U32(bytes, 84) == 0x30315844,
-            "expected a complete DX10 DDS header");
-    rd::TextureDescription actual{
-        U32(bytes, 16), U32(bytes, 12), U32(bytes, 140), U32(bytes, 28),
-        U32(bytes, 128)};
-    const auto &expected = texture.description;
-    Require(actual.width == expected.width &&
-            (expected.height == 0 || actual.height == expected.height) &&
-            (expected.array_size == 0 || actual.array_size == expected.array_size) &&
-            actual.mip_count == expected.mip_count &&
-            actual.format == expected.format &&
-            actual.height > 0 && actual.array_size > 0 &&
-            U32(bytes, 132) == 3 && // D3D10_RESOURCE_DIMENSION_TEXTURE2D
-            U32(bytes, 136) == 0 && U32(bytes, 144) == 0,
-            "VFX DDS shape, format, or resource dimension changed");
-    const bool bc4 = actual.format == rd::kTextureFormatBc4;
-    const auto bytes_per_pixel = actual.format == rd::kTextureFormatR8 ? 1u :
-        actual.format == rd::kTextureFormatRg8Snorm ||
-        actual.format == rd::kTextureFormatR16Float ? 2u :
-        actual.format == rd::kTextureFormatRgba8 ? 4u : 8u;
-    const auto top_pitch = bc4 ?
-        std::uint64_t((actual.width + 3) / 4) * ((actual.height + 3) / 4) * 8 :
-        std::uint64_t(actual.width) * bytes_per_pixel;
-    Require(top_pitch <= UINT32_MAX && U32(bytes, 20) == top_pitch &&
-            U32(bytes, 8) == (bc4 ? 0xa1007u :
-                actual.mip_count > 1 ? 0x2100fu : 0x100fu) &&
-            U32(bytes, 24) <= 1 &&
-            U32(bytes, 108) == (actual.mip_count > 1 ? 0x401008u :
-                actual.array_size > 1 ? 0x1008u : 0x1000u) &&
-            U32(bytes, 112) == 0 && U32(bytes, 116) == 0 &&
-            U32(bytes, 120) == 0 && U32(bytes, 124) == 0,
-            "VFX DDS pitch, flags, or caps changed");
-    for (std::size_t offset = 32; offset < 76; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS reserved header");
-    for (std::size_t offset = 88; offset < 108; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS pixel format fields");
-    return actual;
-}
-
-rd::VolumeTextureDescription ParseVolumeDds(std::span<const std::byte> bytes,
-                                            const TextureSpec &texture)
-{
-    Require(bytes.size() == 148ull + 64ull * 64ull * 64ull * 4ull &&
-                U32(bytes, 0) == 0x20534444 && U32(bytes, 4) == 124 &&
-                U32(bytes, 8) == 0x0080100f && U32(bytes, 12) == 64 &&
-                U32(bytes, 16) == 64 && U32(bytes, 20) == 256 &&
-                U32(bytes, 24) == 64 && U32(bytes, 28) == 1 &&
-                U32(bytes, 76) == 32 && U32(bytes, 80) == 4 &&
-                U32(bytes, 84) == 0x30315844 && U32(bytes, 108) == 0x1008 &&
-                U32(bytes, 112) == 0x00200000 && U32(bytes, 116) == 0 &&
-                U32(bytes, 120) == 0 && U32(bytes, 124) == 0 &&
-                U32(bytes, 132) == 4 && U32(bytes, 136) == 0 &&
-                U32(bytes, 140) == 1 && U32(bytes, 144) == 0 &&
-                U32(bytes, 128) == rd::kTextureFormatRgba8,
-            "expected the authored 64x64x64 RGBA8 volume DDS header and payload");
-    for (std::size_t offset = 32; offset < 76; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS reserved header");
-    for (std::size_t offset = 88; offset < 108; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS DX10 reserved fields");
-    const auto &expected = texture.description;
-    Require(texture.volume && expected.width == 64 && expected.height == 64 &&
-                expected.array_size == 1 && expected.mip_count == 1 &&
-                expected.format == rd::kTextureFormatRgba8,
-            "volume spec contract changed");
-    return {64, 64, 64, 1, rd::kTextureFormatRgba8};
+    Require(texture.volume, "volume role required");
+    const auto decoded = rd::DecodeDdsTexture(bytes);
+    rd::ValidateDdsTextureRole(decoded, rd::DdsTextureRole::VfxVolume, texture.description);
+    return {decoded.description.width, decoded.description.height, decoded.depth,
+            decoded.description.mip_count, decoded.description.format};
 }
 
 bool Current(const fs::path &build_root, const ap::ActionSpec &spec,

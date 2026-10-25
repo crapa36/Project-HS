@@ -119,12 +119,13 @@ void ValidateConfigOverrides(const Json &value)
         "warp",          "validation",          "gpu_validation", "vsync",
         "bloom",         "outline",             "resize_test",    "borderless",
         "width",         "height",              "frame_cap",      "render_scale_percent",
-        "shadow_resolution", "particle_percentage", "barrier_mode"};
+        "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
+        "capture_hero_work", "capture_hero_work_mode", "graphics_preset"};
     CheckKeys(value, "config_overrides", allowed, std::array<std::string_view, 0>{});
 
     constexpr std::array boolean_fields{
         "warp", "validation", "gpu_validation", "vsync", "bloom", "outline",
-        "resize_test", "borderless"};
+        "resize_test", "borderless", "capture_hero_work"};
     for (const auto field : boolean_fields)
     {
         if (value.contains(field))
@@ -146,6 +147,7 @@ void ValidateConfigOverrides(const Json &value)
     };
     ranged("width", 640, 7680);
     ranged("height", 360, 4320);
+    ranged("diagnostic_enemy_count", 0, 10000);
 
     if (value.contains("frame_cap"))
     {
@@ -170,6 +172,20 @@ void ValidateConfigOverrides(const Json &value)
     one_of("render_scale_percent", {75, 100});
     one_of("shadow_resolution", {1024, 2048});
     one_of("particle_percentage", {50, 100});
+
+    if (value.contains("capture_hero_work_mode"))
+    {
+        const auto mode = String(value.at("capture_hero_work_mode"), "config_overrides.capture_hero_work_mode");
+        if (mode != "full" && mode != "no-environment" && mode != "coverage-only")
+            Invalid("config_overrides.capture_hero_work_mode", "unsupported value");
+    }
+
+    if (value.contains("graphics_preset"))
+    {
+        const auto preset = String(value.at("graphics_preset"), "config_overrides.graphics_preset");
+        if (preset != "low" && preset != "medium" && preset != "high" && preset != "ultra")
+            Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+    }
 
     if (value.contains("barrier_mode"))
     {
@@ -635,12 +651,42 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("outline", config.outline);
         boolean("resize_test", config.resize_test);
         boolean("borderless", config.borderless);
+        boolean("capture_hero_work", config.capture_hero_work);
+        if (overrides.contains("graphics_preset"))
+        {
+            const auto preset = overrides.at("graphics_preset").get<std::string>();
+            if (preset == "low") config.graphics_preset = GraphicsPreset::Low;
+            else if (preset == "medium") config.graphics_preset = GraphicsPreset::Medium;
+            else if (preset == "high") config.graphics_preset = GraphicsPreset::High;
+            else if (preset == "ultra") config.graphics_preset = GraphicsPreset::Ultra;
+            else Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+        }
+        if (overrides.contains("capture_hero_work_mode"))
+        {
+            const auto mode = overrides.at("capture_hero_work_mode").get<std::string>();
+            if (mode == "full") config.hero_work_mode = HeroWorkDiagnosticMode::Full;
+            else if (mode == "no-environment") config.hero_work_mode = HeroWorkDiagnosticMode::NoEnvironment;
+            else if (mode == "coverage-only") config.hero_work_mode = HeroWorkDiagnosticMode::CoverageOnly;
+            else Invalid("config_overrides.capture_hero_work_mode", "unsupported value");
+        }
         number("width", config.width);
         number("height", config.height);
+        if (overrides.contains("width") || overrides.contains("height")) config.resolution_explicit = true;
         number("frame_cap", config.frame_cap);
+        if (overrides.contains("frame_cap")) config.frame_cap_explicit = true;
         number("render_scale_percent", config.render_scale_percent);
+        if (overrides.contains("render_scale_percent")) config.render_scale_explicit = true;
         number("shadow_resolution", config.shadow_resolution);
+        if (overrides.contains("shadow_resolution")) config.shadow_resolution_explicit = true;
         number("particle_percentage", config.particle_percentage);
+        if (overrides.contains("particle_percentage")) config.particle_percentage_explicit = true;
+        number("diagnostic_enemy_count", config.diagnostic_enemy_count);
+        if (overrides.contains("vsync")) config.vsync_explicit = true;
+        if (overrides.contains("borderless")) config.borderless_explicit = true;
+        if (overrides.contains("bloom")) config.bloom_explicit = true;
+        if (overrides.contains("outline")) config.outline_explicit = true;
+        if (config.capture_hero_work || config.diagnostic_enemy_count)
+            config.capture_diagnostics = true;
         if (overrides.contains("barrier_mode"))
         {
             const auto mode = overrides.at("barrier_mode").get<std::string>();

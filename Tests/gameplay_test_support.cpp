@@ -1,5 +1,8 @@
+#include <hs/game_rules/simulation_rules_io.hpp>
 #include "gameplay_test_support.hpp"
+#include <hs/presentation/process_scene.hpp>
 #include "test_generation_paths.hpp"
+#include <hs/presentation/presentation_catalog_io.hpp>
 
 #include <algorithm>
 #include <array>
@@ -114,11 +117,10 @@ void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,
 
 bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &snapshot)
 {
-    hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
+    auto read = simulation.BorrowTickReadView();
     static const hs::SettingsData settings;
-    return hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
-                                     settings, snapshot);
+    return hs::ProjectTick(read.View(), DefaultContent().presentation, test_ui,
+        settings, snapshot, hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read.View(), {})));
 }
 
 bool HasVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind kind)

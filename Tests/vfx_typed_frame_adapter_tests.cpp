@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "vfx_typed_frame_adapter.hpp"
 #include "vfx_session_state.hpp"
 #include "vfx_typed_screen_commands.hpp"

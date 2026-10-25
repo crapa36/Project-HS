@@ -58,7 +58,7 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t bytes,
         {
             const auto &stream = environment_geometry_streams[ordinal];
             const auto &mesh = environment_meshes[stream.target_index];
-            if (stream.retiring || stream.upload_pending || stream.upload_submitted || !mesh.vertices.resource ||
+            if (stream.retiring || stream.upload_pending || stream.upload_submitted || !mesh.storage.resource ||
                 !stream.request || residency.IsPinned(mesh.residency) ||
                 (stream.last_demand_frame >= frame_number && stream.priority >= priority)) continue;
             consider(stream.priority, stream.last_demand_frame, 1u, ordinal);
@@ -76,8 +76,7 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t bytes,
         auto &runtime = *cluster_runtime;
         auto &stream = runtime.streams[index];
         stream.retirement = stream.last_use;
-        for (const auto *buffer : {&stream.page->vertices, &stream.page->indices,
-            &stream.page->meshlets, &stream.page->auxiliary}) stream.retirement.Merge(buffer->graph_completion);
+        stream.retirement.Merge(stream.page->storage.graph_completion);
         if (!streaming.Retire(stream.request, stream.retirement) ||
             !residency.Retire(stream.page->residency, stream.retirement))
             return StreamFailure("Shared pressure could not retire a hierarchy page.");
@@ -107,8 +106,7 @@ Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t bytes,
             stream.generation == UINT32_MAX)
             return StreamFailure("Whole-LOD pressure requires an intact pinned noncyclic fallback.");
         stream.retirement = {};
-        for (const auto *buffer : {&mesh.vertices, &mesh.indices, &mesh.meshlets, &mesh.auxiliary})
-            stream.retirement.Merge(buffer->graph_completion);
+        stream.retirement.Merge(mesh.storage.graph_completion);
         if (!streaming.Retire(stream.request, stream.retirement) || !residency.Retire(mesh.residency, stream.retirement))
             return StreamFailure("Shared pressure could not retire a whole-LOD page.");
         stream.candidate = std::move(static_cast<GeometryPageGpu &>(mesh));
@@ -471,14 +469,10 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
         const std::array<std::uint64_t, 4> sizes{data.vertices.size() * sizeof(render_data::ExpandedVertex),
             data.indices.size() * 4u, data.meshlets.size() * render_data::kGeometryMeshletStride,
             (data.meshlet_vertex_refs.size() + data.meshlet_triangles.size() + data.canonical_primitive_remap.size()) * 4u};
-        std::uint64_t resident_bytes{}, upload_bytes{};
-        for (const auto bytes : sizes)
-        {
-            const auto description = BufferDescription(bytes);
-            const auto size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
-            if (size == UINT64_MAX || !AddBytes(resident_bytes, size) || !AddBytes(upload_bytes, bytes))
-                return StreamFailure("Hierarchy page allocation estimate overflow.");
-        }
+        std::uint64_t upload_bytes{}; std::array<std::uint64_t, 4> offsets{};
+        if (!GeometryPageLayout(sizes, offsets, upload_bytes)) return StreamFailure("Hierarchy page allocation estimate overflow.");
+        const auto resident_description = BufferDescription(upload_bytes);
+        const auto resident_bytes = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_bytes);
         const auto staging_bytes = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
         std::uint64_t peak = resident_bytes;

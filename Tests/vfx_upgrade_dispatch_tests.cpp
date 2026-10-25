@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "vfx_upgrade_dispatch.hpp"
 #include "vfx_typed_frame_adapter.hpp"
 #include <hs/core/cooked_format.hpp>
@@ -153,6 +154,7 @@ hs::PresentationEvent Event(std::uint8_t index,std::uint8_t stage)
 }
 void SimulationProjectionDispatchUsesZeroBasedUpgradeIndex()
 {
+    const auto program=Program();
     hs::GameSimulation simulation;
     Check(simulation.Initialize({0xBA51Cu}).Succeeded(),"simulation upgrade ingress initialize");
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantUpgrade,
@@ -192,7 +194,7 @@ void SimulationProjectionDispatchUsesZeroBasedUpgradeIndex()
 
     std::vector<hs::PresentationEvent> dispatched;
     Check(hs::runtime_detail::DispatchVfxUpgradeEvents(
-              Program(),std::span(projected).first(projected_count),dispatched).Succeeded() &&
+              program,std::span(projected).first(projected_count),dispatched).Succeeded() &&
           dispatched.size()==1 &&
           dispatched[0].asset.value==hs::MakeAssetId("particle.upgrade.arrow.echo").value &&
           dispatched[0].asset.value!=hs::MakeAssetId("particle.upgrade.arrow.pierce").value,
@@ -201,6 +203,7 @@ void SimulationProjectionDispatchUsesZeroBasedUpgradeIndex()
 }
 void SimulationChargedShotPulseProjectsAndDispatches()
 {
+    const auto program=Program();
     hs::GameSimulation simulation;
     Check(simulation.Initialize({0xC4A2EDu}).Succeeded(),
           "charged pulse initialize");
@@ -250,7 +253,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
     Check(found,"faster charge emitted no single decorated six-tick pulse");
     constexpr std::uint64_t player_render_id=1ull<<60;
     hs::GameReadModelStorage charging_model;
-    simulation.WriteReadModel(charging_model);
+    simulation.CopyReadModelForDevelopment(charging_model);
     Check(pulse.upgrade_cast_id!=0 && pulse.upgrade_owner_id==player_render_id &&
           pulse.tick>charging_model.View().player.charge_start &&
           (pulse.tick+player_render_id)%6==0 &&
@@ -275,7 +278,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
 
     std::vector<hs::PresentationEvent> dispatched;
     Check(hs::runtime_detail::DispatchVfxUpgradeEvents(
-              Program(),std::span(projected).first(projected_count),dispatched).Succeeded() &&
+              program,std::span(projected).first(projected_count),dispatched).Succeeded() &&
           dispatched.size()==1 &&
           dispatched[0].asset.value==hs::MakeAssetId(
               "particle.skill.charged_shot.pulse").value &&
@@ -289,7 +292,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
     input.ordered_edges=std::span<const hs::ActionEdge>(release);
     (void)simulation.TickFixed(input,fixed_step);
     hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     const auto projectile=std::find_if(model.View().projectiles.begin(),
                                        model.View().projectiles.end(),[](const auto &value) {
         return value.player_owned && value.skill==hs::SkillKind::ChargedShot && !value.dead;
@@ -556,6 +559,7 @@ void SimulationEmitsOuterArrowConeAfterSuccessfulProjectile()
 }
 void SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding()
 {
+    const auto program=Program();
     hs::GameSimulation simulation;
     Check(simulation.Initialize({0x51A0C7u}).Succeeded(),
           "retreat landing shockwave initialize");
@@ -613,7 +617,7 @@ void SimulationEmitsRetreatLandingShockwaveAfterSuccessfulLanding()
     std::vector<hs::PresentationEvent> dispatched;
     Check(projected_count==1 &&
           hs::runtime_detail::DispatchVfxUpgradeEvents(
-              Program(),std::span(projected).first(projected_count),dispatched).Succeeded() &&
+              program,std::span(projected).first(projected_count),dispatched).Succeeded() &&
           dispatched.size()==1 &&
           dispatched[0].asset.value==hs::MakeAssetId(
               "particle.upgrade.retreat.land_shockwave").value &&
@@ -695,6 +699,7 @@ void RealSecondRetreatRetainsCapturedGeometry()
 }
 void SimulationEmitsCooldownProcForRealRefund()
 {
+    const auto program=Program();
     hs::GameSimulation simulation;
     Check(simulation.Initialize({0xC001D00Du}).Succeeded(),
           "retreat cooldown proc initialize");
@@ -744,7 +749,7 @@ void SimulationEmitsCooldownProcForRealRefund()
     std::vector<hs::PresentationEvent> dispatched;
     Check(projected_count==1 &&
           hs::runtime_detail::DispatchVfxUpgradeEvents(
-              Program(),std::span(projected).first(projected_count),dispatched).Succeeded() &&
+              program,std::span(projected).first(projected_count),dispatched).Succeeded() &&
           dispatched.size()==1 &&
           dispatched[0].asset.value==hs::MakeAssetId("particle.upgrade.cooldown_proc").value,
           "real retreat cooldown visual did not dispatch its cooked proc");
@@ -869,6 +874,7 @@ void CooldownProcMappings()
 }
 void RealSlowAreaOwnersSelectAuthoredAliases()
 {
+    const auto slow_program=UpgradeSlowProgram();
     constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const auto check_cast=[&](hs::SkillKind skill,std::uint8_t upgrade_index,
                               std::uint64_t seed,std::uint32_t expected_effect,
@@ -903,7 +909,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
         for(std::uint32_t step=0;step<450 && !found;++step)
         {
             model.Clear();
-            simulation.WriteReadModel(model);
+            simulation.CopyReadModelForDevelopment(model);
             const auto view=model.View();
             snapshot.Clear();
             Check(hs::ProjectRenderSnapshot(view,presentation,ui,settings,snapshot),
@@ -1045,7 +1051,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
               std::abs(owner->radius-slow_area.radius)<0.0001f,
               "slow-area owner must preserve exact flat/meadow geometry and metadata");
         const auto adapted=hs::runtime_detail::BuildVfxTypedFrameInputs(
-            UpgradeSlowProgram(),{},std::array{*owner},{},snapshot.View().header.tick);
+            slow_program,{},std::array{*owner},{},snapshot.View().header.tick);
         Check(adapted.unsupported_effect_ids.empty() && adapted.persistent.size()==2 &&
               adapted.persistent[0].effect_handle==2 &&
               adapted.persistent[0].stable_id==owner->stable_id &&
@@ -1273,6 +1279,7 @@ void FourNewBindingsRequireExactStageAndCookedMembership()
 }
 void RealEmpoweredBasicAndRollTrapBindings()
 {
+    const auto program=Program();
     constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     {
         hs::GameSimulation simulation;
@@ -1327,7 +1334,7 @@ void RealEmpoweredBasicAndRollTrapBindings()
         const auto count=hs::ProjectDomainSignal(cone,projected);
         std::vector<hs::PresentationEvent> output;
         Check(count==1 && hs::runtime_detail::DispatchVfxUpgradeEvents(
-                  Program(),std::span(projected).first(count),output).Succeeded() &&
+                  program,std::span(projected).first(count),output).Succeeded() &&
               output.size()==1 && output[0].asset.value==hs::MakeAssetId(
                   "particle.upgrade.arrow.triple_release").value,
               "real empowered basic cone did not dispatch");
@@ -1380,7 +1387,7 @@ void RealEmpoweredBasicAndRollTrapBindings()
             const auto count=hs::ProjectDomainSignal(signal,projected);
             std::vector<hs::PresentationEvent> output;
             Check(hs::runtime_detail::DispatchVfxUpgradeEvents(
-                      Program(),std::span(projected).first(count),output).Succeeded() &&
+                      program,std::span(projected).first(count),output).Succeeded() &&
                   !output.empty() && output[0].asset.value==hs::MakeAssetId(
                       "particle.skill.trap").value &&
                   hs::DecodeVfxParameters(output[0].parameters).scale==0.8f,
@@ -1397,6 +1404,7 @@ void RealEmpoweredBasicAndRollTrapBindings()
 }
 void RealTrapRearmPullAndBleedBindings()
 {
+    const auto program=Program();
     constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     const auto run=[&](std::uint8_t upgrade_index, hs::Float2 enemy_position,
                        std::string_view effect, bool expect_visual) {
@@ -1458,7 +1466,7 @@ void RealTrapRearmPullAndBleedBindings()
             std::vector<hs::PresentationEvent> output;
             const auto projected_count=hs::ProjectDomainSignal(visual,projected);
             Check(projected_count==1 && hs::runtime_detail::DispatchVfxUpgradeEvents(
-                      Program(),std::span(projected).first(projected_count),output).Succeeded() &&
+                      program,std::span(projected).first(projected_count),output).Succeeded() &&
                   output.size()==1 && output[0].asset.value==hs::MakeAssetId(effect).value &&
                   output[0].upgrade_cast_id==visual.upgrade_cast_id &&
                   output[0].upgrade_owner_id==visual.upgrade_owner_id,
@@ -1473,6 +1481,7 @@ void RealTrapRearmPullAndBleedBindings()
 }
 void RealFirePulseAndTrapMarkBindings()
 {
+    const auto program=Program();
     constexpr auto fixed_step=std::chrono::nanoseconds{16'666'667};
     auto rules=QuietRules();
     auto &enemy=rules.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
@@ -1529,7 +1538,7 @@ void RealFirePulseAndTrapMarkBindings()
         const auto count=hs::ProjectDomainSignal(pulse,projected);
         std::vector<hs::PresentationEvent> output;
         Check(count==1 && hs::runtime_detail::DispatchVfxUpgradeEvents(
-                  Program(),std::span(projected).first(count),output).Succeeded() &&
+                  program,std::span(projected).first(count),output).Succeeded() &&
               output.size()==1 && output[0].asset.value==hs::MakeAssetId(
                   "particle.skill.fire_area.pulse").value &&
               output[0].tick==pulse.tick && output[0].geometry.radius==pulse.geometry.radius,
@@ -1591,7 +1600,7 @@ void RealFirePulseAndTrapMarkBindings()
         const auto count=hs::ProjectDomainSignal(burst,projected);
         std::vector<hs::PresentationEvent> output;
         Check(count==2 && hs::runtime_detail::DispatchVfxUpgradeEvents(
-                  Program(),std::span(projected).first(count),output).Succeeded() &&
+                  program,std::span(projected).first(count),output).Succeeded() &&
               output.size()==2 && output[0].asset.value==hs::MakeAssetId(
                   "particle.upgrade.trap.mark_burst").value &&
               output[1].kind==hs::PresentationKind::Audio,

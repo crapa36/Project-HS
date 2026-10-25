@@ -56,4 +56,7 @@ struct CharacterAnimationExtensionData
 void ValidateCharacterAnimationBinding(
     const CharacterAnimationExtensionData &animation,
     const CharacterMetadataPackageData &character, AssetId expected_character_asset_id);
+void ValidateCharacterAnimationBinding(
+    const CharacterAnimationExtensionData &animation,
+    const CharacterPackageData &character, AssetId expected_character_asset_id);
 } // namespace hs::render_data

@@ -97,20 +97,43 @@ Result CompilePostSubgraphs(const PostSubgraphInputs &inputs,
                                   candidate.outputs.post_b); !added) return added;
         color = candidate.outputs.post_b;
     }
-    if (auto added = next_pass(14, "ToneMap", {color}, candidate.outputs.post_a); !added) return added;
-    color = candidate.outputs.post_a;
+    const bool linear_ui = static_cast<bool>(targets.display_linear.resource);
+    const bool identity_fxaa = inputs.fxaa_identity && IsTexture(targets.display_linear);
+    auto &tone_map_target = identity_fxaa && !inputs.outline
+        ? candidate.outputs.display_linear : candidate.outputs.post_a;
+    if (auto added = next_pass(14, "ToneMap", {color}, tone_map_target); !added) return added;
+    if (identity_fxaa && !inputs.outline && inputs.initialize_post_targets)
+    {
+        if (!IsTexture(candidate.outputs.post_a) || candidate.outputs.post_a.ordinal == UINT32_MAX)
+            return PostFailure("Post target is invalid or has no next resource version.");
+        const auto predecessor = candidate.outputs.post_a;
+        ++candidate.outputs.post_a.ordinal;
+        candidate.passes.back().additional_outputs.emplace_back(predecessor, candidate.outputs.post_a);
+    }
+    color = tone_map_target;
     if (inputs.outline)
     {
+        auto &outline_target = identity_fxaa ? candidate.outputs.display_linear : candidate.outputs.post_b;
         if (auto added = next_pass(15, "Screen-space Outline", {color, inputs.metadata, inputs.depth},
-                                  candidate.outputs.post_b); !added) return added;
-        color = candidate.outputs.post_b;
+                                  outline_target); !added) return added;
+        color = outline_target;
     }
-    const bool linear_ui = static_cast<bool>(targets.display_linear.resource);
-    auto &aa_target = linear_ui ? candidate.outputs.display_linear : candidate.outputs.back_buffer;
-    if (auto added = next_pass(16, "FXAA", {color}, aa_target); !added) return added;
+    if (identity_fxaa)
+    {
+        if (inputs.screen_overlay_upload.resource)
+        {
+            if (auto added = next_pass(16, "Screen Overlay", {}, candidate.outputs.display_linear, true); !added)
+                return added;
+        }
+    }
+    else
+    {
+        auto &aa_target = linear_ui ? candidate.outputs.display_linear : candidate.outputs.back_buffer;
+        if (auto added = next_pass(16, "FXAA", {color}, aa_target); !added) return added;
+    }
     if (auto added = next_pass(17, "Game UI", {inputs.ui}, candidate.outputs.back_buffer, !linear_ui); !added)
         return added;
-    if (linear_ui) candidate.passes.back().reads.push_back({aa_target, Access::ShaderRead});
+    if (linear_ui) candidate.passes.back().reads.push_back({candidate.outputs.display_linear, Access::ShaderRead});
     plan = std::move(candidate);
     return Result::Success();
 }

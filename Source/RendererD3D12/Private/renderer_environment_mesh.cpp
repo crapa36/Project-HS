@@ -57,7 +57,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         try
         {
             const auto package = index % 3 == 0 && geometry_ordinal < render_data::kGroundDetailGeometryBegin ? material_headers[material_ordinal].view
-                : render_data::ReadPackage(bytes, MakeAssetId(logical_id));
+                : MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(bytes, MakeAssetId(logical_id)); });
             const render_data::ChunkView *geometry_chunk = nullptr;
             const render_data::ChunkView *material_chunk = nullptr;
             const render_data::ChunkView *program_chunk = nullptr;
@@ -82,7 +82,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
             if (layout_chunk == package.chunks.end() || !layout_chunk->required ||
                 layout_chunk->version != 1 || layout_chunk->count != 1 || layout_chunk->stride != 32 ||
-                render_data::DecodeMaterialParameterLayout(layout_chunk->bytes) !=
+                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout_chunk->bytes); }) !=
                     material_parameter_layouts[material_ordinal])
                 throw std::runtime_error("environment material parameter layout mismatch");
             const auto surface_chunk = std::ranges::find(package.chunks,
@@ -91,7 +91,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 surface_chunk->version != 1 || surface_chunk->count != 1 ||
                 surface_chunk->stride != render_data::kMaterialSurfaceLayoutStride)
                 throw std::runtime_error("environment material surface layout is missing or invalid");
-            if (render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes) !=
+            if (MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes); }) !=
                 material_surface_layouts[material_ordinal])
                 throw std::runtime_error("environment surface profile differs across LOD headers");
             if (package.chunks.size() != (index % 3 == 0 ? 7u : 6u) ||
@@ -116,8 +116,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                     program_chunk->count != (masked ? 2u : 1u))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                            "Invalid material program chunk: " + path.string());
-                const auto programs = render_data::DecodeMaterialPrograms(
-                    program_chunk->bytes, package.dependencies);
+                const auto programs = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialPrograms(
+                    program_chunk->bytes, package.dependencies); });
                 const auto scene_id = "render/shader/" + material_name + "_scene.dxil";
                 const auto shadow_id = "render/shader/" + material_name + "_shadow.dxil";
                 if (programs.size() != (masked ? 2u : 1u) ||
@@ -134,8 +134,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 if (masked)
                     program_shadow_shader = package.dependencies[programs[1].dependency_index];
             }
-            packaged_material = render_data::DecodeRockMaterial(material_chunk->bytes,
-                                                                 package.dependencies);
+            packaged_material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeRockMaterial(material_chunk->bytes,
+                                                                 package.dependencies); });
             if ((render_data::ClassifyEnvironmentMaterial(packaged_material) ==
                  render_data::EnvironmentMaterialVariant::MaskedTwoSided) != masked)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -153,8 +153,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                        "Render package omits mesh dependency " + mesh_dependency +
                                            ": " + path.string());
-            geometry_metadata = render_data::DecodeGeometryMetadata(
-                geometry_chunk->bytes, package.dependencies, logical_id);
+            geometry_metadata = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryMetadata(
+                geometry_chunk->bytes, package.dependencies, logical_id); });
             if (geometry_metadata.lod != index % 3 ||
                 geometry_metadata.page_dependency_index == render_data::kNoGeometryDependency)
                 throw std::runtime_error("environment geometry metadata has invalid LOD/page identity");
@@ -184,8 +184,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
             }
             const std::uint32_t required_layer = masked
                 ? (name.starts_with("grass_") ? 1u : 2u) : geometry_metadata.max_material_index;
-            const auto bindings = render_data::DecodeMaterialBindings(
-                bindings_chunk->bytes, package.dependencies);
+            const auto bindings = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialBindings(
+                bindings_chunk->bytes, package.dependencies); });
             EnvironmentMaterialBindingsGpu selected_bindings;
             for (const auto &binding : bindings)
             {
@@ -251,7 +251,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
         if (auto read = ReadBinary(page_path, page_bytes); !read) return read;
         try
         {
-            const auto page_package = render_data::ReadPackage(page_bytes, MakeAssetId(page_id));
+            const auto page_package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(page_bytes, MakeAssetId(page_id)); });
             if (page_package.dependencies != std::vector<std::string>{mesh_dependency})
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                        "Environment geometry page has an unexpected source dependency; expected only " +
@@ -263,8 +263,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                                    "Invalid environment geometry page " + page_path.string() + ": " +
                                        error.what());
         }
-        if (auto created = CreateGeometryPage(mesh, geometry_metadata, page_bytes,
-                MakeAssetId(page_id), static_cast<std::uint32_t>(index), command_list.Get(), uploads);
+        if (auto created = MeasureStartupOperation(RendererStartupOperation::GeometryPrepare, [&] { return CreateGeometryPage(mesh, geometry_metadata, page_bytes,
+                MakeAssetId(page_id), static_cast<std::uint32_t>(index), command_list.Get(), uploads); });
             !created) return created;
     }
     // Terrain is a material package; its geometry is the shared procedural page.
@@ -287,7 +287,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
             if (layout_chunk == package.chunks.end() || !layout_chunk->required ||
                 layout_chunk->version != 1 || layout_chunk->count != 1 || layout_chunk->stride != 32 ||
-                render_data::DecodeMaterialParameterLayout(layout_chunk->bytes) !=
+                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout_chunk->bytes); }) !=
                     material_parameter_layouts[kTerrainMaterialOrdinal])
                 throw std::runtime_error("terrain material parameter layout mismatch");
             const auto surface_chunk = std::ranges::find(package.chunks,
@@ -296,7 +296,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 surface_chunk->version != 1 || surface_chunk->count != 1 ||
                 surface_chunk->stride != render_data::kMaterialSurfaceLayoutStride)
                 throw std::runtime_error("terrain material surface layout is missing or invalid");
-            if (render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes) !=
+            if (MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialSurfaceLayout(surface_chunk->bytes); }) !=
                 material_surface_layouts[kTerrainMaterialOrdinal])
                 throw std::runtime_error("terrain surface profile changed during initialization");
             if (package.chunks.size() != 5 || !metadata || !program || !bindings ||
@@ -312,15 +312,15 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes()
                 std::filesystem::path dependency_path;
                 if (auto resolved = config.ResolveProduct(dependency, dependency_path); !resolved) return resolved;
             }
-            const auto programs = render_data::DecodeMaterialPrograms(program->bytes, package.dependencies);
+            const auto programs = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialPrograms(program->bytes, package.dependencies); });
             if (programs.size() != 1 || programs[0].kind != render_data::MaterialProgramKind::OpaqueScenePS ||
                 package.dependencies[programs[0].dependency_index] != "render/shader/terrain_scene.dxil")
                 throw std::runtime_error("terrain material program identity is invalid");
-            auto material = render_data::DecodeRockMaterial(metadata->bytes, package.dependencies);
+            auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeRockMaterial(metadata->bytes, package.dependencies); });
             if (render_data::ClassifyEnvironmentMaterial(material) !=
                     render_data::EnvironmentMaterialVariant::OpaqueSingleSided)
                 throw std::runtime_error("terrain material must be opaque and single sided");
-            const auto decoded = render_data::DecodeMaterialBindings(bindings->bytes, package.dependencies);
+            const auto decoded = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialBindings(bindings->bytes, package.dependencies); });
             EnvironmentMaterialBindingsGpu selected;
             for (const auto &binding : decoded)
             {
@@ -396,7 +396,7 @@ Result D3D12Renderer::Impl::DemandEnvironmentGeometry(std::uint32_t ordinal,
         stream.target_index >= environment_meshes.size())
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Geometry demand requires a selected content catalog.");
-    if (stream.request || stream.retiring || environment_meshes[stream.target_index].vertices.resource)
+    if (stream.request || stream.retiring || environment_meshes[stream.target_index].storage.resource)
         return Result::Success();
     stream.content_generation = resource_generation_id;
     stream.request = streaming.Request(
@@ -456,7 +456,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
 
         if (const auto *page = streaming.Find(stream.request);
             page && page->state == StreamingPageState::Resident &&
-            stream.candidate.vertices.resource)
+            stream.candidate.storage.resource)
         {
             if (stream.target_index >= environment_meshes.size())
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -515,13 +515,13 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             stream.decoded_residency = read.storage;
             try
             {
-                const auto page_package = render_data::ReadPackage(
-                    stream.decoded_storage, MakeAssetId(stream.logical_id));
+                const auto page_package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(
+                    stream.decoded_storage, MakeAssetId(stream.logical_id)); });
                 if (page_package.dependencies != std::vector<std::string>{stream.source_id})
                     throw std::runtime_error(
                         "Streamed environment geometry page has an unexpected source dependency.");
-                static_cast<void>(render_data::DecodeGeometryPage(
-                    stream.decoded_storage, MakeAssetId(stream.logical_id), stream.metadata));
+                static_cast<void>(MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryPage(
+                    stream.decoded_storage, MakeAssetId(stream.logical_id), stream.metadata); }));
             }
             catch (const std::exception &error)
             {
@@ -550,19 +550,11 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             static_cast<std::uint64_t>(metadata.meshlet_count) * render_data::kGeometryMeshletStride,
             static_cast<std::uint64_t>(metadata.vertex_ref_count) * sizeof(std::uint32_t) +
                 static_cast<std::uint64_t>(metadata.index_count / 3) * 2 * sizeof(std::uint32_t)};
-        std::uint64_t resident_size{}, upload_size{};
-        for (const auto size : sizes)
-        {
-            const auto description = BufferDescription(size);
-            const auto allocation_size =
-                device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
-            if (allocation_size == std::numeric_limits<std::uint64_t>::max() ||
-                resident_size > std::numeric_limits<std::uint64_t>::max() - allocation_size)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                       "Streamed geometry allocation size overflow.");
-            resident_size += allocation_size;
-            upload_size += size;
-        }
+        std::uint64_t upload_size{}; std::array<std::uint64_t, 4> offsets{};
+        if (!GeometryPageLayout(sizes, offsets, upload_size))
+            return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Streamed geometry allocation size overflow.");
+        const auto resident_description = BufferDescription(upload_size);
+        const auto resident_size = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_size);
         const auto staging_size =
             device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
@@ -580,9 +572,8 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Geometry publication generation exhausted.");
         candidate.generation = static_cast<std::uint32_t>(stream.generation + 1u);
         AllocationResource upload;
-        std::array<std::uint64_t, kGeometryBuffersPerPage> upload_offsets{};
         if (auto prepared = PrepareGeometryPageUpload(candidate, metadata, stream.decoded_storage,
-                MakeAssetId(stream.logical_id), stream.target_index, upload, upload_offsets); !prepared)
+                MakeAssetId(stream.logical_id), stream.target_index, upload); !prepared)
         {
             static_cast<void>(streaming.Cancel(stream.request));
             return prepared;
@@ -610,7 +601,6 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         std::vector<std::byte>{}.swap(stream.decoded_storage);
         stream.candidate = std::move(candidate);
         stream.upload = std::move(upload);
-        stream.upload_offsets = upload_offsets;
         stream.upload_residency = upload_ticket;
         stream.upload_pending = true;
         return Result::Success();

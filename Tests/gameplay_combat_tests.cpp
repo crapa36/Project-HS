@@ -255,7 +255,7 @@ void TestAttackStopsMovementAndFacesAim()
     Check(WriteSnapshot(simulation, projectile_snapshot),
           "first basic projectile snapshot");
     hs::GameReadModelStorage projectile_model;
-    simulation.WriteReadModel(projectile_model);
+    simulation.CopyReadModelForDevelopment(projectile_model);
     const auto projectile_radius = projectile_model.View().projectiles.front().radius;
     Check(std::abs(projectile_radius - 0.36f) < 0.0001f,
           "basic arrow uses the migrated final collision radius");
@@ -393,7 +393,7 @@ void TestEnemyLookupAcrossCleanupAndSpawn()
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, -10.0f});
     hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     const auto first = model.View().enemies.front().id;
     const auto last = model.View().enemies.back().id;
     const auto attack = [&] {
@@ -403,7 +403,7 @@ void TestEnemyLookupAcrossCleanupAndSpawn()
         (void)Tick(simulation, held);
         held.basic_attack_held = false;
         for (unsigned tick = 0; tick < 90; ++tick) (void)Tick(simulation, held);
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         Check(model.View().enemies.size() == 2 &&
                     model.View().enemies.front().id.value == first.value &&
                     model.View().enemies.back().id.value == last.value,
@@ -414,7 +414,7 @@ void TestEnemyLookupAcrossCleanupAndSpawn()
     attack();
     Debug(simulation, hs::DebugCommandKind::StartSession);
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     Check(model.View().enemies.size() == 1 &&
               model.View().enemies.front().id.value > last.value,
           "session reset clears actors without invalidating ID ordering");
@@ -436,7 +436,7 @@ void TestBasicAttackSkillCancellationAndBufferRules()
         for (std::uint32_t i = 0; i < 30; ++i)
         {
             (void)Tick(simulation, held);
-            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
             for (const auto &projectile : model.View().projectiles)
             {
                 basic_emitted |= projectile.skill == hs::SkillKind::BasicAttack;
@@ -459,7 +459,7 @@ void TestBasicAttackSkillCancellationAndBufferRules()
         for (std::uint32_t i = 0; i < 30; ++i)
         {
             (void)Tick(simulation, held);
-            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
             for (const auto &projectile : model.View().projectiles)
                 basic_emitted |= projectile.skill == hs::SkillKind::BasicAttack;
         }
@@ -592,7 +592,7 @@ void TestRedirectedArrowUsesRemainingTick()
         hs::ProjectileView before;
         for (int i = 0; i < 30 && before.id.value == 0; ++i)
         {
-            simulation.WriteReadModel(model);
+            simulation.CopyReadModelForDevelopment(model);
             if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
             else (void)Tick(simulation, held);
         }
@@ -602,7 +602,7 @@ void TestRedirectedArrowUsesRemainingTick()
         if (!returning)
             Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {-1.3f, 2});
         const auto result = Tick(simulation, held);
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         const auto view = model.View();
         const auto arrow = std::ranges::find_if(view.projectiles, [&](const auto &p) {
             return p.id.value == before.id.value;
@@ -671,7 +671,7 @@ void TestProjectilesHitMovingTargets()
             hs::ProjectileView before;
             for (int i = 0; i < 30 && before.id.value == 0; ++i)
             {
-                simulation.WriteReadModel(model);
+                simulation.CopyReadModelForDevelopment(model);
                 if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
                 else (void)Tick(simulation, held);
             }
@@ -679,7 +679,7 @@ void TestProjectilesHitMovingTargets()
             Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0,
                   {before.position.x + 6, fixture.projectile_speed > 0 ? .6f : 0});
             const auto result = Tick(simulation, held);
-            simulation.WriteReadModel(model);
+            simulation.CopyReadModelForDevelopment(model);
             const auto enemies = model.View().enemies;
             Check(enemies.size() == 1 && (enemies[0].health < 1000) == fixture.hit,
                   "moving target sweep catches intermediate contacts and preserves static controls");
@@ -711,7 +711,7 @@ void TestMovingPlayerHitsStationaryEnemyProjectile()
     for (int i = 0; i < 120 && incoming.id.value == 0; ++i)
     {
         (void)Tick(simulation);
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         const auto found = std::ranges::find_if(model.View().projectiles,
             [](const auto &projectile) { return !projectile.player_owned; });
         if (found != model.View().projectiles.end()) incoming = *found;
@@ -757,7 +757,7 @@ void TestRicochetClipsMovingTargetTime()
     hs::ProjectileView before;
     for (int i = 0; i < 30 && before.id.value == 0; ++i)
     {
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         if (!model.View().projectiles.empty()) before = model.View().projectiles.front();
         else (void)Tick(simulation, held);
     }
@@ -767,7 +767,7 @@ void TestRicochetClipsMovingTargetTime()
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {14, 0});
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 1, 0, {11, 1.5f});
     const auto result = Tick(simulation, held);
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     Check(model.View().enemies.size() == 2 &&
               std::ranges::all_of(model.View().enemies, [](const auto &enemy) { return enemy.health < 1000; }),
           "ricochet tests the moving target only during the remaining global tick interval");
@@ -801,7 +801,7 @@ void TestPiercingAndWallContactOrder()
         (void)Tick(simulation, held); held.basic_attack_held = false;
         for (int i = 0; i < 30; ++i) (void)Tick(simulation, held);
         hs::GameReadModelStorage model;
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         std::vector<std::int32_t> health;
         for (const auto &enemy : model.View().enemies) health.push_back(enemy.health);
         Check(simulation.Shutdown().Succeeded(), "piercing order shutdown");
@@ -840,7 +840,7 @@ void TestZeroTimeRicochetsAreBounded()
     for (int i = 0; i < 30 && !progressed; ++i)
     {
         (void)Tick(simulation, held);
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         const auto enemies = model.View().enemies;
         const auto hits = std::ranges::count_if(enemies, [](const auto &enemy) { return enemy.health < 10000; });
         if (hits == 0) continue;
@@ -849,7 +849,7 @@ void TestZeroTimeRicochetsAreBounded()
     }
     Check(progressed, "zero-time fixture reaches its first contacts");
     for (int i = 0; i < 4; ++i) (void)Tick(simulation, held);
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     Check(std::ranges::all_of(model.View().enemies, [](const auto &enemy) { return enemy.health < 10000; }),
           "a bounded zero-time chain resumes and eventually visits every target");
     Check(simulation.Shutdown().Succeeded(), "zero-time ricochet shutdown");
@@ -872,7 +872,7 @@ void TestSoftSeparationRecoversCoincidentCenters()
         }
         Check(Tick(first).checksum == Tick(repeat).checksum, "coincident recovery is deterministic");
         hs::GameReadModelStorage model;
-        first.WriteReadModel(model);
+        first.CopyReadModelForDevelopment(model);
         const auto enemies = model.View().enemies;
         Check(enemies.size() == 2, "soft separation keeps both enemies");
         const auto separated = std::hypot(enemies[0].position.x - enemies[1].position.x,
@@ -886,7 +886,7 @@ void TestSoftSeparationRecoversCoincidentCenters()
 void TestChargeBufferAndRecovery()
 {
     const auto player = [](hs::GameSimulation &simulation) {
-        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
         return model.View().player;
     };
     // A charge started during windup replaces the pending basic projectile.
@@ -904,7 +904,7 @@ void TestChargeBufferAndRecovery()
         for (int i = 0; i < 30; ++i)
         {
             (void)Tick(simulation, held);
-            hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+            hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
             for (const auto &shot : model.View().projectiles)
                 basic_emitted |= shot.skill == hs::SkillKind::BasicAttack;
         }
@@ -950,7 +950,7 @@ void TestChargeBufferAndRecovery()
                   "instant skill cancels basic recovery immediately");
         Check(player(simulation).basic_attack_animation_until <= simulation.GetObservation().tick,
               "successful skill ends the basic animation");
-        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
         bool basic_survives{};
         for (const auto &shot : model.View().projectiles)
             basic_survives |= shot.skill == hs::SkillKind::BasicAttack;
@@ -1018,7 +1018,7 @@ void TestExplosionUpgradesRespectTerrain()
         hs::HeldInputState held; held.aim_world = {20, 0, 0}; hs::Sequence sequence{};
         (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed, sequence, held);
         for (int i = 0; i < 180; ++i) (void)Tick(simulation, held);
-        hs::GameReadModelStorage model; simulation.WriteReadModel(model);
+        hs::GameReadModelStorage model; simulation.CopyReadModelForDevelopment(model);
         Check(model.View().enemies.size() == 1, "explosion test target survives");
         if (wall && !model.View().enemies.empty())
         {
@@ -1090,7 +1090,7 @@ void TestExplosionEventsCarryDamageRadius()
         for (int i=0;i<240;++i)
         {
             (void)Tick(simulation,held);
-            hs::GameReadModelStorage model;simulation.WriteReadModel(model);
+            hs::GameReadModelStorage model;simulation.CopyReadModelForDevelopment(model);
             for(const auto &bomb:model.View().mini_bombs)
             {
                 saw_mini_owner=true;
@@ -1107,7 +1107,7 @@ void TestExplosionEventsCarryDamageRadius()
         if(skill==hs::SkillKind::ExplosiveArrow)
         {
             Check(saw_mini_owner,"mini-bomb schedules never published owners");
-            hs::GameReadModelStorage model;simulation.WriteReadModel(model);
+            hs::GameReadModelStorage model;simulation.CopyReadModelForDevelopment(model);
             Check(model.View().mini_bombs.empty(),"resolved mini bombs retained warning owners");
             std::size_t births=0,warnings=0,resolves=0;
             for(const auto &signal:simulation.PendingDomainSignals())
@@ -1161,7 +1161,7 @@ void TestVisualLinksRetainCapturedEndpoints()
     std::vector<hs::VisualLinkView> captured;
     for(int i=0;i<90 && captured.empty();++i)
     {
-        (void)Tick(simulation,held);simulation.WriteReadModel(model);
+        (void)Tick(simulation,held);simulation.CopyReadModelForDevelopment(model);
         if(model.View().visual_links.size()>=2)
             captured.assign(model.View().visual_links.begin(),model.View().visual_links.end());
     }
@@ -1179,9 +1179,9 @@ void TestVisualLinksRetainCapturedEndpoints()
                       signal->position.z==link.source_position.z && signal->target.x==link.target_position.x && signal->target.z==link.target_position.z,
                   "link endpoints and owner match the emitted domain event");
         }
-        const auto checksum=simulation.ComputeChecksum();simulation.WriteReadModel(model);
+        const auto checksum=simulation.ComputeChecksum();simulation.CopyReadModelForDevelopment(model);
         Check(simulation.ComputeChecksum()==checksum,"visual publication does not mutate gameplay checksum");
-        (void)Tick(simulation,held);simulation.WriteReadModel(model);
+        (void)Tick(simulation,held);simulation.CopyReadModelForDevelopment(model);
         for(const auto &original:captured)
         {
             const auto current=std::ranges::find_if(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;});
@@ -1192,13 +1192,13 @@ void TestVisualLinksRetainCapturedEndpoints()
         }
         const auto last_expiry=std::ranges::max(captured,{},&hs::VisualLinkView::expires).expires;
         while(simulation.GetObservation().tick<last_expiry) (void)Tick(simulation,held);
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         for(const auto &original:captured)
             Check(std::ranges::none_of(model.View().visual_links,[&](const auto &link){return link.owner_id==original.owner_id;}),
                   "visual link expires at its exact end tick");
     }
     Debug(simulation,hs::DebugCommandKind::StartSession);
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     Check(model.View().visual_links.empty(),"session reset clears visual links");
     Check(simulation.Shutdown().Succeeded(),"visual link shutdown");
 }

@@ -96,10 +96,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             page.logical_slot = stream.logical_slot;
             page.resident = resident;
             page.upload = stream.upload_pending;
-            const std::array buffers{&stream.page->vertices, &stream.page->indices,
-                &stream.page->meshlets, &stream.page->auxiliary};
-            constexpr std::array names{"ClusterVertices", "ClusterIndices", "ClusterMeshlets", "ClusterAuxiliary"};
-            for (std::size_t i = 0; i < buffers.size(); ++i) page.buffers[i] = import(*buffers[i], names[i]);
+            page.buffer = import(stream.page->storage, "ClusterGeometryPage");
             state.geometry.push_back(std::move(page));
         }
     }
@@ -110,7 +107,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         if (native.page_upload_pending) state.pages.version = upload.Write(state.pages.version, Access::CopyDest);
         for (auto &page : state.geometry)
             if (page.upload)
-                for (auto &buffer : page.buffers) buffer.version = upload.Write(buffer.version, Access::CopyDest);
+                page.buffer.version = upload.Write(page.buffer.version, Access::CopyDest);
         upload.SetExecute([this, frame_slot, &state](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             if (cluster_runtime->frames[frame_slot].page_upload_pending) RecordClusterPageTableUpload(list, frame_slot);
@@ -191,10 +188,16 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         state.refs.version = count.Write(state.refs.version, Access::UnorderedWrite);
         for (auto &cut : state.cuts)
             if (cut.active)
-                for (auto *buffer : {&cut.counts, &cut.offsets, &cut.block_sums, &cut.block_offsets,
-                    &cut.demand, &cut.status, &cut.draw_commands, &cut.mesh_commands, &cut.command_counts,
+            {
+                // ConstantsValid queries these UAV dimensions, without reading
+                // prior bytes. Their actual writers are Prefix or Emit below.
+                for (auto *buffer : {&cut.offsets, &cut.block_sums, &cut.block_offsets,
+                    &cut.draw_commands, &cut.mesh_commands})
+                    count.Read(buffer->version, Access::UnorderedRead);
+                for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
                     &cut.selected_bounds, &cut.previous_rejected, &cut.retest_draw_commands, &cut.retest_mesh_commands})
                     buffer->version = count.Write(buffer->version, Access::UnorderedWrite);
+            }
         for (auto &cut : state.cuts)
             if (cut.active)
                 for (auto *buffer : {&cut.history_bits, &cut.history_generations})
@@ -219,11 +222,10 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 if (!state.cuts[ordinal].active) continue;
                 auto &cut = cluster_runtime->frames[frame_slot].cuts[ordinal];
                 // Emit overwrites every published argument; its count excludes the unused tail.
-                const std::array resources{&cut.counts, &cut.offsets, &cut.block_sums, &cut.block_offsets,
-                    &cut.demand, &cut.status, &cut.command_counts,
+                const std::array resources{&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
                     &cut.history_bits, &cut.history_generations, &cut.selected_bounds, &cut.previous_rejected,
                     &cut.retest_draw_commands, &cut.retest_mesh_commands};
-                constexpr std::array<std::uint32_t, 13> slots{0, 1, 2, 3, 4, 5, 10, 12, 13, 14, 15, 16, 17};
+                constexpr std::array<std::uint32_t, 10> slots{0, 4, 5, 10, 12, 13, 14, 15, 16, 17};
                 for (std::size_t i = 0; i < resources.size(); ++i) clear(ordinal, slots[i], *resources[i]);
                 if (!refs_cleared)
                 {
@@ -236,10 +238,8 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
             {
                 if (!state.cuts[ordinal].active) continue;
-                for (const auto *buffer : {&state.cuts[ordinal].counts, &state.cuts[ordinal].offsets,
-                    &state.cuts[ordinal].block_sums, &state.cuts[ordinal].block_offsets,
-                    &state.cuts[ordinal].demand, &state.cuts[ordinal].status, &state.cuts[ordinal].draw_commands,
-                    &state.cuts[ordinal].mesh_commands, &state.cuts[ordinal].command_counts,
+                for (const auto *buffer : {&state.cuts[ordinal].counts,
+                    &state.cuts[ordinal].demand, &state.cuts[ordinal].status, &state.cuts[ordinal].command_counts,
                     &state.cuts[ordinal].history_bits, &state.cuts[ordinal].history_generations,
                     &state.cuts[ordinal].selected_bounds, &state.cuts[ordinal].previous_rejected,
                     &state.cuts[ordinal].retest_draw_commands, &state.cuts[ordinal].retest_mesh_commands}) context.UavBarrier(buffer->handle);
@@ -265,13 +265,15 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 if (stage == 0)
                 {
                     prefix.Read(cut.counts.version, Access::UnorderedRead);
-                    cut.offsets.version = prefix.ReadWrite(cut.offsets.version, Access::UnorderedWrite);
-                    cut.block_sums.version = prefix.ReadWrite(cut.block_sums.version, Access::UnorderedWrite);
+                    // Every readable active element is written by Prefix0;
+                    // invalid constants fault/return before any scratch reader.
+                    cut.offsets.version = prefix.Write(cut.offsets.version, Access::UnorderedWrite);
+                    cut.block_sums.version = prefix.Write(cut.block_sums.version, Access::UnorderedWrite);
                 }
                 else if (stage == 1)
                 {
                     prefix.Read(cut.block_sums.version, Access::UnorderedRead);
-                    cut.block_offsets.version = prefix.ReadWrite(cut.block_offsets.version, Access::UnorderedWrite);
+                    cut.block_offsets.version = prefix.Write(cut.block_offsets.version, Access::UnorderedWrite);
                 }
                 else
                 {
@@ -350,7 +352,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
     graph.SetFinalAccess(state.pages.version, Access::ComputeRead);
     if (state.draws) graph.SetFinalAccess(state.refs.version, Access::ShaderRead);
     for (const auto &page : state.geometry)
-        for (const auto &buffer : page.buffers) graph.SetFinalAccess(buffer.version, Access::ComputeRead);
+        graph.SetFinalAccess(page.buffer.version, Access::ComputeRead);
     for (const auto &cut : state.cuts)
         if (cut.active)
         {
@@ -451,7 +453,7 @@ void D3D12Renderer::Impl::ReadClusterFrame(PassBuilder &pass, const ClusterFrame
     pass.Read(state.pages.version, Access::ComputeRead);
     for (const auto &page : state.geometry)
         if (page.resident)
-            for (const auto &buffer : page.buffers) pass.Read(buffer.version, access);
+            pass.Read(page.buffer.version, draw ? Access::VertexShaderRead : Access::ComputeRead);
     if (draw)
         for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
         {
@@ -526,8 +528,7 @@ Result D3D12Renderer::Impl::CommitClusterFrameGraph(std::uint32_t frame_slot,
     for (const auto &page : state.geometry)
         if (page.upload)
         {
-            CompletionSet uploaded;
-            for (const auto &buffer : page.buffers) uploaded.Merge(graph.ResourceCompletion(buffer.handle));
+            const auto uploaded = graph.ResourceCompletion(page.buffer.handle);
             if (auto result = SubmitClusterPageUpload(page.logical_slot, uploaded); !result) return result;
         }
     for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)

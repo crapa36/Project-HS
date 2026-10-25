@@ -20,6 +20,11 @@ struct RendererPipelineCacheStats
     std::uint64_t root_registrations{},key_failures{},loaded_bytes{},serialized_bytes{};
     std::int32_t last_cache_hresult{},last_io_error{};
     bool initialized{},library_supported{},mesh_library_supported{},persistence_enabled{};
+    // Capture-only inclusive wall nanoseconds; native calls can include driver waits.
+    std::uint64_t key_build_ns{},key_build_max_ns{},library_load_ns{},library_load_max_ns{};
+    std::uint64_t native_create_ns{},native_create_max_ns{},library_store_ns{},library_store_max_ns{};
+    std::uint64_t serialize_ns{},cache_write_ns{},mutex_wait_ns{},mutex_wait_max_ns{};
+    bool capture_timings{};
 };
 
 // One device's optional D3D12 pipeline library. Register each root immediately
@@ -40,7 +45,7 @@ class RendererPipelineCache
     RendererPipelineCache(const RendererPipelineCache &)=delete;
     RendererPipelineCache &operator=(const RendererPipelineCache &)=delete;
     [[nodiscard]] Result Initialize(ID3D12Device *device,IDXGIAdapter *adapter,
-        std::filesystem::path cache_directory);
+        std::filesystem::path cache_directory,bool capture_timings=false);
     [[nodiscard]] Result RegisterRootSignature(ID3D12RootSignature *root,
         std::span<const std::byte> serialized);
     [[nodiscard]] HRESULT CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,

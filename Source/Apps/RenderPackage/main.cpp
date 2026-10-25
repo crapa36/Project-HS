@@ -119,16 +119,6 @@ ap::Input ParameterIdentityInput(const std::string &product_id,
                                                              product_id.size())));
 }
 
-bool SameMaterialParameters(std::span<const rd::MaterialParameterDefinition> left,
-                            std::span<const rd::MaterialParameterDefinition> right)
-{
-    if (left.size() != right.size()) return false;
-    return std::ranges::equal(left, right, [](const auto &a, const auto &b) {
-        return a.id == b.id && a.type == b.type && a.default_words == b.default_words &&
-               a.uint_min == b.uint_min && a.uint_max == b.uint_max;
-    });
-}
-
 rd::RockMaterial NeutralMaterial(const rd::RockMaterial &material)
 {
     auto neutral = material;
@@ -146,16 +136,16 @@ void ValidateParameterProduct(const std::string &product_id, const fs::path &pac
     rd::ValidateMaterialParameters(decoded);
     Require(rd::MaterialParameterLayoutHash(decoded) ==
                 rd::MaterialParameterLayoutHash(parameters) &&
-                SameMaterialParameters(decoded, parameters),
+                std::ranges::equal(decoded, parameters),
             "material parameter package layout disagrees with material source");
 }
 
 constexpr std::string_view kTerrainMaterialName = "terrain";
 
 
-rd::MaterialSurfaceLayout SurfaceLayout(const rd::MaterialGraph &graph)
+rd::MaterialSurfaceLayout SurfaceLayout(const rd::PreparedMaterial &prepared)
 {
-    const auto reflection = rd::AnalyzeClosure(graph);
+    const auto reflection = rd::AnalyzeClosure(prepared);
     const rd::MaterialSurfaceLayout layout{reflection.capability_mask, reflection.varying_mask};
     (void)rd::EncodeMaterialSurfaceLayout(layout);
     return layout;
@@ -250,7 +240,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     const auto material_text = ap::ReadBytes(material_path);
     const auto definition = hs::material_content::ParseMaterialDefinition(
         name, material_text);
-    Require(definition.graph.textures.size() == (name == kTerrainMaterialName ? rd::kMaterialTextureSlots : 3u),
+    Require(definition.prepared.Graph().textures.size() == (name == kTerrainMaterialName ? rd::kMaterialTextureSlots : 3u),
             "standalone material texture count mismatch");
 
     ap::ActionSpec spec;
@@ -268,13 +258,13 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     fs::path parameter_result_path;
     (void)ap::ReadActionResult(build_root, parameter_namespace,
                                parameter_id, parameter_dependency, parameter_result_path);
-    ValidateParameterProduct(parameter_id, parameter_result_path, definition.graph.parameters);
+    ValidateParameterProduct(parameter_id, parameter_result_path, definition.prepared.Graph().parameters);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
 
     std::vector<std::string> dependencies;
-    dependencies.reserve(definition.graph.textures.size() + 2);
+    dependencies.reserve(definition.prepared.Graph().textures.size() + 2);
     dependencies.push_back(parameter_id);
-    for (const auto &texture : definition.graph.textures)
+    for (const auto &texture : definition.prepared.Graph().textures)
     {
         ap::UpstreamProduct upstream;
         fs::path texture_path;
@@ -308,8 +298,8 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
             return a.logical_id == b.logical_id;
         }), spec.upstream.end());
 
-    const auto surface_layout = SurfaceLayout(definition.graph);
-    if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies, definition.graph.parameters, surface_layout))
+    const auto surface_layout = SurfaceLayout(definition.prepared);
+    if (CurrentStandaloneMaterial(build_root, spec, product_id, dependencies, definition.prepared.Graph().parameters, surface_layout))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         std::cout << spec.action_id << " current\n";
@@ -326,9 +316,9 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
             rd::MaterialProgramSource{shader_id, rd::MaterialProgramKind::OpaqueScenePS}};
         const auto program_bytes = rd::EncodeMaterialPrograms(dependencies, programs);
         const auto binding_bytes = rd::EncodeMaterialBindings(
-            dependencies, definition.graph.textures);
+            dependencies, definition.prepared.Graph().textures);
         const auto parameter_layout = rd::EncodeMaterialParameterLayout(
-            definition.graph.parameters);
+            definition.prepared.Graph().parameters);
         const auto surface_bytes = rd::EncodeMaterialSurfaceLayout(surface_layout);
         const std::array chunks{
             rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::MaterialMetadata),
@@ -357,7 +347,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
                 verified_layout->stride == 32,
                 "standalone parameter layout chunk missing");
         rd::ValidateMaterialParameterLayout(verified_layout->bytes,
-                                            definition.graph.parameters);
+                                            definition.prepared.Graph().parameters);
         const auto filename = fs::path(product_id).filename().string();
         const auto output = stage / filename;
         ap::WriteBytes(output, package);
@@ -422,9 +412,7 @@ bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
         main_package.dependencies, input.logical_id);
     if (main_package.dependencies[dependency_index] != input.hierarchy_id) return false;
     ap::UpstreamProduct ignored;
-    fs::path hierarchy_path;
-    result.ReadProduct(input.hierarchy_id, ignored, hierarchy_path);
-    const auto contents = ap::ReadBytes(hierarchy_path);
+    const auto contents = result.ReadProductBytes(input.hierarchy_id, ignored);
     const auto hierarchy = rd::DecodeGeometryHierarchy(std::as_bytes(std::span(contents.data(), contents.size())));
     if (hierarchy.geometry_flags != flags || hierarchy.source_triangle_count != input.vertices.size() / 3 ||
         !std::ranges::all_of(hierarchy.groups, [](const auto &group) { return group.material_partition == 0; }))
@@ -439,9 +427,7 @@ bool CurrentHierarchy(const ap::ActionResultSnapshot &result,
         const auto &page_id = hierarchy.pages[index].logical_id;
         const std::vector<std::string> dependencies{input.mesh_id};
         if (result.ProductMetadata(page_id).at("dependencies") != dependencies) return false;
-        fs::path page_path;
-        result.ReadProduct(page_id, ignored, page_path);
-        const auto page_contents = ap::ReadBytes(page_path);
+        const auto page_contents = result.ReadProductBytes(page_id, ignored);
         const auto bytes = std::as_bytes(std::span(page_contents.data(), page_contents.size()));
         if (rd::ReadPackage(bytes, hs::MakeAssetId(page_id)).dependencies != dependencies) return false;
         const auto payload = rd::DecodeGeometryPagePayload(bytes, hs::MakeAssetId(page_id), hierarchy.geometry_flags);
@@ -470,9 +456,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
             if (result.ProductMetadata(package.logical_id).at("dependencies") != package.dependencies)
                 return false;
             ap::UpstreamProduct ignored;
-            fs::path path;
-            result.ReadProduct(package.logical_id, ignored, path);
-            const auto contents = ap::ReadBytes(path);
+            const auto contents = result.ReadProductBytes(package.logical_id, ignored);
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto view = rd::ReadPackage(bytes, hs::MakeAssetId(package.logical_id));
             const auto name = std::string_view(spec.action_id).substr(7);
@@ -509,9 +493,7 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
                 layout->count != 1 || layout->stride != 32)
                 return false;
             rd::ValidateMaterialParameterLayout(layout->bytes, parameters);
-            fs::path page_path;
-            result.ReadProduct(package.page_id,ignored,page_path);
-            const auto page_contents=ap::ReadBytes(page_path);
+            const auto page_contents=result.ReadProductBytes(package.page_id,ignored);
             const auto page_bytes=std::as_bytes(std::span(page_contents.data(),page_contents.size()));
             const auto page_view=rd::ReadPackage(page_bytes,hs::MakeAssetId(package.page_id));
             if(page_view.dependencies!=std::vector<std::string>{package.mesh_id})return false;
@@ -529,10 +511,11 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
 }
 
 void Produce(std::string_view name, const fs::path &source_root,
-             const fs::path &build_root)
+             const fs::path &build_root, bool exhaustive_geometry_error)
 {
     if (name == kTerrainMaterialName || name == "ground_detail")
     {
+        Require(!exhaustive_geometry_error, "exhaustive geometry error requires an environment geometry product");
         ProduceStandaloneMaterial(name, source_root, build_root);
         return;
     }
@@ -555,7 +538,9 @@ void Produce(std::string_view name, const fs::path &source_root,
     spec.recipe_version = 14;
     spec.namespace_path = "render/" + std::string(name);
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
-    const hs::geometry_content::GeometryHierarchyCookOptions hierarchy_options;
+    hs::geometry_content::GeometryHierarchyCookOptions hierarchy_options;
+    if (exhaustive_geometry_error)
+        hierarchy_options.error_checks.mode = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
     spec.inputs.push_back(HierarchyContractInput(source_root, name, hierarchy_options));
     std::vector<PackageInput> packages;
     packages.reserve(3);
@@ -563,7 +548,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     const auto material_path = source_root / material_relative;
     const auto material_text = ap::ReadBytes(material_path);
     const auto definition = hs::material_content::ParseMaterialDefinition(material_name, material_text);
-    const auto surface_layout = SurfaceLayout(definition.graph);
+    const auto surface_layout = SurfaceLayout(definition.prepared);
     const auto material = NeutralMaterial(definition.material);
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(material_name) +
                                                   "/package-structure",
@@ -575,10 +560,10 @@ void Produce(std::string_view name, const fs::path &source_root,
     (void)ap::ReadActionResult(build_root,
                                "render/material/" + std::string(material_name) + "/parameters",
                                parameter_id, parameter_dependency, parameter_result_path);
-    ValidateParameterProduct(parameter_id, parameter_result_path, definition.graph.parameters);
+    ValidateParameterProduct(parameter_id, parameter_result_path, definition.prepared.Graph().parameters);
     spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
     std::vector<rd::TextureDescription> texture_descriptions;
-    for (const auto &texture : definition.graph.textures)
+    for (const auto &texture : definition.prepared.Graph().textures)
     {
         ap::UpstreamProduct upstream;
         fs::path texture_path;
@@ -631,12 +616,12 @@ void Produce(std::string_view name, const fs::path &source_root,
                         "foliage atlas entry exceeds the shader page mapping ABI");
             else required_layer = std::max(required_layer, material_index);
         }
-        for (std::size_t slot = 0; slot < definition.graph.textures.size(); ++slot)
-            rd::ValidateMaterialTexturePackage(definition.graph.textures[slot],
+        for (std::size_t slot = 0; slot < definition.prepared.Graph().textures.size(); ++slot)
+            rd::ValidateMaterialTexturePackage(definition.prepared.Graph().textures[slot],
                                                texture_descriptions[slot], required_layer);
         std::vector<std::uint32_t> layer_counts;
         for (const auto &description : texture_descriptions) layer_counts.push_back(description.array_size);
-        rd::ValidateMaterialSampleLayers(definition.graph, layer_counts, required_layer);
+        rd::ValidateMaterialSampleLayers(definition.prepared, layer_counts, required_layer);
         PackageInput package{"render/" + stem + ".rpkg", mesh_path, material,
                              {mesh_id}};
         package.page_id="render/geometry/"+stem+".rpage";package.mesh_id=mesh_id;
@@ -670,7 +655,7 @@ void Produce(std::string_view name, const fs::path &source_root,
         [](const ap::UpstreamProduct &a, const ap::UpstreamProduct &b) {
             return a.logical_id == b.logical_id;
         }), spec.upstream.end());
-    if (Current(build_root, spec, packages, definition.graph.parameters, surface_layout))
+    if (!exhaustive_geometry_error && Current(build_root, spec, packages, definition.prepared.Graph().parameters, surface_layout))
     {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         std::cout << spec.action_id << " current\n";
@@ -715,7 +700,7 @@ void Produce(std::string_view name, const fs::path &source_root,
         hierarchy_product.dependencies = std::move(hierarchy_dependencies);
         products.push_back(std::move(hierarchy_product));
         const auto parameter_layout = rd::EncodeMaterialParameterLayout(
-            definition.graph.parameters);
+            definition.prepared.Graph().parameters);
         const auto surface_bytes = rd::EncodeMaterialSurfaceLayout(surface_layout);
         float previous_error=0;
         for (const auto &input : packages)
@@ -728,7 +713,7 @@ void Produce(std::string_view name, const fs::path &source_root,
             const auto dep=[&](const std::string&id){const auto found=std::ranges::find(input.dependencies,id);Require(found!=input.dependencies.end(),"missing geometry dependency");return static_cast<std::uint16_t>(found-input.dependencies.begin());};
             gm.page_dependency_index=dep(input.page_id);
             if(input.lod<2){gm.fallback_dependency_index=dep("render/"+std::string(name)+"_lod"+std::to_string(input.lod+1)+".rpkg");gm.terminal_fallback_dependency_index=dep("render/"+std::string(name)+"_lod2.rpkg");}
-            if(input.lod){const auto material_mapping=MaterialPartitionMapping(packages.front().vertices,input.vertices);const auto error=hs::geometry_content::MeasureGeometryError(packages.front().vertices,input.vertices,material_mapping);gm.geometric_error=std::max(previous_error,std::nextafter(static_cast<float>(error.upper),std::numeric_limits<float>::infinity()));previous_error=gm.geometric_error;}
+            if(input.lod){const auto material_mapping=MaterialPartitionMapping(packages.front().vertices,input.vertices);const auto error=hs::geometry_content::MeasureGeometryError(packages.front().vertices,input.vertices,material_mapping,4096,hierarchy_options.error_checks);gm.geometric_error=std::max(previous_error,std::nextafter(static_cast<float>(error.upper),std::numeric_limits<float>::infinity()));previous_error=gm.geometric_error;}
             const auto geometry_metadata=rd::EncodeGeometryMetadata(gm,input.dependencies,input.logical_id);
             const std::vector<std::string>page_dependencies{input.mesh_id};
             const auto page=rd::BuildGeometryPage(hs::MakeAssetId(input.page_id),page_dependencies,geometry);
@@ -751,7 +736,7 @@ void Produce(std::string_view name, const fs::path &source_root,
             chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialProgram),
                               1, true, program, program.size() / rd::kMaterialProgramStride,
                               rd::kMaterialProgramStride});
-            const auto bindings = rd::EncodeMaterialBindings(input.dependencies, definition.graph.textures);
+            const auto bindings = rd::EncodeMaterialBindings(input.dependencies, definition.prepared.Graph().textures);
             chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialBindings),
                               1, true, bindings, rd::kMaterialTextureSlots, rd::kMaterialBindingStride});
             chunks.push_back({static_cast<std::uint32_t>(rd::ChunkType::MaterialParameterLayout),
@@ -780,7 +765,7 @@ void Produce(std::string_view name, const fs::path &source_root,
                     verified_layout->stride == 32,
                     "render package parameter layout chunk missing");
             rd::ValidateMaterialParameterLayout(verified_layout->bytes,
-                                                definition.graph.parameters);
+                                                definition.prepared.Graph().parameters);
             (void)rd::DecodeMaterialPrograms(verified.chunks[2].bytes,
                                              verified.dependencies);
             (void)rd::DecodeMaterialBindings(verified.chunks[3].bytes, verified.dependencies);
@@ -807,6 +792,7 @@ int wmain(int argc, wchar_t **argv)
 {
     fs::path source_root, build_root;
     std::string name;
+    bool exhaustive_geometry_error{};
     ap::Json action_id = nullptr;
     try
     {
@@ -828,16 +814,18 @@ int wmain(int argc, wchar_t **argv)
                 for (const wchar_t character : value)
                     name.push_back(static_cast<char>(character));
             }
+            else if (arg == L"--exhaustive-geometry-error" && !exhaustive_geometry_error)
+                exhaustive_geometry_error = true;
             else
                 throw std::runtime_error("hs_render_package: invalid command line");
         }
         Require(!name.empty() && !source_root.empty() && !build_root.empty(),
-                "usage: hs_render_package --name <archetype> --source-root <absolute> --build-root <absolute>");
+                "usage: hs_render_package --name <archetype> --source-root <absolute> --build-root <absolute> [--exhaustive-geometry-error]");
         if (name == kTerrainMaterialName || name == "ground_detail")
             action_id = "render." + name;
         else if (hs::material_content::IsEnvironmentMaterialName(name))
             action_id = "render." + name;
-        Produce(name, source_root.lexically_normal(), build_root.lexically_normal());
+        Produce(name, source_root.lexically_normal(), build_root.lexically_normal(), exhaustive_geometry_error);
         return 0;
     }
     catch (const std::exception &error)

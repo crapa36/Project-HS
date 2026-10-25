@@ -22,6 +22,9 @@ This document describes the module graph enforced by the current build and `Test
 
 Runtime composes Core, Jobs, Gameplay, Presentation, and RendererD3D12. Apps are executable entry points and composition targets.
 
+CombatSim consumes Gameplay's scoped public tick view for targeting. Its combat and
+progression loops do not depend on Presentation or construct render snapshots.
+
 | Module | Responsibility | Allowed Project HS dependencies |
 |---|---|---|
 | Core | Foundation types and shared low-level contracts | none |
@@ -59,6 +62,13 @@ Gameplay must not contain D3D12/DXGI, renderer, presentation, UI/window, audio, 
 
 Structural changes must preserve phase order, fixed-step behavior, seeds, `/fp:strict`, deterministic iteration, checksums, and public read-model semantics. `Source/Gameplay/Private/simulation_pipeline.hpp` is the authoritative phase order.
 
+Enemy and projectile hot/cold groups are the single authoritative actor storage.
+Private status, attribution and history remain in Gameplay. GameDomain's scoped
+TickReadView borrows those owners through semantic accessors, immutable spans and
+cached small facts; it owns no actor/history mirror. Mutation is rejected while a
+scope is active. Presentation consumes the view synchronously and owns the render
+packet it publishes across threads. Full read-model copies are development exports.
+
 Checksum capture is optional observability, not a gameplay decision. Existing
 simulation callers default to capture enabled; ordinary Runtime play disables
 it while smoke, recording and replay retain capture. Disabled TickResult and
@@ -69,13 +79,97 @@ same canonical state hash on demand without enabling automatic capture.
 
 Presentation projects stable GameDomain contracts. It does not execute rules or reach into Gameplay implementation state.
 
+Presentation prepares an immutable ProcessSceneLayout for the actual launch seed,
+generation and environment geometry. Runtime retains that owner across session
+restarts with the same layout. Render packets share its read-only Core
+StaticRenderScene view; mutable scene storage is frozen before publication.
+Renderer prepares HLOD member mappings and proxy bindings once per retained scene
+and refreshes only residency-dependent fields each frame.
+
+PresentationCatalog and SimulationRules are typed tables. Their developer file
+decoders are the separate hs_presentation_io and hs_game_rules_io libraries.
+Release Runtime binds the content-linker's compiled const tables; developer
+Runtime retains the selected-Generation loaders. Simulation's canonical byte
+writer and C++ emitter share one typed member inventory, preserving ABI padding
+normalization and the existing independent gameplay hash.
+The linker atomically replaces Content/content.hsp before updating its generated
+compile input. These two files are not a transaction: Runtime rejects an interrupted
+pair by matching the compiled 64-byte header and file extent. An already opened
+owner retains its original file. Core's move-only ShippedContentOwner owns the
+read handle and bounded offset reads, optionally checking a supplied SHA256 during
+that same read; it has no catalog, format, generation or renderer knowledge. This cutover
+currently covers PresentationCatalog, SimulationRules, AudioImage and VfxImage. AudioContent
+validates WAV inputs once and emits typed cue/sample rows plus headerless PCM;
+the linker incorporates these products without decoding the audio domain again.
+Release audio borrows generated cue rows and owns one preload PCM arena. Generated
+chunk digests cover contiguous preload runs and independent transition tracks;
+only successful verified reads publish ready PCM. Only
+transition tracks use asynchronous preparation and completion-safe eviction.
+Developer JSON/WAV loading is isolated in hs_runtime_audio_io and excluded from
+Release Runtime. VFX uses the existing record types through VfxProgramView and
+VfxImage spans; generated arrays own shipping metadata for the process. Developer
+VfxImageData owns mutable vectors and the shared decoder/static-policy preparation
+in hs_vfx_image_io, backed by the CPU-only hs_vfx_program_io format reader.
+Developer Catalog file loading is hs_runtime_vfx_io. These decoders are absent
+from the Release Runtime link, and IO libraries build only when consumed.
+Light output recipes and their effect ranges are prepared by that same CPU IO
+phase and emitted as immutable tables; Runtime evaluates only live input/time.
+Renderer accepts font bytes and DirectWrite owns its copy after initialization.
+Release reads the generated, verified font range from the pack; developer hosts
+load their explicit font input. Renderer texture/shader/bulk deployment still uses
+selected Generation products; this cutover does not complete those domains.
+
 RendererD3D12 is the single concrete platform backend. D3D12 types stay inside that boundary and Runtime/Apps that compose it. A generic renderer interface, factory, or registry is unwarranted without a real second backend.
+
+RenderData owns the static light-space R32 page archive and its bounded index
+and lossless page decoders. RendererD3D12 exposes a synchronous offline depth bake using
+canonical environment geometry, full source texture mips and the existing material
+opacity shaders. It can run immediately after renderer initialization. Apps own
+file publication and Generation selection. When content tools are enabled, the
+existing render-test host also publishes the native bake through AssetPipeline.
+The explicit hs_render_static_shadow_candidate target uses a shadow-free input
+Generation; its output is composed into runtime-full after the shadow-free input.
+Gameplay projection and the baker share Presentation's fixed environment-sun direction. Ordinary runtime shadow
+sampling supports an optional complete coarse-page archive in the existing VSM
+static D32 bank. Fine pages still raster/cache at their original precision;
+dynamic depth remains separate until tap-wise reverse-Z composition. RenderData
+owns the index and lossless page codec (private pinned meshoptimizer dependency).
+The renderer owns bounded coarse staging and GPU seeding, while Apps own atomic
+publication. Incompatible sun/grid/layout or reloaded materials/pipelines use
+the realtime path. A per-view CPU plan admits omission of the full CSM producer
+only when baked supply, all receiver domains and current coarse-page command
+capacity are guaranteed. Otherwise the actual CSM remains registered. Software
+GI retains CSM until its off-camera receiver domain is closed. CPU policy and
+completed GPU publication are separate diagnostics.
+The fixed shadow command allocation is partitioned by actual coarse demand and
+active-group weight for approved no-CSM frames. Fallback frames retain the
+original floor division. CPU admission, GPU scatter and native indirect draws
+use the same nonoverlapping prefix layout; insufficient total supply retains CSM.
+
+RenderData owns one bounded DDS wire decoder; consumers enforce their own role
+and format constraints. Character color and normal/roughness products use full
+BC7 mip chains with semantic mip generation at cook time. Runtime consumes the
+prepared subresources directly.
+
+Developer Hero work capture selects five separate diagnostic pixel shaders and
+owns bounded per-slot/per-phase query, counter and coverage storage. Runtime
+writes completed samples through its existing diagnostic output; the normal
+renderer selects the original shaders and allocates none of this storage.
+The diagnostic shading modes measure sensitivity and do not select production
+quality. These products are excluded from the shipping Generation closure.
+The nearest Hero composite writes HDR and its six reconstruction guides in one
+draw, sharing the selected surface. Farther layers retain one color target.
+Ribbon indirect arguments are frame-slot scratch; shared history alone needs
+all-reader completion when its layout changes.
 
 AO, GI, reconstruction and post processing connect through their concrete inputs.
 The FrameGraph owns resource dependency ordering, versions and lifetimes; there
 is no second semantic registration graph above it. The post compiler emits the
 configured fixed pass chain. Native services validate actual resource formats
 and extents at their boundaries.
+
+The graph retains at most eight exact value-only compiled plans. Declaration
+storage can survive Reset; callbacks, external owners and logical uses do not.
 
 Sequential views retain their own temporal and native reconstruction state.
 There is no parallel semantic history-resource registry: resources and history
@@ -98,6 +192,8 @@ Runtime is the composition root, so it may know the concrete systems it runs. Cr
 Runtime loads saved settings once and applies explicit command-line overrides
 before creating the window. Apps parse arguments once and do not load profiles.
 Smoke uses process graphics defaults and explicit overrides.
+Experiments can supply a typed graphics preset through the same startup rules;
+explicit process fields then override that preset without persisting it.
 
 Apps parse arguments, select configuration, call a library/runtime entry point, and return process results. They must use public module APIs rather than another module's private implementation.
 
@@ -121,6 +217,11 @@ Material graph validation/optimization/HLSL generation is the RenderData-owned
 Only the material shader producer, render package producer and material package
 tests link it. `hs_render_data` contains runtime data formats without depending
 on this compiler, so compiler edits do not relink unrelated producers or the game.
+Each material producer invocation owns a move-only PreparedMaterial with its
+validated/folded graph, reflection and reachability. Context, uniform, opacity,
+layout and layer-proof consumers borrow that preparation; JSON is parsed once.
+Legacy lowering retains its separate pre/post transformation checks. Raw graph
+compiler APIs delegate to the same emitters for standalone compatibility calls.
 
 `hs_environment_layout` is an internal Presentation target that compiles the
 existing environment builder once. `hs_presentation` exposes it transitively;
@@ -140,6 +241,13 @@ The Apps-owned `hs_asset_pipeline` static library compiles the shared Action
 implementation once. Producers remain separate executables, so a producer-specific
 change does not invalidate unrelated recipes. Each process hashes its own executable;
 there is no intermediate recipe manifest or post-link preparation target.
+
+CharacterContent imports one CharacterIR and directly emits final character
+metadata, LOD0 geometry, named animation and DDS products. Normal builds do not
+exchange native meshbin or material JSON sidecars through a second producer.
+ContentLinker reads exact character/material/texture snapshots, retains checked
+bytes while validating their bindings, and reuses the prepared metadata. Explicit
+CharacterInterchange compatibility export remains a separate developer leaf.
 
 The low-level configuration is:
 

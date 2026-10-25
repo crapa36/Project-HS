@@ -1,6 +1,6 @@
 #pragma once
 #include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/renderer/vfx_program.hpp>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -8,10 +8,10 @@ namespace hs::runtime_detail
 {
 // Emits one immutable record per burst particle. Runtime owns absolute event age.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(
-    const VfxProgramData &program, std::span<const VfxEventInput> inputs);
+    const VfxProgramView &program, std::span<const VfxEventInput> inputs);
 // Reconstruct only live indexed emissions from an authoritative owner clock.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(
-    const VfxProgramData &program, std::span<const VfxEventInput> inputs, Tick current_tick);
+    const VfxProgramView &program, std::span<const VfxEventInput> inputs, Tick current_tick);
 
 struct VfxOwnedStatusTickMoteCommand
 {
@@ -21,14 +21,14 @@ struct VfxOwnedStatusTickMoteCommand
 // A real status tick supplies the burst clock; the matching entity episode
 // supplies the persistent recipe and surface anchor.
 [[nodiscard]] std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
-    const VfxProgramData &program, std::span<const VfxEventInput> events,
+    const VfxProgramView &program, std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> owners);
 
 // Reconstruct the currently visible indexed births for gameplay-owned entity
 // status effects. This is intentionally stateless: callers submit the result
 // directly for the current frame instead of retaining the records as flashes.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> owners);
+    const VfxProgramView &program, std::span<const VfxPersistentInput> owners);
 
 // One cursor per live projectile/source. The six supported micro_sparks sources
 // each have one velocity_billboard output. Past births are skipped when snapshots
@@ -37,12 +37,12 @@ class VfxPersistentSparkState
 {
   public:
     [[nodiscard]] std::vector<VfxFlashSpawnInput> Emit(
-        const VfxProgramData &program,
+        const VfxProgramView &program,
         std::span<const VfxPersistentInput> owners,
         Tick current_tick);
     void Clear() noexcept { cursors_.clear(); }
-    [[nodiscard]] std::uint64_t Rebind(const VfxProgramData &previous,
-                                     const VfxProgramData &next) noexcept;
+    [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
+                                     const VfxProgramView &next) noexcept;
     void Swap(VfxPersistentSparkState &prepared) noexcept { cursors_.swap(prepared.cursors_); }
 
   private:

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <source_location>
 #include <string>
 #include <string_view>
@@ -50,12 +51,12 @@ class Result
 
     [[nodiscard]] std::string_view Subsystem() const noexcept
     {
-        return subsystem_;
+        return details_ ? std::string_view{details_->subsystem} : std::string_view{""};
     }
 
     [[nodiscard]] std::string_view Message() const noexcept
     {
-        return message_;
+        return details_ ? std::string_view{details_->message} : std::string_view{""};
     }
 
     [[nodiscard]] const std::source_location &Location() const noexcept
@@ -64,17 +65,23 @@ class Result
     }
 
   private:
+    struct FailureDetails
+    {
+        std::string subsystem;
+        std::string message;
+    };
+
     Result() = default;
 
     Result(ErrorCode code, std::string_view subsystem, std::string message,
            std::source_location location)
-        : code_(code), subsystem_(subsystem), message_(std::move(message)), location_(location)
+        : code_(code), details_(std::in_place, std::string{subsystem}, std::move(message)), location_(location)
     {
     }
 
     ErrorCode code_{ErrorCode::None};
-    std::string subsystem_;
-    std::string message_;
+    // Successful calls need no strings (including MSVC Debug iterator allocations).
+    std::optional<FailureDetails> details_;
     std::source_location location_;
 };
 

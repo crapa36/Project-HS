@@ -9,6 +9,11 @@ namespace hs
 [[nodiscard]] inline SettingsData PrepareStartupGraphicsSettings(
     SettingsDocument &requested, const ApplicationConfig &config)
 {
+    if (config.graphics_preset)
+    {
+        requested.graphics.preset = *config.graphics_preset;
+        ApplyGraphicsPreset(requested.graphics);
+    }
     // Smoke runs use process graphics defaults, independent of a saved profile.
     if (config.resolution_explicit || config.smoke)
     {
@@ -21,15 +26,15 @@ namespace hs
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetVsync, config.vsync ? 1u : 0u});
     if (config.frame_cap_explicit || config.smoke)
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetFrameCap, config.frame_cap});
-    if (config.render_scale_explicit || config.smoke)
+    if (config.render_scale_explicit || (config.smoke && !config.graphics_preset))
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetRenderScale, config.render_scale_percent});
-    if (config.shadow_resolution_explicit || config.smoke)
+    if (config.shadow_resolution_explicit || (config.smoke && !config.graphics_preset))
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetShadowResolution, config.shadow_resolution});
-    if (config.particle_percentage_explicit || config.smoke)
+    if (config.particle_percentage_explicit || (config.smoke && !config.graphics_preset))
         (void)ApplySettingsEdit(requested, {UiCommandKind::SetParticlePercentage, config.particle_percentage});
-    if (config.bloom_explicit || config.smoke)
+    if (config.bloom_explicit || (config.smoke && !config.graphics_preset))
         requested.graphics.bloom = config.bloom;
-    if (config.outline_explicit || config.smoke)
+    if (config.outline_explicit || (config.smoke && !config.graphics_preset))
         requested.graphics.outline = config.outline;
     auto effective = ProjectSettingsDocument(requested);
     if (config.mute_audio) effective.master_volume = 0.0f;

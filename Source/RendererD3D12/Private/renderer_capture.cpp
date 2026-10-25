@@ -730,9 +730,11 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                        DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
         SurfaceCapture{"oit_revealage", &impl_->oit_revealage,
                        DXGI_FORMAT_R16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"shadow_atlas", &impl_->shadow,
-                       DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
     };
+    // A proved VSM-only frame never writes or initializes the CSM atlas.
+    if (impl_->virtual_shadows.CacheStatus().guarantee.csm_required)
+        surfaces.push_back(SurfaceCapture{"shadow_atlas", &impl_->shadow,
+                           DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite});
     for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
         surfaces.push_back(SurfaceCapture{plane == 0 ? "material_sidecar_0" : "material_sidecar_1",
             &impl_->material_sidecars[plane], impl_->MaterialSidecarFormat(plane), Access::ShaderRead});

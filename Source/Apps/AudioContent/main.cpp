@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include "../AssetPipeline/action.hpp"
+#include "../Content/release_audio_codegen.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -13,7 +14,6 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <set>
@@ -29,7 +29,7 @@ using Json = nlohmann::json;
 
 constexpr std::string_view kActionId = "audio";
 constexpr std::string_view kRecipeId = "project-hs.audio-copy";
-constexpr std::uint32_t kRecipeVersion = 1;
+constexpr std::uint32_t kRecipeVersion = 2;
 constexpr std::uint32_t kActionKeySchemaVersion = 1;
 
 [[noreturn]] void Fail(const std::string &message)
@@ -84,46 +84,9 @@ bool SafeWaveName(std::string_view name)
     return true;
 }
 
-void ValidateWave(const fs::path &path, bool stereo)
+std::vector<std::string> DiscoverWaves(std::string_view catalog)
 {
-    RequireRegularFile(path);
-    std::ifstream input(path, std::ios::binary);
-    std::array<std::uint8_t, 44> header{};
-    Require(static_cast<bool>(input.read(reinterpret_cast<char *>(header.data()), header.size())),
-            "WAV header is truncated: " + path.string());
-    const auto u16 = [&](std::size_t offset) {
-        return static_cast<std::uint16_t>(header[offset] | (header[offset + 1] << 8));
-    };
-    const auto u32 = [&](std::size_t offset) {
-        return static_cast<std::uint32_t>(header[offset] | (header[offset + 1] << 8) |
-                                          (header[offset + 2] << 16) | (header[offset + 3] << 24));
-    };
-    const auto channels = static_cast<std::uint16_t>(stereo ? 2 : 1);
-    const auto file_size = fs::file_size(path);
-    Require(file_size >= header.size() &&
-                std::memcmp(header.data(), "RIFF", 4) == 0 &&
-                std::memcmp(header.data() + 8, "WAVEfmt ", 8) == 0 &&
-                std::memcmp(header.data() + 36, "data", 4) == 0 &&
-                u32(4) == file_size - 8 && u32(16) == 16 && u16(20) == 1 &&
-                u16(22) == channels && u32(24) == 48000 &&
-                u32(28) == 48000u * channels * 3 && u16(32) == channels * 3 &&
-                u16(34) == 24 &&
-                static_cast<std::uint64_t>(44) + u32(40) + (u32(40) & 1u) == file_size,
-            "WAV must be canonical 48kHz 24-bit PCM with required channel count: " + path.string());
-}
-
-struct WaveReference
-{
-    std::string name;
-    bool stereo = false;
-};
-
-std::vector<WaveReference> DiscoverWaves(const fs::path &catalog)
-{
-    RequireRegularFile(catalog);
-    std::ifstream input(catalog, std::ios::binary);
-    Require(input.is_open(), "cannot read audio catalog");
-    const Json audio = Json::parse(input);
+    const Json audio = Json::parse(catalog);
     const auto &schema_version = Member(audio, "schema_version");
     const auto &maximum_voices = Member(audio, "maximum_source_voices");
     Require(schema_version.is_number_integer() && schema_version == 1 &&
@@ -135,7 +98,7 @@ std::vector<WaveReference> DiscoverWaves(const fs::path &catalog)
             "audio catalog must contain exactly 107 cues");
     std::set<std::string, std::less<>> ids;
     std::set<std::string, std::less<>> names;
-    std::vector<WaveReference> waves;
+    std::vector<std::string> waves;
     for (const auto &entry : entries)
     {
         const auto id = StringMember(entry, "id");
@@ -146,22 +109,61 @@ std::vector<WaveReference> DiscoverWaves(const fs::path &catalog)
                 "audio cue must use non-streaming PCM: " + id);
         const auto &files = Member(entry, "files");
         Require(files.is_array() && !files.empty(), "audio cue has no files: " + id);
-        const bool stereo = id.starts_with("audio.bgm.") ||
-                            id.starts_with("audio.ambience.");
         for (const auto &file : files)
         {
             Require(file.is_string(), "audio WAV name must be a string: " + id);
             const auto name = file.get<std::string>();
             Require(SafeWaveName(name) && names.emplace(name).second,
                     "duplicate or unsafe WAV name: " + name);
-            waves.push_back({name, stereo});
+            waves.push_back(name);
         }
     }
     Require(names.size() == 379, "audio catalog must reference exactly 379 unique WAV files");
-    std::sort(waves.begin(), waves.end(), [](const auto &a, const auto &b) {
-        return a.name < b.name;
-    });
+    std::ranges::sort(waves);
     return waves;
+}
+
+bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string_view key)
+{
+    const auto result_path = build_root / "Actions/audio/result.json";
+    if (!fs::exists(result_path)) return false;
+    const ap::ActionResultSnapshot snapshot(build_root, "audio");
+    Require(snapshot.ActionId() == spec.action_id, "cached audio Action ID changed");
+    if (snapshot.ActionKeyValue() != key) return false;
+    Require(snapshot.ProductCount() == spec.inputs.size() + 2, "cached audio product set changed");
+    std::vector<ap::Product> products;
+    fs::path directory;
+    const auto verify = [&](const std::string &id, const std::string &filename, std::string_view source_digest = {}) {
+        const auto &metadata = snapshot.ProductMetadata(id);
+        Require(!metadata.contains("dependencies") || metadata.at("dependencies") == Json::array(),
+                "cached audio product dependencies changed: " + id);
+        ap::UpstreamProduct dependency;
+        fs::path path;
+        snapshot.ReadProduct(id, dependency, path);
+        Require(path.filename() == filename && (source_digest.empty() || dependency.digest == source_digest),
+                "cached audio product identity changed: " + id);
+        directory = path.parent_path();
+        products.push_back({id, filename, dependency.digest, dependency.size, {}});
+    };
+    for (const auto &input : spec.inputs)
+    {
+        const auto filename = input.path.filename().string();
+        verify("audio/" + filename, filename, input.digest);
+    }
+    verify("audio/release-cpp", "release_audio.cpp");
+    verify("audio/release-pcm", "release_audio.pcm");
+    std::ranges::sort(products, {}, &ap::Product::logical_id);
+    Require(ap::ProductSetId(products) == directory.filename().string(), "cached audio ProductSet identity changed");
+    std::size_t count{};
+    for (const auto &entry : fs::directory_iterator(directory))
+    {
+        RequireRegularFile(entry.path());
+        ++count;
+    }
+    Require(count == products.size(), "cached audio ProductSet has unexpected files");
+    if (!fs::exists(result_path.parent_path() / "result.d")) return false;
+    RequireRegularFile(result_path.parent_path() / "result.d");
+    return true;
 }
 
 void Produce(const fs::path &source_root, const fs::path &build_root)
@@ -176,40 +178,63 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
                                 "audio_cues.json";
     const auto source_audio = source_root / "ContentSource" / "Audio";
     RequireDirectory(source_audio);
+    const auto catalog_bytes = ap::ReadBytes(source_catalog);
+    const auto catalog_digest = ap::Sha256Bytes(std::as_bytes(std::span(catalog_bytes.data(), catalog_bytes.size())));
+    const auto waves = DiscoverWaves(catalog_bytes);
+    ap::ActionSpec spec;
+    spec.action_id = std::string(kActionId);
+    spec.recipe_id = std::string(kRecipeId);
+    spec.recipe_version = kRecipeVersion;
+    spec.namespace_path = "audio";
+    spec.include_namespace_field = false; // Preserve the original Audio ActionResult schema.
+    spec.inputs.push_back({"ContentSource/GameData/audio_cues.json", source_catalog, catalog_digest});
+    for (const auto &wave : waves)
+        spec.inputs.push_back(ap::HashInput("ContentSource/Audio/" + wave, source_audio / wave));
+    std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+    const auto action_key = ap::ActionKey(spec);
+    // This checks the captured inputs, not an atomic cross-file author revision.
+    if (Current(build_root, spec, action_key))
+    {
+        ap::TouchActionResult(actions / "result.json");
+        std::cout << "audio current files=" << waves.size() + 3 << '\n';
+        return;
+    }
     const auto stage = ap::CreateStage(actions);
     try
     {
-        ap::ActionSpec spec;
-        spec.action_id = std::string(kActionId);
-        spec.recipe_id = std::string(kRecipeId);
-        spec.recipe_version = kRecipeVersion;
-        spec.namespace_path = "audio";
-        spec.include_namespace_field = false; // Preserve the original Audio ActionResult schema.
         std::vector<ap::Product> products;
-        auto catalog = ap::CopyAndHashInput("ContentSource/GameData/audio_cues.json",
-                                             source_catalog, stage / "audio_cues.json");
-        spec.inputs.push_back(catalog);
+        ap::WriteBytes(stage / "audio_cues.json", std::as_bytes(std::span(catalog_bytes.data(), catalog_bytes.size())));
         products.push_back({"audio/audio_cues.json", "audio_cues.json",
-                            catalog.digest, fs::file_size(stage / "audio_cues.json"), {}});
-        const auto waves = DiscoverWaves(stage / "audio_cues.json");
+                            catalog_digest, catalog_bytes.size(), {}});
         for (const auto &wave : waves)
         {
-            const auto source = source_audio / wave.name;
-            const auto staged = stage / wave.name;
-            auto input = ap::CopyAndHashInput("ContentSource/Audio/" + wave.name,
+            const auto source = source_audio / wave;
+            const auto staged = stage / wave;
+            auto input = ap::CopyAndHashInput("ContentSource/Audio/" + wave,
                                                source, staged);
-            ValidateWave(staged, wave.stereo);
-            products.push_back({"audio/" + wave.name, wave.name, input.digest,
+            const auto expected = std::ranges::lower_bound(spec.inputs, input.logical_id, {}, &ap::Input::logical_id);
+            Require(expected != spec.inputs.end() && expected->logical_id == input.logical_id &&
+                        expected->digest == input.digest, "audio source changed during preparation: " + wave);
+            products.push_back({"audio/" + wave, wave, input.digest,
                                 fs::file_size(staged), {}});
-            spec.inputs.push_back(std::move(input));
         }
-        std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+        const auto release = hs::audio_content::BuildReleaseAudio(
+            ap::ReadBytes(stage / "audio_cues.json"),
+            [&](std::string_view name) { return ap::ReadBytes(stage / std::string(name)); }, 64);
+        ap::WriteBytes(stage / "release_audio.cpp", std::as_bytes(std::span(release.source.data(), release.source.size())));
+        ap::WriteBytes(stage / "release_audio.pcm", std::as_bytes(std::span(release.pcm.data(), release.pcm.size())));
+        products.push_back(ap::HashProduct("audio/release-cpp", "release_audio.cpp", stage / "release_audio.cpp"));
+        products.push_back(ap::HashProduct("audio/release-pcm", "release_audio.pcm", stage / "release_audio.pcm"));
+        std::cout << "shipping-audio PCM preload_samples=" << release.preload_samples
+                  << " preload_bytes=" << release.preload_bytes
+                  << " transition_samples=" << release.transition_samples
+                  << " transition_bytes=" << release.transition_bytes
+                  << " total_bytes=" << release.pcm.size() << '\n';
         std::ranges::sort(products, {}, &ap::Product::logical_id);
-        const auto action_key = ap::ActionKey(spec);
         const auto product_set_id = ap::ProductSetId(products);
         ap::Publish(build_root, spec, stage, std::move(products));
         std::cout << "audio action_key=" << action_key << " product_set_id="
-                  << product_set_id << " files=" << waves.size() + 1 << '\n';
+                  << product_set_id << " files=" << waves.size() + 3 << '\n';
     }
     catch (...)
     {

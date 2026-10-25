@@ -3,12 +3,14 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/types.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -234,71 +236,6 @@ struct RenderSceneInstanceKeyHash
     [[nodiscard]] std::size_t operator()(RenderSceneInstanceKey key) const noexcept;
 };
 
-enum class RenderSceneDeltaKind : std::uint8_t
-{
-    Unchanged,
-    Created,
-    Updated,
-};
-
-enum RenderSceneRevisionMask : std::uint8_t
-{
-    RenderSceneTransformChanged = 1u << 0,
-    RenderScenePoseChanged = 1u << 1,
-    RenderSceneMaterialChanged = 1u << 2,
-    RenderSceneContentChanged = 1u << 3,
-};
-
-inline constexpr std::uint8_t kRenderSceneAllRevisions =
-    RenderSceneTransformChanged | RenderScenePoseChanged |
-    RenderSceneMaterialChanged | RenderSceneContentChanged;
-
-[[nodiscard]] constexpr std::uint8_t CompareRenderInstanceRevisions(
-    const RenderInstance::Revisions &before,
-    const RenderInstance::Revisions &after) noexcept
-{
-    return (before.transform != after.transform ? RenderSceneTransformChanged : 0) |
-           (before.pose != after.pose ? RenderScenePoseChanged : 0) |
-           (before.material != after.material ? RenderSceneMaterialChanged : 0) |
-           (before.content != after.content ? RenderSceneContentChanged : 0);
-}
-
-struct RenderSceneDeltaItem
-{
-    RenderSceneInstanceKey key{};
-    std::uint32_t source_index{};
-    RenderInstance::Revisions revisions{};
-    RenderSceneDeltaKind kind{RenderSceneDeltaKind::Unchanged};
-    std::uint8_t revision_mask{};
-};
-
-// Owning producer-side representation. base_generation identifies the scene
-// generation this delta was computed from. Consumers that miss a published
-// snapshot can detect the gap instead of applying an incomplete incremental
-// update.
-struct RenderSceneDelta
-{
-    std::vector<RenderSceneDeltaItem> instances;
-    std::vector<RenderSceneInstanceKey> destroyed;
-    std::uint64_t base_generation{};
-    std::uint64_t generation{};
-    std::size_t created{};
-    std::size_t updated{};
-    std::size_t unchanged{};
-};
-
-struct RenderSceneDeltaView
-{
-    std::span<const RenderSceneDeltaItem> instances;
-    std::span<const RenderSceneInstanceKey> destroyed;
-    std::uint64_t base_generation{};
-    std::uint64_t generation{};
-    std::size_t created{};
-    std::size_t updated{};
-    std::size_t unchanged{};
-    bool published{};
-};
-
 [[nodiscard]] RenderInstance::Revisions
 DeriveRenderInstanceRevisions(const RenderInstance &instance) noexcept;
 [[nodiscard]] std::uint64_t
@@ -391,13 +328,60 @@ struct StaticRenderScene
         std::uint64_t stable_id{}, object_id{};
         std::uint32_t instance_index{};
     };
+    std::span<const RenderInstance> instances;
+    AssetId scene_asset_id{};
+    std::string content_generation_id;
+    std::uint32_t layout_abi{};
+    std::array<std::byte, 32> eligible_layout_digest{};
+    std::span<const EligibleStaticMember> eligible_static_members;
+    std::span<const RenderSceneInstanceKey> static_keys;
+};
+
+// Mutable preparation only. Bind after the final allocation and all vector writes.
+struct StaticRenderSceneStorage final
+{
+    using EligibleStaticMember = StaticRenderScene::EligibleStaticMember;
     std::vector<RenderInstance> instances;
     AssetId scene_asset_id{};
     std::string content_generation_id;
     std::uint32_t layout_abi{};
     std::array<std::byte, 32> eligible_layout_digest{};
     std::vector<EligibleStaticMember> eligible_static_members;
+    std::vector<RenderSceneInstanceKey> static_keys;
+    StaticRenderScene exported_view;
+
+    StaticRenderSceneStorage() = default;
+    explicit StaticRenderSceneStorage(const StaticRenderScene &view)
+        : instances(view.instances.begin(), view.instances.end()), scene_asset_id(view.scene_asset_id),
+          content_generation_id(view.content_generation_id), layout_abi(view.layout_abi),
+          eligible_layout_digest(view.eligible_layout_digest),
+          eligible_static_members(view.eligible_static_members.begin(), view.eligible_static_members.end()),
+          static_keys(view.static_keys.begin(), view.static_keys.end()) {}
+    void BindExportedView()
+    {
+        exported_view = {instances, scene_asset_id, content_generation_id, layout_abi,
+                         eligible_layout_digest, eligible_static_members, static_keys};
+    }
 };
+
+// Development/native fixtures use the same stable-address, immutable lease contract.
+[[nodiscard]] inline std::shared_ptr<const StaticRenderScene> FreezeStaticRenderScene(
+    std::unique_ptr<StaticRenderSceneStorage> candidate)
+{
+    candidate->static_keys.clear();
+    candidate->static_keys.reserve(candidate->instances.size());
+    for (std::size_t index = 0; index < candidate->instances.size(); ++index)
+        candidate->static_keys.push_back(MakeRenderSceneInstanceKey(
+            candidate->instances[index].stable_id, static_cast<std::uint32_t>(index)));
+    std::ranges::sort(candidate->static_keys, [](const auto &left, const auto &right) {
+        return std::pair{left.stable_id, left.fallback_ordinal} <
+               std::pair{right.stable_id, right.fallback_ordinal};
+    });
+    candidate->BindExportedView();
+    const auto *view = &candidate->exported_view;
+    std::shared_ptr<const StaticRenderSceneStorage> owner(std::move(candidate));
+    return {std::move(owner), view};
+}
 
 // Actual projected instance captured before its source actor leaves the scene.
 // The snapshot carries provenance only; Runtime owns recipe-dependent retention.
@@ -420,7 +404,6 @@ struct RenderSnapshot
     std::span<const PersistentVfxVisual> persistent_vfx;
     CameraView camera{};
     std::shared_ptr<const StaticRenderScene> static_scene;
-    RenderSceneDeltaView scene_delta{};
     std::span<const CapturedRenderInstance> captured_instances;
 };
 
@@ -434,14 +417,17 @@ class RenderSnapshotStorage
     [[nodiscard]] bool AddInstance(const RenderInstance &instance);
     [[nodiscard]] bool AddPose(const AnimationPoseRef &pose);
     [[nodiscard]] bool AddCapturedInstance(const CapturedRenderInstance &capture);
+    // Complete-packet producers append final operands without deriving a
+    // producer revision history. Add* retains the development adapter rules.
+    [[nodiscard]] bool AppendInstance(const RenderInstance &instance);
+    [[nodiscard]] bool AppendPose(const AnimationPoseRef &pose);
+    [[nodiscard]] bool AppendCapturedInstance(const CapturedRenderInstance &capture);
     [[nodiscard]] bool AddLight(const LightView &light);
     [[nodiscard]] bool AddUi(const UiModel &ui);
     [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
     [[nodiscard]] std::size_t InstanceCount() const noexcept;
     [[nodiscard]] RenderSnapshot View() const noexcept;
     void SetStaticScene(std::shared_ptr<const StaticRenderScene> scene) noexcept;
-    void SetSceneDelta(RenderSceneDelta delta);
-    void ClearSceneDelta() noexcept;
 
     RenderSnapshotHeader header{};
     CameraView camera{};
@@ -454,8 +440,6 @@ class RenderSnapshotStorage
     std::vector<UiModel> ui_;
     std::vector<PersistentVfxVisual> persistent_vfx_;
     std::shared_ptr<const StaticRenderScene> static_scene_;
-    RenderSceneDelta scene_delta_;
-    bool scene_delta_published_{};
 };
 
 } // namespace hs

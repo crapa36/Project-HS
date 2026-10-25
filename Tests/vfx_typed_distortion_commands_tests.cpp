@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_distortion_commands.hpp"
 #include <bit>
 #include <cmath>

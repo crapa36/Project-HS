@@ -12,7 +12,7 @@ namespace
 constexpr std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
-template<class T>bool Range(VfxRange r,const std::vector<T>&v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
+template<class T>bool Range(VfxRange r,std::span<const T> v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
 struct Recipe{std::uint32_t shape;VfxMotionKind motion;VfxDistortionShape kind;float radius;};
 constexpr Recipe recipes[]{
  {Hash("screen_space_radial_normal"),VfxMotionKind::SingleOutwardRefractivePulse,VfxDistortionShape::RadialRing,.8f},
@@ -49,7 +49,7 @@ std::optional<Anchor> EventAnchor(const VfxEventInput &in,std::uint32_t schema)
  const float length=std::hypot(a.direction.x,a.direction.y,a.direction.z);if(!std::isfinite(length)||(a.projectile&&length<=.0001f))return {};
  a.direction=length>.0001f?Float3{a.direction.x/length,a.direction.y/length,a.direction.z/length}:Float3{0,0,1};return a;
 }
-bool Textures(const VfxProgramData&p,const VfxOutputRecord&o)
+bool Textures(const VfxProgramView&p,const VfxOutputRecord&o)
 {
  if(!Range(o.textures,p.texture_bindings))return false;
  for(const auto&b:std::span(p.texture_bindings).subspan(o.textures.first,o.textures.count))
@@ -63,7 +63,7 @@ bool Textures(const VfxProgramData&p,const VfxOutputRecord&o)
  }
  return true;
 }
-bool Params(const VfxProgramData&p,const VfxOutputRecord&o,const Recipe&r,float&strength,float&radius)
+bool Params(const VfxProgramView&p,const VfxOutputRecord&o,const Recipe&r,float&strength,float&radius)
 {
  if(!Range(o.parameters,p.parameters))return false;const bool radial=r.kind==VfxDistortionShape::RadialRing;
  const bool explicit_radius=r.kind==VfxDistortionShape::HeadEnvelope||r.kind==VfxDistortionShape::TightDisc;
@@ -85,7 +85,7 @@ std::optional<float> Envelope(const VfxSourceRecord&s,float age)
  const float end=s.knots[s.knot_count-1];if(end<=s.knots[0]||age<s.knots[0]||age>=end)return {};
  float alpha=1;if(s.knot_count==4){if(age<s.knots[1]&&s.knots[1]>s.knots[0])alpha=(age-s.knots[0])/(s.knots[1]-s.knots[0]);else if(age>s.knots[2]&&end>s.knots[2])alpha=(end-age)/(end-s.knots[2]);}return alpha;
 }
-void Append(const VfxProgramData&p,const VfxEffectRecord&e,const Anchor&a,float age,std::uint64_t owner,
+void Append(const VfxProgramView&p,const VfxEffectRecord&e,const Anchor&a,float age,std::uint64_t owner,
             std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent,std::vector<VfxDistortionInput>&result)
 {
  if(!std::isfinite(age)||age<0||age>=1||static_cast<std::uint32_t>(quality)>2||!Range(e.sources,p.sources))return;
@@ -116,7 +116,7 @@ void Append(const VfxProgramData&p,const VfxEffectRecord&e,const Anchor&a,float 
  }
 }
 }
-std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxProgramData&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick current_tick)
+std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick current_tick)
 {
  std::vector<VfxDistortionInput> result;
  for(const auto&in:events)

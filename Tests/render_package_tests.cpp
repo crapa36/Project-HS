@@ -1,10 +1,18 @@
 #include <hs/core/cooked_format.hpp>
+#include "../Source/RendererD3D12/Private/renderer_hlod_scene.hpp"
+#include "../Source/RendererD3D12/Private/renderer_hero_work_math.hpp"
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/character_package.hpp>
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/dds_texture.hpp>
+#include "../Source/Apps/Content/character_texture_mips.hpp"
+#include "../Source/Apps/Content/character_bc7_coverage.hpp"
+#include "../Source/Apps/Content/character_bc7_normal.hpp"
 #include <hs/render_data/quality_profiles.hpp>
+#include <hs/render_data/static_shadow.hpp>
+#include <hs/render_data/static_shadow_archive.hpp>
 #include "../Source/Apps/RenderMaterialShader/material_graph_parser.hpp"
 #include "../Source/Apps/AssetPipeline/render_shader_bindings.hpp"
 #include <nlohmann/json.hpp>
@@ -14,6 +22,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +34,9 @@
 #include <string>
 #include <vector>
 #include <utility>
+
+void TestReleaseAudioCodegen();
+void TestVirtualShadowGuarantees();
 
 namespace
 {
@@ -102,6 +114,37 @@ void TestExpandedVertexFields()
     invalid[2] = std::byte{0xc0}; invalid[3] = std::byte{0x7f};
     Reject([&] { (void)rd::DecodeExpandedVertices(invalid); },
            "nonfinite vertex position accepted");
+
+    rd::ValidateExpandedVertices(std::span(&original, 1));
+    Reject([] { rd::ValidateExpandedVertices({}); }, "empty vertex validation accepted");
+    Reject([] { (void)rd::EncodeExpandedVertices({}); }, "empty vertex encoding accepted");
+    auto vertex = original;
+    const auto reject_vertex = [&] {
+        Reject([&] { rd::ValidateExpandedVertices(std::span(&vertex, 1)); },
+               "invalid vertex accepted by direct validation");
+        Reject([&] { (void)rd::EncodeExpandedVertices(std::span(&vertex, 1)); },
+               "invalid vertex accepted by encoding");
+    };
+    for (auto field : std::array<std::span<float>, 5>{
+             vertex.position, vertex.normal, vertex.uv, vertex.tangent, vertex.bone_weights})
+    {
+        const auto saved = field.front();
+        field.front() = std::numeric_limits<float>::infinity();
+        reject_vertex();
+        field.front() = saved;
+    }
+    for (const auto weights : std::array<std::array<float, 4>, 3>{
+             std::array{-0.1f, 0.5f, 0.3f, 0.3f},
+             std::array{1.1f, 0.0f, 0.0f, 0.0f},
+             std::array{0.1f, 0.1f, 0.1f, 0.1f}})
+    {
+        vertex.bone_weights = weights;
+        reject_vertex();
+    }
+    vertex = original; vertex.bone_weights = {};
+    rd::ValidateExpandedVertices(std::span(&vertex, 1));
+    vertex.reserved = 1;
+    reject_vertex();
 }
 
 std::uint64_t Get64(const std::vector<std::byte> &bytes, std::size_t offset)
@@ -297,6 +340,24 @@ void TestDecalMaterialPackages()
         Require(file.is_open(), "authored decal material source missing");
         const std::string source{std::istreambuf_iterator<char>(file), {}};
         const auto graph = hs::material_content::ParseDecalMaterialGraph(name, source);
+        const auto prepared = rd::PrepareMaterial(graph, rd::MaterialPreparationDomain::Decal);
+        Require(prepared.Graph().kind == graph.kind &&
+                rd::EmitDecalMaterialContextHlsl(graph, "HsDecalSurface", 9) ==
+                    rd::EmitDecalMaterialContextHlsl(prepared, "HsDecalSurface", 9),
+                "prepared decal changed graph kind or emitted source");
+        if (name == rd::kDecalMaterialNames.front())
+        {
+            bool preserved_name_error = false;
+            try { (void)rd::EmitDecalMaterialContextHlsl(graph, "!", 9); }
+            catch (const std::invalid_argument &error)
+            {
+                preserved_name_error = std::string_view(error.what()).find("invalid decal function name") !=
+                    std::string_view::npos;
+            }
+            Require(preserved_name_error, "decal emitter changed function-name error priority");
+            Reject([&] { (void)rd::PrepareMaterial(graph, rd::MaterialPreparationDomain::Environment); },
+                   "environment preparation accepted a decal graph");
+        }
         const auto encoded = rd::BuildDecalMaterialPackage(name, graph.parameters,
             graph.textures.front().product_id, "render/shader/decal_surface_cs.dxil", graph.decal_receivers);
         const auto decoded = rd::ReadDecalMaterialPackage(encoded, name);
@@ -433,6 +494,14 @@ void TestMaterialGraph()
                "non-string or mismatched material ID accepted");
     }
     const auto emitted = rd::EmitRock0MaterialHlsl(identity);
+    const auto prepared = rd::PrepareMaterial(identity);
+    const auto prepared_emitted = rd::EmitRock0MaterialHlsl(prepared);
+    const auto raw_reflection = rd::AnalyzeClosure(identity);
+    const auto prepared_reflection = rd::AnalyzeClosure(prepared);
+    Require(prepared.Graph().nodes.size() == identity.nodes.size() && emitted == prepared_emitted &&
+            raw_reflection.capability_mask == prepared_reflection.capability_mask &&
+            raw_reflection.varying_mask == prepared_reflection.varying_mask,
+            "prepared material changed graph, reflection, or emitted source");
     Require(identity.nodes.size() == 5 && identity.base_color_output == 0 &&
             identity.roughness_output == 4 &&
             emitted.find("float3 HsRock0BaseColor(float3 sampled_base_color)") !=
@@ -442,6 +511,8 @@ void TestMaterialGraph()
             emitted.find("float n3 = n1 * n2;") != std::string::npos &&
             emitted.find("float n4 = saturate(n3);") != std::string::npos,
             "identity roughness graph did not emit sampled * scale and saturation");
+    Reject([&] { (void)rd::PrepareMaterial(identity, rd::MaterialPreparationDomain::Environment); },
+           "environment preparation accepted a rock_0 compiler graph");
     auto wrong_type = std::string(identity_nodes);
     const auto edge = wrong_type.find("\"rough_scale\",\"type\":\"float\"}");
     Require(edge != std::string::npos, "scalar edge fixture");
@@ -454,6 +525,12 @@ void TestMaterialGraph()
     wrong_ir.nodes[3].inputs[1] = 0; // bypass JSON parser: typed IR must still reject it.
     Reject([&] { rd::ValidateRock0MaterialGraph(wrong_ir); },
            "typed IR accepted mismatched scalar input");
+    Reject([&] { (void)rd::PrepareMaterial(wrong_ir); },
+           "prepared material accepted mismatched scalar input");
+    auto cyclic_ir = identity;
+    cyclic_ir.nodes[3].inputs[0] = 4;
+    Reject([&] { (void)rd::PrepareMaterial(cyclic_ir); },
+           "prepared material accepted a cyclic/backward edge");
     Reject([&] { (void)mc::ParseRock0MaterialGraph(document(
         R"([{"id":"sampled","op":"sampled_base_color","type":"float3"},
              {"id":"rough_a","op":"multiply","type":"float",
@@ -469,6 +546,10 @@ void TestMaterialGraph()
     Require(dead.nodes.size() == 3 &&
             rd::EmitRock0MaterialHlsl(dead).find("n2") == std::string::npos,
             "dead scalar node was not pruned");
+    auto invalid_dead = dead;
+    invalid_dead.nodes.back().value[0] = std::numeric_limits<float>::infinity();
+    Reject([&] { (void)rd::PrepareMaterial(invalid_dead); },
+           "prepared material accepted an invalid dead node");
 
     const auto leaf_document = [](std::string_view nodes, std::string_view output,
                                   std::string_view type = "float") {
@@ -482,6 +563,8 @@ void TestMaterialGraph()
     const auto leaf = mc::ParseLeaf0MaterialGraph(leaf_document(
         R"([{"id":"alpha","op":"sampled_alpha","type":"float"}])", "alpha"));
     const auto leaf_hlsl = rd::EmitLeaf0MaterialHlsl(leaf);
+    Require(leaf_hlsl == rd::EmitLeaf0MaterialHlsl(rd::PrepareMaterial(leaf)),
+            "prepared leaf emitter changed generated source");
     Require(leaf.kind == rd::MaterialGraphKind::Leaf0 && leaf.nodes.size() == 1 &&
             leaf.opacity_output == 0 &&
             leaf_hlsl.find("float HsLeaf0Opacity(float sampled_alpha)") != std::string::npos &&
@@ -519,6 +602,9 @@ void TestGenericMaterialOutputInputs()
             "opacity":{"node":"opacity","type":"float"}}})";
     const auto graph = mc::ParseEnvironmentMaterialGraph("leaf_1", source);
     const auto hlsl = rd::EmitEnvironmentMaterialHlsl(graph);
+    Require(hlsl == rd::EmitEnvironmentMaterialHlsl(rd::PrepareMaterial(graph,
+                rd::MaterialPreparationDomain::Environment)),
+            "prepared numeric environment emitter changed generated source");
     Require(graph.kind == rd::MaterialGraphKind::Masked &&
             hlsl.find("float HsMaterialRoughness(float sampled, float scale)\n{\n"
                       "    float n1 = sampled;\n    float n2 = scale;\n"
@@ -1234,13 +1320,13 @@ void TestAuthoredEnvironmentMaterials()
                     mc::IsMaskedEnvironmentMaterial(name) == masked,
                     "authored material classification changed");
             const auto definition = mc::ParseMaterialDefinition(name, source);
-            const auto &graph = definition.graph;
+            const auto &graph = definition.prepared.Graph();
             const auto expected_kind = masked ? rd::MaterialGraphKind::Masked
                                               : rd::MaterialGraphKind::Opaque;
             Require(graph.kind == expected_kind, "authored graph kind changed");
             const auto ordinal = static_cast<std::size_t>(std::ranges::find(rd::kEnvironmentMaterialNames, name) -
                                                           rd::kEnvironmentMaterialNames.begin());
-            const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(graph, ordinal);
+            const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, ordinal);
             for (const auto signature : {
                      "HsMaterialSurface HsMaterialEvaluateSurface(HsMaterialContext ctx)",
                      "float HsMaterialEvaluateOpacity(HsMaterialContext ctx)",
@@ -1332,7 +1418,7 @@ void TestAuthoredTerrainMaterial()
             document.at("samplers").size() == 2,
             "terrain schema fixture lost its v6 resource contract");
     const auto definition = mc::ParseMaterialDefinition("terrain", source);
-    const auto &graph = definition.graph;
+    const auto &graph = definition.prepared.Graph();
     Require(mc::IsAuthoredMaterialName("terrain") && !mc::IsEnvironmentMaterialName("terrain") &&
             graph.kind == rd::MaterialGraphKind::Terrain && graph.textures.size() == 6 &&
             graph.samplers.size() == 2 && graph.terrain_output != rd::kNoMaterialInput &&
@@ -1366,7 +1452,7 @@ void TestAuthoredTerrainMaterial()
     const auto ordinal = static_cast<std::size_t>(
         std::ranges::find(rd::kAuthoredMaterialNames, std::string_view{"terrain"}) -
         rd::kAuthoredMaterialNames.begin());
-    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(graph, ordinal);
+    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, ordinal);
     Require(hlsl.find("#include \"material_terrain.hlsli\"") != std::string::npos &&
             hlsl.find("HsMaterialTerrainStochastic(") != std::string::npos &&
             hlsl.find("HsMaterialTexture5") != std::string::npos &&
@@ -1455,13 +1541,18 @@ void TestSurfaceClosure()
     Require(file.is_open(), "surface closure fixture missing");
     const std::string source{std::istreambuf_iterator<char>(file), {}};
     const auto definition = mc::ParseMaterialDefinition("rock_0", source);
-    const auto &graph = definition.graph;
+    const auto &graph = definition.prepared.Graph();
     Require(graph.closure_output != rd::kNoMaterialInput &&
             graph.nodes[graph.closure_output].op == rd::MaterialOp::MetallicRoughnessClosure &&
             rd::MaterialInputCount(rd::MaterialOp::MetallicRoughnessClosure,
                                    rd::MaterialType::SurfaceClosure) == 6,
             "typed surface closure root or signature missing");
-    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(graph, 3);
+    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, 3);
+    const auto raw_closure = rd::AnalyzeClosure(graph);
+    const auto prepared_closure = rd::AnalyzeClosure(definition.prepared);
+    Require(raw_closure.capability_mask == prepared_closure.capability_mask &&
+            raw_closure.varying_mask == prepared_closure.varying_mask,
+            "prepared closure reflection changed authored material");
     Require(hlsl.find("#include \"material_surface.hlsli\"") != std::string::npos &&
             hlsl.find("HsMaterialMakeSurfaceClosure(n") != std::string::npos &&
             hlsl.find("MaterialParameters[ctx.parameter_base + 0]") != std::string::npos &&
@@ -1474,19 +1565,19 @@ void TestSurfaceClosure()
     auto renamed = Json::parse(source);
     renamed["id"] = "rock_1";
     const auto renamed_definition = mc::ParseMaterialDefinition("rock_1", renamed.dump());
-    Require(renamed_definition.graph.kind == rd::MaterialGraphKind::Opaque &&
-            renamed_definition.graph.closure_output != rd::kNoMaterialInput,
+    Require(renamed_definition.prepared.Graph().kind == rd::MaterialGraphKind::Opaque &&
+            renamed_definition.prepared.Graph().closure_output != rd::kNoMaterialInput,
             "typed closure was incorrectly restricted to rock_0");
     auto masked = Json::parse(source);
     masked["id"] = "leaf_0";
     masked["render_flags"] = {{"two_sided", true}, {"alpha_mode", "mask"}};
     const auto masked_definition = mc::ParseMaterialDefinition("leaf_0", masked.dump());
-    const auto masked_closure = masked_definition.graph.closure_output;
-    Require(masked_definition.graph.kind == rd::MaterialGraphKind::Masked &&
+    const auto masked_closure = masked_definition.prepared.Graph().closure_output;
+    Require(masked_definition.prepared.Graph().kind == rd::MaterialGraphKind::Masked &&
             masked_closure != rd::kNoMaterialInput &&
-            masked_definition.graph.nodes[masked_closure].inputs[5] != rd::kNoMaterialInput,
+            masked_definition.prepared.Graph().nodes[masked_closure].inputs[5] != rd::kNoMaterialInput,
             "masked typed closure lost its opacity root");
-    const auto masked_hlsl = rd::EmitEnvironmentMaterialContextHlsl(masked_definition.graph, 3);
+    const auto masked_hlsl = rd::EmitEnvironmentMaterialContextHlsl(masked_definition.prepared, 3);
     Require(masked_hlsl.find("float HsMaterialEvaluateOpacity") != std::string::npos &&
             masked_hlsl.find("ctx.sampled_alpha") != std::string::npos,
             "masked typed closure opacity evaluator missing");
@@ -1519,6 +1610,23 @@ void TestSurfaceClosure()
          constant_metallic_b, constant_ao, constant_opacity});
     constant_closures.closure_output = constant_root;
     const auto constant_hlsl = rd::EmitEnvironmentMaterialContextHlsl(constant_closures, 0);
+    const auto constant_prepared = rd::PrepareMaterial(constant_closures,
+        rd::MaterialPreparationDomain::Environment);
+    Require(constant_hlsl == rd::EmitEnvironmentMaterialContextHlsl(constant_prepared, 0),
+            "prepared environment context emitter changed generated source");
+    const auto hero_prepared = rd::PrepareMaterial(constant_closures,
+        rd::MaterialPreparationDomain::Hero);
+    Require(rd::EmitHeroMaterialContextHlsl(constant_closures, "HsHeroSurface", "HsHeroOpacity") ==
+            rd::EmitHeroMaterialContextHlsl(hero_prepared, "HsHeroSurface", "HsHeroOpacity"),
+            "prepared hero context emitter changed generated source");
+    bool preserved_hero_name_error = false;
+    try { (void)rd::EmitHeroMaterialContextHlsl(constant_closures, "!", "HsHeroOpacity"); }
+    catch (const std::invalid_argument &error)
+    {
+        preserved_hero_name_error = std::string_view(error.what()).find("invalid hero material function name") !=
+            std::string_view::npos;
+    }
+    Require(preserved_hero_name_error, "hero emitter changed function-name error priority");
     Require(constant_hlsl.find("HsMaterialMakeSurfaceClosure(") != std::string::npos &&
             constant_hlsl.find("HsSurfaceClosure()") == std::string::npos,
             "constant closure aggregate was folded into an invalid empty struct");
@@ -1526,7 +1634,9 @@ void TestSurfaceClosure()
     auto layered = constant_closures;
     layered.closure_output = MaterialNode(layered, rd::MaterialType::SurfaceClosure,
         rd::MaterialOp::CoatClosure, {constant_root, constant_ao, constant_roughness_b});
-    Require(rd::EmitUniformClosureHlsl(layered).find("HsMaterialApplyCoat(base") != std::string::npos,
+    const auto uniform_hlsl = rd::EmitUniformClosureHlsl(layered);
+    Require(uniform_hlsl == rd::EmitUniformClosureHlsl(rd::PrepareMaterial(layered)) &&
+            uniform_hlsl.find("HsMaterialApplyCoat(base") != std::string::npos,
             "uniform coat must remain in the deferred evaluator");
     const auto varying_weight = MaterialNode(layered, rd::MaterialType::Float,
         rd::MaterialOp::SampledRoughness, {});
@@ -1590,10 +1700,10 @@ void TestSurfaceClosure()
         {"ao", closure_fields.at("ao")}};
     const std::string legacy_source = legacy_document.dump();
     const auto legacy = mc::ParseMaterialDefinition("rock_1", legacy_source);
-    Require(legacy.graph.closure_output != rd::kNoMaterialInput &&
-            legacy.graph.nodes[legacy.graph.closure_output].op == rd::MaterialOp::MetallicRoughnessClosure,
+    Require(legacy.prepared.Graph().closure_output != rd::kNoMaterialInput &&
+            legacy.prepared.Graph().nodes[legacy.prepared.Graph().closure_output].op == rd::MaterialOp::MetallicRoughnessClosure,
             "legacy material did not lower to a typed closure root");
-    const auto legacy_hlsl = rd::EmitEnvironmentMaterialContextHlsl(legacy.graph, 4);
+    const auto legacy_hlsl = rd::EmitEnvironmentMaterialContextHlsl(legacy.prepared, 4);
     Require(legacy_hlsl.find("HsMaterialSurface HsMaterialEvaluateSurface") != std::string::npos &&
             legacy_hlsl.find("HsMaterialMakeSurfaceClosure(n") != std::string::npos &&
             legacy_hlsl.find("MaterialParameters[ctx.parameter_base + 0]") != std::string::npos,
@@ -1634,20 +1744,20 @@ void TestMaterialTextureBindingsAndContexts()
     for (auto &node : invalid["nodes"])
         if (node["op"] == "sample_grad") { node["layer"]["type"] = "float"; break; }
     reject_json(invalid);
-    auto invalid_graph = definition.graph;
+    auto invalid_graph = definition.prepared.Graph();
     auto ref = std::ranges::find(invalid_graph.nodes, rd::MaterialOp::TextureRef, &rd::MaterialNode::op);
     Require(ref != invalid_graph.nodes.end(), "texture reference fixture missing");
     ref->declaration_index = invalid_graph.textures.size();
     Reject([&] { rd::ValidateEnvironmentMaterialGraph(invalid_graph); },
            "out-of-range public texture reference accepted");
-    invalid_graph = definition.graph;
+    invalid_graph = definition.prepared.Graph();
     rd::MaterialNode dead;
     dead.id = "dead_sampler"; dead.op = rd::MaterialOp::SamplerRef;
     dead.type = rd::MaterialType::SamplerRef; dead.declaration_index = invalid_graph.samplers.size();
     invalid_graph.nodes.push_back(dead);
     Reject([&] { rd::ValidateEnvironmentMaterialGraph(invalid_graph); },
            "dead out-of-range public sampler reference accepted");
-    auto sample_level_graph = definition.graph;
+    auto sample_level_graph = definition.prepared.Graph();
     Require(sample_level_graph.closure_output + 1 == sample_level_graph.nodes.size(),
             "SampleLevel fixture closure is not the terminal node");
     auto sample_level_closure = sample_level_graph.nodes[sample_level_graph.closure_output];
@@ -1676,10 +1786,10 @@ void TestMaterialTextureBindingsAndContexts()
     sample_level_graph.nodes.push_back(level);
     Reject([&] { rd::ValidateEnvironmentMaterialGraph(sample_level_graph); },
            "SampleLevel accepted vector LOD");
-    const auto original_sample = *std::ranges::find(definition.graph.nodes,
+    const auto original_sample = *std::ranges::find(definition.prepared.Graph().nodes,
         rd::MaterialOp::SampleGrad, &rd::MaterialNode::op);
-    const std::vector<std::uint32_t> two_layers(definition.graph.textures.size(), 2);
-    auto layer_graph = definition.graph;
+    const std::vector<std::uint32_t> two_layers(definition.prepared.Graph().textures.size(), 2);
+    auto layer_graph = definition.prepared.Graph();
     const auto layer_node = static_cast<std::size_t>(std::ranges::find_if(layer_graph.nodes,
         [](const rd::MaterialNode &node) { return node.op == rd::MaterialOp::Context &&
             node.context_input == rd::MaterialContextInput::Layer; }) - layer_graph.nodes.begin());
@@ -1699,6 +1809,9 @@ void TestMaterialTextureBindingsAndContexts()
     sample.id = "selected_layer_sample"; sample.inputs[3] = selected;
     layer_graph.nodes.push_back(sample);
     rd::ValidateMaterialSampleLayers(layer_graph, two_layers, 1);
+    const auto prepared_layers = rd::PrepareMaterial(layer_graph,
+        rd::MaterialPreparationDomain::Environment);
+    rd::ValidateMaterialSampleLayers(prepared_layers, two_layers, 1);
     const auto bool_uint = MaterialNode(layer_graph, rd::MaterialType::Uint,
                                        rd::MaterialOp::Convert, {unknown});
     sample.id = "bool_layer_sample"; sample.inputs[3] = bool_uint;
@@ -1711,6 +1824,9 @@ void TestMaterialTextureBindingsAndContexts()
     invalid_layer_graph.nodes.push_back(sample);
     Reject([&] { rd::ValidateMaterialSampleLayers(invalid_layer_graph, two_layers, 1); },
            "context layer plus one accepted unavailable array layer");
+    Reject([&] { rd::ValidateMaterialSampleLayers(rd::PrepareMaterial(invalid_layer_graph,
+        rd::MaterialPreparationDomain::Environment), two_layers, 1); },
+        "prepared layer validation accepted an unavailable array layer");
     const auto increment_valid = MaterialNode(layer_graph, rd::MaterialType::Uint,
                                              rd::MaterialOp::Add, {layer_node, one});
     const auto max_uint = UintConstant(layer_graph, UINT32_MAX);
@@ -1733,7 +1849,7 @@ void TestMaterialTextureBindingsAndContexts()
     Reject([&] { (void)rd::MaterialSamplerRegister(static_cast<rd::MaterialSamplerProfile>(99)); },
            "unknown sampler profile accepted");
 
-    auto library_context = definition.graph;
+    auto library_context = definition.prepared.Graph();
     const auto context_node = [&](rd::MaterialContextInput input) {
         const auto found = std::ranges::find_if(library_context.nodes,
             [&](const rd::MaterialNode &node) { return node.op == rd::MaterialOp::Context &&
@@ -1773,15 +1889,15 @@ void TestMaterialTextureBindingsAndContexts()
             "context library node helpers or expressions missing");
 
     std::vector<std::string> dependencies;
-    for (const auto &texture : definition.graph.textures) dependencies.push_back(texture.product_id);
+    for (const auto &texture : definition.prepared.Graph().textures) dependencies.push_back(texture.product_id);
     std::ranges::sort(dependencies);
-    const auto bindings = rd::EncodeMaterialBindings(dependencies, definition.graph.textures);
+    const auto bindings = rd::EncodeMaterialBindings(dependencies, definition.prepared.Graph().textures);
     const auto decoded = rd::DecodeMaterialBindings(bindings, dependencies);
     Require(decoded.size() == rd::kMaterialTextureSlots, "texture binding count changed");
-    for (std::size_t slot = 0; slot < definition.graph.textures.size(); ++slot)
+    for (std::size_t slot = 0; slot < definition.prepared.Graph().textures.size(); ++slot)
         Require(decoded[slot].slot == slot &&
-                dependencies[decoded[slot].dependency_index] == definition.graph.textures[slot].product_id &&
-                decoded[slot].semantic == definition.graph.textures[slot].semantic &&
+                dependencies[decoded[slot].dependency_index] == definition.prepared.Graph().textures[slot].product_id &&
+                decoded[slot].semantic == definition.prepared.Graph().textures[slot].semantic &&
                 decoded[slot].shader_binding_abi == rd::kMaterialShaderBindingAbi,
                 "texture binding slot/dependency/semantic/ABI roundtrip failed");
     Require(decoded[4].dependency_index == 0xffff && decoded[5].dependency_index == 0xffff &&
@@ -1795,13 +1911,13 @@ void TestMaterialTextureBindingsAndContexts()
                "invalid material binding accepted");
     }
     auto missing = dependencies; missing.erase(missing.begin());
-    Reject([&] { (void)rd::EncodeMaterialBindings(missing, definition.graph.textures); },
+    Reject([&] { (void)rd::EncodeMaterialBindings(missing, definition.prepared.Graph().textures); },
            "binding accepted missing texture package dependency");
     auto wrong_namespace = dependencies;
     for (auto &id : wrong_namespace) id = "environment/texture.dds";
     Reject([&] { (void)rd::DecodeMaterialBindings(bindings, wrong_namespace); },
            "binding accepted DDS dependency as texture package");
-    const auto base = definition.graph.textures.front();
+    const auto base = definition.prepared.Graph().textures.front();
     rd::ValidateMaterialTexturePackage(base, {4, 4, 4, 3, rd::kTextureFormatBc7Srgb}, 3);
     Reject([&] { rd::ValidateMaterialTexturePackage(base, {4, 4, 4, 3, rd::kTextureFormatBc7}, 3); },
            "linear histogram texture accepted as sRGB base color");
@@ -1832,7 +1948,7 @@ void TestLegacyMaterialContextLowering()
     Require(rd::EmitEnvironmentMaterialHlsl(numeric_graph).find("float3 HsMaterialBaseColor(float3 sampled)") !=
                 std::string::npos, "legacy numeric emitter API changed");
     const auto definition = mc::ParseMaterialDefinition("rock_0", document.dump());
-    const auto &graph = definition.graph;
+    const auto &graph = definition.prepared.Graph();
     Require(graph.textures.size() == 4 && graph.samplers.size() == 1 &&
             graph.samplers[0].profile == rd::MaterialSamplerProfile::EnvironmentAnisotropicWrap &&
             graph.normal_output != rd::kNoMaterialInput && graph.ao_output != rd::kNoMaterialInput &&
@@ -1841,14 +1957,14 @@ void TestLegacyMaterialContextLowering()
     for (const auto &node : graph.nodes)
         Require(node.op != rd::MaterialOp::SampledBaseColor && node.op != rd::MaterialOp::SampledRoughness &&
                 node.op != rd::MaterialOp::SampledAlpha, "legacy sampled input survived context lowering");
-    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(graph, 6);
+    const auto hlsl = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, 6);
     const auto surface = hlsl.substr(hlsl.find("HsMaterialSurface HsMaterialEvaluateSurface"));
     Require(surface.find("HsTextureSampleGrad(HsMaterialTexture0, 36u, EnvironmentWrap,") != std::string::npos &&
             surface.find("HsTextureSampleGrad(HsMaterialTexture3, 39u, EnvironmentWrap,") != std::string::npos &&
             surface.find("ctx.sampled_base_color") == std::string::npos &&
             surface.find("ctx.sampled_roughness") == std::string::npos,
             "version2 context evaluator retained untextured sampled-value inputs");
-    rd::ValidateMaterialSampleLayers(graph, std::array<std::uint32_t, 4>{4,4,4,4}, 3);
+    rd::ValidateMaterialSampleLayers(definition.prepared, std::array<std::uint32_t, 4>{4,4,4,4}, 3);
     document["id"] = "leaf_0";
     document["textures"] = {{"base_color", "environment/environment_leaf_basecolor.dds"},
         {"surface", "environment/environment_leaf_roughness.dds"},
@@ -1857,9 +1973,9 @@ void TestLegacyMaterialContextLowering()
     document["nodes"].push_back({{"id", "alpha"}, {"op", "sampled_alpha"}, {"type", "float"}});
     document["outputs"]["opacity"] = {{"node", "alpha"}, {"type", "float"}};
     const auto leaf = mc::ParseMaterialDefinition("leaf_0", document.dump());
-    const auto leaf_hlsl = rd::EmitEnvironmentMaterialContextHlsl(leaf.graph, 3);
+    const auto leaf_hlsl = rd::EmitEnvironmentMaterialContextHlsl(leaf.prepared, 3);
     const auto opacity = leaf_hlsl.substr(leaf_hlsl.find("float HsMaterialEvaluateOpacity"));
-    Require(leaf.graph.samplers[0].profile == rd::MaterialSamplerProfile::FoliageAnisotropicClamp &&
+    Require(leaf.prepared.Graph().samplers[0].profile == rd::MaterialSamplerProfile::FoliageAnisotropicClamp &&
             opacity.find("HsTextureSampleGrad(HsMaterialTexture0, 18u, FoliageClamp,") != std::string::npos &&
             opacity.find("HsMaterialTexture1") == std::string::npos &&
             opacity.find("ctx.sampled_alpha") == std::string::npos,
@@ -1894,6 +2010,9 @@ void TestGeometryPackage()
     Reject([&]{(void)rd::DecodeGeometryMetadata(metadata,deps,"render/other.rpkg");},"wrong page product accepted");
     auto reserved=metadata;reserved[88]=std::byte{1};Reject([&]{(void)rd::DecodeGeometryMetadata(reserved,deps,"render/fixture.rpkg");},"metadata reserved accepted");
     auto bad=g;bad.canonical_primitive_remap[1]=1;Reject([&]{rd::ValidateGeometryData(bad);},"duplicate primitive occurrence accepted");
+    bad=g;bad.vertices[0].normal[0]=std::numeric_limits<float>::quiet_NaN();Reject([&]{rd::ValidateGeometryData(bad);},"nonfinite geometry vertex field accepted");
+    bad=g;bad.vertices[0].bone_weights[0]=0.5f;Reject([&]{rd::ValidateGeometryData(bad);},"unnormalized geometry vertex weights accepted");
+    bad=g;bad.vertices[0].reserved=1;Reject([&]{rd::ValidateGeometryData(bad);},"reserved geometry vertex field accepted");
     bad=g;bad.meshlet_triangles[0]|=0x01000000;Reject([&]{rd::ValidateGeometryData(bad);},"packed triangle high byte accepted");
     bad=g;bad.meshlet_triangles[0]=0x000102;Reject([&]{rd::ValidateGeometryData(bad);},"reversed primitive orientation accepted");
     bad=g;bad.meshlet_vertex_refs[0]=3;Reject([&]{rd::ValidateGeometryData(bad);},"mixed meshlet material accepted");
@@ -2009,6 +2128,542 @@ void TestCharacterPackage()
     const auto bad_count = rd::BuildPackage(asset, dependencies, chunks);
     Reject([&] { (void)rd::DecodeCharacterPackage(bad_count, asset); },
            "cross-chunk bone count mismatch accepted");
+}
+
+void TestHeroWorkRawDecoding()
+{
+    hs::HeroWorkShaderLayout layout;
+    Require(hs::HeroWorkMakeShaderLayout(1, 1, 1, layout) && layout.pixels == 1 && layout.bitmap_words == 1 &&
+        layout.contributor_bytes == 512 && layout.phase_bytes == 3072 && layout.total_bytes == 67584,
+        "hero two exact bitmaps/header/aligned stride/slot total");
+    Require(hs::HeroWorkMakeShaderLayout(1280, 720, 3, layout) && layout.bitmap_words == 28800 &&
+        layout.total_bytes <= hs::kHeroWorkShaderStorageLimit, "hero actual three-slot capture fits bounded storage");
+    Require(!hs::HeroWorkMakeShaderLayout(0, 720, 3, layout) && !hs::HeroWorkMakeShaderLayout(1280, 0, 3, layout) &&
+        !hs::HeroWorkMakeShaderLayout(1280, 720, 0, layout), "hero zero diagnostic dimensions/slots are invalid");
+    Require(!hs::HeroWorkMakeShaderLayout(UINT32_MAX, 2, 1, layout) &&
+        !hs::HeroWorkMakeShaderLayout(1, 1, UINT32_MAX, layout), "hero checked pixel/slot product cannot wrap");
+    Require(!hs::HeroWorkMakeShaderLayout(3840, 2160, 3, layout), "hero exact two-bitmap 4K capture exceeds explicit 512MiB limit");
+
+    std::uint64_t qpc = 123;
+    Require(hs::HeroWorkCalibrate(1100, 1000, 5000, 100, 1000, qpc) && qpc == 6000,
+        "hero queue timestamp after calibration anchor");
+    Require(hs::HeroWorkCalibrate(900, 1000, 5000, 100, 1000, qpc) && qpc == 4000,
+        "hero timestamp before anchor must not unsigned-wrap");
+    Require(!hs::HeroWorkCalibrate(0, 1000, 100, 100, 1000, qpc) && qpc == 0,
+        "hero negative QPC calibration must be unavailable");
+    Require(!hs::HeroWorkCalibrate(1000, 1000, 5000, 0, 1000, qpc), "hero zero GPU frequency");
+    Require(!hs::HeroWorkCalibrate(1000, 1000, 5000, 100, 0, qpc), "hero zero QPC frequency");
+    Require(!hs::HeroWorkCalibrate(UINT64_MAX, 0, UINT64_MAX, 1, UINT64_MAX, qpc), "hero calibration overflow");
+    const std::array<std::uint32_t, 6> indexed{7, 30, 4, 6, UINT32_MAX, 0};
+    Require(hs::HeroWorkIndexedArgumentsValid(indexed, 36, 4), "hero actual indexed argument layout");
+    auto invalid = indexed; invalid[1] = 37;
+    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero index-count subtraction underflow");
+    invalid = indexed; invalid[3] = 7;
+    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero start-index range");
+    invalid = indexed; invalid[2] = 5;
+    Require(!hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "hero visible instance range");
+    invalid = indexed; invalid[2] = 0;
+    Require(hs::HeroWorkIndexedArgumentsValid(invalid, 36, 4), "zero-instance ExecuteIndirect still has copied arguments");
+    Require(hs::kHeroWorkStatisticsOffset + 14 * 8 == hs::kHeroWorkOcclusionOffset &&
+        hs::kHeroWorkOcclusionOffset + 8 == hs::kHeroWorkRowBytes && hs::kHeroWorkRowBytes % 8 == 0,
+        "hero native timestamp/statistics/occlusion readback spans overlap");
+}
+
+void TestHlodScenePreparation()
+{
+    auto storage = std::make_unique<hs::StaticRenderSceneStorage>();
+    storage->content_generation_id = "scene-generation";
+    storage->layout_abi = 2;
+    rd::SceneHlod scene;
+    scene.layout_abi = storage->layout_abi;
+    for (std::uint32_t index = 0; index < 2; ++index)
+    {
+        hs::RenderInstance instance;
+        instance.stable_id = 10 + index;
+        instance.asset_id = hs::MakeAssetId(index ? "source/b" : "source/a");
+        instance.mesh = hs::RenderMesh::Rock;
+        instance.position = {float(index), 0, 0};
+        storage->instances.push_back(instance);
+        storage->eligible_static_members.push_back({instance.stable_id, 100 + index, index});
+        rd::SceneHlodMember member;
+        member.stable_id = instance.stable_id; member.object_id = 100 + index;
+        member.asset_id = instance.asset_id; member.mesh_semantic = static_cast<std::uint32_t>(instance.mesh);
+        member.variant = instance.environment_variant; member.tint_rgba = instance.color_rgba;
+        member.position = instance.position; member.scale = instance.scale; member.yaw = instance.yaw;
+        scene.members.push_back(member);
+    }
+    scene.layout_digest = rd::ComputeSceneHlodLayoutDigest(scene.layout_abi, scene.members);
+    storage->eligible_layout_digest = scene.layout_digest;
+    std::reverse(scene.members.begin(), scene.members.end());
+    scene.dependencies = {"material/a", "material/b"};
+    scene.pages.push_back({"proxy/page"});
+    for (std::uint32_t index = 0; index < 2; ++index)
+    {
+        rd::SceneHlodProxy proxy;
+        proxy.material_dependency = index;
+        proxy.mesh_semantic = static_cast<std::uint32_t>(hs::RenderMesh::Rock);
+        scene.proxies.push_back(proxy);
+    }
+    const auto source = hs::FreezeStaticRenderScene(std::move(storage));
+    hs::HlodScenePreparation prepared;
+    const std::array<std::uint32_t, 2> materials{3, 1};
+    Require(prepared.Resolve(source, scene, "scene-generation", materials), "valid HLOD scene rejected");
+    Require(prepared.member_slots == std::vector<std::uint32_t>{1, 0} &&
+            prepared.proxy_order == std::vector<std::uint32_t>{1, 0},
+            "HLOD preparation lost native member order or canonical material/proxy order");
+    const auto *proxies = prepared.proxies.data();
+    const auto *slots = prepared.member_slots.data();
+    Require(prepared.Resolve(source, scene, "scene-generation", materials) &&
+            proxies == prepared.proxies.data() && slots == prepared.member_slots.data(),
+            "unchanged immutable scene must retain prepared proxy/member storage");
+    auto bad = std::make_unique<hs::StaticRenderSceneStorage>(*source);
+    bad->instances.front().asset_id = hs::MakeAssetId("wrong/geometry");
+    Require(!prepared.Resolve(hs::FreezeStaticRenderScene(std::move(bad)), scene, "scene-generation", materials) &&
+            prepared.source == source && prepared.proxies.data() == proxies,
+            "asset mismatch must not publish a partially rebound HLOD preparation");
+    bad = std::make_unique<hs::StaticRenderSceneStorage>(*source);
+    bad->instances.front().position.x += 1;
+    Require(!prepared.Resolve(hs::FreezeStaticRenderScene(std::move(bad)), scene, "scene-generation", materials),
+            "copied digest must not authenticate changed instance geometry");
+    bad = std::make_unique<hs::StaticRenderSceneStorage>(*source);
+    bad->eligible_static_members[1] = bad->eligible_static_members[0];
+    Require(!prepared.Resolve(hs::FreezeStaticRenderScene(std::move(bad)), scene, "scene-generation", materials),
+            "duplicate HLOD member must not overwrite a prepared slot");
+    const auto replacement = hs::FreezeStaticRenderScene(std::make_unique<hs::StaticRenderSceneStorage>(*source));
+    Require(prepared.Resolve(replacement, scene, "scene-generation", materials) && prepared.source == replacement &&
+            source->instances.size() == 2, "new scene owner must bind without retiring old packet storage");
+}
+
+void TestStaticShadowLayout()
+{
+    hs::StaticRenderSceneStorage scene;
+    const auto current_layout = [&] {
+        scene.BindExportedView();
+        return rd::StaticShadowLayoutDigest(scene.exported_view);
+    };
+    hs::RenderInstance rock;
+    rock.mesh = hs::RenderMesh::Rock;
+    rock.position = {2, 1, -3};
+    scene.instances.push_back(rock);
+    const auto layout = current_layout();
+    scene.content_generation_id = "different-generation";
+    scene.instances[0].stable_id = 456;
+    scene.instances[0].revisions.transform = 99;
+    scene.instances[0].environment_seed = 123;
+    Require(current_layout() == layout, "non-geometric identity changed shadow layout");
+    auto grass = rock;
+    grass.mesh = hs::RenderMesh::Grass;
+    scene.instances.push_back(grass);
+    Require(!rd::IsStaticShadowCaster(grass) && current_layout() == layout,
+            "wind geometry changed static shadow layout");
+    scene.instances[0].position.x += 1;
+    Require(current_layout() != layout, "changed rock transform reused shadow layout");
+    auto animated = rock;
+    animated.animation_clip_id = hs::AssetId{1};
+    Require(!rd::IsStaticShadowCaster(animated), "animated geometry entered static bake");
+    animated = rock; animated.vfx_owner_id = 1;
+    Require(!rd::IsStaticShadowCaster(animated), "VFX geometry entered static bake");
+    for (std::uint32_t variant : {0u, 3u, 7u})
+    {
+        auto detail = rock;
+        detail.mesh = hs::RenderMesh::GroundDetail;
+        detail.environment_variant = variant;
+        Require(!rd::IsStaticShadowCaster(detail), "wind-driven detail entered static bake");
+    }
+    scene.instances[0].mesh = hs::RenderMesh::Ground;
+    const auto ground_layout = current_layout();
+    ++scene.instances[0].environment_seed;
+    Require(current_layout() == ground_layout, "opaque terrain seed invalidated static shadows");
+}
+
+void TestStaticShadowArchive()
+{
+    constexpr auto count = rd::kStaticShadowPageTexels;
+    std::vector<float> clear(count), plane(count), cutout(count), noise(count);
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        const auto x = std::clamp<int>(int(i % rd::kStaticShadowPageTile) - 2, 0, 127);
+        const auto y = std::clamp<int>(int(i / rd::kStaticShadowPageTile) - 2, 0, 127);
+        plane[i] = .1f + float(x) * .003f + float(y) * .002f;
+        cutout[i] = ((x / 8 + y / 8) % 5 == 0) ? 0.0f : plane[i];
+    }
+    plane[0] = -0.0f;
+    plane[1] = std::numeric_limits<float>::denorm_min();
+    std::uint32_t random = 0x12345678;
+    for (auto &value : noise)
+    {
+        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+        auto bits = random & 0x3fffffff;
+        if (bits > 0x3f800000) bits -= 0x00800000;
+        value = std::bit_cast<float>(bits);
+    }
+    std::vector<float> decoded(count + 2, -123.0f);
+    const auto output = std::span(decoded).subspan(1, count);
+    const auto roundtrip = [&](const std::vector<float> &page) {
+        auto encoded = rd::EncodeStaticShadowPage(page);
+        rd::DecodeStaticShadowPage(encoded, output);
+        Require(std::ranges::equal(std::as_bytes(std::span(page)), std::as_bytes(output)) &&
+                decoded.front() == -123.0f && decoded.back() == -123.0f,
+                "shadow page words or guarded output changed");
+        return encoded;
+    };
+    const auto empty = roundtrip(clear);
+    Require(empty.empty(), "positive-zero shadow tile must be implicit clear");
+    const auto compressed = roundtrip(plane);
+    Require(!compressed.empty() && compressed[0] == std::byte{1}, "plane page should use lossless codec");
+    const auto holes = roundtrip(cutout);
+    const auto raw = roundtrip(noise);
+    Require(raw.size() == count * 4 + 1 && raw[0] == std::byte{0}, "incompressible page needs bounded raw fallback");
+    std::vector<float> negative_zero(count, -0.0f);
+    Require(!roundtrip(negative_zero).empty(), "negative-zero words must not become implicit clear");
+    Reject([&] { (void)rd::EncodeStaticShadowPage(std::span(plane).first(count - 1)); }, "short page encoded");
+    auto invalid_depth = plane;
+    invalid_depth[0] = std::numeric_limits<float>::quiet_NaN();
+    Reject([&] { (void)rd::EncodeStaticShadowPage(invalid_depth); }, "nonfinite page encoded");
+    invalid_depth[0] = 1.01f;
+    Reject([&] { (void)rd::EncodeStaticShadowPage(invalid_depth); }, "out-of-range page encoded");
+    Reject([&] { rd::DecodeStaticShadowPage(compressed, output.first(count - 1)); }, "short decode output accepted");
+    for (const auto length : {std::size_t{1}, compressed.size() / 2, compressed.size() - 1})
+        Reject([&] { rd::DecodeStaticShadowPage(std::span(compressed).first(length), output); }, "truncated codec accepted");
+    Reject([&] { rd::DecodeStaticShadowPage(std::span(raw).first(raw.size() - 1), output); }, "truncated raw page accepted");
+    auto malformed = compressed;
+    malformed[0] = std::byte{2};
+    Reject([&] { rd::DecodeStaticShadowPage(malformed, output); }, "unknown page codec accepted");
+    malformed = raw;
+    const auto nan_bits = std::bit_cast<std::uint32_t>(std::numeric_limits<float>::quiet_NaN());
+    for (unsigned i = 0; i < 4; ++i) malformed[1 + i] = std::byte((nan_bits >> (i * 8)) & 255);
+    Reject([&] { rd::DecodeStaticShadowPage(malformed, output); }, "nonfinite raw page decoded");
+    Require(decoded.front() == -123.0f && decoded.back() == -123.0f, "failed decode overwrote output guards");
+
+    rd::StaticShadowArchiveIndex index;
+    auto &d = index.description;
+    d.light_right = {1, 0, 0}; d.light_up = {0, 1, 0}; d.light_forward = {0, 0, 1};
+    d.depth_minimum = -4; d.depth_maximum = 12;
+    d.levels = {{{1, -1, -1, 1, 1}, {2, -2, -2, 1, 1}, {4, -1, 0, 3, 1}}};
+    d.layout_digest = rd::Sha256(compressed);
+    index.pages.resize(5);
+    index.pages[4].bytes = UINT32_MAX;
+    // Payload order follows baker chunks, independently of canonical directory slots.
+    std::vector<std::byte> payload;
+    const std::array encoded_pages{empty, compressed, holes, raw};
+    for (std::size_t i = encoded_pages.size(); i-- > 0;)
+    {
+        if (encoded_pages[i].empty()) continue;
+        auto &entry = index.pages[i];
+        entry.offset = payload.size(); entry.bytes = static_cast<std::uint32_t>(encoded_pages[i].size());
+        entry.digest = rd::Sha256(encoded_pages[i]);
+        payload.insert(payload.end(), encoded_pages[i].begin(), encoded_pages[i].end());
+    }
+    index.payload_bytes = payload.size();
+    const auto bytes = rd::BuildStaticShadowArchiveIndex(index);
+    const auto read = rd::ReadStaticShadowArchiveIndex(bytes);
+    Require(rd::BuildStaticShadowArchiveIndex(read) == bytes && read.pages[0].bytes == 0 &&
+            read.pages[4].bytes == UINT32_MAX && read.pages[3].offset == 0 && read.pages[1].offset > read.pages[3].offset,
+            "archive clear/missing page, page zero or reverse payload order changed");
+    auto coarse_only = index;
+    for (std::size_t level = 0; level < 2; ++level)
+        coarse_only.description.levels[level].width = coarse_only.description.levels[level].height = 0;
+    coarse_only.pages = {index.pages[0], index.pages[1], index.pages[3]};
+    const auto coarse_bytes = rd::BuildStaticShadowArchiveIndex(coarse_only);
+    const auto coarse_read = rd::ReadStaticShadowArchiveIndex(coarse_bytes);
+    Require(coarse_read.pages.size() == 3 && coarse_read.description.levels[0].width == 0 &&
+            coarse_read.description.levels[1].height == 0 && rd::BuildStaticShadowArchiveIndex(coarse_read) == coarse_bytes,
+            "coarse-only archive must omit empty fine-level directories");
+    coarse_only.description.levels[0].width = 1;
+    Reject([&] { (void)rd::BuildStaticShadowArchiveIndex(coarse_only); }, "one-sided zero level extent accepted");
+    for (std::size_t i = 0; i < encoded_pages.size(); ++i)
+    {
+        const auto &entry = read.pages[i];
+        const auto encoded = std::span(payload).subspan(static_cast<std::size_t>(entry.offset), entry.bytes);
+        Require(encoded.empty() || rd::Sha256(encoded) == entry.digest, "caller page authentication fixture");
+        rd::DecodeStaticShadowPage(encoded, output);
+        Require(std::ranges::equal(std::as_bytes(output), std::as_bytes(std::span(i == 0 ? clear : i == 1 ? plane : i == 2 ? cutout : noise))),
+                "archive directory did not resolve the current page");
+    }
+    const auto put32 = [](std::vector<std::byte> &b, std::size_t at, std::uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i) b[at + i] = std::byte((value >> (i * 8)) & 255);
+    };
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(std::span(bytes).first(80)); }, "short archive header accepted");
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(std::span(bytes).first(bytes.size() - 1)); }, "short archive directory accepted");
+    for (const std::size_t at : {0u, 8u, 16u, 24u, 28u, 92u, 188u, 256u + 12u, 256u + 16u})
+    {
+        auto bad = bytes; bad[at] ^= std::byte{0xff};
+        Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "invalid archive header/record accepted");
+    }
+    for (const auto [at, value] : std::array{
+            std::pair{48u, std::bit_cast<std::uint32_t>(2.0f)},
+            std::pair{60u, std::bit_cast<std::uint32_t>(std::numeric_limits<float>::infinity())},
+            std::pair{64u, 0u}, std::pair{88u, std::bit_cast<std::uint32_t>(-4.0f)},
+            std::pair{96u, 0u}, std::pair{108u, UINT32_MAX}, std::pair{100u, std::uint32_t(INT32_MAX)}})
+    {
+        auto bad = bytes; put32(bad, at, value);
+        if (at == 108) put32(bad, 112, 2);
+        if (at == 100) put32(bad, 108, 2);
+        Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "invalid basis/depth/level span/count accepted");
+    }
+    auto bad = bytes;
+    std::fill(bad.begin() + 156, bad.begin() + 188, std::byte{});
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "missing archive layout identity accepted");
+    bad = bytes; Put64(bad, 40, 6);
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "archive count disagreement accepted");
+    bad = bytes; Put64(bad, 256 + 48, UINT64_MAX);
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "overflowing archive page offset accepted");
+    bad = bytes; put32(bad, 256 + 48 + 8, count * 4 + 2);
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "oversized archive page accepted");
+    bad = bytes; std::fill(bad.begin() + 256 + 48 + 16, bad.begin() + 256 + 96, std::byte{});
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "missing encoded-page digest accepted");
+    bad = bytes; Put64(bad, 256 + 4 * 48, 1);
+    Reject([&] { (void)rd::ReadStaticShadowArchiveIndex(bad); }, "missing page with payload offset accepted");
+    auto invalid_index = index; invalid_index.pages[0].offset = 1;
+    Reject([&] { (void)rd::BuildStaticShadowArchiveIndex(invalid_index); }, "producer emitted malformed clear page");
+    invalid_index = index; invalid_index.description.light_up = d.light_right;
+    Reject([&] { (void)rd::BuildStaticShadowArchiveIndex(invalid_index); }, "nonorthogonal archive basis accepted");
+    invalid_index = index;
+    invalid_index.description.levels[0].minimum_x = INT32_MIN;
+    invalid_index.description.levels[0].page_world_size = std::numeric_limits<float>::max();
+    Reject([&] { (void)rd::BuildStaticShadowArchiveIndex(invalid_index); }, "unbounded level world span accepted");
+}
+
+void TestDdsConsumerRoles()
+{
+    // Independent wire fixtures: no production DDS writer constructs these headers.
+    const auto put = [](std::vector<std::byte> &bytes, std::size_t offset, std::uint32_t value) {
+        for (std::size_t index = 0; index < 4; ++index) bytes[offset + index] = std::byte((value >> (8 * index)) & 255);
+    };
+    const auto legacy = [&](std::uint32_t side, std::uint32_t mips) {
+        std::size_t size = 128;
+        for (std::uint32_t mip = 0; mip < mips; ++mip) size += std::size_t(std::max(1u, side >> mip)) * std::max(1u, side >> mip) * 4;
+        std::vector<std::byte> bytes(size);
+        for (const auto [offset, value] : std::array<std::pair<std::size_t, std::uint32_t>, 15>{{
+            {0, 0x20534444}, {4, 124}, {8, mips > 1 ? 0x2100fu : 0x100fu}, {12, side}, {16, side}, {20, side * 4},
+            {28, mips}, {76, 32}, {80, 65}, {88, 32}, {92, 255}, {96, 0xff00}, {100, 0xff0000}, {104, 0xff000000},
+            {108, mips > 1 ? 0x401008u : 0x1000u}}}) put(bytes, offset, value);
+        return bytes;
+    };
+    for (const auto [side, mips] : std::array{std::pair{2048u, 1u}, std::pair{1024u, 11u}})
+    {
+        auto bytes = legacy(side, mips);
+        const auto view = rd::DecodeDdsTexture(bytes);
+        const rd::TextureDescription spec{side, side, 1, mips, rd::kTextureFormatRgba8};
+        rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::CharacterLegacy, spec);
+        Require(view.subresources.size() == mips, "legacy Archer1/Slime11 mip count rejected");
+        auto wrong = spec; wrong.mip_count = mips == 1 ? 2 : 1;
+        Reject([&] { rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::CharacterLegacy, wrong); }, "legacy spec mip mismatch accepted");
+        Reject([&] { rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::CharacterFinalBc7, spec); }, "legacy proof substituted for final BC7 role");
+        for (const auto offset : {8u, 20u, 24u, 32u, 108u, 112u})
+        {
+            auto malformed = bytes; put(malformed, offset, 7);
+            Reject([&] { rd::ValidateDdsTextureRole(rd::DecodeDdsTexture(malformed), rd::DdsTextureRole::CharacterLegacy, spec); },
+                "legacy flags/pitch/depth/reserved/caps accepted");
+        }
+        bytes.pop_back();
+        Reject([&] { (void)rd::DecodeDdsTexture(bytes); }, "truncated legacy last mip accepted");
+    }
+    // 7x5, 3x2, 1x1: BC7 tails stay one whole 16-byte block per slice.
+    const rd::TextureDescription shape{7, 5, 2, 3, rd::kTextureFormatBc7Srgb};
+    std::vector<std::byte> bc7(148 + 192);
+    for (const auto [offset, value] : std::array<std::pair<std::size_t, std::uint32_t>, 13>{{
+        {0, 0x20534444}, {4, 124}, {8, 0xa1007}, {12, 5}, {16, 7}, {20, 64}, {28, 3}, {76, 32},
+        {80, 4}, {84, 0x30315844}, {108, 0x401008}, {128, rd::kTextureFormatBc7Srgb}, {132, 3}}}) put(bc7, offset, value);
+    put(bc7, 140, 2);
+    for (std::size_t index = 148; index < bc7.size(); ++index) bc7[index] = std::byte(index & 255);
+    const auto view = rd::DecodeDdsTexture(bc7);
+    rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::CharacterFinalBc7, shape);
+    Require(view.subresources.size() == 6 && view.subresources[0].row_pitch == 32 &&
+        view.subresources[0].slice_pitch == 64 && view.subresources[1].row_pitch == 16 &&
+        view.subresources.back().bytes.size() == 16 && view.subresources.back().bytes.data() == bc7.data() + 324,
+        "BC7 odd extent/array/tail partition changed");
+    // CPU padded-row copy checks sentinels. Actual native footprints require the native renderer gate.
+    std::array<std::byte, 512> padded; padded.fill(std::byte{0x5a});
+    for (std::size_t row = 0; row < 2; ++row)
+        std::memcpy(padded.data() + row * 256, view.subresources[0].bytes.data() + row * 32, 32);
+    Require(std::equal(padded.begin(), padded.begin() + 32, view.subresources[0].bytes.begin()) &&
+        padded[32] == std::byte{0x5a} && padded[255] == std::byte{0x5a} && padded[288] == std::byte{0x5a},
+        "BC block rows overwrote native-style padding");
+    for (const auto offset : {20u, 32u, 88u, 112u, 132u, 136u, 140u, 144u})
+    {
+        auto malformed = bc7; put(malformed, offset, 7);
+        Reject([&] { rd::ValidateDdsTextureRole(rd::DecodeDdsTexture(malformed), rd::DdsTextureRole::CharacterFinalBc7, shape); },
+            "BC7 role accepted invalid pitch/reserved/dimension/array flags");
+    }
+    auto wrong = shape; wrong.format = rd::kTextureFormatBc7;
+    Reject([&] { rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::CharacterFinalBc7, wrong); }, "BC7 color/data role format changed");
+    auto trailing = bc7; trailing.push_back(std::byte{});
+    Reject([&] { (void)rd::DecodeDdsTexture(trailing); }, "DDS trailing payload accepted");
+    Reject([&] { (void)rd::DecodeDdsTexture(std::span(bc7).first(147)); }, "truncated DX10 header accepted");
+    auto environment = bc7; put(environment, 24, 1);
+    rd::ValidateDdsTextureRole(rd::DecodeDdsTexture(environment), rd::DdsTextureRole::Environment, shape);
+    Reject([&] { rd::ValidateDdsTextureRole(view, rd::DdsTextureRole::Environment, shape); },
+        "character non-volume depth rule weakened the independent environment role");
+    auto rgba = bc7; rgba.resize(148 + 168); put(rgba, 8, 0x2100f); put(rgba, 12, 4); put(rgba, 16, 4);
+    put(rgba, 20, 16); put(rgba, 128, rd::kTextureFormatRgba8);
+    const rd::TextureDescription vfx{4, 4, 2, 3, rd::kTextureFormatRgba8};
+    rd::ValidateDdsTextureRole(rd::DecodeDdsTexture(rgba), rd::DdsTextureRole::VfxTexture, vfx);
+    put(rgba, 8, 0xa1007);
+    Reject([&] { rd::ValidateDdsTextureRole(rd::DecodeDdsTexture(rgba), rd::DdsTextureRole::VfxTexture, vfx); },
+        "VFX uncompressed texture accepted BC flags");
+    auto volume = rgba; volume.resize(148 + 64 * 64 * 64 * 4); put(volume, 8, 0x80100f);
+    put(volume, 12, 64); put(volume, 16, 64); put(volume, 20, 256); put(volume, 24, 64); put(volume, 28, 1);
+    put(volume, 108, 0x1008); put(volume, 112, 0x200000); put(volume, 132, 4); put(volume, 140, 1);
+    const rd::TextureDescription volume_spec{64, 64, 1, 1, rd::kTextureFormatRgba8};
+    const auto volume_view = rd::DecodeDdsTexture(volume);
+    rd::ValidateDdsTextureRole(volume_view, rd::DdsTextureRole::VfxVolume, volume_spec);
+    Require(volume_view.subresources.size() == 1 && volume_view.subresources[0].depth == 64 &&
+        volume_view.subresources[0].slice_pitch == 16384 && volume_view.payload.size() == 1048576,
+        "DDS volume depth slices were mistaken for array layers");
+    Reject([&] { rd::ValidateDdsTextureRole(volume_view, rd::DdsTextureRole::VfxTexture, volume_spec); },
+        "VFX volume role substituted for 2D texture");
+}
+
+void TestCharacterSemanticMips()
+{
+    using namespace hs::content;
+    CharacterMip checker{2, 2, {{{0, 0, 0, 0}}, {{1, 1, 1, 1}}, {{1, 1, 1, 1}}, {{0, 0, 0, 0}}}};
+    const auto color = BuildCharacterMipChain(checker, CharacterTextureSemantic::Color);
+    Require(color.size() == 2 && std::abs(color[1].pixels[0][0] - 0.735356983f) < 1e-6f &&
+        color[1].pixels[0][3] == 0.5f, "color RGB was averaged in sRGB or alpha was gamma encoded");
+    const auto data = BuildCharacterMipChain(checker, CharacterTextureSemantic::LinearData);
+    Require(data[1].pixels[0][0] == 0.5f && data[1].pixels[0][3] == 0.5f, "linear channels changed meaning");
+    CharacterMip normals{2, 2, {{{1, 0.5f, 0.5f, 0.2f}}, {{0.5f, 1, 0.5f, 0.4f}},
+                               {{1, 0.5f, 0.5f, 0.6f}}, {{0.5f, 1, 0.5f, 0.8f}}}};
+    const auto normal = BuildCharacterMipChain(normals, CharacterTextureSemantic::NormalRoughness);
+    Require(std::abs(normal[1].pixels[0][0] - 0.853553391f) < 1e-6f &&
+        std::abs(normal[1].pixels[0][1] - 0.853553391f) < 1e-6f && normal[1].pixels[0][2] == 0.5f &&
+        std::abs(normal[1].pixels[0][3] - 0.5f) < 1e-6f, "normal was not renormalized separately from roughness alpha");
+    CharacterMip unequal{2, 2, {{{0.625f, 0.5f, 0.5f, 0.2f}}, {{0.5f, 1, 0.5f, 0.4f}},
+                              {{0.625f, 0.5f, 0.5f, 0.6f}}, {{0.5f, 1, 0.5f, 0.8f}}}};
+    auto canonical = BuildCharacterMipChain(unequal, CharacterTextureSemantic::NormalRoughness);
+    const auto previous_lower = canonical[1].pixels;
+    const auto canonical_stats = CanonicalizeCharacterNormalBase(canonical.front());
+    Require(canonical_stats.texels == 4 && canonical_stats.minimum_length_squared == 0.0625 &&
+        canonical_stats.maximum_length_squared == 1, "base normal canonicalization lost source magnitude diagnostics");
+    Require(canonical[0].pixels[0][0] == 1 && canonical[0].pixels[0][1] == 0.5f &&
+        canonical[0].pixels[0][3] == unequal.pixels[0][3] && canonical[1].pixels == previous_lower &&
+        std::abs(canonical[1].pixels[0][0] - 0.6212678125f) < 1e-6f,
+        "base normalization changed roughness or reweighted the existing lower-mip normals");
+    CharacterMip bow{1, 1, {{{145.0f / 255, 114.0f / 255, 156.0f / 255, 0.37f}}}};
+    const auto original_bow = bow.pixels.front();
+    (void)CanonicalizeCharacterNormalBase(bow);
+    // Same linear TBN operation followed by normalize as the actual shader,
+    // including a non-orthonormal test basis. Positive magnitude must cancel.
+    const auto transformed_unit = [](CharacterTexel pixel) {
+        constexpr double basis[3][3]{{0.8, 0.1, -0.2}, {0.2, 0.9, 0.1}, {0.1, -0.3, 1.1}};
+        std::array<double, 3> result{}; double length{};
+        for (unsigned row = 0; row < 3; ++row)
+        { for (unsigned column = 0; column < 3; ++column) result[row] += basis[row][column] * (double(pixel[column]) * 2 - 1); length += result[row] * result[row]; }
+        for (auto &value : result) value /= std::sqrt(length);
+        return result;
+    };
+    const auto original_direction = transformed_unit(original_bow), canonical_direction = transformed_unit(bow.pixels.front());
+    for (unsigned channel = 0; channel < 3; ++channel)
+        Require(std::abs(original_direction[channel] - canonical_direction[channel]) < 1e-6,
+            "Bow base canonicalization changed point-sampled shader normal direction");
+    Require(bow.pixels.front()[3] == original_bow[3], "normal canonicalization changed roughness alpha");
+    CharacterMip zero_normal{1, 1, {{{0.5f, 0.5f, 0.5f, 0.7f}}}};
+    Reject([&] { (void)CanonicalizeCharacterNormalBase(zero_normal); }, "zero authored normal was silently replaced by another direction");
+    CharacterNormalBlock reference_block{},bad_block{};
+    for(auto &pixel:reference_block) pixel={0.5f,0.5f,1,0.37f};
+    reference_block[0]={0.8395207524f,0.1525834799f,0.618437469f,1};
+    bad_block=reference_block;bad_block[0]={0.5725490451f,0.5529412031f,0.3882353306f,1};
+    const auto failed_score=ScoreCharacterNormalBlock(reference_block,bad_block);
+    Require(!failed_score.valid&&failed_score.invalid_texels==1,
+        "real Bow mip1 opposite-hemisphere candidate passed the unchanged normal gate");
+    const auto exact_score=ScoreCharacterNormalBlock(reference_block,reference_block);
+    Require(exact_score.valid&&PreferCharacterNormalBlock(exact_score,failed_score),
+        "valid normal candidate did not outrank a lower scalar-error invalid candidate");
+    auto weaker=reference_block;weaker[0]={0.5f,0.5f,1,1};
+    const auto weaker_score=ScoreCharacterNormalBlock(reference_block,weaker);
+    Require(weaker_score.valid&&PreferCharacterNormalBlock(exact_score,weaker_score),
+        "normal candidates were not ranked by actual maximum angular error");
+    auto roughness_changed=reference_block;roughness_changed[7][3]=0.5f;
+    Require(!CharacterNormalAlphaErrorNotWorse(reference_block,bad_block,roughness_changed)&&
+        CharacterNormalAlphaErrorNotWorse(reference_block,bad_block,reference_block),
+        "normal repair silently increased a texel's roughness-alpha error");
+    auto zero_candidate=reference_block;zero_candidate[8]={0.5f,0.5f,0.5f,0.37f};
+    const auto zero_score=ScoreCharacterNormalBlock(reference_block,zero_candidate);
+    Require(!zero_score.valid&&zero_score.invalid_texels==1,
+        "normal repair candidate skipped a non-failing neighbor texel in its 4x4 block");
+    auto placeholder = CharacterConstantSlice(8, 8, {128, 128, 255, 255});
+    const auto flat = BuildCharacterMipChain(placeholder, CharacterTextureSemantic::NormalRoughness);
+    Require(flat.size() == 4 && flat.front().pixels.size() == 64 && flat.back().width == 1 &&
+        flat.back().pixels[0][3] == 1, "placeholder was not expanded before building its final mip chain");
+    CharacterMip mask{4, 4, std::vector<CharacterTexel>(16, {1, 1, 1, 0})};
+    for (const auto index : {0u, 2u, 8u, 10u}) mask.pixels[index][3] = 1;
+    const auto masked = BuildCharacterMipChain(mask, CharacterTextureSemantic::Color, {0.2f, false});
+    Require(std::ranges::count_if(masked[1].pixels, [](const auto &pixel) { return pixel[3] >= 0.2f; }) == 1,
+        "alpha coverage changed beyond its nearest representable mip texel count");
+    auto body = CharacterConstantSlice(4, 4, {128, 128, 128, 173});
+    const auto translucent = BuildCharacterMipChain(body, CharacterTextureSemantic::Color, {0.98f, true});
+    for (const auto &mip : translucent)
+        for (const auto &pixel : mip.pixels)
+            Require(std::abs(pixel[3] - 173.0f / 255.0f) < 1e-6f, "coverage correction made homogeneous slime body opaque");
+    auto invalid = checker; invalid.pixels[0][3] = std::numeric_limits<float>::quiet_NaN();
+    Reject([&] { (void)BuildCharacterMipChain(invalid, CharacterTextureSemantic::Color); }, "nonfinite source channel accepted");
+}
+
+void TestCharacterBc7CoverageRepair()
+{
+    using namespace hs::content;
+    // Independent mode5 alpha-field decoding from the fixed BC7 bit layout.
+    const auto alpha_bytes = [](const CharacterBc7Block &block) {
+        const auto bits = [&](unsigned offset, unsigned count) {
+            unsigned value{};
+            for (unsigned bit = 0; bit < count; ++bit)
+                value |= unsigned((block[(offset + bit) / 8] >> ((offset + bit) % 8)) & 1u) << bit;
+            return value;
+        };
+        Require(bits(0, 6) == 0x20 && bits(6, 2) == 0, "repair did not produce unrotated BC7 mode5");
+        const auto a = bits(50, 8), b = bits(58, 8);
+        constexpr std::array<unsigned, 4> interpolation{0, 21, 43, 64};
+        std::array<unsigned, 16> result{};
+        unsigned offset = 97;
+        for (unsigned pixel = 0; pixel < 16; ++pixel)
+        {
+            const auto count = pixel ? 2u : 1u;
+            const auto index = bits(offset, count); offset += count;
+            result[pixel] = ((64 - interpolation[index]) * a + interpolation[index] * b + 32) / 64;
+        }
+        return result;
+    };
+    CharacterBc7Texels source{};
+    for (auto &pixel : source) pixel = {0, 0, 0, 1};
+    CharacterBc7Block original{}, encoded{}; bool retained{};
+    Require(EncodeCharacterBc7CoverageBlock(source, {0.2f, false}, original, encoded, retained) && !retained,
+        "mode5 constant block repair failed");
+    CharacterBc7Block golden{}; golden[0] = 0x20; golden[6] = 0xfc; golden[7] = 0xff; golden[8] = 0x03;
+    Require(encoded == golden, "BC7 mode5 constant black/opaque golden packing differs");
+    for (const auto alpha : alpha_bytes(encoded)) Require(alpha == 255, "mode5 opaque anchor changed");
+
+    for (unsigned pixel = 0; pixel < 16; ++pixel)
+        source[pixel] = {0.25f, 0.5f, 0.75f, pixel % 2 ? 173.0f / 255.0f : 1.0f};
+    Require(EncodeCharacterBc7CoverageBlock(source, {0.98f, true}, original, encoded, retained),
+        "mode5 real slime body/opaque anchors failed");
+    auto decoded = alpha_bytes(encoded);
+    for (unsigned pixel = 0; pixel < 16; ++pixel)
+        Require(decoded[pixel] == (pixel % 2 ? 173u : 255u), "mode5 anchor or first-index endpoint swap changed alpha");
+
+    original.fill(0xa5); original[0] = 0x20;
+    Require(EncodeCharacterBc7CoverageBlock(source, {0.98f, true}, original, encoded, retained) && retained,
+        "existing unrotated mode5 RGB was needlessly recompressed");
+    for (unsigned bit = 0; bit < 128; ++bit)
+        if (bit < 50 || (bit >= 66 && bit < 97))
+            Require(((original[bit / 8] >> (bit % 8)) & 1u) == ((encoded[bit / 8] >> (bit % 8)) & 1u),
+                "alpha repair modified original mode5 RGB/header bits");
+
+    // Two semantic float decisions can collapse to the same R8 input value.
+    // The repair must preserve those original decisions, not rewrite the reference.
+    for (unsigned pixel = 0; pixel < 16; ++pixel)
+        source[pixel][3] = pixel % 2 ? std::nextafter(0.2f, 0.0f) : 0.2f;
+    Require(EncodeCharacterBc7CoverageBlock(source, {0.2f, false}, original, encoded, retained),
+        "R8 threshold crossing was not repaired against semantic float mip");
+    decoded = alpha_bytes(encoded);
+    for (unsigned pixel = 0; pixel < 16; ++pixel)
+        Require((float(decoded[pixel]) / 255.0f >= 0.2f) == (source[pixel][3] >= 0.2f),
+            "mode5 changed semantic float cutoff mask after R8 quantization");
+
+    source[0][3] = 0; source[1][3] = 173.0f / 255.0f; source[2][3] = 1;
+    Require(!EncodeCharacterBc7CoverageBlock(source, {0.98f, true}, original, encoded, retained),
+        "mode5 pretended that zero/body173/opaque255 are always simultaneously representable");
 }
 
 void TestTexturePackage()
@@ -2148,6 +2803,15 @@ int main(int argc, char **argv)
         RunNamed("TestCharacterPackage", TestCharacterPackage);
         RunNamed("TestGeometryPackage", TestGeometryPackage);
         RunNamed("TestTexturePackage", TestTexturePackage);
+        RunNamed("TestDdsConsumerRoles", TestDdsConsumerRoles);
+        RunNamed("TestCharacterSemanticMips", TestCharacterSemanticMips);
+        RunNamed("TestCharacterBc7CoverageRepair", TestCharacterBc7CoverageRepair);
+        RunNamed("TestHlodScenePreparation", TestHlodScenePreparation);
+        RunNamed("TestHeroWorkRawDecoding", TestHeroWorkRawDecoding);
+        RunNamed("TestVirtualShadowGuarantees", TestVirtualShadowGuarantees);
+        RunNamed("TestStaticShadowLayout", TestStaticShadowLayout);
+        RunNamed("TestStaticShadowArchive", TestStaticShadowArchive);
+        RunNamed("TestReleaseAudioCodegen", TestReleaseAudioCodegen);
         if (dump_numeric_fixtures) DumpNumericMaterialHlsl(dump_directory);
         std::cout << "render package tests passed\n";
         return 0;

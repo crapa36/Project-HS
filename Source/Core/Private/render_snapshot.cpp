@@ -193,7 +193,6 @@ void RenderSnapshotStorage::Clear() noexcept
     ui_.clear();
     persistent_vfx_.clear();
     static_scene_.reset();
-    ClearSceneDelta();
 }
 
 bool RenderSnapshotStorage::AddInstance(const RenderInstance &instance)
@@ -227,6 +226,24 @@ bool RenderSnapshotStorage::AddCapturedInstance(const CapturedRenderInstance &ca
     return true;
 }
 
+bool RenderSnapshotStorage::AppendInstance(const RenderInstance &instance)
+{
+    instances_.push_back(instance);
+    return true;
+}
+
+bool RenderSnapshotStorage::AppendPose(const AnimationPoseRef &pose)
+{
+    poses_.push_back(pose);
+    return true;
+}
+
+bool RenderSnapshotStorage::AppendCapturedInstance(const CapturedRenderInstance &capture)
+{
+    captured_instances_.push_back(capture);
+    return true;
+}
+
 bool RenderSnapshotStorage::AddLight(const LightView &light)
 {
     lights_.push_back(light);
@@ -252,38 +269,14 @@ std::size_t RenderSnapshotStorage::InstanceCount() const noexcept
 
 RenderSnapshot RenderSnapshotStorage::View() const noexcept
 {
-    RenderSceneDeltaView scene_delta;
-    if (scene_delta_published_)
-    {
-        scene_delta = {scene_delta_.instances,
-                       scene_delta_.destroyed,
-                       scene_delta_.base_generation,
-                       scene_delta_.generation,
-                       scene_delta_.created,
-                       scene_delta_.updated,
-                       scene_delta_.unchanged,
-                       true};
-    }
     return {header, instances_, poses_, lights_, ui_, persistent_vfx_, camera,
-            static_scene_, scene_delta, captured_instances_};
+            static_scene_, captured_instances_};
 }
 
 void RenderSnapshotStorage::SetStaticScene(
     std::shared_ptr<const StaticRenderScene> scene) noexcept
 {
     static_scene_ = std::move(scene);
-}
-
-void RenderSnapshotStorage::SetSceneDelta(RenderSceneDelta delta)
-{
-    scene_delta_ = std::move(delta);
-    scene_delta_published_ = true;
-}
-
-void RenderSnapshotStorage::ClearSceneDelta() noexcept
-{
-    scene_delta_ = {};
-    scene_delta_published_ = false;
 }
 
 } // namespace hs

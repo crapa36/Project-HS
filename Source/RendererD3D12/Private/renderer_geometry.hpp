@@ -1,10 +1,28 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
 namespace hs
 {
+// Four existing raw descriptors address aligned slices of one immutable page.
+constexpr bool GeometryPageLayout(const std::array<std::uint64_t, 4> &sizes,
+    std::array<std::uint64_t, 4> &offsets, std::uint64_t &total) noexcept
+{
+    total = 0;
+    for (std::size_t i = 0; i < sizes.size(); ++i)
+    {
+        if (!sizes[i] || sizes[i] % 4 || sizes[i] > UINT32_MAX || total > UINT32_MAX - 15u)
+            return false;
+        total = (total + 15u) & ~std::uint64_t(15u);
+        offsets[i] = total;
+        if (sizes[i] > UINT32_MAX - total) return false;
+        total += sizes[i];
+    }
+    return true;
+}
+
 inline constexpr std::uint32_t kGeometryDrawRecordCapacity = 4096;
 inline constexpr std::uint32_t kGeometryGpuSceneRefs = 1u;
 inline constexpr std::uint32_t kGeometryMeshEligible = 2u;

@@ -19,7 +19,7 @@ constexpr std::uint32_t Hash(std::string_view s)
 { std::uint32_t h = 2166136261u; for (const unsigned char c : s) { h ^= c; h *= 16777619u; } return h; }
 constexpr std::uint64_t Hash64(std::string_view s)
 { std::uint64_t h = 14695981039346656037ull; for (const unsigned char c : s) { h ^= c; h *= 1099511628211ull; } return h; }
-template<class T> bool Range(VfxRange r, const std::vector<T> &v)
+template<class T> bool Range(VfxRange r, std::span<const T> v)
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 bool Finite(Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 std::uint32_t Mix(std::uint32_t v)
@@ -33,7 +33,7 @@ constexpr Recipe recipes[]{
     {Hash("diamond_motes"), VfxMotionKind::ShortUpwardSpiral, VfxImpactShape::DiamondMote, .035f, .15f, .6f, 5}
 };
 struct SourceParams { std::uint32_t count{}; float curl{.2f}, drag{.8f}; };
-std::optional<SourceParams> DecodeParams(const VfxProgramData &p, const VfxSourceRecord &source)
+std::optional<SourceParams> DecodeParams(const VfxProgramView &p, const VfxSourceRecord &source)
 {
     if (!Range(source.parameters, p.parameters)) return {};
     SourceParams result;
@@ -59,7 +59,7 @@ std::optional<SourceParams> DecodeParams(const VfxProgramData &p, const VfxSourc
     return count_seen ? std::optional(result) : std::nullopt;
 }
 template<class Input>
-bool DecodeMask(const VfxProgramData &p, const VfxOutputRecord &o, const Input &input, VfxFlashSpawnInput &out)
+bool DecodeMask(const VfxProgramView &p, const VfxOutputRecord &o, const Input &input, VfxFlashSpawnInput &out)
 {
     if (!Range(o.textures, p.texture_bindings)) return false;
     for (const auto &b : std::span(p.texture_bindings).subspan(o.textures.first, o.textures.count))
@@ -103,7 +103,7 @@ struct PersistentMoteParameters
 };
 
 std::optional<PersistentMoteParameters> DecodePersistentMoteParameters(
-    const VfxProgramData &program, const VfxOutputRecord &output, float footprint)
+    const VfxProgramView &program, const VfxOutputRecord &output, float footprint)
 {
     if (!Range(output.parameters, program.parameters) || !std::isfinite(footprint) ||
         footprint <= 0.0f) return {};
@@ -164,7 +164,7 @@ constexpr std::array kSparkEffects{
     Hash64("particle.skill.ricochet_arrow"),
     Hash64("particle.upgrade.arrow_rain.incoming_arrow")};
 struct SparkParams { std::uint32_t count{}; float cone_degrees{}, drag{}; };
-std::optional<SparkParams> DecodeSparkParams(const VfxProgramData &p,
+std::optional<SparkParams> DecodeSparkParams(const VfxProgramView &p,
                                              const VfxSourceRecord &source)
 {
     if (!Range(source.parameters, p.parameters) || source.parameters.count != 3) return {};
@@ -197,7 +197,7 @@ std::optional<SparkParams> DecodeSparkParams(const VfxProgramData &p,
         return {};
     return result;
 }
-bool SparkTextures(const VfxProgramData &p, const VfxOutputRecord &output)
+bool SparkTextures(const VfxProgramView &p, const VfxOutputRecord &output)
 {
     if (!Range(output.textures, p.texture_bindings) || output.textures.count != 3) return false;
     bool gradient = false, curve = false, optional_mask = false;
@@ -246,7 +246,7 @@ Float3 SparkDirection(Float3 velocity, float cone_degrees, std::uint32_t seed)
 }
 
 template<class Input>
-void AppendRateMotes(const VfxProgramData &program, const Input &owner,
+void AppendRateMotes(const VfxProgramView &program, const Input &owner,
                           Float3 position, float extent, const VfxEffectRecord &effect,
                           std::uint64_t effect_id, std::int64_t current_ticks,
                           double duration_ticks, std::vector<VfxFlashSpawnInput> &result)
@@ -363,7 +363,7 @@ void AppendRateMotes(const VfxProgramData &program, const Input &owner,
     }
 }
 
-void AppendPersistentTrapMotes(const VfxProgramData &program,
+void AppendPersistentTrapMotes(const VfxProgramView &program,
                                const VfxPersistentInput &owner,
                                const VfxCirclePayload &circle,
                                std::vector<VfxFlashSpawnInput> &result)
@@ -422,7 +422,7 @@ void AppendPersistentTrapMotes(const VfxProgramData &program,
                           current_ticks, duration_ticks, result);
 }
 }
-std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramData &program, std::span<const VfxEventInput> inputs)
+std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramView &program, std::span<const VfxEventInput> inputs)
 {
     std::vector<VfxFlashSpawnInput> result;
     for (const auto &input : inputs)
@@ -562,7 +562,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedMoteCommands(const VfxProgramData &
     return result;
 }
 std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
-    const VfxProgramData &program, std::span<const VfxEventInput> events,
+    const VfxProgramView &program, std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> owners)
 {
     std::vector<VfxOwnedStatusTickMoteCommand> result;
@@ -653,7 +653,7 @@ std::vector<VfxOwnedStatusTickMoteCommand> BuildVfxOwnedStatusTickMoteCommands(
     return result;
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramData &program,
+std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramView &program,
     std::span<const VfxEventInput> inputs, Tick current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;
@@ -776,7 +776,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxOwnedMoteCommands(const VfxProgramData &
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> owners)
+    const VfxProgramView &program, std::span<const VfxPersistentInput> owners)
 {
     std::vector<VfxFlashSpawnInput> result;
     constexpr double lifetime_ticks = kPersistentMoteLifetimeTicks;
@@ -979,8 +979,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommands(
     return result;
 }
 
-std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramData &previous,
-                                          const VfxProgramData &next) noexcept
+std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
+                                          const VfxProgramView &next) noexcept
 {
     const auto count = cursors_.size();
     std::erase_if(cursors_, [&](Cursor &cursor) {
@@ -1026,7 +1026,7 @@ std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramData &previous,
 }
 
 std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> owners,
+    const VfxProgramView &program, std::span<const VfxPersistentInput> owners,
     Tick current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;

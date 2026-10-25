@@ -13,6 +13,7 @@
 namespace hs
 {
 inline constexpr std::uint32_t kEnvironmentLayoutAbi = 2;
+inline constexpr Float3 kEnvironmentSunDirection{-0.45f, -0.82f, 0.35f};
 
 struct EnvironmentStaticMember
 {

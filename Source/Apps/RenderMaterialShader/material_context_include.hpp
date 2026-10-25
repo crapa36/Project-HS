@@ -1,11 +1,31 @@
 #pragma once
 // Included inside each producer namespace after its Require/SemanticInput helpers.
-std::uint32_t AddSurfaceReflectionInputs(ap::ActionSpec &spec, const fs::path &source_root)
+class PreparedMaterialInputs
+{
+  public:
+    explicit PreparedMaterialInputs(const fs::path &source_root) : source_root_(source_root) {}
+
+    const hs::material_content::MaterialDefinition &Get(std::string_view name)
+    {
+        const auto found = definitions_.find(name);
+        if (found != definitions_.end()) return found->second;
+        const auto path = source_root_ / ("ContentSource/Materials/" + std::string(name) + ".json");
+        return definitions_.emplace(std::string(name),
+            hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path))).first->second;
+    }
+
+  private:
+    const fs::path &source_root_;
+    std::map<std::string, hs::material_content::MaterialDefinition, std::less<>> definitions_;
+};
+
+std::uint32_t AddSurfaceReflectionInputs(ap::ActionSpec &spec, const fs::path &source_root,
+                                       PreparedMaterialInputs &materials)
 {
     std::uint32_t mask{};
     const auto add = [&](std::string_view name) {
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
-        const auto reflection = rd::AnalyzeClosure(hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path)).graph);
+        const auto reflection = rd::AnalyzeClosure(materials.Get(name).prepared);
         mask |= reflection.varying_mask;
         const auto bytes = rd::EncodeMaterialSurfaceLayout({reflection.capability_mask, reflection.varying_mask});
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/surface-reflection", path, bytes));
@@ -15,15 +35,16 @@ std::uint32_t AddSurfaceReflectionInputs(ap::ActionSpec &spec, const fs::path &s
     return mask;
 }
 
-std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root)
+std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root,
+                               PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
     for (std::size_t ordinal = 0; ordinal < rd::kHeroMaterialNames.size(); ++ordinal)
     {
         const auto name = rd::kHeroMaterialNames[ordinal];
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
-        const auto graph = hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path)).graph;
-        const auto functions = rd::EmitHeroMaterialContextHlsl(graph,
+        const auto &prepared = materials.Get(name).prepared;
+        const auto functions = rd::EmitHeroMaterialContextHlsl(prepared,
             "HsHeroEvaluateSurface_" + std::to_string(ordinal), "HsHeroEvaluateOpacity_" + std::to_string(ordinal));
         generated += functions;
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/hero-context-ir", path,
@@ -41,15 +62,16 @@ std::string HeroContextInclude(ap::ActionSpec &spec, const fs::path &source_root
 
 
 
-std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_root)
+std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_root,
+                                   PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
     for (std::size_t ordinal = 0; ordinal < rd::kAuthoredMaterialNames.size(); ++ordinal)
     {
         const std::string name(rd::kAuthoredMaterialNames[ordinal]);
         const auto path = source_root / ("ContentSource/Materials/" + name + ".json");
-        const auto definition = hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path));
-        const auto function = rd::EmitUniformClosureHlsl(definition.graph,
+        const auto &definition = materials.Get(name);
+        const auto function = rd::EmitUniformClosureHlsl(definition.prepared,
             "HsMaterialApplyUniformLayers_" + std::to_string(ordinal));
         generated += function;
         spec.inputs.push_back(SemanticInput("material/" + name + "/uniform-closure-ir", path,
@@ -65,8 +87,8 @@ std::string DeferredContextInclude(ap::ActionSpec &spec, const fs::path &source_
     {
         const auto name = rd::kHeroMaterialNames[ordinal];
         const auto path = source_root / ("ContentSource/Materials/" + std::string(name) + ".json");
-        const auto graph = hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(path)).graph;
-        const auto function = rd::EmitUniformClosureHlsl(graph,
+        const auto &prepared = materials.Get(name).prepared;
+        const auto function = rd::EmitUniformClosureHlsl(prepared,
             "HsHeroApplyUniformLayers_" + std::to_string(ordinal));
         generated += function;
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/uniform-closure-ir", path,

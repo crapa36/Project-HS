@@ -48,8 +48,7 @@ Result D3D12Renderer::Impl::AddGeometryDrawRecord(
     std::uint32_t mesh_id, std::uint32_t &packed_pass)
 {
     if (frame_slot >= kFrameCount || view > 3 || page.page_slot >= kGeometryPageCapacity ||
-        !page.vertices.resource || !page.indices.resource || !page.meshlets.resource ||
-        !page.auxiliary.resource || (flags & ~(kGeometryGpuSceneRefs | kGeometryMeshEligible |
+        !page.storage.resource || (flags & ~(kGeometryGpuSceneRefs | kGeometryMeshEligible |
             kGeometryStaticInstances | kGeometryPreviousPage | kGeometryBuiltin |
             kGeometryExplicitMaterialBinding)) != 0 ||
         static_cast<std::uint64_t>(visible_base) + instance_count > UINT32_MAX)

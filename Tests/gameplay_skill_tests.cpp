@@ -279,7 +279,7 @@ void TestCombatPresentationContracts()
             return instance.mesh == hs::RenderMesh::PlayerProjectile;
         });
     hs::GameReadModelStorage release_model;
-    simulation.WriteReadModel(release_model);
+    simulation.CopyReadModelForDevelopment(release_model);
     Check(arrow != snapshot.View().instances.end() &&
               !release_model.View().projectiles.empty() &&
               std::abs(arrow->position.x -
@@ -398,7 +398,7 @@ void TestAttackSpeedAnimationRate()
     hs::RenderSnapshotStorage snapshot(128, 4, 2, 64);
     Check(WriteSnapshot(simulation, snapshot), "level-ten attack snapshot");
     hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     const auto attack_interval = static_cast<std::uint32_t>(
         std::floor(60.0f / model.View().effective_attack_speed + 0.5f));
     Check(std::abs(snapshot.View().poses.front().upper_body_playback_rate -
@@ -585,7 +585,7 @@ void TestArrowRainTrackingProjectileMoves()
                std::abs(moved->position.z - first_position.z) > 0.1f),
           "arrow rain tracking arrow advances instead of standing still");
     hs::GameReadModelStorage second_model;
-    simulation.WriteReadModel(second_model);
+    simulation.CopyReadModelForDevelopment(second_model);
     const auto current_projectile = std::ranges::find_if(
         second_model.View().projectiles, [](const hs::ProjectileView &projectile) {
             return projectile.player_owned;
@@ -868,7 +868,7 @@ void TestMultiShotCastVfxIsPerFan()
               signal.geometry.end_tick == signal.tick,
           "multishot cone geometry follows the effective fan and skill range");
     hs::GameReadModelStorage release_model;
-    simulation.WriteReadModel(release_model);
+    simulation.CopyReadModelForDevelopment(release_model);
     const auto has_outer_angle = [&release_model](float expected) {
         return std::ranges::any_of(release_model.View().projectiles,
                                    [expected](const hs::ProjectileView &projectile) {

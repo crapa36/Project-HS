@@ -225,11 +225,11 @@ Result Window::Create(std::uint32_t width, std::uint32_t height, bool visible, b
     return Result::Success();
 }
 
-bool Window::PumpMessages(Result *failure)
+bool Window::PumpMessages(Result *failure, bool sample_input)
 {
     if (failure) *failure = Result::Success();
     MSG message{};
-    while (!dpi_error_ && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+    while (!dpi_error_ && runtime_detail::PeekMainMessage(message, sample_input))
     {
         if (message.message == WM_QUIT)
         {
@@ -247,7 +247,7 @@ bool Window::PumpMessages(Result *failure)
         return false;
     }
 
-    if (accepting_input_ && window_)
+    if (sample_input && accepting_input_ && window_)
     {
         POINT cursor{};
         if (GetCursorPos(&cursor) && ScreenToClient(window_, &cursor))
@@ -638,10 +638,21 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         return GET_RAWINPUT_CODE_WPARAM(wparam) == RIM_INPUT
                    ? DefWindowProcW(window, message, wparam, lparam) : 0;
     case WM_KILLFOCUS:
+    {
+        // System messages can overtake deferred input while the native token is
+        // parked. Those queued values belong to the closing focus epoch.
+        MSG stale{};
+        while (PeekMessageW(&stale, window, WM_INPUT, WM_INPUT, PM_REMOVE))
+            if (GET_RAWINPUT_CODE_WPARAM(stale.wParam) == RIM_INPUT)
+                DefWindowProcW(window, stale.message, stale.wParam, stale.lParam);
+        while (PeekMessageW(&stale, window, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE)) {}
+        while (PeekMessageW(&stale, window, WM_MOUSEFIRST, WM_MOUSELAST, PM_REMOVE)) {}
         held_ = {};
         channels_->held_input.store(held_, std::memory_order_release);
         channels_->focus_epoch.fetch_add(1, std::memory_order_release);
+        channels_->NotifyMain();
         return 0;
+    }
     case WM_SIZE:
         if (wparam != SIZE_MINIMIZED)
         {
@@ -655,10 +666,12 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         // Keep the HWND alive until the render thread drains and releases DXGI.
         // The owning Window destructor runs after RunApplication joins it.
         channels_->stop_requested.store(true, std::memory_order_release);
+        channels_->NotifyMain();
         return 0;
     case WM_DESTROY:
         window_ = nullptr;
         channels_->stop_requested.store(true, std::memory_order_release);
+        channels_->NotifyMain();
         PostQuitMessage(0);
         return 0;
     default:

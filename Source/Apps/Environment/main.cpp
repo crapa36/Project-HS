@@ -101,29 +101,23 @@ void AddInputs(ap::ActionSpec& spec, const fs::path& source_root,
 }
 
 bool IsCurrent(const fs::path& build_root, const ap::ActionSpec& spec,
-               const std::vector<std::string>& names,
-               ap::ProductReadPolicy product_read_policy = ap::ProductReadPolicy::VerifyIntegrity)
+               const std::vector<std::string>& names)
 {
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
     if (!fs::exists(result_path) || !fs::exists(result_path.parent_path() / "result.d"))
         return false;
-    const auto result = ap::Json::parse(ap::ReadBytes(result_path));
-    if (result.at("action_id") != spec.action_id ||
-        result.at("recipe_id") != spec.recipe_id ||
-        result.at("recipe_version") != spec.recipe_version ||
-        result.at("action_key") != ap::ActionKey(spec) ||
-        !result.at("products").is_array() || result.at("products").size() != names.size())
-        return false;
-    for (const auto& name : names) {
-        ap::UpstreamProduct dependency;
-        fs::path product_path;
-        try {
-            ap::ReadActionResult(build_root, spec.namespace_path,
-                                 "environment/" + name, dependency, product_path,
-                                 product_read_policy);
-        } catch (const std::exception&) {
-            return false;
+    try {
+        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
+        if (snapshot.ActionId() != spec.action_id ||
+            snapshot.ActionKeyValue() != ap::ActionKey(spec) ||
+            snapshot.ProductCount() != names.size()) return false;
+        for (const auto& name : names) {
+            ap::UpstreamProduct dependency;
+            fs::path product_path;
+            snapshot.ReadProduct("environment/" + name, dependency, product_path);
         }
+    } catch (const std::exception&) {
+        return false;
     }
     return true;
 }
@@ -177,10 +171,7 @@ void Produce(std::string_view mode, const fs::path& source_root,
     }
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
 
-    const auto product_read_policy = mode == "texture-role" || mode == "histogram"
-        ? ap::ProductReadPolicy::MetadataOnly
-        : ap::ProductReadPolicy::VerifyIntegrity;
-    if (IsCurrent(build_root, spec, names, product_read_policy)) {
+    if (IsCurrent(build_root, spec, names)) {
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         std::cout << spec.action_id << " current\n";
         return;

@@ -46,21 +46,13 @@ float GetFloat(std::span<const std::byte> bytes, std::size_t offset)
     return std::bit_cast<float>(Get(bytes, offset, 4));
 }
 
-void Validate(const CharacterPackageData &data, bool validate_mask, bool embedded = true)
+template <typename Vertex>
+void ValidateVertices(std::span<const Vertex> vertices, std::uint32_t bone_count,
+                      std::uint32_t material_count)
 {
-    Require(data.bone_count > 0 && data.bone_count <= kMaxCharacterBones &&
-            data.material_count > 0 && data.material_count <= kMaxCharacterMaterials &&
-            (!embedded || (!data.vertices.empty() && data.vertices.size() <= 3'000'000 &&
-            data.vertices.size() % 3 == 0)) &&
-            data.parents.size() == data.bone_count &&
-            data.inverse_bind_matrices.size() == data.bone_count &&
-            data.upper_body_weights.size() == data.bone_count &&
-            data.clips.size() == static_cast<std::size_t>(CharacterAnimationClip::Count) &&
-            !data.transforms.empty() && data.transforms.size() <= 800'000 &&
-            std::isfinite(data.ground_offset), "invalid character shape");
-    for (const auto &vertex : data.vertices)
+    for (const auto &vertex : vertices)
     {
-        Require(vertex.material_index < data.material_count && vertex.reserved == 0,
+        Require(vertex.material_index < material_count && vertex.reserved == 0,
                 "invalid character vertex material/reserved");
         const auto finite = [](float x) { return std::isfinite(x); };
         Require(std::ranges::all_of(vertex.position, finite) &&
@@ -70,7 +62,7 @@ void Validate(const CharacterPackageData &data, bool validate_mask, bool embedde
         float sum = 0.0f;
         for (std::size_t i = 0; i < 4; ++i)
         {
-            Require(vertex.bone_indices[i] < data.bone_count &&
+            Require(vertex.bone_indices[i] < bone_count &&
                     std::isfinite(vertex.bone_weights[i]) &&
                     vertex.bone_weights[i] >= 0.0f && vertex.bone_weights[i] <= 1.0f,
                     "invalid vertex skin influence");
@@ -79,6 +71,25 @@ void Validate(const CharacterPackageData &data, bool validate_mask, bool embedde
         Require(std::isfinite(sum) && std::abs(sum - 1.0f) <= 0.001f,
                 "vertex skin weights are not normalized");
     }
+}
+
+template <typename Data, typename Vertex>
+void Validate(const Data &data, std::span<const Vertex> vertices,
+              bool validate_mask, bool embedded = true, std::size_t palette_count = 0)
+{
+    const auto pose_count = palette_count ? palette_count : data.transforms.size();
+    Require(data.bone_count > 0 && data.bone_count <= kMaxCharacterBones &&
+            data.material_count > 0 && data.material_count <= kMaxCharacterMaterials &&
+            (!embedded || (!vertices.empty() && vertices.size() <= 3'000'000 &&
+            vertices.size() % 3 == 0)) &&
+            data.parents.size() == data.bone_count &&
+            data.inverse_bind_matrices.size() == data.bone_count &&
+            data.upper_body_weights.size() == data.bone_count &&
+            data.clips.size() == static_cast<std::size_t>(CharacterAnimationClip::Count) &&
+            pose_count > 0 && pose_count <= 800'000 &&
+            (!palette_count || data.transforms.empty()) &&
+            std::isfinite(data.ground_offset), "invalid character shape");
+    ValidateVertices(vertices, data.bone_count, data.material_count);
     for (std::size_t i = 0; i < data.bone_count; ++i)
     {
         Require(data.parents[i] == std::numeric_limits<std::uint16_t>::max() ||
@@ -102,7 +113,7 @@ void Validate(const CharacterPackageData &data, bool validate_mask, bool embedde
                 clip.frame_count >= 2 && std::isfinite(clip.duration_seconds) &&
                 clip.duration_seconds > 0.0f &&
                 std::uint64_t(clip.first_transform) +
-                    std::uint64_t(clip.frame_count) * data.bone_count <= data.transforms.size(),
+                    std::uint64_t(clip.frame_count) * data.bone_count <= pose_count,
                 "invalid animation clip");
     }
     for (const auto &transform : data.transforms)
@@ -128,6 +139,109 @@ std::vector<std::byte> Bytes(std::size_t count, std::size_t stride)
             "chunk size overflow");
     return std::vector<std::byte>(count * stride);
 }
+
+void ValidateMonster(const MonsterCharacterData &data, std::uint32_t bones,
+    std::span<const CharacterClipHeader> clips, const GeometryMetadata &geometry,
+    std::span<const std::string> dependencies)
+{
+    Require(data.abi == kMonsterDeformationAbi && data.bone_count == bones && !(data.flags & ~3u) &&
+        data.flags != (kMonsterBoundsPositionEnclosure | kMonsterDeformationSuicideBubble) &&
+        std::isfinite(data.numerical_margin) && data.numerical_margin >= 0 &&
+        data.bubble_amplitude == ((data.flags & kMonsterDeformationSuicideBubble) ? 0.006f : 0.0f) &&
+        std::ranges::any_of(data.skeleton_binding, [](std::byte b) { return b != std::byte{}; }),
+        "invalid monster deformation policy or binding");
+    Require(!data.final_matrices.empty() && data.final_matrices.size() <= 800'000 &&
+        !data.lods.empty() && data.lods.size() <= 16, "invalid monster deformation counts");
+    std::uint64_t matrices{}, intervals{};
+    for (const auto &clip : clips)
+    {
+        Require(clip.first_transform == matrices, "monster matrix clip ranges are not contiguous");
+        matrices += std::uint64_t(clip.frame_count) * bones;
+        intervals += clip.frame_count;
+    }
+    Require(matrices == data.final_matrices.size() && intervals * data.lods.size() == data.interval_bounds.size(),
+        "monster matrix or interval range mismatch");
+    for (const auto &matrix : data.final_matrices)
+        Require(std::ranges::all_of(matrix, [](float value) { return std::isfinite(value); }), "nonfinite monster matrix");
+    Require(EncodeGeometryMetadata(data.lods.front(), dependencies, {}) == EncodeGeometryMetadata(geometry, dependencies, {}),
+        "monster LOD0 disagrees with character geometry");
+    std::size_t row{};
+    std::vector<std::uint16_t> pages;
+    for (std::size_t lod = 0; lod < data.lods.size(); ++lod)
+    {
+        const auto &entry = data.lods[lod];
+        Require(entry.lod == lod && (entry.flags & kGeometryFlagSkinned) &&
+            std::ranges::find(pages, entry.page_dependency_index) == pages.end(), "invalid or duplicate monster LOD page");
+        (void)EncodeGeometryMetadata(entry, dependencies, {});
+        pages.push_back(entry.page_dependency_index);
+        for (const auto &clip : clips)
+            for (std::uint32_t frame = 0; frame < clip.frame_count; ++frame)
+            {
+                const auto &bound = data.interval_bounds[row++];
+                Require(bound.lod == lod && bound.clip == clip.clip && bound.frame == frame, "monster interval order mismatch");
+                for (std::size_t axis = 0; axis < 3; ++axis)
+                    Require(std::isfinite(bound.minimum[axis]) && std::isfinite(bound.maximum[axis]) &&
+                        bound.minimum[axis] <= bound.maximum[axis], "invalid monster interval bounds");
+            }
+    }
+}
+
+std::array<std::vector<std::byte>, 4> EncodeMonster(const MonsterCharacterData &data, std::uint32_t bones,
+    std::span<const std::string> dependencies)
+{
+    std::array<std::vector<std::byte>, 4> rows{Bytes(1,64), Bytes(data.final_matrices.size(),64),
+        Bytes(data.interval_bounds.size(),32), Bytes(data.lods.size(),kGeometryMetadataStride)};
+    Put(rows[0],0,data.abi,4); Put(rows[0],4,data.flags,4); Put(rows[0],8,static_cast<std::uint32_t>(data.final_matrices.size()),4);
+    Put(rows[0],12,static_cast<std::uint32_t>(data.interval_bounds.size()),4); Put(rows[0],16,static_cast<std::uint32_t>(data.lods.size()),4);
+    Put(rows[0],20,bones,4); PutFloat(rows[0],24,data.numerical_margin); PutFloat(rows[0],28,data.bubble_amplitude);
+    std::copy(data.skeleton_binding.begin(),data.skeleton_binding.end(),rows[0].begin()+32);
+    for (std::size_t i=0;i<data.final_matrices.size();++i)
+        for (std::size_t scalar=0;scalar<16;++scalar) PutFloat(rows[1],i*64+scalar*4,data.final_matrices[i][scalar]);
+    for (std::size_t i=0;i<data.interval_bounds.size();++i)
+    {
+        const auto &b=data.interval_bounds[i]; const auto at=i*32;
+        Put(rows[2],at,b.lod,2); Put(rows[2],at+2,static_cast<std::uint8_t>(b.clip),1); Put(rows[2],at+4,b.frame,4);
+        for(std::size_t axis=0;axis<3;++axis) { PutFloat(rows[2],at+8+axis*4,b.minimum[axis]); PutFloat(rows[2],at+20+axis*4,b.maximum[axis]); }
+    }
+    for(std::size_t i=0;i<data.lods.size();++i)
+    {
+        const auto row=EncodeGeometryMetadata(data.lods[i],dependencies,{});
+        std::copy(row.begin(),row.end(),rows[3].begin()+i*kGeometryMetadataStride);
+    }
+    return rows;
+}
+
+std::optional<MonsterCharacterData> DecodeMonster(const PackageView &package)
+{
+    const auto find=[&](ChunkType type)->const ChunkView * {
+        const auto it=std::ranges::find(package.chunks,type,&ChunkView::type);
+        return it==package.chunks.end()?nullptr:&*it;
+    };
+    const auto header=find(ChunkType::CharacterDeformationMetadata);
+    if(!header) return std::nullopt;
+    const auto matrices=find(ChunkType::CharacterFinalMatrices), bounds=find(ChunkType::CharacterIntervalBounds), lods=find(ChunkType::CharacterLodDirectory);
+    Require(matrices && bounds && lods,"incomplete monster deformation chunks");
+    const auto h=header->bytes;
+    Require(Get(h,8,4)==matrices->count && Get(h,12,4)==bounds->count && Get(h,16,4)==lods->count &&
+        Get(h,20,4)>0 && Get(h,20,4)<=kMaxCharacterBones,"monster chunk counts disagree");
+    MonsterCharacterData data; data.abi=Get(h,0,4); data.flags=Get(h,4,4); data.bone_count=Get(h,20,4);
+    data.numerical_margin=GetFloat(h,24); data.bubble_amplitude=GetFloat(h,28);
+    std::copy_n(h.begin()+32,32,data.skeleton_binding.begin());
+    data.final_matrices.resize(matrices->count);
+    for(std::size_t i=0;i<data.final_matrices.size();++i)
+        for(std::size_t scalar=0;scalar<16;++scalar) data.final_matrices[i][scalar]=GetFloat(matrices->bytes,i*64+scalar*4);
+    for(std::size_t i=0;i<bounds->count;++i)
+    {
+        const auto at=i*32; CharacterIntervalBound b;
+        b.lod=static_cast<std::uint16_t>(Get(bounds->bytes,at,2)); b.clip=static_cast<CharacterAnimationClip>(Get(bounds->bytes,at+2,1));
+        Require(Get(bounds->bytes,at+3,1)==0,"nonzero monster bound reserved field"); b.frame=Get(bounds->bytes,at+4,4);
+        for(std::size_t axis=0;axis<3;++axis) { b.minimum[axis]=GetFloat(bounds->bytes,at+8+axis*4); b.maximum[axis]=GetFloat(bounds->bytes,at+20+axis*4); }
+        data.interval_bounds.push_back(b);
+    }
+    for(std::size_t i=0;i<lods->count;++i)
+        data.lods.push_back(DecodeGeometryMetadata(lods->bytes.subspan(i*kGeometryMetadataStride,kGeometryMetadataStride),package.dependencies,{}));
+    return data;
+}
 } // namespace
 
 namespace
@@ -135,9 +249,12 @@ namespace
 std::vector<std::byte> BuildCharacterImpl(
     AssetId asset_id, std::span<const std::string> dependencies,
     const CharacterPackageData &character, const GeometryMetadata *geometry,
-    std::span<const CharacterMaterialBinding> material_bindings = {})
+    std::span<const CharacterMaterialBinding> material_bindings = {},
+    const MonsterCharacterData *monster = nullptr)
 {
-    Validate(character, false);
+    Validate(character, std::span(character.vertices), false);
+    Require(!monster || geometry,"embedded character cannot contain cooked monster deformation");
+    if(monster) ValidateMonster(*monster,character.bone_count,character.clips,*geometry,dependencies);
     // Shared skeleton scalar encoding serves both layouts. Only the explicit
     // embedded layout allocates and serializes the expanded vertex chunk.
     std::vector<std::byte> geometry_bytes;
@@ -180,8 +297,8 @@ std::vector<std::byte> BuildCharacterImpl(
         Put(clips, offset + 8, clip.frame_count, 4);
         PutFloat(clips, offset + 12, clip.duration_seconds);
     }
-    auto transforms = Bytes(character.transforms.size(), 40);
-    for (std::size_t i = 0; i < character.transforms.size(); ++i)
+    auto transforms = Bytes(monster ? 0 : character.transforms.size(), 40);
+    for (std::size_t i = 0; !monster && i < character.transforms.size(); ++i)
     {
         const auto &transform = character.transforms[i];
         const auto offset = i * 40;
@@ -201,8 +318,8 @@ std::vector<std::byte> BuildCharacterImpl(
         ChunkSource{4, 1, true, parents, character.bone_count, 2},
         ChunkSource{5, 1, true, inverse, character.bone_count, 64},
         ChunkSource{6, 1, true, mask, character.bone_count, 4},
-        ChunkSource{7, 1, true, clips, character.clips.size(), 16},
-        ChunkSource{8, 1, true, transforms, character.transforms.size(), 40}};
+        ChunkSource{7, 1, true, clips, character.clips.size(), 16}};
+    if(!monster) chunks.push_back({8,1,true,transforms,character.transforms.size(),40});
     std::vector<std::byte> binding_bytes;
     if (geometry)
     {
@@ -211,6 +328,16 @@ std::vector<std::byte> BuildCharacterImpl(
             binding_bytes, material_bindings.size(), kCharacterMaterialBindingStride});
     }
     else Require(material_bindings.empty(), "embedded interchange cannot carry production material bindings");
+    std::array<std::vector<std::byte>,4> deformation;
+    if(monster)
+    {
+        Require(monster->final_matrices.size()==character.transforms.size(),"source and final palette counts disagree");
+        deformation=EncodeMonster(*monster,character.bone_count,dependencies);
+        chunks.push_back({37,1,true,deformation[0],1,64});
+        chunks.push_back({38,1,true,deformation[1],monster->final_matrices.size(),64});
+        chunks.push_back({39,1,true,deformation[2],monster->interval_bounds.size(),32});
+        chunks.push_back({40,1,true,deformation[3],monster->lods.size(),kGeometryMetadataStride});
+    }
     return BuildPackage(asset_id, dependencies, chunks);
 }
 } // namespace
@@ -218,20 +345,20 @@ std::vector<std::byte> BuildCharacterImpl(
 namespace
 {
 CharacterPackageData DecodeCommon(
-    std::span<const std::byte> bytes, AssetId expected_asset_id,
-    bool validate_upper_body_mask, bool embedded)
+    const PackageView &package,
+    bool validate_upper_body_mask, bool embedded, const MonsterCharacterData *monster = nullptr)
 {
-    const auto package = ReadPackage(bytes, expected_asset_id);
-    std::array<const ChunkView *, static_cast<std::size_t>(ChunkType::CharacterMaterialBindings) + 1> chunks{};
+    std::array<const ChunkView *, static_cast<std::size_t>(ChunkType::CharacterLodDirectory) + 1> chunks{};
     for (const auto &chunk : package.chunks)
     {
         const auto type = static_cast<std::uint32_t>(chunk.type);
         Require(type < chunks.size() && !chunks[type], "duplicate or unsupported chunk");
         chunks[type] = &chunk;
     }
-    Require(package.chunks.size() == (embedded ? 7u : 8u) &&
+    Require(package.chunks.size() == (embedded ? 7u : monster ? 11u : 8u) &&
             (embedded ? chunks[1] && !chunks[13] && !chunks[25] : chunks[13] && !chunks[1] && chunks[25]) && chunks[3] && chunks[4] &&
-            chunks[5] && chunks[6] && chunks[7] && chunks[8] && !chunks[2],
+            chunks[5] && chunks[6] && chunks[7] && !chunks[2] &&
+            (monster ? !chunks[8] && chunks[37] && chunks[38] && chunks[39] && chunks[40] : chunks[8]),
             "missing or unexpected character chunk");
     for (const auto &chunk : package.chunks)
         Require(chunk.required, "optional character field is unsupported");
@@ -247,7 +374,7 @@ CharacterPackageData DecodeCommon(
             chunks[5]->count == character.bone_count &&
             chunks[6]->count == character.bone_count &&
             transform_count > 0 && transform_count <= 800'000 &&
-            chunks[8]->count == transform_count,
+            (monster ? monster->final_matrices.size() : chunks[8]->count) == transform_count,
             "character chunk counts disagree");
     if (embedded)
         for (const auto &vertex : DecodeExpandedVertices(chunks[1]->bytes))
@@ -274,8 +401,8 @@ CharacterPackageData DecodeCommon(
             Get(chunks[7]->bytes, offset + 8, 4),
             GetFloat(chunks[7]->bytes, offset + 12)});
     }
-    character.transforms.reserve(transform_count);
-    for (std::size_t i = 0; i < transform_count; ++i)
+    if(!monster) character.transforms.reserve(transform_count);
+    for (std::size_t i = 0; !monster && i < transform_count; ++i)
     {
         const auto offset = i * 40;
         CharacterLocalTransform transform{};
@@ -288,14 +415,18 @@ CharacterPackageData DecodeCommon(
             transform.rotation[j] = GetFloat(chunks[8]->bytes, offset + 12 + j * 4);
         character.transforms.push_back(transform);
     }
-    Validate(character, validate_upper_body_mask, embedded);
+    Validate(character, std::span<const SkinnedVertex>(character.vertices), validate_upper_body_mask, embedded,
+        monster ? monster->final_matrices.size() : 0);
     return character;
 }
 }
 
 CharacterPackageData DecodeEmbeddedCharacterPackage(std::span<const std::byte> bytes,
     AssetId asset, bool validate_mask)
-{ return DecodeCommon(bytes, asset, validate_mask, true); }
+{ return DecodeCommon(ReadPackage(bytes, asset), validate_mask, true); }
+
+void ValidateCharacterSource(const CharacterPackageData &character, bool validate_mask)
+{ Validate(character, std::span(character.vertices), validate_mask); }
 
 std::vector<std::byte> BuildEmbeddedCharacterPackage(AssetId asset,
     std::span<const std::string> deps, const CharacterPackageData &character)
@@ -310,7 +441,8 @@ CharacterPackageData DecodeCharacterPackage(std::span<const std::byte> bytes,
 
 std::vector<std::byte> BuildCharacterMetadataPackage(AssetId asset,
     std::span<const std::string> deps, const CharacterPackageData &character,
-    const GeometryMetadata &geometry, std::span<const CharacterMaterialBinding> material_bindings)
+    const GeometryMetadata &geometry, std::span<const CharacterMaterialBinding> material_bindings,
+    const MonsterCharacterData *monster)
 {
     Require((geometry.flags & kGeometryFlagSkinned) && geometry.index_count == character.vertices.size() &&
             geometry.max_material_index < character.material_count, "character geometry metadata mismatch");
@@ -320,30 +452,37 @@ std::vector<std::byte> BuildCharacterMetadataPackage(AssetId asset,
     const auto metadata_id = "render/" + page_id.substr(16,page_id.size()-16-6) + ".rpkg";
     Require(MakeAssetId(metadata_id).value == asset.value, "character page product identity mismatch");
     (void)EncodeGeometryMetadata(geometry, deps, metadata_id);
-    return BuildCharacterImpl(asset, deps, character, &geometry, material_bindings);
+    return BuildCharacterImpl(asset, deps, character, &geometry, material_bindings, monster);
 }
 
 CharacterMetadataPackageData DecodeCharacterMetadataPackage(std::span<const std::byte> bytes,
     AssetId asset, bool validate_mask)
 {
-    auto source = DecodeCommon(bytes, asset, validate_mask, false);
-    const auto view = ReadPackage(bytes, asset);
+    return DecodeCharacterMetadataPackage(ReadPackage(bytes, asset), validate_mask);
+}
+
+CharacterMetadataPackageData DecodeCharacterMetadataPackage(const PackageView &view,
+    bool validate_mask)
+{
+    auto monster = DecodeMonster(view);
+    auto source = DecodeCommon(view, validate_mask, false, monster ? &*monster : nullptr);
     const auto found = std::ranges::find(view.chunks, ChunkType::GeometryMetadata, &ChunkView::type);
     Require(found != view.chunks.end(), "missing production geometry metadata");
     const auto geometry = DecodeGeometryMetadata(found->bytes, view.dependencies, {});
     const auto &page_id = view.dependencies[geometry.page_dependency_index];
     Require(page_id.starts_with("render/geometry/character/"), "invalid character page namespace");
     const auto metadata_id = "render/" + page_id.substr(16,page_id.size()-16-6) + ".rpkg";
-    Require(MakeAssetId(metadata_id).value == asset.value, "character page product identity mismatch");
+    Require(MakeAssetId(metadata_id).value == view.asset_id.value, "character page product identity mismatch");
     Require((geometry.flags & kGeometryFlagSkinned) && geometry.max_material_index < source.material_count,
             "invalid character geometry metadata");
     const auto binding_chunk = std::ranges::find(view.chunks, ChunkType::CharacterMaterialBindings, &ChunkView::type);
     Require(binding_chunk != view.chunks.end(), "missing production material bindings");
     auto material_bindings = DecodeCharacterMaterialBindings(binding_chunk->bytes, view.dependencies, source.material_count);
+    if(monster) ValidateMonster(*monster,source.bone_count,source.clips,geometry,view.dependencies);
     return {geometry, std::move(source.clips),std::move(source.parents),
             std::move(source.inverse_bind_matrices),std::move(source.upper_body_weights),
             std::move(source.transforms),source.bone_count,source.material_count,source.ground_offset,
-            std::move(material_bindings)};
+            std::move(material_bindings),std::move(monster)};
 }
 
 void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
@@ -351,13 +490,7 @@ void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
 {
     ValidateGeometryPage(character.geometry, geometry);
     Require(geometry.flags & kGeometryFlagSkinned, "character page is not skinned");
-    CharacterPackageData data;
-    data.clips=character.clips;data.parents=character.parents;
-    data.inverse_bind_matrices=character.inverse_bind_matrices;
-    data.upper_body_weights=character.upper_body_weights;data.transforms=character.transforms;
-    data.bone_count=character.bone_count;data.material_count=character.material_count;data.ground_offset=character.ground_offset;
-    for(const auto &v:geometry.vertices)
-        data.vertices.push_back({v.position,v.normal,v.bone_indices,v.bone_weights,v.uv,v.tangent,v.material_index,v.reserved});
-    Validate(data, false, false);
+    Validate(character, std::span(geometry.vertices), false, false,
+        character.monster ? character.monster->final_matrices.size() : 0);
 }
 } // namespace hs::render_data

@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ground_commands.hpp"
 #include "test_generation_paths.hpp"
 #include <hs/core/render_snapshot.hpp>

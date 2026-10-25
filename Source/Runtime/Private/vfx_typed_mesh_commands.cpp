@@ -20,7 +20,7 @@ bool Range(VfxRange r, std::size_t size)
 }
 
 std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs)
+    const VfxProgramView &program, std::span<const VfxPersistentInput> inputs)
 {
     std::vector<VfxOwnedMeshInput> result;
     for (const auto &input : inputs)

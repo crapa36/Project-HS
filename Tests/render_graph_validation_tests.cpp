@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
+#include <numeric>
 #include <random>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace
@@ -55,6 +58,26 @@ struct Graph
         return actual == std::vector<std::uint32_t>(ids);
     }
 };
+
+void QueueAccessPolicy()
+{
+    constexpr std::array compute{Access::Common, Access::ComputeRead, Access::UnorderedRead,
+        Access::UnorderedWrite, Access::CopySource, Access::CopyDest, Access::IndirectArgs};
+    constexpr std::array copy{Access::Common, Access::CopySource, Access::CopyDest};
+    for (unsigned value = 0; value <= static_cast<unsigned>(Access::ShadingRateSource); ++value)
+    {
+        const auto access = static_cast<Access>(value);
+        Check(QueueAccessCompatible(QueueHint::Direct, access), "Direct queue access policy changed.");
+        Check(QueueAccessCompatible(QueueHint::Compute, access) ==
+            (std::find(compute.begin(), compute.end(), access) != compute.end()),
+            "Compute queue access policy changed.");
+        Check(QueueAccessCompatible(QueueHint::Copy, access) ==
+            (std::find(copy.begin(), copy.end(), access) != copy.end()),
+            "Copy queue access policy changed.");
+        Check(!QueueAccessCompatible(static_cast<QueueHint>(255), access),
+            "Unknown queue accepted an access.");
+    }
+}
 
 void BufferBounds()
 {
@@ -696,14 +719,129 @@ void MaterialTextureReadContract()
     }
 }
 
+struct ExplicitDag
+{
+    std::vector<std::vector<std::uint32_t>> dependencies;
+    std::vector<PassInfo> passes;
+    ExplicitDag(std::uint32_t count, bool dense, std::uint32_t seed) : dependencies(count)
+    {
+        std::mt19937 random(seed);
+        std::vector<std::uint32_t> ids(count), registration(count);
+        std::iota(ids.begin(), ids.end(), 1);
+        std::iota(registration.begin(), registration.end(), 0);
+        std::shuffle(ids.begin(), ids.end(), random);
+        std::shuffle(registration.begin(), registration.end(), random);
+        passes.resize(count);
+        for (std::uint32_t index = 0; index < count; ++index)
+        {
+            const auto rank = registration[index];
+            auto &parents = dependencies[index];
+            if (dense)
+            {
+                for (std::uint32_t before = 0; before < rank; ++before)
+                    if (random() % 4 == 0) parents.push_back(ids[before]);
+            }
+            else if (rank)
+                for (unsigned edge = 0; edge < 4; ++edge) parents.push_back(ids[random() % rank]);
+            if (!parents.empty()) parents.push_back(parents.front());
+            passes[index] = {ids[rank], static_cast<QueueHint>(rank % 3), true, {}, parents};
+        }
+    }
+};
+
+void ExplicitDagOrdering()
+{
+    {
+        CompiledSchedule schedule;
+        std::array<std::uint32_t, 1> parent{UINT32_MAX};
+        std::array<PassInfo, 2> passes{{
+            {0, QueueHint::Direct, true, {}, parent},
+            {UINT32_MAX, QueueHint::Copy, true, {}, {}}}};
+        Check(Compile({}, passes, schedule).Succeeded() && schedule.execution_order.front() == 1,
+              "full-width IDs and forward registration dependencies are supported");
+        parent[0] = 1;
+        Check(!Compile({}, passes, schedule), "absent explicit predecessor rejected");
+        parent[0] = 0;
+        Check(!Compile({}, passes, schedule), "self explicit predecessor rejected");
+        parent[0] = UINT32_MAX;
+        passes[1].id = 0;
+        Check(!Compile({}, passes, schedule), "duplicate explicit pass ID rejected");
+    }
+    for (bool dense : {false, true})
+        for (std::uint32_t seed = 0; seed < 24; ++seed)
+        {
+            ExplicitDag graph(1 + seed * 7, dense, seed);
+            CompiledSchedule schedule;
+            Check(Compile({}, graph.passes, schedule).Succeeded(), "explicit DAG must compile");
+            std::vector<bool> visited(graph.passes.size());
+            for (const auto actual : schedule.execution_order)
+            {
+                std::uint32_t expected = UINT32_MAX;
+                for (std::uint32_t candidate = 0; candidate < graph.passes.size(); ++candidate)
+                {
+                    if (visited[candidate]) continue;
+                    const bool ready = std::all_of(graph.dependencies[candidate].begin(), graph.dependencies[candidate].end(),
+                        [&](auto id) {
+                            const auto parent = std::find_if(graph.passes.begin(), graph.passes.end(),
+                                [&](const PassInfo &pass) { return pass.id == id; });
+                            return visited[static_cast<std::size_t>(parent - graph.passes.begin())];
+                        });
+                    if (ready && (expected == UINT32_MAX || graph.passes[candidate].id < graph.passes[expected].id))
+                        expected = candidate;
+                }
+                Check(actual == expected, "DAG order must select the smallest ready pass ID");
+                visited[actual] = true;
+            }
+            Check(std::all_of(visited.begin(), visited.end(), [](bool value) { return value; }), "every DAG pass executes once");
+        }
+}
+
+void BenchmarkExplicitDags()
+{
+    for (bool dense : {false, true})
+        for (const std::uint32_t count : {256u, 1024u})
+        {
+            ExplicitDag graph(count, dense, 4099);
+            CompiledSchedule schedule;
+            const auto begin = std::chrono::steady_clock::now();
+            std::uint64_t digest = 14695981039346656037ull;
+            const auto add = [&](std::uint32_t value) { digest = (digest ^ value) * 1099511628211ull; };
+            for (unsigned repeat = 0; repeat < 20; ++repeat)
+            {
+                Check(Compile({}, graph.passes, schedule).Succeeded(), "benchmark DAG must compile");
+                for (auto index : schedule.execution_order) add(index);
+                for (const auto &queue : schedule.queue_orders)
+                {
+                    add(static_cast<std::uint32_t>(queue.size()));
+                    for (auto index : queue) add(index);
+                }
+                for (const auto &edge : schedule.cross_queue_dependencies)
+                {
+                    add(edge.producer); add(edge.consumer);
+                    add(static_cast<std::uint32_t>(edge.producer_queue));
+                    add(static_cast<std::uint32_t>(edge.consumer_queue));
+                }
+            }
+            const double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            std::printf("graph_bench passes=%u dense=%u iterations=20 ms=%.3f schedule_digest=%llu\n",
+                count, unsigned(dense), milliseconds, static_cast<unsigned long long>(digest));
+        }
+}
+
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
     try
     {
+        if (argc == 2 && std::string_view(argv[1]) == "--benchmark-explicit-dags")
+        {
+            BenchmarkExplicitDags();
+            return 0;
+        }
+        ExplicitDagOrdering();
         BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
-        PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();
+        QueueAccessPolicy(); PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();
         std::puts("Render graph CPU range/version validation passed.");
         return 0;
     }

@@ -32,6 +32,11 @@ HsSceneVertexContext HsSceneGeometryVertexContext(SceneGeometryRecord g,uint geo
     c.instance=SceneDrawInstances[geometry];
     c.skinSlot=g.identity.z;
     c.cachedSkin=(g.material.y&2)!=0;
+    if(c.cachedSkin)
+    {
+        c.skinVertexOffsets=HsLoadGpuSceneSkin(g.identity.x).zw;
+        c.skinVertexStrides=HsLoadGpuSceneSkinStrides(g.identity.x);
+    }
     c.cachedSkinHistory=false;
     c.geometryValid=true;
     c.geometry.Flags=(g.material.y&16)!=0?16u:0u;

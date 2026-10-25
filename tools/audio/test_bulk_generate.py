@@ -8,6 +8,28 @@ from tools.audio.finalize import finalize
 
 
 class BulkTests(unittest.TestCase):
+    def test_invalid_numeric_plan_rejected_before_model_load(self):
+        from tools.audio import render
+        for field in ("duration", "gain_db", "lowpass_hz"):
+            for value in (float("nan"), float("inf"), -float("inf")):
+                cue = {"cue_id": "audio.test", "generator": "stable-small", "duration": 1.0,
+                       "gain_db": 0.0, field: value}
+                with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as d:
+                    plan = Path(d) / "plan.json"
+                    plan.write_text(json.dumps([cue]))
+                    with mock.patch.object(render, "_dependencies") as dependencies:
+                        with self.assertRaises(ValueError):
+                            bulk_generate.run(plan, Path(d) / "out")
+                        dependencies.assert_not_called()
+        self.assertEqual(bulk_generate._duration("0.2-0.3s"), 0.2)
+
+    def test_invalid_stable_model_rate_rejected_before_generation(self):
+        for rate in (float("nan"), float("inf"), 0, -1, 44100.5):
+            model = mock.Mock(sample_rate=rate)
+            with self.subTest(rate=rate), self.assertRaisesRegex(ValueError, "sample rate"):
+                bulk_generate._stable(model, {"duration": 1.0}, 1, Path("unused.wav"))
+            model.generate.assert_not_called()
+
     def test_versioned_production_plan_is_complete(self):
         plan = Path(__file__).parents[2] / "GeneratedAudio" / "full_generation_plan.json"
         cues = bulk_generate._entries(plan)

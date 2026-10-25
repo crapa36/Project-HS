@@ -1,6 +1,7 @@
 #pragma once
 
-#include "render_scene_extractor.hpp"
+#include "renderer_scene_sample.hpp"
+#include "renderer_skin_ranges.hpp"
 
 #include <DirectXMath.h>
 
@@ -28,7 +29,8 @@ struct GpuInstance
 static_assert(sizeof(GpuInstance) == 48);
 
 constexpr std::uint32_t kGpuSceneTableMagic = 0x37475348u; // "HSG7"
-constexpr std::uint32_t kGpuSceneTableVersion = 1;
+// Version 3 records the actual current/previous deformation strides after skin.zw.
+constexpr std::uint32_t kGpuSceneTableVersion = 3;
 
 struct GpuSceneTableHeader
 {
@@ -93,8 +95,11 @@ struct GpuSceneSkinEntry
 {
     std::uint32_t skin_index{std::numeric_limits<std::uint32_t>::max()};
     std::uint32_t flags{};
-    std::uint32_t reserved0{};
-    std::uint32_t reserved1{};
+    std::uint32_t vertex_offset{};
+    std::uint32_t previous_vertex_offset{};
+    std::uint32_t vertex_stride{SkinVertexRanges::kVertexBytes};
+    std::uint32_t previous_vertex_stride{SkinVertexRanges::kVertexBytes};
+    std::uint32_t reserved0{}, reserved1{};
 };
 
 static_assert(sizeof(GpuSceneTableHeader) == 64);
@@ -103,7 +108,7 @@ static_assert(sizeof(GpuSceneTransformEntry) == 32);
 static_assert(sizeof(GpuSceneMeshEntry) == 16);
 static_assert(sizeof(GpuSceneMaterialEntry) == 16);
 static_assert(sizeof(GpuSceneBoundsEntry) == 16);
-static_assert(sizeof(GpuSceneSkinEntry) == 16);
+static_assert(sizeof(GpuSceneSkinEntry) == 32);
 
 constexpr std::size_t kGpuSceneSlotPayloadBytes =
     sizeof(GpuSceneInstanceEntry) + sizeof(GpuSceneTransformEntry) +
@@ -126,6 +131,10 @@ struct GpuSceneMetadata
     std::uint32_t skin_flags{};
     std::uint32_t generation{};
     std::uint32_t reserved{};
+    std::uint32_t skin_vertex_offset{};
+    std::uint32_t previous_skin_vertex_offset{};
+    std::uint32_t skin_vertex_stride{SkinVertexRanges::kVertexBytes};
+    std::uint32_t previous_skin_vertex_stride{SkinVertexRanges::kVertexBytes};
 
     [[nodiscard]] bool operator==(const GpuSceneMetadata &) const noexcept = default;
 };
@@ -177,6 +186,21 @@ struct PersistentGpuSceneRange
     std::size_t count{};
 };
 
+struct GpuSceneCanonicalInputs
+{
+    RenderPoseKey pose{};
+    RenderContentKey content{};
+    std::uint64_t geometry_identity{};
+    std::uint64_t supplied_transform_revision{}, supplied_material_revision{};
+    std::uint32_t status_visual_mask{};
+    bool operator==(const GpuSceneCanonicalInputs &) const noexcept = default;
+};
+
+struct GpuSceneChanges
+{
+    std::size_t created{}, updated{}, unchanged{}, destroyed{};
+};
+
 class PersistentGpuSceneSlots
 {
   public:
@@ -185,8 +209,8 @@ class PersistentGpuSceneSlots
     void BeginFrame(bool reset_scene = false);
     [[nodiscard]] PersistentGpuSceneSlot Upsert(PersistentGpuSceneKey key,
                                                 const GpuInstance &instance,
-                                                RenderInstance::Revisions revisions = {},
-                                                GpuSceneMetadata metadata = {});
+                                                GpuSceneMetadata metadata = {},
+                                                GpuSceneCanonicalInputs canonical = {});
     void EndFrame();
     void Commit();
     void Abort() noexcept;
@@ -208,6 +232,15 @@ class PersistentGpuSceneSlots
         return preparing_ && reset_scene_ ? pending_reset_slots_ : instances_.size();
     }
     [[nodiscard]] std::size_t AnonymousCount() const noexcept { return anonymous_count_; }
+    [[nodiscard]] GpuSceneChanges Changes() const noexcept { return changes_; }
+    [[nodiscard]] const RenderInstance::Revisions &Revisions(std::uint32_t slot) const
+    {
+        return preparing_ ? pending_entries_.at(slot).revisions : entries_.at(slot).revisions;
+    }
+    [[nodiscard]] std::uint64_t ContentRevision() const noexcept
+    {
+        return preparing_ ? pending_content_revision_ : content_revision_;
+    }
     void Clear() noexcept;
 
   private:
@@ -216,6 +249,7 @@ class PersistentGpuSceneSlots
     {
         PersistentGpuSceneKey key{};
         std::uint32_t generation{};
+        GpuSceneCanonicalInputs canonical{};
         RenderInstance::Revisions revisions{};
         bool active{};
     };
@@ -248,6 +282,9 @@ class PersistentGpuSceneSlots
     std::vector<PersistentGpuSceneRange> dirty_ranges_;
     std::size_t active_count_{};
     std::size_t anonymous_count_{};
+    GpuSceneChanges changes_{};
+    std::uint64_t content_revision_{}, pending_content_revision_{};
+    bool content_changed_{};
     bool dirty_ranges_valid_{true};
 };
 

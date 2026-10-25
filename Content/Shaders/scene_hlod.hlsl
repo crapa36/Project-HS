@@ -71,7 +71,7 @@ bool SceneGeneration(uint slot, out uint generation)
     uint size; StaticScene.GetDimensions(size);
     if (size < 64u) return false;
     const uint4 h0 = StaticScene.Load4(0u), h1 = StaticScene.Load4(16u), h2 = StaticScene.Load4(32u);
-    if (h0.x != 0x37475348u || h0.y != 1u || slot >= h0.w || h2.z != 32u ||
+    if (h0.x != 0x37475348u || h0.y != 3u || slot >= h0.w || h2.z != 32u ||
         h1.x > size || slot >= (size - h1.x) / 32u) return false;
     generation = StaticScene.Load(h1.x + slot * h2.z + 20u);
     return generation != 0u;

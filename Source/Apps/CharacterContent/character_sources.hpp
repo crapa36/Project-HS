@@ -8,7 +8,7 @@
 namespace hs::content
 {
 
-// Shared by the legacy aggregate cooker and the output-driven character actions.
+// Native importer specifications for the output-driven character actions.
 inline std::array<CharacterAssetSource, 8> CharacterAssetSources(
     const std::filesystem::path &source_root)
 {
@@ -23,7 +23,7 @@ inline std::array<CharacterAssetSource, 8> CharacterAssetSources(
          {archer_animations / "Idle.fbx", archer_animations / "RunForward.fbx",
           archer_animations / "DrawArrow.fbx", archer_animations / "AimRecoil.fbx",
           archer_animations / "DeathBackward.fbx"},
-         "archer", "Archer", false, false, false,
+         "archer", "Archer", false, false,
          {{archer_animations / "Idle.fbx", "Idle", true},
           {archer_animations / "RunForward.fbx", "RunForward", true},
           {archer_animations / "DrawArrow.fbx", "DrawArrow", false},
@@ -41,28 +41,28 @@ inline std::array<CharacterAssetSource, 8> CharacterAssetSources(
           monster_animations / "SlimeFamily/Melee/Draw.fbx",
           monster_animations / "SlimeFamily/Melee/Recoil.fbx",
           monster_animations / "SlimeFamily/Melee/Death.fbx"},
-         "enemy_melee", "SlimeMelee", false, false, true},
+         "enemy_melee", "SlimeMelee", false, false},
         {monster_models / "SlimeFamily/Ranged/SlimeRanged.fbx",
          {monster_animations / "SlimeFamily/Ranged/Idle.fbx",
           monster_animations / "SlimeFamily/Ranged/Run.fbx",
           monster_animations / "SlimeFamily/Ranged/Draw.fbx",
           monster_animations / "SlimeFamily/Ranged/Recoil.fbx",
           monster_animations / "SlimeFamily/Ranged/Death.fbx"},
-         "enemy_ranged", "SlimeRanged", false, false, true},
+         "enemy_ranged", "SlimeRanged", false, false},
         {monster_models / "SlimeFamily/Suicide/SlimeSuicide.fbx",
          {monster_animations / "SlimeFamily/Suicide/Idle.fbx",
           monster_animations / "SlimeFamily/Suicide/Run.fbx",
           monster_animations / "SlimeFamily/Suicide/Draw.fbx",
           monster_animations / "SlimeFamily/Suicide/Recoil.fbx",
           monster_animations / "SlimeFamily/Suicide/Death.fbx"},
-         "enemy_suicide", "SlimeSuicide", false, false, true},
+         "enemy_suicide", "SlimeSuicide", false, false},
         {monster_models / "SlimeFamily/Projectile/SlimeGelProjectile.fbx",
          {monster_animations / "SlimeFamily/Ranged/Idle.fbx",
           monster_animations / "SlimeFamily/Ranged/Run.fbx",
           monster_animations / "SlimeFamily/Ranged/Draw.fbx",
           monster_animations / "SlimeFamily/Ranged/Recoil.fbx",
           monster_animations / "SlimeFamily/Ranged/Death.fbx"},
-         "enemy_gel_projectile", "SlimeGelProjectile", false, false, true},
+         "enemy_gel_projectile", "SlimeGelProjectile", false, false},
         {monster_models / "TurtleShell_SK.fbx",
          {monster_animations / "5m/IdleBattle.fbx", monster_animations / "5m/Run.fbx",
           monster_animations / "5m/Attack01.fbx", monster_animations / "5m/Attack02.fbx",

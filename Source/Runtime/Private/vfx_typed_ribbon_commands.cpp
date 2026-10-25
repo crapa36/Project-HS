@@ -71,7 +71,7 @@ bool Finite(const Float3 &value) noexcept
            std::isfinite(value.z);
 }
 
-const VfxEffectRecord *FindEffect(const VfxProgramData &program,
+const VfxEffectRecord *FindEffect(const VfxProgramView &program,
                                   VfxEffectHandle handle) noexcept
 {
     if (handle == 0 || handle > program.effects.size()) return nullptr;
@@ -127,7 +127,7 @@ bool AcceptedMotion(VfxMotionKind motion) noexcept
            motion == VfxMotionKind::TwoPhaseNarrowWakes;
 }
 
-bool IsRibbonDetailBinding(const VfxProgramData &cooked,
+bool IsRibbonDetailBinding(const VfxProgramView &cooked,
                            const VfxTextureBindingRecord &binding) noexcept
 {
     const auto resource = std::find_if(cooked.texture_resources.begin(),
@@ -216,11 +216,11 @@ std::uint32_t PayloadKind(const VfxEventInput &input) noexcept
     return 0;
 }
 
-template<class T> bool InRange(VfxRange r,const std::vector<T>&v)
+template<class T> bool InRange(VfxRange r,std::span<const T> v)
 {return r.first<=v.size()&&r.count<=v.size()-r.first;}
 
 std::optional<VfxRibbonSourceInput> BossDashWakeRibbon(
-    const VfxProgramData &cooked, const VfxPersistentInput &input,
+    const VfxProgramView &cooked, const VfxPersistentInput &input,
     const VfxEffectRecord &effect)
 {
     const auto *line = std::get_if<VfxLinePayload>(&input.payload);
@@ -346,7 +346,7 @@ bool PickupCollectEffect(std::uint64_t id) noexcept
 }
 
 std::optional<VfxRibbonSourceInput> PickupCollectRibbon(
-    const VfxProgramData &cooked, const VfxEventInput &event,
+    const VfxProgramView &cooked, const VfxEventInput &event,
     const VfxEffectRecord &effect, const VfxLinkPayload &link, Tick current_tick)
 {
     if (effect.input_mode != 0 || effect.timing_kind != 0 ||
@@ -500,7 +500,7 @@ std::optional<VfxRibbonSourceInput> PickupCollectRibbon(
     return result;
 }
 
-std::optional<VfxRibbonSourceInput> LinkRibbon(const VfxProgramData &c,
+std::optional<VfxRibbonSourceInput> LinkRibbon(const VfxProgramView &c,
                                                const VfxPersistentInput &input,
                                                const VfxEffectRecord &effect,
                                                bool allow_arrow_rain = false)
@@ -709,7 +709,7 @@ std::optional<FixedRibbonGeometry> FixedEventGeometry(
                                point->authored_scale, sign};
 }
 
-bool TextureAssetPath(const VfxProgramData &cooked,
+bool TextureAssetPath(const VfxProgramView &cooked,
                       const VfxTextureBindingRecord &binding,
                       std::string_view &path) noexcept
 {
@@ -726,7 +726,7 @@ bool TextureAssetPath(const VfxProgramData &cooked,
     return true;
 }
 
-bool ValidFixedRibbonTextures(const VfxProgramData &cooked,
+bool ValidFixedRibbonTextures(const VfxProgramView &cooked,
                               const VfxOutputRecord &output) noexcept
 {
     if (!InRange(output.textures, cooked.texture_bindings)) return false;
@@ -754,7 +754,7 @@ bool ValidFixedRibbonTextures(const VfxProgramData &cooked,
     return true;
 }
 
-bool DecodeFixedRibbonOutput(const VfxProgramData &cooked,
+bool DecodeFixedRibbonOutput(const VfxProgramView &cooked,
                              const VfxOutputRecord &output,
                              bool core,
                              float base_width,
@@ -817,7 +817,7 @@ bool DecodeFixedRibbonOutput(const VfxProgramData &cooked,
 }
 
 std::optional<VfxRibbonSourceInput> FixedEventRibbon(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     const VfxEventInput &event,
     const VfxEffectRecord &effect,
     std::uint64_t effect_id,
@@ -915,7 +915,7 @@ std::optional<VfxRibbonSourceInput> FixedEventRibbon(
 }
 
 std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxPersistentInput> persistent)
 {
     std::vector<VfxRibbonSourceInput> result;
@@ -1086,7 +1086,7 @@ std::vector<VfxRibbonSourceInput> BuildVfxTypedRibbonInputs(
 }
 
 std::vector<VfxRibbonSourceInput> BuildVfxEventRibbonInputs(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxEventInput> events,
     Tick current_tick)
 {

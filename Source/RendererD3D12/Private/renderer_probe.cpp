@@ -1,5 +1,6 @@
 #include "renderer_probe.hpp"
 #include "d3d12_resources.hpp"
+#include "renderer_startup.hpp"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/lighting_probe.hpp>
@@ -38,8 +39,8 @@ Result Allocate(D3D12MA::Allocator *allocator,D3D12_HEAP_TYPE heap,
     D3D12_RESOURCE_DESC description,D3D12_RESOURCE_STATES initial,AllocationResource &target)
 {
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=heap;
-    const auto native=allocator->CreateResource(&allocation,&description,initial,nullptr,&target.allocation,
-        IID_PPV_ARGS(target.resource.ReleaseAndGetAddressOf()));
+    const auto native=renderer_detail::MeasureStartupOperation(RendererStartupOperation::NativeResourceAllocation, [&] { return allocator->CreateResource(&allocation,&description,initial,nullptr,&target.allocation,
+        IID_PPV_ARGS(target.resource.ReleaseAndGetAddressOf())); });
     return FAILED(native)?NativeFailure("Allocate lighting probe resource",native):Result::Success();
 }
 D3D12_RESOURCE_DESC CubeDescription(const render_data::TextureDescription &cube)
@@ -121,7 +122,7 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
     if(!device || !allocator) return Failure(ErrorCode::InvalidArgument,"Probe preparation requires a device and allocator.");
     try
     {
-        const auto package=render_data::ReadLightingProbePackage(bytes,MakeAssetId(kProduct));
+        const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadLightingProbePackage(bytes,MakeAssetId(kProduct)); });
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support{DXGI_FORMAT_R32G32B32A32_FLOAT};
         const auto queried=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
         if(FAILED(queried)) return NativeFailure("Query HDR probe format",queried);
@@ -143,6 +144,7 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
         std::byte *mapped=nullptr; D3D12_RANGE empty{0,0};
         const auto mappedResult=storage->upload.resource->Map(0,&empty,reinterpret_cast<void **>(&mapped));
         if(FAILED(mappedResult)) return NativeFailure("Map lighting probe staging",mappedResult);
+        renderer_detail::StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
         auto writeCube=[&](const render_data::TexturePackageView &cube,const UploadCube &upload) {
             for(std::size_t i=0;i<cube.subresources.size();++i)
             {
@@ -157,6 +159,8 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
         std::memcpy(mapped+storage->sh_offset,package.irradiance.data(),144);
         D3D12_RANGE written{0,static_cast<SIZE_T>(storage->sh_offset+144)};
         storage->upload.resource->Unmap(0,&written);
+        pack_timing.Stop();
+        renderer_detail::StartupOperationScope descriptors_timing(RendererStartupOperation::DescriptorWrite);
         D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=3;
         const auto created=device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(storage->descriptors.ReleaseAndGetAddressOf()));
         if(FAILED(created)) return NativeFailure("Create lighting probe SRVs",created);

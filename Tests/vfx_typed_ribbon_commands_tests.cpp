@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_ribbon_commands.hpp"
 #include "test_generation_paths.hpp"
 

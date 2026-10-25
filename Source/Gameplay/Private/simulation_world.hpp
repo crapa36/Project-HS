@@ -3,14 +3,16 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include "navigation_grid.hpp"
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/fixed_step_clock.hpp>
 
 #include "cast_runtime.hpp"
 #include "balance_observer.hpp"
-#include "relic_rule_table.hpp"
 #include "damage_command_buffer.hpp"
 #include "simulation_pipeline.hpp"
 #include "spatial_grid.hpp"
 #include "status_state.hpp"
+#include "actor_storage.hpp"
+#include "pickup_work.hpp"
 
 #include <algorithm>
 #include <array>
@@ -30,6 +32,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <thread>
 
 namespace hs::gameplay_detail
 {
@@ -57,13 +60,33 @@ constexpr Tick AnimationMarkerTicks(Tick source_marker, Tick playback_ticks) noe
 }
 
 constexpr float kPi = std::numbers::pi_v<float>;
-constexpr std::uint8_t kNoTelemetrySource = 0xFF;
 constexpr std::uint8_t kBossTelemetryBase = 3;
 constexpr std::uint64_t kPlayerRenderId = 1ull << 60;
 constexpr std::uint64_t kEnemyRenderId = 2ull << 60;
 constexpr std::uint64_t kProjectileRenderId = 3ull << 60;
 constexpr std::uint64_t kAreaRenderId = 4ull << 60;
 constexpr std::uint64_t kPickupRenderId = 5ull << 60;
+
+inline std::uint64_t TakeSimulationIdentity(std::uint64_t &next)
+{
+    if (next == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Simulation identity exhausted.");
+    return next++;
+}
+
+inline std::uint64_t NextSimulationSequence(std::uint64_t &value)
+{
+    if (value == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Simulation sequence exhausted.");
+    return ++value;
+}
+
+inline std::uint64_t PendingSimulationSequence(std::uint64_t value)
+{
+    if (value == std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Simulation sequence exhausted.");
+    return value + 1;
+}
 
 
 struct PlayerState
@@ -147,113 +170,6 @@ struct PlayerState
     std::uint8_t buffered_skill_slot{0xFF};
 };
 
-struct StatusVisualEpisode { Tick started{}; std::uint64_t generation{}; };
-
-struct EnemyActor
-{
-    EntityId id{};
-    std::uint64_t random_key{};
-    EnemyKind kind{EnemyKind::Melee};
-    std::optional<BossKind> boss;
-    Float2 position{};
-    Float2 previous_position{};
-    DiscMotion2D tick_motion;
-    Float2 velocity{};
-    Float2 displacement_per_tick{};
-    Tick displacement_ticks{};
-    Tick spawned_tick{};
-    std::int32_t health{};
-    std::int32_t max_health{};
-    std::int32_t damage{};
-    float move_speed{};
-    float attack_range{};
-    float warning_extent{};
-    Tick warning_ticks{};
-    Tick attack_cooldown_ticks{};
-    Tick next_attack{};
-    Tick attack_resolve{};
-    Tick boss_action_started{};
-    Tick boss_action_until{};
-    bool boss_action_recoil{};
-    std::uint64_t attack_cast_id{};
-    Float2 locked_aim{};
-    Sequence warning_sequence{};
-    Tick pattern_ready{};
-    std::uint8_t last_pattern{255};
-    std::uint8_t repeat_count{};
-    std::uint8_t final_phase{1};
-    Tick invulnerable_until{};
-    // Presentation clocks; presence remains governed by the live enemy.
-    Tick phase2_started{};
-    Tick dash_started{};
-    Float2 dash_origin{};
-    Tick dash_until{};
-    std::int32_t dash_damage{};
-    bool dash_hit{};
-    std::uint8_t phase_pattern_count{};
-    StatusState status;
-    // Presentation episode metadata; excluded from authoritative checksum.
-    std::array<StatusVisualEpisode, 4> status_visual_episodes{};
-    SkillKind last_damage_skill{SkillKind::Count};
-    EffectOrigin last_damage_origin{EffectOrigin::Original};
-    std::uint64_t last_damage_cast{};
-    std::uint8_t last_damage_upgrade{kNoTelemetrySource};
-    std::uint8_t last_damage_relic{kNoTelemetrySource};
-    SkillKind marked_by_skill{SkillKind::Count};
-    float marked_damage_coefficient{};
-    Tick mark_expires{};
-    Tick bleed_burn_ready{};
-    Tick different_skill_ready{};
-    Tick slow_synergy_ready{};
-    Tick boss_pressure_ready{};
-    SkillKind last_active_hit{SkillKind::Count};
-    Tick last_active_hit_tick{};
-    bool attacking{};
-    bool dead{};
-};
-
-struct ProjectileActor
-{
-    EntityId id{};
-    bool player_owned{};
-    Float2 position{};
-    Float2 previous_position{};
-    Float2 velocity{};
-    Tick spawned_tick{};
-    float remaining_range{};
-    float radius{};
-    std::int32_t damage{};
-    SkillKind skill{SkillKind::BasicAttack};
-    std::uint8_t upgrade_mask{};
-    EffectOrigin origin{EffectOrigin::Original};
-    std::uint64_t cast_id{};
-    std::uint8_t source_upgrade{kNoTelemetrySource};
-    std::uint8_t source_relic{kNoTelemetrySource};
-    std::uint8_t source_enemy{kNoTelemetrySource};
-    std::uint16_t pierce_remaining{};
-    std::uint8_t bounce_remaining{};
-    std::uint32_t hit_count{};
-    std::vector<std::uint64_t> hit_ids;
-    // Each successful bleed extension is a separate short-lived visual episode.
-    std::vector<Tick> bleed_extend_ticks;
-    float explosion_radius{};
-    std::int32_t explosion_damage{};
-    std::uint8_t explosion_source_upgrade{kNoTelemetrySource};
-    std::uint8_t bleed_stacks{};
-    bool burn{};
-    bool slow{};
-    bool returning{};
-    bool homing{};
-    Tick return_started_tick{};
-    Float2 return_start_position{};
-    std::uint64_t homing_target{};
-    bool full_charge{};
-    float charge_ratio{};
-    float carried_burn_attack{};
-    Tick carried_burn_expires{};
-    bool dead{};
-};
-
 enum class AreaKind : std::uint8_t
 {
     Damage,
@@ -293,22 +209,6 @@ struct AreaActor
     std::uint8_t safe_gap_count{};
     bool applies_burn{};
     bool dead{};
-};
-
-struct PickupActor
-{
-    EntityId id{};
-    PickupKind kind{PickupKind::Experience};
-    Float2 position{};
-    std::uint32_t value{};
-    Tick spawned_tick{};
-    bool guaranteed_boss_chest{};
-    bool attracted_by_magnet_stat{};
-    bool globally_attracted{};
-    bool dead{};
-    // Actual pickup motion clock, presentation-only and excluded from checksum.
-    Tick visual_motion_started{}, visual_motion_updated{};
-    float visual_motion_initial_distance{};
 };
 
 enum class ScheduledKind : std::uint8_t
@@ -473,9 +373,14 @@ inline bool HasUpgrade(std::uint8_t mask, std::uint8_t one_based_index) noexcept
     return (mask & (1u << (one_based_index - 1u))) != 0;
 }
 
+constexpr RelicMask RelicBit(RelicKind relic) noexcept
+{
+    return RelicMask{1} << static_cast<unsigned>(relic);
+}
+
 inline bool HasRelic(RelicMask mask, RelicKind relic) noexcept
 {
-    return (mask & (RelicMask{1} << static_cast<unsigned>(relic))) != 0;
+    return (mask & RelicBit(relic)) != 0;
 }
 
 inline std::int32_t RoundDamage(float value) noexcept
@@ -575,11 +480,92 @@ struct GameSimulation::SimulationWorld
     bool selection_waiting_for_release{};
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
 
+    mutable SimulationTimingDiagnostics timings;
+    class TimingScope
+    {
+      public:
+        explicit TimingScope(SimulationTimingSample *sample) noexcept : sample_(sample)
+        { if (sample_) started_ = FixedStepClock::Clock::now(); }
+        ~TimingScope() noexcept { Finish(); }
+        TimingScope(const TimingScope &) = delete;
+        TimingScope &operator=(const TimingScope &) = delete;
+        void Finish() noexcept
+        {
+            if (!sample_) return;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                FixedStepClock::Clock::now() - started_).count();
+            sample_->nanoseconds += static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0));
+            ++sample_->calls;
+            sample_ = nullptr;
+        }
+      private:
+        SimulationTimingSample *sample_{};
+        FixedStepClock::Clock::time_point started_{};
+    };
+    [[nodiscard]] TimingScope Measure(SimulationTimingId id) const noexcept
+    {
+        return TimingScope(config.capture_timings && timings.captured
+            ? &timings.scopes[static_cast<std::size_t>(id)] : nullptr);
+    }
+    void ResetTimings() noexcept
+    {
+        if (!config.capture_timings) { timings.tick = tick; return; }
+        const auto calibration = timings.empty_scope_calibration;
+        timings = {};
+        timings.tick = tick;
+        timings.captured = config.capture_timings;
+        timings.empty_scope_calibration = calibration;
+    }
+    Float2 TimedNavigationWaypoint(NavigationGrid &grid, Float2 from, Float2 target) const
+    {
+        auto timing = Measure(SimulationTimingId::NavigationQuery);
+        return grid.NextWaypoint(from, target);
+    }
+
+    struct ObservationState
+    {
+        std::uint32_t mutation_depth{}, active_borrows{};
+        bool small_facts_dirty{true}, checksum_dirty{true};
+        std::optional<std::thread::id> owner_thread;
+    };
+    mutable ObservationState observation;
+    struct SmallReadFacts
+    {
+        SessionProbe session;
+        PlayerView player;
+        float effective_attack{}, effective_attack_speed{}, effective_move_speed{}, effective_magnet_radius{};
+        float charge_range{}, charge_radius{}, charge_ratio{};
+        Tick charge_normal_ready_tick{};
+        std::array<SkillRuntimeView, kCombatSkillCount> skills{};
+        std::array<WaveView, 5> waves{};
+        std::size_t enemies{}, projectiles{}, areas{}, pickups{}, visual_links{}, mini_bombs{}, spawn_warnings{}, deliveries{};
+    };
+    mutable SmallReadFacts read_facts;
+    void RequireOwnerThread() const;
+    struct MutationScope
+    {
+        SimulationWorld &world;
+        explicit MutationScope(SimulationWorld &world);
+        ~MutationScope() noexcept;
+        MutationScope(const MutationScope &) = delete;
+        MutationScope &operator=(const MutationScope &) = delete;
+    };
+    void InitializeContentReadFacts();
+    void RefreshSmallReadFacts() const;
+    SessionProbe BuildSessionProbe() const;
+    TickReadView MakeTickReadView() const;
+
     SimulationWorld();
-    void UpdateChecksum() { checksum = config.capture_checksums ? CalculateChecksum() : 0; }
+    void UpdateChecksum()
+    {
+        if (config.capture_checksums && observation.checksum_dirty) checksum = CalculateChecksum();
+        if (!config.capture_checksums) checksum = 0;
+        observation.checksum_dirty = false;
+    }
     BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
     const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
     void InitializePlayerState();
+    void ApplyUiAction(const UiAction &action);
     void RebuildNavigation();
     std::span<const ArenaObstacle2D> ArenaObstacles() const noexcept
     {
@@ -587,7 +573,7 @@ struct GameSimulation::SimulationWorld
     }
     std::uint64_t Random(std::uint64_t entity, std::uint64_t purpose) const noexcept;
     float RandomUnit(std::uint64_t entity, std::uint64_t purpose) const noexcept;
-    EntityId AllocateEntityId() noexcept;
+    EntityId AllocateEntityId();
     float EffectiveAttack() const noexcept;
     float EffectiveMoveSpeed() const noexcept;
     float EffectiveAttackSpeed() const noexcept;
@@ -604,13 +590,13 @@ struct GameSimulation::SimulationWorld
                              std::uint64_t amount) noexcept;
     void RecordUpgradeDisplacement(SkillKind skill, std::uint8_t upgrade,
                                    Float2 before, Float2 after) noexcept;
-    void QueueEnemyDisplacement(EnemyActor &enemy, Float2 displacement) noexcept;
+    void QueueEnemyDisplacement(EnemyRow enemy, Float2 displacement) noexcept;
     float EffectiveMagnetRadius() const noexcept;
-    static std::size_t EnemyTelemetryIndex(const EnemyActor &enemy) noexcept;
+    static std::size_t EnemyTelemetryIndex(ConstEnemyRow enemy) noexcept;
     Tick EffectiveCooldownTicks(SkillKind skill) const noexcept;
-    EnemyActor *FindEnemy(std::uint64_t id) noexcept;
-    const EnemyActor *FindEnemy(std::uint64_t id) const noexcept;
-    bool IsBoss(const EnemyActor &enemy) const noexcept;
+    std::optional<EnemyRow> FindEnemy(std::uint64_t id) noexcept;
+    std::optional<ConstEnemyRow> FindEnemy(std::uint64_t id) const noexcept;
+    bool IsBoss(ConstEnemyRow enemy) const noexcept;
     std::uint32_t NormalEnemyCount() const noexcept;
     std::uint32_t BossCount() const noexcept;
     std::uint32_t ProjectileCount(bool player_owned) const noexcept;
@@ -621,6 +607,7 @@ struct GameSimulation::SimulationWorld
                  float height = 0.3f, std::uint8_t context = 0,
                  std::uint64_t source_entity_id = 0,
                  DomainSignalGeometry geometry = {});
+    void PruneVisualLinks();
     void EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                      float height = 0.75f);
     void EmitUpgradeVisual(SkillKind skill, std::uint8_t ordinal,
@@ -636,7 +623,7 @@ struct GameSimulation::SimulationWorld
     void CommitDelayedEnemySpawns();
     void SpawnPickup(PickupKind kind, Float2 position, std::uint32_t value,
                      bool guaranteed = false);
-    ProjectileActor *FireProjectile(SkillKind skill, Float2 position, Float2 direction,
+    std::optional<ProjectileRow> FireProjectile(SkillKind skill, Float2 position, Float2 direction,
                                     float coefficient, EffectOrigin origin,
                                     std::uint64_t cast_id,
                                     std::uint8_t applied_upgrade_mask,
@@ -679,28 +666,29 @@ struct GameSimulation::SimulationWorld
     bool TryBeginSkill(SkillKind skill);
     void ConsumeBufferedSkill();
     void ReleaseChargedShot();
-    EnemyActor *NearestEnemy(Float2 position, float radius,
-                             std::span<const std::uint64_t> excluded = {}) noexcept;
-    const EnemyActor *NearestEnemy(Float2 position, float radius) const noexcept;
+    void CollectEnemies(Float2 position, float radius, EnemyQuery &query) const;
+    std::optional<EnemyRow> NearestEnemy(Float2 position, float radius,
+                            std::span<const std::uint64_t> excluded = {});
+    std::optional<ConstEnemyRow> NearestEnemy(Float2 position, float radius) const;
     void RunPipeline();
     void CastAttackPhase();
     void MovementPhase();
     void SpatialGridPhase();
-    bool AlreadyHit(const ProjectileActor &projectile, std::uint64_t target) const noexcept;
-    void RecordHit(ProjectileActor &projectile, std::uint64_t target);
+    bool AlreadyHit(ConstProjectileRow projectile, std::uint64_t target) const noexcept;
+    void RecordHit(ProjectileRow projectile, std::uint64_t target);
     std::uint8_t IncrementCastHit(std::uint64_t cast, std::uint64_t target);
     std::uint8_t IncrementAreaHit(std::uint64_t area, std::uint64_t target);
     CastRuntime &FindOrCreateCastRuntime(std::uint64_t cast, SkillKind skill);
     // True means the remaining tick must be swept again in the new direction.
-    bool OnProjectileHit(ProjectileActor &projectile, EnemyActor &enemy,
+    bool OnProjectileHit(ProjectileRow projectile, EnemyRow enemy,
                          Float2 contact_position);
-    void ExplodeProjectile(ProjectileActor &projectile);
+    void ExplodeProjectile(ProjectileRow projectile);
     void CollisionHitPhase();
-    void ApplyBleed(EnemyActor &enemy, float attack, std::uint8_t stacks,
+    void ApplyBleed(EnemyRow enemy, float attack, std::uint8_t stacks,
                     SkillKind source_skill = SkillKind::BasicAttack,
                     std::uint8_t source_upgrade = kNoTelemetrySource,
                     std::uint8_t source_relic = kNoTelemetrySource);
-    void ApplyBurn(EnemyActor &enemy, float attack, bool propagated = false,
+    void ApplyBurn(EnemyRow enemy, float attack, bool propagated = false,
                    Tick duration = 240,
                    SkillKind source_skill = SkillKind::BasicAttack,
                    std::uint8_t source_upgrade = kNoTelemetrySource,
@@ -708,8 +696,8 @@ struct GameSimulation::SimulationWorld
     void DamageStatusPhase();
     std::uint64_t Heal(std::int32_t amount, bool emit_signal = true);
     void CancelChargedShot(bool released = false) noexcept;
-    std::uint32_t EnemyExperience(const EnemyActor &enemy) const noexcept;
-    void HandleEnemyDeath(EnemyActor &enemy);
+    std::uint32_t EnemyExperience(ConstEnemyRow enemy) const noexcept;
+    void HandleEnemyDeath(EnemyRow enemy);
     void DeathDropPhase();
     void CollectPickup(PickupActor &pickup);
     SkillTagMask BuildTags() const;
@@ -726,7 +714,7 @@ struct GameSimulation::SimulationWorld
     void CommitAbilitySpawnBarrier();
     void CommitCleanupBarrier();
     GameplayChecksum CalculateChecksum() const;
-    [[nodiscard]] EnemyView EnemyReadView(const EnemyActor &enemy) const;
+    [[nodiscard]] EnemyView EnemyReadView(ConstEnemyRow enemy) const;
     [[nodiscard]] BossActionView BossActionReadView(const BossAction &action) const;
     void HandleRadialBasicAttack(Tick release_ticks, std::uint64_t cast_id);
     void HandleMovementEcho(Tick release_ticks, std::uint64_t cast_id);
@@ -735,37 +723,37 @@ struct GameSimulation::SimulationWorld
     void HandleCombatHitChain(const DamageCommand &event);
     void HandleProjectileCadenceReward();
     std::int32_t ApplyIncomingDamageRelics(std::int32_t amount);
-    void HandleSlowSynergy(EnemyActor &enemy, const DamageCommand &event);
-    void HandleAreaResonance(EnemyActor &enemy, const DamageCommand &event);
-    void HandleBossPressure(EnemyActor &enemy, const DamageCommand &event);
-    void HandleHitStreakReward(EnemyActor &enemy, const DamageCommand &event);
+    void HandleSlowSynergy(EnemyRow enemy, const DamageCommand &event);
+    void HandleAreaResonance(EnemyRow enemy, const DamageCommand &event);
+    void HandleBossPressure(EnemyRow enemy, const DamageCommand &event);
+    void HandleHitStreakReward(EnemyRow enemy, const DamageCommand &event);
     void HandlePickupReward(PickupKind kind);
-    void HandleBleedBurnExplosion(EnemyActor &enemy,
+    void HandleBleedBurnExplosion(EnemyRow enemy,
                                   const DamageCommand &event,
                                   std::uint8_t source_upgrade);
-    void HandleDifferentSkillTracker(EnemyActor &enemy,
+    void HandleDifferentSkillTracker(EnemyRow enemy,
                                      const DamageCommand &event);
     void HandleKillCooldownSurge();
-    void HandleBasicKillTracker(EnemyActor &enemy, CastRuntime *runtime);
-    void HandleBleedKillHeal(const EnemyActor &enemy);
-    void HandleBurnPropagation(const EnemyActor &enemy);
+    void HandleBasicKillTracker(EnemyRow enemy, CastRuntime *runtime);
+    void HandleBleedKillHeal(ConstEnemyRow enemy);
+    void HandleBurnPropagation(ConstEnemyRow enemy);
     bool HandleOnceRevive();
     void DispatchBasicAttackRules(Tick release_ticks, std::uint64_t cast_id);
     void DispatchAbilityRules(SkillKind skill, std::size_t cooldown_index);
     void DispatchPlayerDamagedRules();
-    void DispatchAfterDamageRules(EnemyActor &enemy, const DamageCommand &event);
-    void DispatchStatusAppliedRules(EnemyActor &enemy,
+    void DispatchAfterDamageRules(EnemyRow enemy, const DamageCommand &event);
+    void DispatchStatusAppliedRules(EnemyRow enemy,
                                     const DamageCommand &event,
                                     std::uint8_t source_upgrade);
-    void DispatchEnemyKilledRules(EnemyActor &enemy, CastRuntime *runtime);
+    void DispatchEnemyKilledRules(EnemyRow enemy, CastRuntime *runtime);
     bool DispatchPlayerDeathRules();
     void SessionTimerPhase();
     const SpawnStage &CurrentSpawnStage() const noexcept;
     Float2 SpawnPosition(std::uint64_t salt, bool &used_fallback) const noexcept;
     EnemyKind ChooseEnemyKind(std::uint64_t salt) const noexcept;
     void SpawnPhase();
-    float SlowMultiplier(EnemyActor &enemy);
-    void BossAi(EnemyActor &boss);
+    float SlowMultiplier(EnemyRow enemy);
+    void BossAi(EnemyRow boss);
     void AiIntentPhase();
 };
 

@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $executablePath = [IO.Path]::GetFullPath($Executable)
 $pointerPath = [IO.Path]::GetFullPath($GenerationPointer)
 $artifactsPath = [IO.Path]::GetFullPath($ArtifactsRoot)
-$captureFlags = @('--smoke', '--smoke-render-lockstep', '--ticks=180',
+$captureFlags = @('--smoke', '--smoke-render-lockstep', '--validation', '--ticks=180',
     '--barriers=legacy', '--resize-test')
 $requiredFiles = @('result.json', 'spec.json', 'timeline.csv', 'gpu_passes.csv',
     'dynamic_instance_upload.csv', 'events.ndjson', 'render.json',
@@ -248,8 +248,10 @@ try {
     }
     finally {
         if (Test-Path -LiteralPath $stage -PathType Container) {
-            Assert-ChildPath $stage
-            Remove-Item -LiteralPath $stage -Recurse -Force
+            $failed = Join-Path $artifactsPath ('.failed-' + [Guid]::NewGuid().ToString('N'))
+            Assert-ChildPath $failed
+            [IO.Directory]::Move($stage, $failed)
+            Write-Warning "Failed render baseline artifacts preserved: $failed"
         }
     }
     Write-Output $target

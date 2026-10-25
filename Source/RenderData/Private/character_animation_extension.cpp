@@ -326,9 +326,11 @@ CharacterAnimationExtensionData DecodeCharacterAnimationExtension(
     return animation;
 }
 
-void ValidateCharacterAnimationBinding(
-    const CharacterAnimationExtensionData &animation,
-    const CharacterMetadataPackageData &character, AssetId expected_character_asset_id)
+namespace
+{
+template <typename Character>
+void ValidateBinding(const CharacterAnimationExtensionData &animation,
+    const Character &character, AssetId expected_character_asset_id)
 {
     Validate(animation);
     Require(expected_character_asset_id.value != 0 &&
@@ -338,5 +340,20 @@ void ValidateCharacterAnimationBinding(
             animation.parents == character.parents &&
             animation.inverse_bind_matrices == character.inverse_bind_matrices,
             "ordered skeleton binding mismatch");
+}
+} // namespace
+
+void ValidateCharacterAnimationBinding(
+    const CharacterAnimationExtensionData &animation,
+    const CharacterMetadataPackageData &character, AssetId expected_character_asset_id)
+{
+    ValidateBinding(animation, character, expected_character_asset_id);
+}
+
+void ValidateCharacterAnimationBinding(
+    const CharacterAnimationExtensionData &animation,
+    const CharacterPackageData &character, AssetId expected_character_asset_id)
+{
+    ValidateBinding(animation, character, expected_character_asset_id);
 }
 } // namespace hs::render_data

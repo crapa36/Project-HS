@@ -6,12 +6,16 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cfenv>
 #include <iostream>
+#include <map>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 namespace gc = hs::geometry_content;
 namespace rd = hs::render_data;
+void TestAssetActionSnapshot();
 namespace
 {
 void Check(bool condition, const char *reason)
@@ -67,6 +71,240 @@ void TestCertifiedTriangleDistanceBound()
               displaced.upper >= 0.25 - 1e-5 &&
               displaced.upper - displaced.lower < 0.015,
           "convex-triangle bound must enclose a real displaced-surface error");
+}
+void TestAnalyticErrorSurfaces()
+{
+    const auto triangle = [](std::vector<rd::ExpandedVertex> &surface, float x, float y,
+                             std::uint16_t material) {
+        for (const auto position : {std::array{x, y, 0.0f}, std::array{x + 1, y, 0.0f},
+                                    std::array{x, y, 1.0f}})
+        {
+            rd::ExpandedVertex vertex{};
+            vertex.position = position; vertex.material_index = material;
+            surface.push_back(vertex);
+        }
+    };
+    const auto encloses = [](const auto &fine, const auto &coarse, double exact) {
+        const auto bounds = gc::MeasureGeometryError(fine, coarse);
+        Check(std::isfinite(bounds.lower) && std::isfinite(bounds.upper) &&
+                  bounds.lower >= 0 && bounds.lower <= exact && exact <= bounds.upper &&
+                  bounds.upper - bounds.lower < 0.01,
+              "analytic surface distance must be enclosed by a tight finite bound");
+    };
+    std::vector<rd::ExpandedVertex> fine, coarse;
+    // Twelve separated patches per material force internal BVH nodes. Each
+    // projected triangle remains congruent, so the largest vertical offset is
+    // the exact symmetric distance, independent of traversal/triangle order.
+    for (unsigned i = 0; i < 12; ++i)
+    {
+        triangle(fine, float(i * 4), 0, 0);
+        triangle(coarse, float(i * 4), (i & 1) ? 0.25f : 0.5f, 0);
+    }
+    encloses(fine, coarse, 0.5);
+    std::reverse(coarse.begin(), coarse.end());
+    encloses(fine, coarse, 0.5);
+    encloses(coarse, fine, 0.5);
+
+    fine.clear(); coarse.clear();
+    // The unlabelled surfaces are identical, but each material moves two
+    // metres. A global nearest-surface query would incorrectly return zero.
+    for (unsigned i = 0; i < 12; ++i)
+        for (std::uint16_t material = 0; material < 2; ++material)
+        {
+            triangle(fine, float(i * 4), float(material * 2), material);
+            triangle(coarse, float(i * 4), float((1 - material) * 2), material);
+        }
+    encloses(fine, coarse, 2);
+    std::reverse(coarse.begin(), coarse.end());
+    encloses(fine, coarse, 2);
+
+    // Degenerate closed triangles represent a segment and an isolated point.
+    // Both translate perpendicular to their support by exactly 0.75 metres.
+    fine.clear(); coarse.clear();
+    for (const float x : {0.0f, 1.0f, 2.0f, 8.0f, 8.0f, 8.0f})
+    {
+        rd::ExpandedVertex vertex{}; vertex.position = {x, 0, 0};
+        fine.push_back(vertex);
+        vertex.position[1] = 0.75f; coarse.push_back(vertex);
+    }
+    encloses(fine, coarse, 0.75);
+    std::reverse(coarse.begin(), coarse.end());
+    encloses(fine, coarse, 0.75);
+    encloses(coarse, fine, 0.75);
+}
+void TestGeometryErrorQualificationFallback()
+{
+    std::vector<rd::ExpandedVertex> fine, coarse;
+    for (unsigned i = 0; i < 25; ++i)
+        for (const auto position : {std::array{float(i * 4), 0.0f, 0.0f},
+                                   std::array{float(i * 4 + 1), 0.0f, 0.0f},
+                                   std::array{float(i * 4), 0.0f, 1.0f}})
+        {
+            rd::ExpandedVertex vertex{}; vertex.position = position; vertex.material_index = static_cast<std::uint16_t>(i % 2);
+            fine.push_back(vertex); vertex.position[1] = .5f; coarse.push_back(vertex);
+        }
+    const auto normal = gc::MeasureGeometryError(fine, coarse);
+    Check(normal.oracle_queries == 24 && !normal.qualification_used &&
+              normal.lower <= .5 && normal.upper >= .5,
+          "ordinary cook without GT09 evidence must retain twelve oracle queries in each direction");
+    // This synthetic record tests dispatch policy; it does not qualify the
+    // implementation's continuous input domain for production use.
+    gc::GeometryErrorQualification record{gc::GeometryErrorImplementationKey(), 200, .5, .5, 50, false};
+    const bool eligible_build = record.key.compiler && record.key.target &&
+        record.key.floating_point_contract == 1 && record.key.rounding_mode == FE_TONEAREST;
+    const auto measured = gc::MeasureGeometryError(fine, coarse, {}, 4096,
+        {gc::GeometryErrorCheckMode::Normal, &record});
+    Check(measured.qualification_used == eligible_build &&
+              measured.oracle_queries == (eligible_build ? 0 : 24) &&
+              measured.lower == normal.lower && measured.upper == normal.upper,
+          "qualification may suppress only the duplicate oracle within the exact implementation/domain");
+    const auto fallback = [&](gc::GeometryErrorQualification mismatch) {
+        const auto result = gc::MeasureGeometryError(fine, coarse, {}, 4096,
+            {gc::GeometryErrorCheckMode::Normal, &mismatch});
+        Check(result.oracle_queries == 24 && !result.qualification_used &&
+                  result.lower == normal.lower && result.upper == normal.upper,
+              "stale qualification or uncovered numeric input must use the unchanged sampled oracle");
+    };
+    auto mismatch = record; ++mismatch.key.bvh_abi; fallback(mismatch);
+    mismatch = record; ++mismatch.key.distance_abi; fallback(mismatch);
+    mismatch = record; ++mismatch.key.geometry_format_abi; fallback(mismatch);
+    mismatch = record; ++mismatch.key.material_policy; fallback(mismatch);
+    mismatch = record; ++mismatch.key.compiler; fallback(mismatch);
+    mismatch = record; ++mismatch.key.target; fallback(mismatch);
+    mismatch = record; ++mismatch.key.compiler_version; fallback(mismatch);
+    mismatch = record; ++mismatch.key.floating_point_contract; fallback(mismatch);
+    mismatch = record; ++mismatch.key.rounding_mode; fallback(mismatch);
+    mismatch = record; mismatch.maximum_absolute_coordinate = 1; fallback(mismatch);
+    mismatch = record; mismatch.maximum_triangles_per_surface = 24; fallback(mismatch);
+    mismatch = record; mismatch.minimum_positive_edge_squared = 2; fallback(mismatch);
+    mismatch = record; mismatch.minimum_positive_area_squared = 2; fallback(mismatch);
+    const auto exhaustive = gc::MeasureGeometryError(fine, coarse, {}, 4096,
+        {gc::GeometryErrorCheckMode::Exhaustive, &record});
+    Check(!exhaustive.qualification_used && exhaustive.oracle_queries == 7 * 50 &&
+              exhaustive.lower == normal.lower && exhaustive.upper == normal.upper,
+          "explicit exhaustive mode must check every centroid plus vertex/edge corpus despite qualification");
+    std::vector<rd::ExpandedVertex> line(fine.begin(), fine.begin() + 3), shifted;
+    line[2].position = {2, 0, 0}; shifted = line;
+    for (auto &vertex : shifted) vertex.position[1] = .5f;
+    const auto degenerate = gc::MeasureGeometryError(line, shifted, {}, 4096,
+        {gc::GeometryErrorCheckMode::Normal, &record});
+    Check(degenerate.oracle_queries == 2 && !degenerate.qualification_used &&
+              degenerate.lower <= .5 && degenerate.upper >= .5,
+          "zero-area geometry outside a qualification must retain the segment/point oracle fallback");
+    record.includes_degenerate_triangles = true;
+    const auto supported_degenerate = gc::MeasureGeometryError(line, shifted, {}, 4096,
+        {gc::GeometryErrorCheckMode::Normal, &record});
+    Check(supported_degenerate.qualification_used == eligible_build &&
+              supported_degenerate.oracle_queries == (eligible_build ? 0 : 2) &&
+              supported_degenerate.lower == degenerate.lower && supported_degenerate.upper == degenerate.upper,
+          "degenerate oracle skipping requires the qualification's explicit degenerate domain");
+    for (auto &vertex : shifted) vertex.material_index = 7;
+    bool missing_material = false;
+    try { (void)gc::MeasureGeometryError(line, shifted); }
+    catch (const std::runtime_error &error)
+    { missing_material = std::string_view(error.what()) == "authored LOD removes a complete material surface"; }
+    Check(missing_material, "fallback cannot waive complete material surface validation");
+}
+void TestDuplicatePrimitiveOrder()
+{
+    const std::array positions{std::array{0.0f, 0.0f, 0.0f}, std::array{1.0f, 0.0f, 0.0f},
+                               std::array{0.0f, 0.0f, 1.0f}, std::array{1.0f, 0.0f, 1.0f}};
+    const std::array triangles{std::array{0u, 1u, 2u}, std::array{0u, 1u, 3u},
+                               std::array{0u, 1u, 2u}, std::array{0u, 2u, 1u},
+                               std::array{0u, 1u, 2u}};
+    std::vector<rd::ExpandedVertex> authored;
+    for (std::uint16_t material = 0; material < 2; ++material)
+        for (const auto &triangle : triangles)
+            for (const auto index : triangle)
+            {
+                rd::ExpandedVertex vertex{}; vertex.position = positions[index];
+                vertex.normal = {0, 1, 0}; vertex.tangent = {1, 0, 0, 1};
+                vertex.material_index = material; authored.push_back(vertex);
+            }
+    const auto geometry = gc::CookGeometry(authored, 0);
+    Check(geometry.submeshes.size() == 2, "duplicate fixture must retain both material runs");
+    std::array<bool, 10> seen{};
+    std::map<std::array<std::uint32_t, 3>, std::uint32_t> previous;
+    for (const auto &meshlet : geometry.meshlets)
+        for (std::uint32_t i = 0; i < meshlet.triangle_count; ++i)
+        {
+            const auto triangle_index = meshlet.first_triangle + i;
+            const auto packed = geometry.meshlet_triangles[triangle_index];
+            const auto primitive = geometry.canonical_primitive_remap[triangle_index];
+            Check(primitive < seen.size() && !seen[primitive], "primitive remap must be a permutation");
+            seen[primitive] = true;
+            std::array<std::uint32_t, 3> key{};
+            for (unsigned lane = 0; lane < 3; ++lane)
+            {
+                key[lane] = geometry.meshlet_vertex_refs[meshlet.first_vertex_ref + ((packed >> (lane * 8)) & 255u)];
+                Check(key[lane] == geometry.indices[primitive * 3 + lane],
+                      "primitive remap must preserve oriented triangle identity");
+            }
+            const auto [entry, inserted] = previous.emplace(key, primitive);
+            if (!inserted)
+            {
+                Check(entry->second < primitive, "duplicate oriented primitives must use authored FIFO order");
+                entry->second = primitive;
+            }
+        }
+    Check(std::ranges::all_of(seen, [](bool value) { return value; }), "every authored occurrence must survive cooking");
+}
+void TestIndexedVertexFieldIdentity()
+{
+    std::vector<rd::ExpandedVertex> source;
+    const auto append = [&](rd::ExpandedVertex vertex) {
+        source.insert(source.end(), 3, vertex);
+    };
+    append({});
+    for (std::size_t lane = 0; lane < 4; ++lane)
+    {
+        rd::ExpandedVertex vertex{}; vertex.bone_indices[lane] = 7; append(vertex);
+        vertex = {}; vertex.bone_weights[lane] = 1; append(vertex);
+        vertex = {}; vertex.tangent[lane] = 1; append(vertex);
+        vertex = {}; vertex.tangent[lane] = -0.0f; append(vertex);
+        if (lane < 3)
+        {
+            vertex = {}; vertex.position[lane] = 1; append(vertex);
+            vertex = {}; vertex.normal[lane] = 1; append(vertex);
+            vertex = {}; vertex.position[lane] = -0.0f; append(vertex);
+        }
+        if (lane < 2)
+        {
+            vertex = {}; vertex.uv[lane] = 1; append(vertex);
+        }
+    }
+    rd::ExpandedVertex material{}; material.material_index = 1; append(material);
+    append({}); // Also repeat an earlier vertex after all distinct fields.
+    const auto encoded = rd::EncodeExpandedVertices(source);
+    const auto record = [&](std::size_t index) {
+        return std::span(encoded).subspan(index * rd::kExpandedVertexStride, rd::kExpandedVertexStride);
+    };
+    std::vector<rd::ExpandedVertex> expected_vertices;
+    std::vector<unsigned> expected_indices;
+    // Independent portable-byte reference: first identical record owns the
+    // index, including distinctions such as positive versus negative zero.
+    for (std::size_t i = 0; i < source.size(); ++i)
+    {
+        std::size_t previous = 0;
+        while (previous < i && !std::ranges::equal(record(previous), record(i))) ++previous;
+        if (previous == i)
+        {
+            expected_indices.push_back(static_cast<unsigned>(expected_vertices.size()));
+            expected_vertices.push_back(source[i]);
+        }
+        else expected_indices.push_back(expected_indices[previous]);
+    }
+    std::vector<rd::ExpandedVertex> vertices;
+    std::vector<unsigned> indices;
+    gc::IndexVertices(source, vertices, indices);
+    Check(indices == expected_indices, "native indexing must preserve portable field identity and first occurrence order");
+    Check(rd::EncodeExpandedVertices(vertices) == rd::EncodeExpandedVertices(expected_vertices),
+          "native indexed vertices must preserve every portable field bit");
+    source.front().reserved = 1;
+    bool rejected = false;
+    try { gc::IndexVertices(source, vertices, indices); }
+    catch (const std::runtime_error &) { rejected = true; }
+    Check(rejected, "native indexing must retain reserved-field validation");
 }
 void Validate(const gc::CookedSceneHlod &cooked, std::uint32_t page_limit)
 {
@@ -222,7 +460,12 @@ int main()
 {
     try
     {
+        TestAssetActionSnapshot();
         TestCertifiedTriangleDistanceBound();
+        TestAnalyticErrorSurfaces();
+        TestGeometryErrorQualificationFallback();
+        TestDuplicatePrimitiveOrder();
+        TestIndexedVertexFieldIdentity();
         TestGroundDetailCanonicalLayoutDigest();
         TestSharedMaterialAtlasSelectors();
         const auto geometry = Grid();

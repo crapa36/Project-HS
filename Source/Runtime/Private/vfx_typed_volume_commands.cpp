@@ -20,9 +20,9 @@ constexpr auto kPhase=Hash64("particle.boss.phase_change"),kSpawn=Hash64("partic
     kDeath=Hash64("particle.boss.death"),kAura=Hash64("persistent.boss.phase2_aura");
 Result Invalid(std::string message)
 {return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_volume",std::move(message));}
-template<class T> bool Range(VfxRange r,const std::vector<T> &values)
+template<class T> bool Range(VfxRange r,std::span<const T> values)
 {return r.first<=values.size()&&r.count<=values.size()-r.first;}
-std::uint64_t EffectId(const VfxProgramData &p,VfxEffectHandle handle)
+std::uint64_t EffectId(const VfxProgramView &p,VfxEffectHandle handle)
 {
     const auto i=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[=](const auto &x){return x.handle==handle;});
     return i==p.effect_lookup.end()?0:i->effect_id;
@@ -61,7 +61,7 @@ bool Transform(const std::array<float,16> &owner,float scale,bool crown,VfxVolum
     return std::isfinite(out.bounds_min.x)&&std::isfinite(out.bounds_min.y)&&std::isfinite(out.bounds_min.z)&&
         std::isfinite(out.bounds_max.x)&&std::isfinite(out.bounds_max.y)&&std::isfinite(out.bounds_max.z);
 }
-bool Parameters(const VfxProgramData &p,const VfxOutputRecord &output,bool crown,VfxVolumeInput &out)
+bool Parameters(const VfxProgramView &p,const VfxOutputRecord &output,bool crown,VfxVolumeInput &out)
 {
     if(!Range(output.parameters,p.parameters)||output.parameters.count!=3)return false;
     bool steps=false,density=false,anisotropy=false,noise=false,half=false;
@@ -81,7 +81,7 @@ bool Parameters(const VfxProgramData &p,const VfxOutputRecord &output,bool crown
     }
     return steps&&(crown?(density&&anisotropy):(noise&&half));
 }
-bool Textures(const VfxProgramData &p,const VfxOutputRecord &o)
+bool Textures(const VfxProgramView &p,const VfxOutputRecord &o)
 {
     if(!Range(o.textures,p.texture_bindings)||o.textures.count!=3)return false;
     bool gradient=false,stbn=false,noise=false;
@@ -111,7 +111,7 @@ void Revisions(VfxVolumeInput &out)
     for(float v:{out.scattering_albedo.x,out.scattering_albedo.y,out.scattering_albedo.z,out.emission.x,out.emission.y,out.emission.z,out.hdr})HashFloat(out.appearance_revision,v);
     HashWord(out.appearance_revision,out.gradient_row);
 }
-Result Append(const VfxProgramData &program,const VfxEffectRecord &effect,std::uint64_t effect_id,
+Result Append(const VfxProgramView &program,const VfxEffectRecord &effect,std::uint64_t effect_id,
     VfxVolumeIdentity identity,const std::array<float,16> &transform,float scale,float elapsed,float effect_age,
     std::uint32_t seed,VfxQuality quality,std::vector<VfxVolumeInput> &out)
 {
@@ -163,9 +163,9 @@ Result Append(const VfxProgramData &program,const VfxEffectRecord &effect,std::u
     return found?Result::Success():Invalid("Allowlisted LocalVolume effect has no executable VolumeLocal source.");
 }
 } // namespace
-bool IsVfxTypedVolumeEffect(const VfxProgramData &program,VfxEffectHandle handle) noexcept
+bool IsVfxTypedVolumeEffect(const VfxProgramView &program,VfxEffectHandle handle) noexcept
 {return Allowed(EffectId(program,handle));}
-Result BuildVfxTypedVolumeCommands(const VfxProgramData &program,std::span<const VfxEventInput> events,
+Result BuildVfxTypedVolumeCommands(const VfxProgramView &program,std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> persistent,Tick current_tick,VfxQuality admission,std::vector<VfxVolumeInput> &output)
 {
     output.clear();if(admission!=VfxQuality::High)return Result::Success();

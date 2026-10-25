@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import json
+import math
 import os
 import secrets
 import tempfile
@@ -21,8 +22,8 @@ MODEL_REVISIONS = {
 
 def _positive(value: str) -> float:
     result = float(value)
-    if result <= 0:
-        raise argparse.ArgumentTypeError("must be greater than zero")
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("must be finite and greater than zero")
     return result
 
 
@@ -45,6 +46,8 @@ def _base_seed(seed: int | None) -> int:
 
 
 def _validate_duration(duration: float, model: str) -> None:
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("duration must be finite and greater than zero")
     if duration > MAX_DURATION[model]:
         raise ValueError(f"{model} duration cannot exceed {MAX_DURATION[model]:g} seconds")
 
@@ -140,8 +143,15 @@ def _model_label(model_name: str) -> str:
     return f"{model_name}@{MODEL_REVISIONS[model_name]}"
 
 
+def _sample_rate(sample_rate: int) -> int:
+    if not math.isfinite(sample_rate) or sample_rate <= 0 or int(sample_rate) != sample_rate:
+        raise ValueError("sample rate must be a finite positive integer")
+    return int(sample_rate)
+
+
 def _load_audio(path: Path, torchaudio: Any) -> tuple[int, Any, float]:
     waveform, sample_rate = torchaudio.load(str(path))
+    sample_rate = _sample_rate(sample_rate)
     duration = waveform.shape[-1] / sample_rate
     return sample_rate, waveform, duration
 
@@ -158,6 +168,7 @@ def _next_output(directory: Path) -> tuple[Path, int]:
 
 
 def _save_audio(audio: Any, path: Path, torchaudio: Any, source_rate: int) -> None:
+    source_rate = _sample_rate(source_rate)
     import torch
 
     audio = audio.detach() if hasattr(audio, "detach") else audio
@@ -204,6 +215,7 @@ def _generate(args: argparse.Namespace) -> int:
     _validate_duration(args.duration, args.model)
     StableAudioModel, torchaudio = _dependencies()
     model = _load_model(StableAudioModel, args.model)
+    source_rate = _sample_rate(getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
     base_seed = _base_seed(args.seed)
     for offset in range(args.count):
         seed = base_seed + offset
@@ -211,7 +223,7 @@ def _generate(args: argparse.Namespace) -> int:
         kwargs["seed"] = seed
         audio = model.generate(**kwargs)
         path, _ = _next_output(args.output_dir)
-        _save_audio(audio, path, torchaudio, getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
+        _save_audio(audio, path, torchaudio, source_rate)
         _metadata(args, _model_label(args.model), path, seed, None, args.duration)
         print(path)
     return 0
@@ -219,9 +231,12 @@ def _generate(args: argparse.Namespace) -> int:
 
 def _refine(args: argparse.Namespace) -> int:
     _validate_duration(args.duration, "medium")
+    if not 0.4 <= args.init_noise_level <= 0.8:
+        raise ValueError("init-noise-level must be between 0.4 and 0.8")
     StableAudioModel, torchaudio = _dependencies()
     sample_rate, waveform, _ = _load_audio(args.input_wav, torchaudio)
     model = _load_model(StableAudioModel, "medium")
+    source_rate = _sample_rate(getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
     init_audio = (sample_rate, waveform)
     base_seed = _base_seed(args.seed)
     for offset in range(args.count):
@@ -231,31 +246,32 @@ def _refine(args: argparse.Namespace) -> int:
         kwargs["seed"] = seed
         audio = model.generate(**kwargs)
         path, _ = _next_output(args.output_dir)
-        _save_audio(audio, path, torchaudio, getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
+        _save_audio(audio, path, torchaudio, source_rate)
         _metadata(args, _model_label("medium"), path, seed, args.input_wav, args.duration)
         print(path)
     return 0
 
 
 def _inpaint(args: argparse.Namespace) -> int:
-    if args.mask_start_seconds < 0 or args.mask_end_seconds <= args.mask_start_seconds:
+    if (not math.isfinite(args.mask_start_seconds) or not math.isfinite(args.mask_end_seconds) or
+            args.mask_start_seconds < 0 or args.mask_end_seconds <= args.mask_start_seconds):
         raise ValueError("mask end must be greater than mask start, and start cannot be negative")
     StableAudioModel, torchaudio = _dependencies()
     sample_rate, waveform, duration = _load_audio(args.input_wav, torchaudio)
-    if duration > MAX_DURATION["medium"]:
-        raise ValueError("medium duration cannot exceed 380 seconds")
+    _validate_duration(duration, "medium")
     if args.mask_end_seconds > duration:
         raise ValueError("mask end cannot exceed input WAV duration")
     if args.output_path.exists() or args.output_path.with_suffix(".json").exists():
         raise FileExistsError(f"refusing to overwrite existing output: {args.output_path}")
     model = _load_model(StableAudioModel, "medium")
+    source_rate = _sample_rate(getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
     seed = _base_seed(args.seed)
     kwargs = {"inpaint_audio": (sample_rate, waveform), "inpaint_mask_start_seconds": args.mask_start_seconds,
               "inpaint_mask_end_seconds": args.mask_end_seconds, "prompt": args.prompt,
               "negative_prompt": args.negative_prompt, "duration": duration}
     kwargs["seed"] = seed
     audio = model.generate(**kwargs)
-    _save_audio(audio, args.output_path, torchaudio, getattr(model, "sample_rate", TARGET_SAMPLE_RATE))
+    _save_audio(audio, args.output_path, torchaudio, source_rate)
     _metadata(args, _model_label("medium"), args.output_path, seed, args.input_wav, duration)
     print(args.output_path)
     return 0

@@ -41,31 +41,46 @@ using render_graph::ResourceUse;
 // absent. Texture dimensions describe capacity, not callback active rects.
 using PlanKey = std::vector<std::uint64_t>;
 
-void AppendPlanVersion(PlanKey &key, ResourceVersion version)
+struct PlanKeyWriter
 {
-    key.insert(key.end(), {version.resource.value,
+    PlanKey &storage;
+    std::size_t size{};
+
+    void Append(std::initializer_list<std::uint64_t> words)
+    {
+        const auto end = size + words.size();
+        if (end > storage.size()) storage.resize(end);
+        std::memcpy(storage.data() + size, words.begin(), words.size() * sizeof(std::uint64_t));
+        size = end;
+    }
+    void Finish() { storage.resize(size); }
+};
+
+void AppendPlanVersion(PlanKeyWriter &key, ResourceVersion version)
+{
+    key.Append({version.resource.value,
         static_cast<std::uint64_t>(version.resource.kind), version.ordinal});
 }
 
-void AppendPlanDescriptor(PlanKey &key, const D3D12_RESOURCE_DESC &desc)
+void AppendPlanDescriptor(PlanKeyWriter &key, const D3D12_RESOURCE_DESC &desc)
 {
-    key.insert(key.end(), {static_cast<std::uint64_t>(desc.Dimension), desc.Alignment,
+    key.Append({static_cast<std::uint64_t>(desc.Dimension), desc.Alignment,
         desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels,
         static_cast<std::uint64_t>(desc.Format), desc.SampleDesc.Count,
         desc.SampleDesc.Quality, static_cast<std::uint64_t>(desc.Layout),
         static_cast<std::uint64_t>(desc.Flags)});
 }
 
-void AppendPlanUse(PlanKey &key, const ResourceUse &use)
+void AppendPlanUse(PlanKeyWriter &key, const ResourceUse &use)
 {
     AppendPlanVersion(key, use.predecessor);
     AppendPlanVersion(key, use.successor);
-    key.insert(key.end(), {static_cast<std::uint64_t>(use.access),
+    key.Append({static_cast<std::uint64_t>(use.access),
         use.writes, use.reads, use.range.index()});
     if (const auto *range = std::get_if<BufferRange>(&use.range))
-        key.insert(key.end(), {range->offset, range->size});
+        key.Append({range->offset, range->size});
     else if (const auto *range = std::get_if<TextureSubresourceRange>(&use.range))
-        key.insert(key.end(), {range->first_mip, range->mip_count,
+        key.Append({range->first_mip, range->mip_count,
             range->first_array_slice, range->array_slice_count,
             range->first_plane, range->plane_count});
 }
@@ -101,24 +116,6 @@ void AppendPlanUse(PlanKey &key, const ResourceUse &use)
         return "Copy";
     }
     return "Unknown";
-}
-
-[[nodiscard]] bool QueueAccessCompatibleForExecution(QueueHint queue, Access access) noexcept
-{
-    switch (queue)
-    {
-    case QueueHint::Direct:
-        return true;
-    case QueueHint::Compute:
-        return access == Access::Common || access == Access::ComputeRead ||
-               access == Access::UnorderedRead || access == Access::UnorderedWrite ||
-               access == Access::CopySource || access == Access::CopyDest ||
-               access == Access::IndirectArgs;
-    case QueueHint::Copy:
-        return access == Access::Common || access == Access::CopySource ||
-               access == Access::CopyDest;
-    }
-    return false;
 }
 
 [[nodiscard]] Result QueueFailure(std::string_view operation, HRESULT result)
@@ -312,6 +309,7 @@ struct Pass
         return D3D12_RESOURCE_STATE_INDEX_BUFFER;
     case Access::VertexShaderRead:
         return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+               D3D12_RESOURCE_STATE_INDEX_BUFFER |
                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     case Access::IndirectArgs:
         return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
@@ -354,7 +352,8 @@ struct Pass
     case Access::IndexBuffer:
         return D3D12_BARRIER_SYNC_INDEX_INPUT;
     case Access::VertexShaderRead:
-        return D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING;
+        return D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING |
+               D3D12_BARRIER_SYNC_INDEX_INPUT;
     case Access::IndirectArgs:
         return D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
     case Access::Present:
@@ -397,7 +396,8 @@ struct Pass
     case Access::IndexBuffer:
         return D3D12_BARRIER_ACCESS_INDEX_BUFFER;
     case Access::VertexShaderRead:
-        return D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
+        return D3D12_BARRIER_ACCESS_VERTEX_BUFFER | D3D12_BARRIER_ACCESS_INDEX_BUFFER |
+               D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
     case Access::IndirectArgs:
         return D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
     case Access::Present:
@@ -814,10 +814,20 @@ struct RenderGraphBuilder::Impl
     TransientResourcePool::Impl *pool{};
     std::vector<LogicalResource> resources;
     std::vector<Pass> passes;
+    std::vector<std::vector<ResourceUse>> reusable_pass_uses;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering_dependencies;
     render_graph::CompiledSchedule schedule;
     render_graph::AliasPlan alias_plan;
     PlanKey cached_plan_key;
+    Microsoft::WRL::ComPtr<ID3D12Device> plan_device;
+    struct PreviousPlan
+    {
+        PlanKey key;
+        render_graph::CompiledSchedule schedule;
+        render_graph::AliasPlan aliases;
+    };
+    std::array<PreviousPlan, 7> previous_plans;
+    std::size_t next_previous_plan{};
     PlanKey candidate_plan_key;
     std::uint64_t plan_compilations{};
     std::uint64_t plan_reuses{};
@@ -1163,8 +1173,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (timing.pass_id != pass.id || timing.queue != static_cast<RenderQueue>(pass.queue))
                 return fail("CPU pass timing identity must match compiled execution order.");
             timing.cpu_record_begin_qpc = timing.cpu_record_end_qpc = 0;
+            timing.cpu_callback_begin_qpc = timing.cpu_callback_end_qpc = 0;
             timing.cpu_provider_submit_begin_qpc = timing.cpu_provider_submit_end_qpc = 0;
-            timing.cpu_record_valid = timing.cpu_provider_submit_valid = false;
+            timing.cpu_record_valid = timing.cpu_callback_valid = timing.cpu_provider_submit_valid = false;
         }
     }
     const auto cpu_counter = []() -> std::uint64_t {
@@ -1442,7 +1453,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             state.read_entry = UINT32_MAX;
             state.readers.fill(UINT32_MAX);
         }
-        const auto queue = QueueAccessCompatibleForExecution(state.queue, target) ? state.queue : QueueHint::Direct;
+        const auto queue = QueueAccessCompatible(state.queue, target) ? state.queue : QueueHint::Direct;
         const bool external_import = logical.imported_external_completion.native_fence_owner ||
             logical.imported_external_completion.resource_lease;
         // An untouched import already in its final physical state needs no
@@ -1576,10 +1587,17 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 if (batch.queue != QueueHint::Copy)
                     PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.name.c_str());
                 RenderPassContext context(commands, enhanced, barriers, &g, batch.queue);
+                if (cpu_timing) cpu_timing->cpu_callback_begin_qpc = cpu_counter();
                 if (pass.owner_execute)
                     record_results[index] = pass.owner_execute(context);
                 else
                     pass.execute(context);
+                if (cpu_timing)
+                {
+                    cpu_timing->cpu_callback_end_qpc = cpu_counter();
+                    cpu_timing->cpu_callback_valid = cpu_timing->cpu_callback_begin_qpc != 0 &&
+                        cpu_timing->cpu_callback_end_qpc >= cpu_timing->cpu_callback_begin_qpc;
+                }
                 if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
                 if (queries && batch.queue != QueueHint::Copy) commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             }
@@ -2003,7 +2021,7 @@ Result RenderPassContext::RecordLegacyResourceCommands(
             access.incoming != access.outgoing ||
             (access.incoming != Access::ComputeRead && access.incoming != Access::UnorderedRead &&
              access.incoming != Access::UnorderedWrite) ||
-            !QueueAccessCompatibleForExecution(queue_, access.incoming))
+            !QueueAccessCompatible(queue_, access.incoming))
             return fail("Legacy SDK recording requires matching whole-resource SRV or UAV accesses.");
 
         const auto *resource = graph->Find(access.resource);
@@ -2192,6 +2210,14 @@ void RenderGraphBuilder::Reset()
     impl_->state = Preparation::Building;
     impl_->pool = nullptr;
     impl_->resources.clear();
+    if (impl_->reusable_pass_uses.size() < impl_->passes.size())
+        impl_->reusable_pass_uses.resize(impl_->passes.size());
+    for (std::size_t index = 0; index < impl_->passes.size(); ++index)
+    {
+        auto &reusable = impl_->reusable_pass_uses[index];
+        reusable.swap(impl_->passes[index].uses);
+        reusable.clear();
+    }
     impl_->passes.clear();
     impl_->ordering_dependencies.clear();
     // The last successful value-only plan survives frame construction. Ready
@@ -2249,6 +2275,12 @@ PassBuilder RenderGraphBuilder::AddPass(std::uint32_t pass_id, std::string_view 
 {
     impl_->state = Preparation::Building;
     impl_->passes.push_back({pass_id, std::string(name), queue, {}, {}});
+    const auto index = impl_->passes.size() - 1;
+    if (index < impl_->reusable_pass_uses.size())
+    {
+        auto &reusable = impl_->reusable_pass_uses[index];
+        impl_->passes.back().uses.swap(reusable);
+    }
     return PassBuilder(impl_.get(), static_cast<std::uint32_t>(impl_->passes.size() - 1));
 }
 
@@ -2312,10 +2344,17 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     if (impl_->invalid_final) return fail("RenderGraph final access names a nonexistent resource.");
     if (!pool.impl_->allocator || !pool.impl_->device)
         return fail("RenderGraph transient pool has no allocator or device.");
+    if (impl_->plan_device.Get() != pool.impl_->device.Get())
+    {
+        impl_->cached_plan_key.clear();
+        for (auto &previous : impl_->previous_plans) previous = {};
+        impl_->plan_device = pool.impl_->device;
+    }
     auto &plan_key = impl_->candidate_plan_key;
-    plan_key.clear();
+    // Overwrite retained words without repeated vector insert/iterator bookkeeping.
+    PlanKeyWriter key_writer{plan_key};
     const auto adapter = pool.impl_->device->GetAdapterLuid();
-    plan_key.insert(plan_key.end(), {adapter.LowPart,
+    key_writer.Append({adapter.LowPart,
         static_cast<std::uint32_t>(adapter.HighPart), pool.impl_->device->GetNodeCount(),
         impl_->resources.size(), impl_->passes.size()});
     for (auto &resource : impl_->resources)
@@ -2335,7 +2374,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             if (!SameDevice(static_cast<ID3D12Resource *>(resource.native), pool.impl_->device.Get()))
                 return fail("RenderGraph imported resource belongs to a different device.");
             if (QueueIndex(resource.initial_queue) > QueueIndex(QueueHint::Copy) ||
-                !QueueAccessCompatibleForExecution(resource.initial_queue, resource.initial))
+                !QueueAccessCompatible(resource.initial_queue, resource.initial))
                 return fail("RenderGraph imported initial access is incompatible with its owning queue.");
             resource.native_description = static_cast<ID3D12Resource *>(resource.native)->GetDesc();
             const auto &desc = resource.native_description;
@@ -2425,7 +2464,6 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     for (const auto &r : impl_->resources)
     {
         render_graph::ResourceInfo info;
-        info.name = r.name;
         info.kind = r.kind;
         info.initialized = r.imported;
         info.buffer_size = r.buffer.size;
@@ -2463,26 +2501,14 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             if (!format_planes(static_cast<DXGI_FORMAT>(r.texture.format), info.plane_count))
                 return fail("RenderGraph cannot query transient texture format planes.");
         }
-        if (!r.imported)
-        {
-            const auto desc = NativeDesc(r.kind, r.texture, r.buffer);
-            const auto allocation = pool.impl_->device->GetResourceAllocationInfo(0, 1, &desc);
-            if (!allocation.SizeInBytes || !allocation.Alignment)
-                return fail("RenderGraph transient descriptor returned invalid allocation information.");
-            info.allocation_size = allocation.SizeInBytes;
-            info.allocation_alignment = allocation.Alignment;
-            info.heap_class = static_cast<std::uint32_t>(HeapFlags(
-                r.kind, r.kind == ResourceKind::Texture ? r.texture.flags : r.buffer.flags));
-        }
-        AppendPlanDescriptor(plan_key, r.imported
+        AppendPlanDescriptor(key_writer, r.imported
             ? r.native_description
             : NativeDesc(r.kind, r.texture, r.buffer));
-        plan_key.insert(plan_key.end(), {static_cast<std::uint64_t>(info.kind),
+        key_writer.Append({static_cast<std::uint64_t>(info.kind),
             info.initialized, info.buffer_size, info.mip_count, info.array_count,
             info.plane_count, info.final_set, static_cast<std::uint64_t>(r.fixed_buffer_heap),
-            info.allocation_size, info.allocation_alignment, info.heap_class,
             static_cast<std::uint64_t>(r.final_set ? r.final : Access::Undefined)});
-        AppendPlanVersion(plan_key, info.final_version);
+        AppendPlanVersion(key_writer, info.final_version);
         resource_infos.push_back(info);
     }
     std::vector<std::vector<std::uint32_t>> predecessor_ids(impl_->passes.size());
@@ -2527,8 +2553,8 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                     pass.queue == QueueHint::Copy || (native_flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS));
                 if (!resource || !compatible(*resource, boundary.incoming) || !compatible(*resource, boundary.outgoing) ||
                     (resource->imported && !SameDevice(static_cast<ID3D12Resource *>(resource->native), pool.impl_->device.Get())) ||
-                    !QueueAccessCompatibleForExecution(pass.queue, boundary.incoming) ||
-                    !QueueAccessCompatibleForExecution(pass.queue, boundary.outgoing) ||
+                    !QueueAccessCompatible(pass.queue, boundary.incoming) ||
+                    !QueueAccessCompatible(pass.queue, boundary.outgoing) ||
                     boundary.incoming == Access::Present || boundary.outgoing == Access::Present ||
                     boundary.incoming == Access::DepthRead || boundary.incoming == Access::DepthWrite ||
                     boundary.incoming == Access::DepthShaderRead || boundary.outgoing == Access::DepthRead ||
@@ -2562,27 +2588,53 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         // kind and external boundaries capture its available side-effect data.
         const std::uint64_t execution_kind = pass.external ? 4 : pass.owner_execute
             ? (pass.execute_on_owner ? 3 : 2) : pass.execute ? 1 : 0;
-        plan_key.insert(plan_key.end(), {pass.id, static_cast<std::uint64_t>(pass.queue),
+        key_writer.Append({pass.id, static_cast<std::uint64_t>(pass.queue),
             has_execute, execution_kind, pass.uses.size(), predecessors.size()});
-        for (const auto &use : pass.uses) AppendPlanUse(plan_key, use);
-        plan_key.insert(plan_key.end(), predecessors.begin(), predecessors.end());
+        for (const auto &use : pass.uses) AppendPlanUse(key_writer, use);
+        for (const auto predecessor : predecessors) key_writer.Append({predecessor});
         if (pass.external)
         {
-            plan_key.insert(plan_key.end(), {static_cast<std::uint64_t>(pass.external->binding.queue_type),
+            key_writer.Append({static_cast<std::uint64_t>(pass.external->binding.queue_type),
                 pass.external->accesses.size()});
             for (const auto &boundary : pass.external->accesses)
-                plan_key.insert(plan_key.end(), {boundary.resource.value,
+                key_writer.Append({boundary.resource.value,
                     static_cast<std::uint64_t>(boundary.resource.kind),
                     static_cast<std::uint64_t>(boundary.incoming),
                     static_cast<std::uint64_t>(boundary.outgoing)});
         }
     }
+    key_writer.Finish();
     capture_stage(captured_cpu.cpu_prepare_info_key_us);
     if (impl_->cached_plan_key == plan_key)
         ++impl_->plan_reuses;
+    else if (const auto previous = std::find_if(impl_->previous_plans.begin(), impl_->previous_plans.end(),
+                 [&](const auto &entry) { return entry.key == plan_key; }); previous != impl_->previous_plans.end())
+    {
+        // Rotate exact value-only plans without copying schedules or retaining callbacks/imports.
+        std::swap(impl_->cached_plan_key, previous->key);
+        std::swap(impl_->schedule, previous->schedule);
+        std::swap(impl_->alias_plan, previous->aliases);
+        ++impl_->plan_reuses;
+    }
     else
     {
         // Validation and the exact key are complete before copying compiler-only inputs.
+        for (std::size_t index = 0; index < resource_infos.size(); ++index)
+        {
+            const auto &resource = impl_->resources[index];
+            auto &info = resource_infos[index];
+            info.name = resource.name;
+            if (resource.imported) continue;
+            // Allocation requirements derive from the device and exact descriptor in the key.
+            const auto desc = NativeDesc(resource.kind, resource.texture, resource.buffer);
+            const auto allocation = pool.impl_->device->GetResourceAllocationInfo(0, 1, &desc);
+            if (!allocation.SizeInBytes || allocation.SizeInBytes == UINT64_MAX || !allocation.Alignment)
+                return fail("RenderGraph transient descriptor returned invalid allocation information.");
+            info.allocation_size = allocation.SizeInBytes;
+            info.allocation_alignment = allocation.Alignment;
+            info.heap_class = static_cast<std::uint32_t>(HeapFlags(resource.kind,
+                resource.kind == ResourceKind::Texture ? resource.texture.flags : resource.buffer.flags));
+        }
         std::vector<render_graph::PassInfo> pass_infos;
         pass_infos.reserve(impl_->passes.size());
         for (std::size_t index = 0; index < impl_->passes.size(); ++index)
@@ -2601,9 +2653,18 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             return result;
         // Publish only a fully validated compiler result. A failed candidate
         // leaves the previous successful plan available for a later frame.
+        auto compiled_key = plan_key;
+        if (!impl_->cached_plan_key.empty())
+        {
+            auto &previous = impl_->previous_plans[impl_->next_previous_plan];
+            previous.key = std::move(impl_->cached_plan_key);
+            previous.schedule = std::move(impl_->schedule);
+            previous.aliases = std::move(impl_->alias_plan);
+            impl_->next_previous_plan = (impl_->next_previous_plan + 1) % impl_->previous_plans.size();
+        }
         impl_->schedule = std::move(schedule);
         impl_->alias_plan = std::move(aliases);
-        impl_->cached_plan_key = plan_key;
+        impl_->cached_plan_key = std::move(compiled_key);
         ++impl_->plan_compilations;
     }
     capture_stage(captured_cpu.cpu_prepare_compile_us);

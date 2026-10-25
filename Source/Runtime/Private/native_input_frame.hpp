@@ -17,24 +17,43 @@ class NativeInputFrame
     std::condition_variable changed_;
     bool enabled_{}, cancelled_{}, input_parked_{}, simulation_parked_{};
     std::uint64_t input_request_{}, input_sampled_{}, simulation_request_{}, simulation_completed_{};
+    void (*wake_main_)(void *) noexcept{};
+    void *wake_context_{};
+    void WakeMain() noexcept { if (wake_main_) wake_main_(wake_context_); }
   public:
+    // Bound before any endpoint starts, and retained through stop/join.
+    void BindMainWake(void (*notify)(void *) noexcept, void *context) noexcept
+    { wake_main_ = notify; wake_context_ = context; }
+    bool MainWorkPending()
+    {
+        std::lock_guard lock(mutex_);
+        return !cancelled_ && (enabled_ ? (!input_parked_ || input_request_ != input_sampled_) : input_parked_);
+    }
+    bool InputGated()
+    {
+        std::lock_guard lock(mutex_);
+        return enabled_ && !cancelled_ && input_request_ == input_sampled_;
+    }
     void SetEnabled(bool enabled)
     {
-        std::unique_lock lock(mutex_); enabled_ = enabled; changed_.notify_all();
+        std::unique_lock lock(mutex_);
+        const bool changed = enabled_ != enabled;
+        enabled_ = enabled; changed_.notify_all();
+        if (changed || (enabled && !input_parked_)) WakeMain();
         if (enabled)
             changed_.wait(lock, [&] { return cancelled_ || (input_parked_ && simulation_parked_); });
         // Parked flags describe the worker state until each worker actually resumes.
     }
     void Cancel()
     {
-        std::lock_guard lock(mutex_); cancelled_ = true; changed_.notify_all();
+        std::lock_guard lock(mutex_); cancelled_ = true; changed_.notify_all(); WakeMain();
     }
     bool RequestInput(std::uint64_t token)
     {
         std::lock_guard lock(mutex_);
         if (!enabled_ || cancelled_ || !token || input_request_ != input_sampled_ ||
             simulation_request_ != simulation_completed_) return false;
-        input_request_ = token; changed_.notify_all(); return true;
+        input_request_ = token; changed_.notify_all(); WakeMain(); return true;
     }
     bool WaitInput(std::uint64_t token)
     {

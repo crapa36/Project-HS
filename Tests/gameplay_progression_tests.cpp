@@ -196,7 +196,7 @@ void TestStartingEnemyBalanceAndBoundary()
            "normal enemy fallback warning projects to a visible world effect");
     Check(std::hypot(parameters.direction.x, parameters.direction.z) > 0.0001f,
           "spawn warning VFX projection carries a valid direction");
-    hs::GameReadModelStorage spawn_model; fallback.WriteReadModel(spawn_model);
+    hs::GameReadModelStorage spawn_model; fallback.CopyReadModelForDevelopment(spawn_model);
     Check(warning != fallback.PendingDomainSignals().end() &&
         warning->geometry.kind == hs::DomainSignalGeometryKind::Circle &&
         warning->geometry.radius == fallback_rules.enemies[warning->context].collision_radius &&
@@ -214,7 +214,7 @@ void TestStartingEnemyBalanceAndBoundary()
     (void)Tick(fallback);
     Check(fallback.GetObservation().normal_enemy_count == 1,
           "normal enemy fallback commits after the authored warning duration");
-    fallback.WriteReadModel(spawn_model);
+    fallback.CopyReadModelForDevelopment(spawn_model);
     Check(std::ranges::none_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.owner_id==spawn_owner;}),
         "committed fallback spawn warning owner expires");
     Check(fallback.Shutdown().Succeeded(), "spawn fallback shutdown");
@@ -401,7 +401,7 @@ void TestPickupCollectionTargetsCurrentPlayer()
     for (std::uint32_t tick = 0; tick < 180 &&
          !std::ranges::all_of(collected, [](bool found) { return found; }); ++tick)
     {
-        simulation.WriteReadModel(before);
+        simulation.CopyReadModelForDevelopment(before);
         simulation.ClearDomainSignals();
         (void)Tick(simulation, held);
         const auto player = simulation.GetObservation().player_position;
@@ -549,7 +549,7 @@ void TestTimedBossEventsAndSpawnStop()
         boss_warning->geometry.radius==hs::SimulationRules::Defaults().boss_common.collision_radius&&
         boss_warning->geometry.source_id==boss_warning->sequence&&boss_warning->geometry.end_tick-boss_warning->geometry.start_tick==90,
         "boss spawn warning uses actual footprint and schedule");
-    hs::GameReadModelStorage spawn_model; simulation.WriteReadModel(spawn_model);
+    hs::GameReadModelStorage spawn_model; simulation.CopyReadModelForDevelopment(spawn_model);
     const auto boss_owner=boss_warning!=simulation.PendingDomainSignals().end()?boss_warning->sequence:0;
     Check(std::ranges::any_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.boss&&owner.owner_id==boss_owner;}),
         "pending boss spawn publishes warning owner");
@@ -557,7 +557,7 @@ void TestTimedBossEventsAndSpawnStop()
     Check(simulation.GetObservation().boss_count == 0, "5-minute warning window");
     (void)Tick(simulation);
     Check(simulation.GetObservation().boss_count == 1, "5-minute boss event");
-    simulation.WriteReadModel(spawn_model);
+    simulation.CopyReadModelForDevelopment(spawn_model);
     Check(std::ranges::none_of(spawn_model.View().spawn_warnings,[&](const auto &owner){return owner.owner_id==boss_owner;}),
         "boss spawn commit removes warning owner");
 

@@ -54,7 +54,7 @@ constexpr auto kStatusStamp = Hash32("status_stamp");
 constexpr auto kStatusSymbol = Hash32("status_symbol_sdf");
 bool Finite(const Float3 &v) noexcept
 { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
-template<class T> bool ValidRange(VfxRange r, const std::vector<T> &v)
+template<class T> bool ValidRange(VfxRange r, std::span<const T> v)
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 struct Recipe { std::uint32_t shape; VfxMotionKind motion; VfxImpactShape kind; float size; };
 constexpr Recipe kRecipes[]{
@@ -72,7 +72,7 @@ constexpr Recipe kRecipes[]{
     {Hash32("boss_crest_contact_sdf"), VfxMotionKind::SingleFrameSnapShrink, VfxImpactShape::BossCrestContact, 1},
     {Hash32("needle_star_sdf"), VfxMotionKind::InstantCompressionAxialSplit, VfxImpactShape::NeedleStar, 1}
 };
-bool Parameters(const VfxProgramData &c, const VfxOutputRecord &o, VfxFlashSpawnInput &spawn)
+bool Parameters(const VfxProgramView &c, const VfxOutputRecord &o, VfxFlashSpawnInput &spawn)
 {
     if (!ValidRange(o.parameters, c.parameters)) return false;
     const auto params = std::span(c.parameters).subspan(o.parameters.first, o.parameters.count);
@@ -113,7 +113,7 @@ bool Parameters(const VfxProgramData &c, const VfxOutputRecord &o, VfxFlashSpawn
     if (spawn.shape == VfxImpactShape::StarRing && !enumeration("sdf", "star_ring")) return false;
     return true;
 }
-bool OitParameters(const VfxProgramData &c, const VfxOutputRecord &o, const VfxEventInput &input,
+bool OitParameters(const VfxProgramView &c, const VfxOutputRecord &o, const VfxEventInput &input,
                    VfxFlashSpawnInput &spawn)
 {
     if (!ValidRange(o.parameters, c.parameters)) return false;
@@ -178,7 +178,7 @@ bool OitParameters(const VfxProgramData &c, const VfxOutputRecord &o, const VfxE
 }
 
 template<class Input>
-bool Mask(const VfxProgramData &c, const VfxOutputRecord &o, const Input &input,
+bool Mask(const VfxProgramView &c, const VfxOutputRecord &o, const Input &input,
           VfxFlashSpawnInput &spawn)
 {
     if (!ValidRange(o.textures, c.texture_bindings)) return false;
@@ -204,7 +204,7 @@ bool Mask(const VfxProgramData &c, const VfxOutputRecord &o, const Input &input,
     return true;
 }
 
-bool HasUniqueIdentity(const VfxProgramData &cooked, VfxEffectHandle handle,
+bool HasUniqueIdentity(const VfxProgramView &cooked, VfxEffectHandle handle,
                        std::uint64_t effect_id)
 {
     return std::count_if(cooked.effect_lookup.begin(), cooked.effect_lookup.end(),
@@ -228,7 +228,7 @@ std::uint64_t StatusEffectId(std::uint8_t kind)
     }
 }
 
-bool StatusStampTextures(const VfxProgramData &cooked, const VfxOutputRecord &output,
+bool StatusStampTextures(const VfxProgramView &cooked, const VfxOutputRecord &output,
                          bool bleed_extend)
 {
     const bool texture_count_ok = bleed_extend
@@ -301,7 +301,7 @@ bool StatusStampTextures(const VfxProgramData &cooked, const VfxOutputRecord &ou
     return gradient && curve && (!bleed_extend || (optional_mask && authored_mask));
 }
 
-bool StatusStampCurve(const VfxProgramData &cooked, const VfxOutputRecord &output)
+bool StatusStampCurve(const VfxProgramView &cooked, const VfxOutputRecord &output)
 {
     if (!ValidRange(output.parameters, cooked.parameters) || output.parameters.count != 1) return false;
     const auto &parameter = cooked.parameters[output.parameters.first];
@@ -321,7 +321,7 @@ bool StatusStampCurve(const VfxProgramData &cooked, const VfxOutputRecord &outpu
     return cooked.curve_keys[curve.keys.first].time == 0.0f && previous == 1.0f;
 }
 
-bool StatusTickCurve(const VfxProgramData &cooked, const VfxOutputRecord &output)
+bool StatusTickCurve(const VfxProgramView &cooked, const VfxOutputRecord &output)
 {
     if (!ValidRange(output.parameters, cooked.parameters) || output.parameters.count != 1) return false;
     const auto &parameter = cooked.parameters[output.parameters.first];
@@ -341,7 +341,7 @@ bool StatusTickCurve(const VfxProgramData &cooked, const VfxOutputRecord &output
     return cooked.curve_keys[curve.keys.first].time == 0.0f && previous == 1.0f;
 }
 
-bool StatusTickTextures(const VfxProgramData &cooked, const VfxOutputRecord &output,
+bool StatusTickTextures(const VfxProgramView &cooked, const VfxOutputRecord &output,
                         bool bleed, const VfxEventInput &event, VfxFlashSpawnInput &flash)
 {
     if (!ValidRange(output.textures, cooked.texture_bindings) ||
@@ -388,7 +388,7 @@ bool StatusTickTextures(const VfxProgramData &cooked, const VfxOutputRecord &out
 }
 }
 
-std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData &cooked,
+std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramView &cooked,
                                                          std::span<const VfxEventInput> inputs,
                                                          std::vector<Sequence> *superseded_pickup_sequences)
 {
@@ -569,7 +569,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxProgramData 
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs,
+    const VfxProgramView &program, std::span<const VfxPersistentInput> inputs,
     Tick current_tick)
 {
     std::vector<VfxFlashSpawnInput> result;
@@ -684,7 +684,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
 }
 
 std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxPersistentInput> inputs)
 {
     std::vector<VfxFlashSpawnInput> result;
@@ -787,7 +787,7 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
 }
 
 std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> persistent)
 {

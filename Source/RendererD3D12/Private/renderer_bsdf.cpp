@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include <hs/render_data/dds_texture.hpp>
 
 namespace hs
 {
@@ -7,41 +8,27 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
                                                   AllocationResource &lut)
 {
     constexpr UINT extent = 128;
-    constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16_FLOAT;
-    std::filesystem::path shader_path;
-    if (auto resolved = lut_config.ResolveProduct("render/shader/bsdf_preintegrate_cs.dxil",
-                                               shader_path); !resolved) return resolved;
-    std::vector<std::byte> shader;
-    if (auto read = ReadBinary(shader_path, shader); !read) return read;
+    constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    std::filesystem::path path;
+    if (auto resolved = lut_config.ResolveProduct("render/lighting/coated_ggx_dfg.dds", path);
+        !resolved) return resolved;
+    std::vector<std::byte> bytes;
+    if (auto read = ReadBinary(path, bytes); !read) return read;
+    render_data::DdsTextureView dds;
+    try
+    {
+        dds = render_data::DecodeDdsTexture(bytes);
+        const auto &shape = dds.description;
+        if (dds.dimension != 3 || dds.misc != 0 || shape.width != extent ||
+            shape.height != extent || shape.array_size != 1 || shape.mip_count != 1 ||
+            shape.format != static_cast<std::uint32_t>(format))
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Cooked coated DFG shape does not match the shader ABI.");
+    }
+    catch (const std::exception &error)
+    { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
     auto result = device.As(&environment_brdf_init_device);
     if (FAILED(result)) return HResultFailure("Query BSDF initialization device", result);
-
-    D3D12_DESCRIPTOR_RANGE1 range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 1;
-    range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-    D3D12_ROOT_PARAMETER1 parameter{};
-    parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameter.DescriptorTable = {1, &range};
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
-    root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    root_description.Desc_1_1 = {1, &parameter, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_NONE};
-    ComPtr<ID3DBlob> serialized, errors;
-    result = D3D12SerializeVersionedRootSignature(&root_description, &serialized, &errors);
-    if (FAILED(result)) return HResultFailure("Serialize BSDF integration root signature", result);
-    ComPtr<ID3D12RootSignature> root;
-    result = device->CreateRootSignature(0, serialized->GetBufferPointer(),
-        serialized->GetBufferSize(), IID_PPV_ARGS(&root));
-    if (FAILED(result)) return HResultFailure("Create BSDF integration root signature", result);
-    if (auto registered = pipeline_cache.RegisterRootSignature(root.Get(),
-            {static_cast<const std::byte *>(serialized->GetBufferPointer()), serialized->GetBufferSize()});
-        !registered) return registered;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_description{};
-    pipeline_description.pRootSignature = root.Get();
-    pipeline_description.CS = {shader.data(), shader.size()};
-    ComPtr<ID3D12PipelineState> pipeline;
-    result = pipeline_cache.CreateCompute(&pipeline_description, IID_PPV_ARGS(&pipeline));
-    if (FAILED(result)) return HResultFailure("Create BSDF integration pipeline", result);
 
     D3D12_RESOURCE_DESC texture{};
     texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -51,54 +38,55 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
     texture.MipLevels = 1;
     texture.Format = format;
     texture.SampleDesc = {1, 0};
-    texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     if (auto created = CreateAllocation(lut, allocation, texture,
-                                        D3D12_RESOURCE_STATE_COMMON); !created) return created;
-    D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
-    heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap_description.NumDescriptors = 1;
-    heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ComPtr<ID3D12DescriptorHeap> heap;
-    result = device->CreateDescriptorHeap(&heap_description, IID_PPV_ARGS(&heap));
-    if (FAILED(result)) return HResultFailure("Create BSDF integration UAV heap", result);
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-    uav.Format = format;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    device->CreateUnorderedAccessView(lut.resource.Get(), nullptr, &uav,
-                                     heap->GetCPUDescriptorHandleForHeapStart());
+                                        D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+    UINT rows{};
+    UINT64 row_size{}, upload_size{};
+    device->GetCopyableFootprints(&texture, 0, 1, 0, &footprint, &rows, &row_size, &upload_size);
+    AllocationResource upload;
+    allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+    if (auto created = CreateAllocation(upload, allocation, BufferDescription(upload_size),
+        D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+    void *mapped{};
+    const D3D12_RANGE no_read{};
+    result = upload.resource->Map(0, &no_read, &mapped);
+    if (FAILED(result)) return HResultFailure("Map cooked DFG upload", result);
+    const auto &source = dds.subresources.front();
+    for (UINT row = 0; row < rows; ++row)
+        std::memcpy(static_cast<std::byte *>(mapped) + footprint.Offset +
+                    static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
+                    source.bytes.data() + static_cast<std::size_t>(row) * source.row_pitch,
+                    static_cast<std::size_t>(row_size));
+    upload.resource->Unmap(0, nullptr);
 
-    // One immutable initialization; all helper COM objects outlive the submission.
-    // The texture survives resize and is only released after the renderer drain.
+    // Staging survives a failed drain; the immutable texture survives resize.
     result = frames[0].allocator->Reset();
     if (FAILED(result)) return HResultFailure("Reset BSDF integration allocator", result);
-    result = command_list->Reset(frames[0].allocator.Get(), pipeline.Get());
+    result = command_list->Reset(frames[0].allocator.Get(), nullptr);
     if (FAILED(result)) return HResultFailure("Reset BSDF integration list", result);
-    TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_COMMON,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_LAYOUT_COMMON,
-        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS);
-    ID3D12DescriptorHeap *heaps[] = {heap.Get()};
-    command_list->SetDescriptorHeaps(1, heaps);
-    command_list->SetComputeRootSignature(root.Get());
-    command_list->SetComputeRootDescriptorTable(0, heap->GetGPUDescriptorHandleForHeapStart());
-    command_list->Dispatch(extent / 8, extent / 8, 1);
-    TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    D3D12_TEXTURE_COPY_LOCATION destination{};
+    destination.pResource = lut.resource.Get();
+    destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    D3D12_TEXTURE_COPY_LOCATION origin{};
+    origin.pResource = upload.resource.Get();
+    origin.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    origin.PlacedFootprint = footprint;
+    command_list->CopyTextureRegion(&destination, 0, 0, 0, &origin, nullptr);
+    TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
         D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-        D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
+        D3D12_BARRIER_LAYOUT_COPY_DEST, D3D12_BARRIER_LAYOUT_SHADER_RESOURCE);
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close BSDF integration list", result);
-    environment_brdf_init_root = std::move(root);
-    environment_brdf_init_pipeline = std::move(pipeline);
-    environment_brdf_init_heap = std::move(heap);
+    environment_brdf_init_upload = std::move(upload);
     environment_brdf_init_pending = true;
     ID3D12CommandList *lists[] = {command_list.Get()};
-    queue->ExecuteCommandLists(1, lists);
+    MeasureStartupOperation(RendererStartupOperation::UploadSubmit, [&] { return queue->ExecuteCommandLists(1, lists); });
     if (auto waited = WaitForGpu(); !waited) return waited;
     environment_brdf_init_pending = false;
-    environment_brdf_init_root.Reset();
-    environment_brdf_init_pipeline.Reset();
-    environment_brdf_init_heap.Reset();
+    environment_brdf_init_upload.Reset();
     environment_brdf_init_device.Reset();
     lut.graph_access = Access::AllShaderRead;
     lut.graph_queue = QueueHint::Direct;
@@ -107,8 +95,9 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
 
 void D3D12Renderer::Impl::WriteEnvironmentBrdfLutDescriptors()
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_R16G16_FLOAT;
+    srv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;

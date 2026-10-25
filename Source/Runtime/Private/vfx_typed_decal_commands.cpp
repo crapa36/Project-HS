@@ -11,7 +11,7 @@ namespace
 constexpr std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
-template<class T>bool Range(VfxRange r,const std::vector<T>&v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
+template<class T>bool Range(VfxRange r,std::span<const T> v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
 
 struct Anchor{Float3 position{},direction{0,0,1};float radius{1.25f};};
 std::optional<Anchor> GetAnchor(const VfxPayload&payload,const VfxTransform&transform,std::uint32_t schema)
@@ -25,13 +25,13 @@ std::optional<Anchor> GetAnchor(const VfxPayload&payload,const VfxTransform&tran
  const float length=std::hypot(a.direction.x,a.direction.z);if(!std::isfinite(length))return {};
  a.direction=length>.0001f?Float3{a.direction.x/length,0,a.direction.z/length}:Float3{0,0,1};return a;
 }
-std::optional<std::string_view> Path(const VfxProgramData&p,std::uint32_t slot)
+std::optional<std::string_view> Path(const VfxProgramView&p,std::uint32_t slot)
 {
  const auto r=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto&v){return v.slot==slot;});
  if(r==p.texture_resources.end()||!Range(r->asset_path_bytes,p.strings))return {};
  return std::string_view(reinterpret_cast<const char*>(p.strings.data())+r->asset_path_bytes.first,r->asset_path_bytes.count);
 }
-bool Textures(const VfxProgramData&p,const VfxOutputRecord&o,VfxDecalInput&v)
+bool Textures(const VfxProgramView&p,const VfxOutputRecord&o,VfxDecalInput&v)
 {
  if(!Range(o.textures,p.texture_bindings))return false;
  constexpr std::string_view fracture="Content/Textures/VFX/vfx_fracture_decal_array.dds",organic="Content/Textures/VFX/vfx_organic_decal_array.dds",gradient="Content/Textures/VFX/vfx_gradient_lut.dds";
@@ -55,7 +55,7 @@ bool Textures(const VfxProgramData&p,const VfxOutputRecord&o,VfxDecalInput&v)
  }
  return global&&detail&&(v.kind==VfxDecalKind::Fracture||coverage);
 }
-bool Params(const VfxProgramData&p,const VfxOutputRecord&o,VfxDecalInput&v)
+bool Params(const VfxProgramView&p,const VfxOutputRecord&o,VfxDecalInput&v)
 {
  if(!Range(o.parameters,p.parameters))return false;
  if(v.kind==VfxDecalKind::Organic)return o.parameters.count==0;
@@ -76,7 +76,7 @@ std::optional<float> Envelope(const VfxSourceRecord&s,float age)
  float alpha=1;if(s.knot_count==4){if(age<s.knots[1]&&s.knots[1]>s.knots[0])alpha=(age-s.knots[0])/(s.knots[1]-s.knots[0]);else if(age>s.knots[2]&&end>s.knots[2])alpha=(end-age)/(end-s.knots[2]);}return alpha;
 }
 
-void Append(const VfxProgramData&p,const VfxEffectRecord&e,const Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,std::vector<VfxDecalInput>&out)
+void Append(const VfxProgramView&p,const VfxEffectRecord&e,const Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,std::vector<VfxDecalInput>&out)
 {
  if(!std::isfinite(age)||age<0||age>=1||static_cast<std::uint32_t>(quality)>2||!Range(e.sources,p.sources))return;
  const auto id=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto&v){return v.handle==e.handle;});if(id==p.effect_lookup.end()||!id->effect_id)return;
@@ -100,7 +100,7 @@ void Append(const VfxProgramData&p,const VfxEffectRecord&e,const Anchor&a,float 
  }
 }
 }
-std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxProgramData&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick tick)
+std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxProgramView&p,std::span<const VfxEventInput>events,std::span<const VfxPersistentInput>persistent,Tick tick)
 {
  std::vector<VfxDecalInput> result;
  for(const auto&i:events)

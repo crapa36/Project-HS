@@ -4,7 +4,8 @@
 // Versioned Renderer-v7 current-scene buffer. One root SRV carries independent
 // logical tables so frontends can evolve without widening the root signature.
 static const uint HsGpuSceneMagic = 0x37475348u; // "HSG7"
-static const uint HsGpuSceneVersion = 1u;
+// Version 3 stores current/previous deformation strides in the second skin word.
+static const uint HsGpuSceneVersion = 3u;
 
 ByteAddressBuffer HsGpuSceneTables : register(t28, space3);
 
@@ -93,6 +94,20 @@ uint4 HsLoadGpuSceneSkin(ByteAddressBuffer scene, uint slot)
 uint4 HsLoadGpuSceneSkin(uint slot)
 {
     return HsLoadGpuSceneSkin(HsGpuSceneTables, slot);
+}
+
+uint2 HsLoadGpuSceneSkinStrides(ByteAddressBuffer scene, uint slot)
+{
+    uint4 header0, header1, header2, header3;
+    if (!HsGpuSceneSlotValid(scene, slot, header0, header1, header2, header3)) return 0u;
+    const uint instance_address = header1.x + slot * header2.z;
+    const uint skin_index = scene.Load(instance_address + 16);
+    if (skin_index == 0xffffffffu || header3.w != 32u) return 0u;
+    return scene.Load2(header2.y + skin_index * header3.w + 16u);
+}
+uint2 HsLoadGpuSceneSkinStrides(uint slot)
+{
+    return HsLoadGpuSceneSkinStrides(HsGpuSceneTables, slot);
 }
 
 #endif

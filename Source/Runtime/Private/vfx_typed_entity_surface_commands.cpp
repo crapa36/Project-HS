@@ -27,7 +27,7 @@ constexpr auto kDeath = Hash64("particle.boss.death");
 constexpr auto kPersistent = Hash64("persistent.boss.phase_transition_invulnerable");
 constexpr std::uint64_t kEnemyRenderPrefix = 2ull << 60;
 
-template<class T> bool Range(VfxRange r, const std::vector<T> &v) noexcept
+template<class T> bool Range(VfxRange r, std::span<const T> v) noexcept
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 bool Finite(Float3 v) noexcept
 { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
@@ -52,7 +52,7 @@ bool FinitePose(const AnimationPoseRef &pose) noexcept
         std::isfinite(pose.upper_body_normalized_time) && std::isfinite(pose.upper_body_playback_rate) &&
         std::isfinite(pose.upper_body_weight) && pose.upper_body_weight >= 0 && pose.upper_body_weight <= 1;
 }
-std::uint64_t Identity(const VfxProgramData &program, VfxEffectHandle handle) noexcept
+std::uint64_t Identity(const VfxProgramView &program, VfxEffectHandle handle) noexcept
 {
     std::uint64_t id{};
     for (const auto &lookup : program.effect_lookup)
@@ -63,7 +63,7 @@ std::uint64_t Identity(const VfxProgramData &program, VfxEffectHandle handle) no
         }
     return id;
 }
-bool Textures(const VfxProgramData &program, const VfxOutputRecord &output) noexcept
+bool Textures(const VfxProgramView &program, const VfxOutputRecord &output) noexcept
 {
     if (!Range(output.textures, program.texture_bindings) || output.textures.count != 3) return false;
     std::uint32_t seen{};
@@ -85,7 +85,7 @@ bool Textures(const VfxProgramData &program, const VfxOutputRecord &output) noex
     }
     return seen == 7;
 }
-bool Parameters(const VfxProgramData &program, const VfxOutputRecord &output,
+bool Parameters(const VfxProgramView &program, const VfxOutputRecord &output,
                 bool persistent, VfxEntitySurfaceCommand &command) noexcept
 {
     if (!Range(output.parameters, program.parameters) || output.parameters.count != 3) return false;
@@ -106,7 +106,7 @@ bool Parameters(const VfxProgramData &program, const VfxOutputRecord &output,
     return seen == 7 && std::isfinite(command.noise_scale) && command.noise_scale == (persistent ? 2.6f : 2.4f) &&
         std::isfinite(command.edge_width) && command.edge_width == (persistent ? .08f : .07f);
 }
-void Append(const VfxProgramData &program, const VfxEffectRecord &effect, bool persistent,
+void Append(const VfxProgramView &program, const VfxEffectRecord &effect, bool persistent,
             bool death, VfxQuality quality, Tick started, Tick until, Tick current,
             const VfxEntitySurfaceCommand &owner, std::vector<VfxEntitySurfaceCommand> &result)
 {
@@ -150,7 +150,7 @@ void Append(const VfxProgramData &program, const VfxEffectRecord &effect, bool p
 } // namespace
 
 std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
-    const VfxProgramData &program, std::span<const VfxEntitySurfaceEventCapture> events,
+    const VfxProgramView &program, std::span<const VfxEntitySurfaceEventCapture> events,
     std::span<const VfxEntitySurfacePersistentCapture> persistent, Tick current_tick,
     Tick death_current_tick)
 {

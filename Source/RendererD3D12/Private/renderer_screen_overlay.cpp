@@ -1,4 +1,5 @@
 #include "renderer_screen_overlay.hpp"
+#include "renderer_pipeline_cache.hpp"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -68,7 +69,8 @@ struct ScreenOverlayTargets
 std::uint64_t ScreenOverlayCandidate::AllocatedBytes() const noexcept{return targets_?targets_->bytes:0;}
 std::uint64_t ScreenOverlaySystem::AllocatedBytes() const noexcept{return targets_?targets_->bytes:0;}
 Result ScreenOverlaySystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ViewExtent capacity,
-    std::uint32_t frames,const ShaderReader &read,bool enabled,ScreenOverlayCandidate &candidate) const
+    std::uint32_t frames,const ShaderReader &read,bool enabled,RendererPipelineCache &pipelineCache,
+    ScreenOverlayCandidate &candidate) const
 {
     candidate={};
     if(!enabled){candidate.prepared_=true;return Result::Success();}
@@ -98,12 +100,15 @@ Result ScreenOverlaySystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
     if(FAILED(hr))return Native("Serialize screen overlay root",hr);
     hr=device->CreateRootSignature(0,serialized->GetBufferPointer(),serialized->GetBufferSize(),IID_PPV_ARGS(&next->root));
     if(FAILED(hr))return Native("Create screen overlay root",hr);
+    if(auto registered=pipelineCache.RegisterRootSignature(next->root.Get(),
+        {static_cast<const std::byte *>(serialized->GetBufferPointer()),serialized->GetBufferSize()});
+        !registered)return registered;
     std::vector<std::byte> cs,vs,ps;
     if(auto r=read("vfx_screen_overlay_mask_cs.dxil",cs);!r)return r;
     if(auto r=read("vfx_screen_overlay_vs.dxil",vs);!r)return r;
     if(auto r=read("vfx_screen_overlay_ps.dxil",ps);!r)return r;
     D3D12_COMPUTE_PIPELINE_STATE_DESC compute{};compute.pRootSignature=next->root.Get();compute.CS={cs.data(),cs.size()};
-    hr=device->CreateComputePipelineState(&compute,IID_PPV_ARGS(&next->mask_pipeline));
+    hr=pipelineCache.CreateCompute(&compute,IID_PPV_ARGS(&next->mask_pipeline));
     if(FAILED(hr))return Native("Create screen overlay mask pipeline",hr);
     D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics{};graphics.pRootSignature=next->root.Get();
     graphics.VS={vs.data(),vs.size()};graphics.PS={ps.data(),ps.size()};graphics.SampleMask=UINT_MAX;
@@ -119,7 +124,7 @@ Result ScreenOverlaySystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
     blend.DestBlend=D3D12_BLEND_INV_SRC_ALPHA;blend.BlendOp=D3D12_BLEND_OP_ADD;
     blend.SrcBlendAlpha=D3D12_BLEND_ONE;blend.DestBlendAlpha=D3D12_BLEND_INV_SRC_ALPHA;
     blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;blend.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
-    hr=device->CreateGraphicsPipelineState(&graphics,IID_PPV_ARGS(&next->draw_pipeline));
+    hr=pipelineCache.CreateGraphics(&graphics,IID_PPV_ARGS(&next->draw_pipeline));
     if(FAILED(hr))return Native("Create screen overlay draw pipeline",hr);
     D3D12_RESOURCE_DESC texture{};texture.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     texture.Width=capacity.width;texture.Height=capacity.height;texture.DepthOrArraySize=1;texture.MipLevels=1;

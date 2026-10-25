@@ -294,14 +294,13 @@ std::vector<std::byte> Bake(const Source &source,const hs::lighting_probe::Radia
     return rd::BuildLightingProbePackage(hs::MakeAssetId(kProduct),{},
         {source.edge,float(source.yaw)},raw,filtered,sh);
 }
-void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path &executable)
+void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
 {
     Require(sourceRoot.is_absolute() && buildRoot.is_absolute(), "roots must be absolute");
     ap::RequireDirectory(sourceRoot); ap::MakeDirectory(buildRoot);
     ap::ActionSpec spec;
     spec.action_id="render.lighting.default_probe"; spec.recipe_id="project-hs.render.lighting-probe";
     spec.recipe_version=3; spec.namespace_path=kNamespace;
-    spec.inputs.push_back(ap::HashInput("tool/hs_lighting_probe",executable));
     const auto sourcePath=sourceRoot/"ContentSource/Lighting/default_probe.json";
     // Hash and bake the same source snapshot, even if an editor subsequently
     // replaces the authored JSON while this action is preparing its output.
@@ -319,14 +318,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
         spec.inputs.push_back({source.hdr_path,hdrPath,
             ap::Sha256Bytes(std::as_bytes(std::span(hdrBytes.data(),hdrBytes.size())))});
     }
-    for(const auto *relative:{"Schemas/lighting_probe.schema.json",
-        "Source/Apps/LightingProbe/main.cpp","Source/Apps/LightingProbe/radiance_hdr.hpp",
-        "Source/Apps/AssetPipeline/action.hpp","Source/Apps/AssetPipeline/action.cpp",
-        "Source/RenderData/Public/hs/render_data/lighting_probe.hpp","Source/RenderData/Private/lighting_probe.cpp",
-        "Source/RenderData/Public/hs/render_data/render_asset_format.hpp","Source/RenderData/Private/render_asset_format.cpp",
-        "Source/RenderData/Public/hs/render_data/texture_package.hpp",
-        "Source/Core/Public/hs/core/cooked_format.hpp","Source/Core/Private/cooked_format.cpp",
-        "Source/Core/Public/hs/core/sha256.hpp","Source/Core/Private/sha256.cpp"})
+    for(const auto *relative:{"Schemas/lighting_probe.schema.json"})
         spec.inputs.push_back(ap::HashInput(relative,sourceRoot/relative));
     std::ranges::sort(spec.inputs,{},&ap::Input::logical_id);
     const auto resultPath=buildRoot/"Actions"/kNamespace/"result.json";
@@ -379,7 +371,7 @@ int main(int argc,char **argv)
         }
         Require(produce && !sourceRoot.empty() && !buildRoot.empty(),
                 "usage: hs_lighting_probe --produce --source-root <absolute> --build-root <absolute>");
-        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal(),fs::absolute(fs::path(argv[0])).lexically_normal()); return 0;
+        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal()); return 0;
     }
     catch(const std::exception &error)
     {

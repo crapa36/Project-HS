@@ -9,7 +9,7 @@ namespace hs::material_content
 struct MaterialDefinition
 {
     render_data::RockMaterial material;
-    render_data::MaterialGraph graph;
+    render_data::PreparedMaterial prepared;
 };
 [[nodiscard]] MaterialDefinition ParseMaterialDefinition(
     std::string_view name, std::string_view json_text);
@@ -19,6 +19,8 @@ struct MaterialDefinition
 [[nodiscard]] bool IsHeroMaterialName(std::string_view name);
 [[nodiscard]] bool IsDecalMaterialName(std::string_view name);
 [[nodiscard]] render_data::MaterialGraph ParseDecalMaterialGraph(
+    std::string_view name, std::string_view json_text);
+[[nodiscard]] render_data::PreparedMaterial ParsePreparedDecalMaterial(
     std::string_view name, std::string_view json_text);
 [[nodiscard]] bool IsMaskedEnvironmentMaterial(std::string_view name);
 [[nodiscard]] render_data::MaterialGraph ParseEnvironmentMaterialGraph(

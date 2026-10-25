@@ -164,7 +164,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     // Instrumented PSOs stay in memory; disk identity is shared with ordinary runs.
     if (auto cached = pipeline_cache.Initialize(device.Get(), adapter.Get(),
             configuration.gpu_validation || configuration.artifact_directory.empty() ? std::filesystem::path{} :
-                configuration.artifact_directory / "pso-cache"); !cached) return cached;
+                configuration.artifact_directory / "pso-cache", configuration.capture_timing_stream); !cached) return cached;
     if (auto prepared = PrepareReconstructionProvider(config.reconstruction_request
             ? &*config.reconstruction_request : nullptr, config.dynamic_resolution,
             config.dynamic_min_percent, config.dynamic_max_percent, {width, height},
@@ -571,6 +571,7 @@ Result D3D12Renderer::Impl::WaitForFrame(FrameContext &frame)
 
 void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *heap) const noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     D3D12_SHADER_RESOURCE_VIEW_DESC empty{};
     empty.Format = DXGI_FORMAT_R32_UINT;
     empty.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -648,6 +649,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
 }
 void D3D12Renderer::Impl::PublishFrameDescriptors(std::uint32_t slot) const noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto source = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     auto destination = srv_heap->GetCPUDescriptorHandleForHeapStart();
     const auto offset = static_cast<SIZE_T>(slot) * kTextureDescriptorCount * srv_stride;
@@ -658,6 +660,7 @@ void D3D12Renderer::Impl::PublishFrameDescriptors(std::uint32_t slot) const noex
 
 Result D3D12Renderer::Impl::WaitForGpu()
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::GpuCompletionAdmission);
     // Utility upload/capture work uses a separate Direct fence; destruction
     // additionally requires the graph's Compute and Copy timelines to drain.
     if (graph_queue_executor.NativeQueue(QueueHint::Direct))
@@ -681,7 +684,7 @@ Result D3D12Renderer::Impl::WaitForGpu()
         {
             return HResultFailure("SetEventOnCompletion", result);
         }
-        const auto waited = WaitForSingleObject(fence_event, INFINITE);
+        const auto waited = MeasureStartupOperation(RendererStartupOperation::GpuFenceWait, [&] { return WaitForSingleObject(fence_event, INFINITE); });
         if (waited != WAIT_OBJECT_0)
             return HResultFailure("Wait for utility completion fence",
                 waited == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : E_FAIL);

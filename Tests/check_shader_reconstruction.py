@@ -600,8 +600,34 @@ class ShaderContracts(unittest.TestCase):
         probe = frame[frame.index("for (const auto &probe : impl_->local_probes.Probes())"):]
         probe = probe[:probe.index("if (impl_->volumetrics.AllocatedBytes()")]
         self.assertRegex(probe, r"probe\.position\.z - probe\.capture_distance\}\), 1\.0f\}")
-        self.assertIn("if (water_receiver) receivers.push_back(*water_receiver)", frame)
-        self.assertIn("if (gel_receiver) receivers.push_back(*gel_receiver)", frame)
+        # Camera-only unions still request GPU pages and extend depth. Their
+        # separate maximum.w tag must not turn them into private depth-only lanes.
+        for name in ("water_receiver", "gel_receiver"):
+            self.assertRegex(frame, rf"if\s*\({name}\)\s*\{{\s*{name}->maximum\.w\s*=\s*1;\s*receivers\.push_back\(\*{name}\);")
+        self.assertNotIn("box.maximum.w", feedback)
+        compact = re.sub(r"\s+", "", frame)
+        inputs = compact.split("VirtualShadowInputsinputs;", 1)[1].split("inputs.declare_material_sampling=", 1)[0]
+        self.assertIn("inputs.required_receiver_domains=ShadowReceiverCamera;", inputs)
+        self.assertIn("inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;", inputs)
+        self.assertIn("inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld;", inputs)
+        self.assertIn("if(active_features.software_gi_enabled)inputs.required_receiver_domains|=ShadowReceiverSoftwareGi;", inputs)
+        self.assertNotIn("closed_receiver_domains|=ShadowReceiverSoftwareGi", inputs)
+        self.assertIn("XMStoreFloat4x4(&inputs.receiver_view_projection,clip_matrix)", inputs)
+        self.assertIn("inputs.surface_receivers={static_shadow_batch->surface_receivers,dynamic_surface_receivers,", inputs)
+        # Actual draw surfaces, including shadow-off leaves and world-space
+        # HLOD proxies, supply camera coverage independently of caster records.
+        self.assertIn("append_surface(static_scene->instances[static_draw_refs[index].instance_index]", compact)
+        self.assertIn("&impl_->hlod_runtime->scene.proxies.at(index).bounds", compact)
+        self.assertIn("append_surface(render_instances[index],&persistent_instances[dynamic_draw_refs[index].instance_index]", compact)
+        proof = re.sub(r"\s+", "", (renderer / "renderer_shadow_guarantee.hpp").read_text(encoding="utf-8"))
+        self.assertIn("(f.closed_receiver_domains&f.required_receiver_domains)!=f.required_receiver_domains", proof)
+        self.assertIn("if(camera&&(receiver.minimum.w!=0||receiver.maximum.w!=1))return-1;", proof)
+        # Receiver roles and query geometry have direct CPU behavior tests.
+        # Keep this source check on the actual native matrix wiring instead.
+        self.assertIn("inputs.main_csm_view_projection_valid=true;", inputs)
+        self.assertIn("constants->shadow_view_projection[cascade].m[column][row]", inputs)
+        native_policy = re.sub(r"\s+", "", (renderer / "renderer_virtual_shadow.cpp").read_text(encoding="utf-8"))
+        self.assertIn("BuildShadowCsmQueryFrusta(in.main_csm_view_projection,facts.csm_query_frusta)", native_policy)
         self.assertIn("environment_variant_radii[render_data::kMeadowWaterGeometry]", frame)
         # The origin-centered sphere includes offsets, signed/nonuniform scale, and yaw.
         rng = random.Random(0x56534D)
@@ -618,6 +644,64 @@ class ShaderContracts(unittest.TestCase):
                     x, y, z = [v*s for v, s in zip(local, scale)]
                     point = (x*math.cos(yaw)+z*math.sin(yaw), y, -x*math.sin(yaw)+z*math.cos(yaw))
                     self.assertLessEqual(max(map(abs, point)), world_radius + 1e-12)
+
+    def test_cluster_prefix_overwrite_keeps_fault_and_metadata_boundaries(self):
+        renderer = SHADERS.parents[1] / "Source" / "RendererD3D12" / "Private"
+        graph = (renderer / "renderer_cluster_graph.cpp").read_text(encoding="utf-8")
+        shader = (SHADERS / "cluster_refinement.hlsl").read_text(encoding="utf-8")
+        declarations = graph.split('auto count = graph.AddPass(40u,', 1)[1].split("count.SetExecute(", 1)[0]
+        metadata = declarations.split("for (auto *buffer : {&cut.offsets", 1)[1].split("count.Read(buffer->version, Access::UnorderedRead);", 1)[0]
+        self.assertEqual(re.findall(r"&cut\.([a-z_]+)", "&cut.offsets" + metadata),
+                         ["offsets", "block_sums", "block_offsets", "draw_commands", "mesh_commands"])
+        execute = graph.split("count.SetExecute(", 1)[1].split("for (std::uint32_t stage", 1)[0]
+        resources = re.search(r"const std::array resources\{(.*?)\};", execute, re.S).group(1)
+        initialized = ["counts", "demand", "status", "command_counts", "history_bits", "history_generations",
+                       "selected_bounds", "previous_rejected", "retest_draw_commands", "retest_mesh_commands"]
+        self.assertEqual(re.findall(r"&cut\.([a-z_]+)", resources), initialized)
+        self.assertIn("slots{0, 4, 5, 10, 12, 13, 14, 15, 16, 17}", execute)
+        barriers = re.search(r"for \(const auto \*buffer : \{(.*?)\}\) context.UavBarrier", execute, re.S).group(1)
+        self.assertEqual(re.findall(r"&state\.cuts\[ordinal\]\.([a-z_]+)", barriers), initialized)
+        self.assertIn("clear(ordinal, 7u, cluster_runtime->frames[frame_slot].refs)", execute)
+        self.assertIn("context.UavBarrier(state.refs.handle)", execute)
+        prefix_graph = graph.split("for (std::uint32_t stage = 0; stage < 3; ++stage)", 1)[1]
+        first = prefix_graph.split("if (stage == 0)", 1)[1].split("else if (stage == 1)", 1)[0]
+        second = prefix_graph.split("else if (stage == 1)", 1)[1].split("else", 1)[0]
+        self.assertIn("prefix.Write(cut.offsets.version, Access::UnorderedWrite)", first)
+        self.assertIn("prefix.Write(cut.block_sums.version, Access::UnorderedWrite)", first)
+        self.assertIn("prefix.Write(cut.block_offsets.version, Access::UnorderedWrite)", second)
+        self.assertIn("prefix.ReadWrite(cut.offsets.version, Access::UnorderedWrite)", prefix_graph)
+        self.assertIn("prefix.ReadWrite(cut.draw_commands.version, Access::UnorderedWrite)", prefix_graph)
+        constants = shader.split("bool ConstantsValid()", 1)[1].split("bool CandidateValid(", 1)[0]
+        for resource in ("CutOffsets", "BlockSums", "BlockOffsets"):
+            self.assertIn(resource + ".GetDimensions(count, stride)", constants)
+        self.assertIn("if (!valid) Fault(FailureCatalog)", constants)
+        prefix = shader.split("void PrefixCuts(", 1)[1].split("bool SameSelectedHistory(", 1)[0]
+        self.assertEqual(prefix.count("if (!ConstantsValid()) return;"), 3)
+        self.assertIn("if (thread_index < CandidateCount) CutOffsets[thread_index] =", prefix)
+        self.assertIn("if (lane == 63u && block_index < PrefixBlockCount) BlockSums[block_index] =", prefix)
+        stage1 = prefix.split("if (PrefixStage == 1u)", 1)[1].split("if (PrefixStage == 2u)", 1)[0]
+        self.assertLess(stage1.index("CommandCounts.Store4(0u, uint4(0u, 0u, 0u, 0u))"),
+                        stage1.index("if (!ConstantsValid()) return;"))
+        self.assertIn("BlockOffsets[block] = total", stage1)
+        self.assertIn("CutStatus.Load(16u) == 0u ? total.x : 0u", stage1)
+        emit = shader.split("void EmitCuts(", 1)[1]
+        self.assertLess(emit.index("CutStatus.Load(16u) != 0u"), emit.index("CutOffsets[candidate_index]"))
+        self.assertIn("if (!cut.candidate_count) continue", graph)
+        self.assertIn("if (!active) return Result::Success()", graph.split("Impl::DrawClusterGeometry(", 1)[1])
+
+    def test_skin_stream_abi_keeps_attributes_in_source(self):
+        skin = (SHADERS / "skin_cache.hlsl").read_text(encoding="utf-8-sig")
+        self.assertIn("kSourceVertexStride = 76", skin)
+        self.assertIn("kDeformedVertexStride = 36", skin)
+        self.assertIn("SkinOutput.Store3(output_base + 24, asuint(tangent))", skin)
+        self.assertNotIn("SkinOutput.Store2", skin)
+        self.assertNotIn("SkinOutput.Store4", skin)
+        scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")
+        self.assertIn("cached_vertex * context.skinVertexStrides.x", scene)
+        self.assertIn("previous_vertex * context.skinVertexStrides.y", scene)
+        self.assertIn("input.Tangent.w * scale_sign.x", scene)
+        self.assertNotIn("cached_vertex * 76u", scene)
+        self.assertNotIn("previous_vertex * 76u", scene)
 
     def test_shadow_frontends_skip_temporal_deformation(self):
         scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")

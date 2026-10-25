@@ -87,6 +87,7 @@ enum class Access : std::uint8_t
     CopyDest,
     VertexBuffer,
     IndexBuffer,
+    // Packed geometry: vertex/index input and non-pixel shader reads.
     VertexShaderRead,
     IndirectArgs,
     Present,
@@ -97,6 +98,24 @@ enum class Access : std::uint8_t
     // Native VRS image consumed by rasterization on the direct queue.
     ShadingRateSource,
 };
+
+[[nodiscard]] constexpr bool QueueAccessCompatible(QueueHint queue, Access access) noexcept
+{
+    switch (queue)
+    {
+    case QueueHint::Direct:
+        return true;
+    case QueueHint::Compute:
+        return access == Access::Common || access == Access::ComputeRead ||
+               access == Access::UnorderedRead || access == Access::UnorderedWrite ||
+               access == Access::CopySource || access == Access::CopyDest ||
+               access == Access::IndirectArgs;
+    case QueueHint::Copy:
+        return access == Access::Common || access == Access::CopySource ||
+               access == Access::CopyDest;
+    }
+    return false;
+}
 
 enum class ResourceKind : std::uint8_t
 {

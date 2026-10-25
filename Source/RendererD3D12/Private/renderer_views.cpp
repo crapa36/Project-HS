@@ -550,8 +550,12 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
             })) admitted_surfaces.push_back(command);
     EntitySurfaceFrame surface;
     if (auto r = surface.Build(admitted_surfaces); !r) return r;
-    auto extractor_validation = dynamic_scene_extractor;
-    if (!extractor_validation.Adopt(render_instances, false))
+    std::unordered_set<RenderSceneInstanceKey, RenderSceneInstanceKeyHash> source_keys;
+    bool unique_sources = render_instances.size() <= UINT32_MAX;
+    for (std::size_t index = 0; unique_sources && index < render_instances.size(); ++index)
+        unique_sources = source_keys.emplace(MakeRenderSceneInstanceKey(
+            render_instances[index].stable_id, static_cast<std::uint32_t>(index))).second;
+    if (!unique_sources)
         return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
     std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> palette;
     for (const auto &instance : render_instances)
@@ -561,7 +565,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         if (auto r = SampleNamedCharacterAnimation(archer_named_animations, instance,
             std::span(palette.data(), archer_bone_count)); !r) return r;
     }
-    if (snapshot.static_scene)
+    if (snapshot.static_scene && (!static_gpu_scene || static_gpu_scene->source != snapshot.static_scene))
     {
         std::uint64_t output_count{};
         for (const auto &instance : snapshot.static_scene->instances)
@@ -572,7 +576,21 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
             output_count += environment ? 3u : 1u;
         }
         if (output_count > UINT32_MAX / 4u) return ViewFailure("Static visibility output index overflow.");
+        const auto keys = snapshot.static_scene->static_keys;
+        if (keys.size() != snapshot.static_scene->instances.size() ||
+            !std::ranges::is_sorted(keys, {}, &RenderSceneInstanceKey::stable_id) ||
+            std::adjacent_find(keys.begin(), keys.end()) != keys.end())
+            return ViewFailure("Static scene does not carry complete unique prepared identities.");
+        for (const auto &instance : snapshot.static_scene->instances)
+            if (instance.stable_id && !std::ranges::binary_search(
+                    keys, instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
+                return ViewFailure("Static scene identity does not match its prepared owner.");
     }
+    if (snapshot.static_scene)
+        for (const auto &instance : render_instances)
+            if (instance.stable_id && std::ranges::binary_search(snapshot.static_scene->static_keys,
+                    instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
+                return ViewFailure("Dynamic render identity collides with the immutable process scene.");
     if (render_instances.size() > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
     auto ribbon_validation = ribbon_state;
     std::string ribbon_error;
@@ -631,7 +649,6 @@ void D3D12Renderer::Impl::ExchangeView(OwnedView &view) noexcept
     swap(lod_session_epoch, view.lod_session_epoch);
     swap(previous_volumetric_camera, view.previous_volumetric_camera);
     swap(previous_shadow_casters, view.previous_shadow_casters);
-    swap(previous_shadow_caster_nodes, view.previous_shadow_caster_nodes);
     swap(previous_geometry_page_versions, view.previous_geometry_page_versions);
     swap(reconstruction_provider, view.reconstruction_provider);
     swap(reconstruction_plan, view.reconstruction_plan);
@@ -908,6 +925,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewAfterCompletion(OwnedView &view)
     if (auto r = view.adaptive_shading.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.subsurface.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_reflections.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
+    if (auto r = ArchiveHeroWork(view.hero_transparency); !r) return r;
     if (auto r = view.hero_transparency.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.hdr_post.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;
     if (auto r = view.screen_overlay.ResetAfterCompletion(graph_queue_executor.Completed()); !r) return r;

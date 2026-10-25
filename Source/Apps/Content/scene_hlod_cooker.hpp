@@ -1,5 +1,6 @@
 #pragma once
 
+#include "geometry_cooker.hpp"
 #include <hs/core/render_snapshot.hpp>
 #include <hs/render_data/scene_hlod.hpp>
 
@@ -35,10 +36,10 @@ struct SceneHlodCookOptions
     // Oversize parents retain their independently loadable child forest.
     std::uint32_t max_group_pages{32};
     // Bounded refinement for conservative geometry error used by runtime LOD.
-    // Large exhaustive qualification passes must not block normal asset builds.
     std::uint64_t error_refinement_budget{4096};
     // Zero selects the bounded TaskSystem default; one keeps qualification serial.
     std::uint32_t error_worker_count{};
+    GeometryErrorChecks error_checks;
 };
 
 struct CookedSceneHlod

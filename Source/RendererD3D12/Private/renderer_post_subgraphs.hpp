@@ -36,6 +36,8 @@ struct PostSubgraphInputs
     PostHdrHook devtools_ui;
     ResourceVersion screen_overlay_alpha, screen_overlay_upload, screen_overlay_gradient;
     ResourceVersion reactive_composite_hdr;
+    bool fxaa_identity{};
+    bool initialize_post_targets{};
 };
 
 struct PostSubgraphTargets

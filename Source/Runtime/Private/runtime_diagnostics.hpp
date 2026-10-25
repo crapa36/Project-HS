@@ -1,6 +1,7 @@
 #pragma once
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <cstdint>
 #include <ostream>
 #include <string>
@@ -8,6 +9,34 @@
 
 namespace hs::runtime_detail
 {
+using DiagnosticClock = std::uint64_t (*)() noexcept;
+struct DiagnosticSample
+{
+    std::uint64_t ticks{}, calls{};
+};
+
+// A null clock leaves ordinary play free of diagnostic clock reads.
+class DiagnosticScope
+{
+  public:
+    DiagnosticScope(DiagnosticSample &sample, DiagnosticClock clock) noexcept
+        : sample_(sample), clock_(clock), begin_(clock ? clock() : 0) {}
+    ~DiagnosticScope() { Stop(); }
+    DiagnosticScope(const DiagnosticScope &) = delete;
+    void Stop() noexcept
+    {
+        if (!clock_) return;
+        const auto end = clock_();
+        sample_.ticks += end >= begin_ ? end - begin_ : 0;
+        ++sample_.calls;
+        clock_ = nullptr;
+    }
+  private:
+    DiagnosticSample &sample_;
+    DiagnosticClock clock_{};
+    std::uint64_t begin_{};
+};
+
 // RFC 4180 field quoting also keeps provider/display names and native reasons parseable.
 inline std::string CsvField(std::string_view value)
 {
@@ -23,7 +52,7 @@ inline std::string CsvField(std::string_view value)
     return field;
 }
 
-// Runtime captures one main view; completed GPU frame IDs increase for its lifetime.
+// Runtime captures one main view; slot reuse and capture can observe completions out of order.
 class PerformanceLogState
 {
   public:
@@ -39,28 +68,49 @@ class PerformanceLogState
     }
     bool AcceptGpuFrame(std::uint64_t frame, bool available, bool completed) noexcept
     {
-        if (!available || !completed || frame <= completed_gpu_frame_) return false;
-        completed_gpu_frame_ = frame;
+        if (!available || !completed || frame <= contiguous_gpu_frame_ || gpu_frame_overflowed_)
+            return false;
+        if (frame - contiguous_gpu_frame_ > pending_gpu_frames_.size())
+        {
+            gpu_frame_overflowed_ = true;
+            return false;
+        }
+        const auto slot = static_cast<std::size_t>(frame % pending_gpu_frames_.size());
+        if (pending_gpu_frames_[slot]) return false;
+        pending_gpu_frames_[slot] = true;
+        completed_gpu_frame_ = std::max(completed_gpu_frame_, frame);
         ++gpu_frames_;
+        while (contiguous_gpu_frame_ < completed_gpu_frame_)
+        {
+            const auto next = static_cast<std::size_t>((contiguous_gpu_frame_ + 1) % pending_gpu_frames_.size());
+            if (!pending_gpu_frames_[next]) break;
+            pending_gpu_frames_[next] = false;
+            ++contiguous_gpu_frame_;
+        }
         return true;
     }
     [[nodiscard]] std::uint64_t GpuFrames() const noexcept { return gpu_frames_; }
     [[nodiscard]] std::uint64_t LastGpuFrame() const noexcept { return completed_gpu_frame_; }
     [[nodiscard]] bool GpuFrameCoverageComplete(std::uint64_t rendered_frames) const noexcept
     {
-        return gpu_frames_ == rendered_frames && completed_gpu_frame_ == rendered_frames;
+        return !gpu_frame_overflowed_ && gpu_frames_ == rendered_frames &&
+               contiguous_gpu_frame_ == rendered_frames && completed_gpu_frame_ == rendered_frames;
     }
   private:
-    std::uint64_t previous_qpc_{}, completed_gpu_frame_{}, gpu_frames_{};
+    std::uint64_t previous_qpc_{}, completed_gpu_frame_{}, contiguous_gpu_frame_{}, gpu_frames_{};
+    // Match the renderer capture stream bound without allocating a lifetime-long ID set.
+    std::bitset<240> pending_gpu_frames_;
+    bool gpu_frame_overflowed_{};
 };
 
-// Single render-thread owner. Capture writes fixed chunks synchronously; a slow
+// One thread owns each log. Capture writes fixed chunks synchronously; a slow
 // disk applies backpressure without a second unbounded queue or writer thread.
 class DiagnosticLog
 {
   public:
-    DiagnosticLog(std::ostream &sink, bool enabled, std::string_view header = {})
-        : sink_(sink), enabled_(enabled)
+    DiagnosticLog(std::ostream &sink, bool enabled, std::string_view header = {},
+                  DiagnosticClock clock = nullptr)
+        : sink_(sink), enabled_(enabled), clock_(clock)
     {
         if (enabled_) Write(header);
     }
@@ -71,31 +121,38 @@ class DiagnosticLog
         if (finished_ || failed_) { ++dropped_; return; }
         Write(line);
     }
+    bool Flush()
+    {
+        if (enabled_ && !finished_)
+        {
+            FlushChunk();
+            DiagnosticScope scope(io_, clock_);
+            try { sink_.flush(); failed_ |= !sink_; }
+            catch (...) { failed_ = true; }
+        }
+        return !failed_;
+    }
     bool Finish()
     {
-        if (!finished_)
-        {
-            if (enabled_)
-            {
-                FlushChunk();
-                try { sink_.flush(); failed_ |= !sink_; }
-                catch (...) { failed_ = true; }
-            }
-            finished_ = true;
-        }
+        Flush();
+        finished_ = true;
         return !failed_;
     }
     bool Complete() const noexcept { return finished_ && !failed_ && dropped_ == 0; }
     bool Failed() const noexcept { return failed_; }
     std::uint64_t Records() const noexcept { return records_; }
     std::uint64_t Dropped() const noexcept { return dropped_; }
+    DiagnosticSample Io() const noexcept { return io_; }
+    std::uint64_t Bytes() const noexcept { return bytes_; }
   private:
     void FlushChunk()
     {
         if (used_ && !failed_)
         {
+            DiagnosticScope scope(io_, clock_);
             try { sink_.write(chunk_.data(), static_cast<std::streamsize>(used_)); failed_ |= !sink_; }
             catch (...) { failed_ = true; }
+            if (!failed_) bytes_ += used_;
         }
         used_ = 0;
     }
@@ -111,8 +168,10 @@ class DiagnosticLog
     }
     std::ostream &sink_;
     bool enabled_{}, failed_{}, finished_{};
+    DiagnosticClock clock_{};
+    DiagnosticSample io_{};
     std::array<char, 64 * 1024> chunk_{};
     std::size_t used_{};
-    std::uint64_t records_{}, dropped_{};
+    std::uint64_t records_{}, dropped_{}, bytes_{};
 };
 }

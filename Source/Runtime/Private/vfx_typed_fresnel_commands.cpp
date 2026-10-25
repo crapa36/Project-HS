@@ -45,7 +45,7 @@ constexpr auto kProfileGlobal = Hash32("profile.global");
 constexpr auto kProfileAuthored = Hash32("profile.authored");
 
 template<class T>
-bool InRange(VfxRange range, const std::vector<T> &values) noexcept
+bool InRange(VfxRange range, std::span<const T> values) noexcept
 {
     return range.first <= values.size() &&
            range.count <= values.size() - range.first;
@@ -57,7 +57,7 @@ bool FiniteTransform(const VfxTransform &transform) noexcept
                        [](float value) { return std::isfinite(value); });
 }
 
-bool ExactTextures(const VfxProgramData &program,
+bool ExactTextures(const VfxProgramView &program,
                    const VfxOutputRecord &output) noexcept
 {
     if (!InRange(output.textures, program.texture_bindings) ||
@@ -90,7 +90,7 @@ bool ExactTextures(const VfxProgramData &program,
     return gradient && noise;
 }
 
-bool AuthoredEffect(const VfxProgramData &program, VfxEffectHandle handle,
+bool AuthoredEffect(const VfxProgramView &program, VfxEffectHandle handle,
                     VfxFresnelShellKind &kind) noexcept
 {
     std::uint64_t identity{};
@@ -123,7 +123,7 @@ bool SourceEnvelope(const VfxSourceRecord &source, float age,
     return std::isfinite(progress) && progress >= 0.0f && progress < 1.0f;
 }
 
-bool AuthoredParameters(const VfxProgramData &program,
+bool AuthoredParameters(const VfxProgramView &program,
                         const VfxOutputRecord &output,
                         VfxFresnelShellKind kind,
                         VfxFresnelInput &input) noexcept
@@ -199,7 +199,7 @@ bool AuthoredParameters(const VfxProgramData &program,
 }
 
 std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
-    const VfxProgramData &program,
+    const VfxProgramView &program,
     std::span<const VfxPersistentInput> inputs)
 {
     std::vector<VfxFresnelInput> result;

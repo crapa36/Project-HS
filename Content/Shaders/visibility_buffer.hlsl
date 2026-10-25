@@ -321,6 +321,10 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
         else
             skin = HsLoadGpuSceneSkin(HsDynamicScene, draw.InstanceIndex);
         context.skinSlot = skin.x;
+        context.skinVertexOffsets = skin.zw;
+        context.skinVertexStrides = staticSource
+            ? HsLoadGpuSceneSkinStrides(HsStaticScene, draw.InstanceIndex)
+            : HsLoadGpuSceneSkinStrides(HsDynamicScene, draw.InstanceIndex);
     }
     context.instance.Mesh |= draw.MeshFlags;
     const uint resolvedMesh = context.instance.Mesh & 0xffu;

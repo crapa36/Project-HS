@@ -20,10 +20,9 @@ std::span<const std::byte> GeometryChunk(const render_data::PackageView &package
 Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
     std::span<const std::byte> package_bytes, AssetId page_asset,
-    std::uint32_t page_slot, AllocationResource &upload,
-    std::array<std::uint64_t, kGeometryBuffersPerPage> &upload_offsets)
+    std::uint32_t page_slot, AllocationResource &upload)
 {
-    if (page_slot >= kGeometryPageCapacity || page.vertices.resource || upload.resource)
+    if (page_slot >= kGeometryPageCapacity || page.storage.resource || upload.resource)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Geometry page upload has an invalid slot or occupied destination.");
     render_data::PackageView package;
@@ -53,20 +52,11 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                std::string("Invalid geometry page: ") + error.what());
     }
+    std::array<std::uint64_t, 4> upload_offsets{};
     std::uint64_t upload_size{};
-    for (std::size_t index = 0; index < bytes.size(); ++index)
-    {
-        if (bytes[index].empty() || bytes[index].size() % 4 != 0 ||
-            bytes[index].size() > std::numeric_limits<UINT>::max() ||
-            upload_size > std::numeric_limits<std::uint64_t>::max() - bytes[index].size())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Geometry page GPU buffer size exceeds its ABI.");
-        upload_offsets[index] = upload_size;
-        upload_size += bytes[index].size();
-    }
-    if (upload_size > std::numeric_limits<std::size_t>::max())
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Geometry page upload size exceeds addressable memory.");
+    const std::array<std::uint64_t, 4> sizes{bytes[0].size(),bytes[1].size(),bytes[2].size(),bytes[3].size()};
+    if (!GeometryPageLayout(sizes, upload_offsets, upload_size))
+        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Geometry page GPU buffer size exceeds its ABI.");
     GeometryPageGpu next;
     next.source_asset = page_asset;
     next.source_digest = render_data::Sha256(package_bytes);
@@ -78,23 +68,14 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
                 return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Selected geometry AssetId is ambiguous.");
             next.source_product = id;
         }
-    std::array<AllocationResource *, kGeometryBuffersPerPage> resources{
-        &next.vertices, &next.indices, &next.meshlets, &next.auxiliary};
+    next.offsets = upload_offsets;
+    next.sizes = sizes;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    std::uint64_t resident_size{};
-    for (std::size_t index = 0; index < resources.size(); ++index)
-    {
-        if (auto created = CreateAllocation(*resources[index], allocation,
-                BufferDescription(bytes[index].size()), D3D12_RESOURCE_STATE_COPY_DEST); !created)
-            return created;
-        resources[index]->graph_access = Access::CopyDest;
-        const auto size = resources[index]->allocation->GetSize();
-        if (resident_size > std::numeric_limits<std::uint64_t>::max() - size)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Geometry residency size overflow.");
-        resident_size += size;
-    }
+    if (auto result = CreateAllocation(next.storage, allocation, BufferDescription(upload_size),
+            D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
+    next.storage.graph_access = Access::CopyDest;
+    const auto resident_size = next.storage.allocation->GetSize();
     AllocationResource next_upload;
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     if (auto created = CreateAllocation(next_upload, allocation, BufferDescription(upload_size),
@@ -104,6 +85,7 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     D3D12_RANGE no_read{};
     const auto result = next_upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(result)) return HResultFailure("Map geometry page upload", result);
+    std::memset(mapped, 0, static_cast<std::size_t>(upload_size));
     for (std::size_t index = 0; index < bytes.size(); ++index)
         std::memcpy(static_cast<std::byte *>(mapped) + upload_offsets[index],
                     bytes[index].data(), bytes[index].size());
@@ -126,9 +108,9 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     next.remap_offset = next.triangle_offset +
         static_cast<std::uint32_t>(GeometryChunk(package,
             render_data::ChunkType::GeometryMeshletTriangles).size());
-    next.vertex_view = {next.vertices.resource->GetGPUVirtualAddress(),
+    next.vertex_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[0],
         static_cast<UINT>(bytes[0].size()), sizeof(Vertex)};
-    next.index_view = {next.indices.resource->GetGPUVirtualAddress(),
+    next.index_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[1],
         static_cast<UINT>(bytes[1].size()), DXGI_FORMAT_R32_UINT};
     page = std::move(next);
     upload = std::move(next_upload);
@@ -137,15 +119,10 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
 
 void D3D12Renderer::Impl::RecordGeometryPageUpload(
     ID3D12GraphicsCommandList *list, const GeometryPageGpu &page,
-    const AllocationResource &upload,
-    const std::array<std::uint64_t, kGeometryBuffersPerPage> &upload_offsets) const
+    const AllocationResource &upload) const
 {
-    const std::array<ID3D12Resource *, kGeometryBuffersPerPage> resources{
-        page.vertices.resource.Get(), page.indices.resource.Get(),
-        page.meshlets.resource.Get(), page.auxiliary.resource.Get()};
-    for (std::size_t index = 0; index < resources.size(); ++index)
-        list->CopyBufferRegion(resources[index], 0, upload.resource.Get(),
-                              upload_offsets[index], resources[index]->GetDesc().Width);
+    list->CopyBufferRegion(page.storage.resource.Get(), 0, upload.resource.Get(), 0,
+                          page.storage.resource->GetDesc().Width);
 }
 
 Result D3D12Renderer::Impl::CreateGeometryPage(
@@ -155,34 +132,17 @@ Result D3D12Renderer::Impl::CreateGeometryPage(
     std::vector<AllocationResource> &uploads)
 {
     AllocationResource upload;
-    std::array<std::uint64_t, kGeometryBuffersPerPage> offsets{};
     if (auto prepared = PrepareGeometryPageUpload(page, metadata, package_bytes, page_asset,
-                                                  page_slot, upload, offsets); !prepared)
+                                                  page_slot, upload); !prepared)
         return prepared;
-    RecordGeometryPageUpload(list, page, upload, offsets);
-    const std::array<ID3D12Resource *, kGeometryBuffersPerPage> resources{
-        page.vertices.resource.Get(), page.indices.resource.Get(),
-        page.meshlets.resource.Get(), page.auxiliary.resource.Get()};
-    const std::array<D3D12_RESOURCE_STATES, kGeometryBuffersPerPage> states{
-        D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
-        D3D12_RESOURCE_STATE_INDEX_BUFFER,
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
-    std::array<D3D12_RESOURCE_BARRIER, kGeometryBuffersPerPage> barriers{};
-    for (std::size_t index = 0; index < resources.size(); ++index)
-    {
-        auto &barrier = barriers[index];
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = resources[index];
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = states[index];
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    }
-    list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
-    page.vertices.graph_access = Access::VertexBuffer;
-    page.indices.graph_access = Access::IndexBuffer;
-    page.meshlets.graph_access = Access::ComputeRead;
-    page.auxiliary.graph_access = Access::ComputeRead;
+    RecordGeometryPageUpload(list, page, upload);
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition = {page.storage.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+        D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER |
+        D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    list->ResourceBarrier(1, &barrier);
+    page.storage.graph_access = Access::VertexShaderRead;
     uploads.push_back(std::move(upload));
     return Result::Success();
 }
@@ -200,8 +160,7 @@ const GeometryPageGpu *D3D12Renderer::Impl::FindGeometryPage(std::uint32_t page_
         else if (page_slot == kProjectileGeometryPage) page = &gel_projectile_geometry;
         else if (page_slot == kProceduralGeometryPage) page = &procedural_geometry;
         if (!page) return nullptr;
-        if (page->vertices.resource && page->indices.resource &&
-            page->meshlets.resource && page->auxiliary.resource) return page;
+        if (page->storage.resource) return page;
         if (page->fallback_page_slot >= kGeometryPageCapacity ||
             page->fallback_page_slot == page_slot) return nullptr;
         page_slot = page->fallback_page_slot;
@@ -218,18 +177,15 @@ void D3D12Renderer::Impl::WriteGeometryPageDescriptors(std::uint32_t frame_slot)
     for (std::uint32_t slot = 0; slot < kGeometryPageCapacity; ++slot)
     {
         const auto *page = FindGeometryPage(slot);
-        const std::array<ID3D12Resource *, kGeometryBuffersPerPage> resources{
-            page ? page->vertices.resource.Get() : nullptr,
-            page ? page->indices.resource.Get() : nullptr,
-            page ? page->meshlets.resource.Get() : nullptr,
-            page ? page->auxiliary.resource.Get() : nullptr};
-        for (auto *resource : resources)
+        auto *resource = page ? page->storage.resource.Get() : nullptr;
+        for (std::size_t slice = 0; slice < kGeometryBuffersPerPage; ++slice)
         {
             D3D12_SHADER_RESOURCE_VIEW_DESC view{};
             view.Format = DXGI_FORMAT_R32_TYPELESS;
             view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
             view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Buffer.NumElements = resource ? static_cast<UINT>(resource->GetDesc().Width / 4) : 1;
+            view.Buffer.FirstElement = page ? page->offsets[slice] / 4 : 0;
+            view.Buffer.NumElements = page ? static_cast<UINT>(page->sizes[slice] / 4) : 1;
             view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
             device->CreateShaderResourceView(resource, &view, descriptor);
             descriptor.ptr += srv_stride;

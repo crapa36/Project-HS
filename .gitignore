@@ -56,22 +56,16 @@ events.ndjson
 
 # Local planning documents
 /Docs/*
-!/Docs/ENGINE_LEAN_AUDIT.md
-!/Docs/VFX_Visual_UX_Audit_Resolution.md
-!/Docs/Consolidated_Review_Resolution.md
-!/Docs/Grass_History_Correction.md
-!/Docs/Plans/
-/Docs/Plans/*
-!/Docs/Plans/ENGINE_RENDERER_V7.md
-!/Docs/Plans/CONTENT_GENERATION_DIRECTIVE.md
-!/Docs/Plans/IMPLEMENTATION_EXECUTION_PLAN.md
+/.planning
 
 # Operating system files
 .DS_Store
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-$RECYCLE.BIN/
 
 # Blender automatic save backups
 *.blend[0-9]
+
+/.codex
+/.planning

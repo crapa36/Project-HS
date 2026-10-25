@@ -8,6 +8,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -30,6 +31,36 @@ struct CharacterPackageData
     float ground_offset{};
 };
 
+inline constexpr std::uint32_t kMonsterDeformationAbi = 1;
+// ABI1 proves position enclosure only for ordinary matrix skinning. Bubble
+// still uses the existing runtime reduction because normal singularities are
+// not qualified. Terminal frame rows enclose the clamped last frame, not wrap.
+inline constexpr std::uint32_t kMonsterBoundsPositionEnclosure = 1;
+inline constexpr std::uint32_t kMonsterDeformationSuicideBubble = 2;
+struct CharacterIntervalBound
+{
+    std::uint16_t lod{};
+    CharacterAnimationClip clip{};
+    std::uint32_t frame{};
+    std::array<float, 3> minimum{}, maximum{};
+};
+struct MonsterCharacterData
+{
+    std::uint32_t abi{kMonsterDeformationAbi};
+    std::uint32_t bone_count{};
+    std::uint32_t flags{};
+    std::array<std::byte, 32> skeleton_binding{};
+    float numerical_margin{};
+    float bubble_amplitude{};
+    // Stored exactly as the old XMStoreFloat4x4(transpose(skin)) upload rows.
+    // Clip first_transform is the first matrix; frame-major, bone-major order.
+    std::vector<std::array<float, 16>> final_matrices;
+    std::vector<CharacterIntervalBound> interval_bounds;
+    // Actual pages only, in contiguous LOD order starting at zero. No synthetic
+    // reduced entry is admitted merely because a renderer can select an LOD.
+    std::vector<GeometryMetadata> lods;
+};
+
 // Production metadata deliberately contains no embedded geometry. The page is
 // required and validated separately before its vertices can be used.
 struct CharacterMetadataPackageData
@@ -44,7 +75,13 @@ struct CharacterMetadataPackageData
     std::uint32_t material_count{};
     float ground_offset{};
     std::vector<CharacterMaterialBinding> material_bindings;
+    std::optional<MonsterCharacterData> monster;
 };
+
+// Build-only import boundary, using the same strict scalar predicates as the
+// character codec before any geometry remap or publication.
+void ValidateCharacterSource(const CharacterPackageData &character,
+                             bool validate_upper_body_mask = true);
 
 [[nodiscard]] std::vector<std::byte> BuildEmbeddedCharacterPackage(
     AssetId asset_id, std::span<const std::string> dependencies,
@@ -58,10 +95,13 @@ struct CharacterMetadataPackageData
 [[nodiscard]] std::vector<std::byte> BuildCharacterMetadataPackage(
     AssetId asset_id, std::span<const std::string> dependencies,
     const CharacterPackageData &character, const GeometryMetadata &geometry,
-    std::span<const CharacterMaterialBinding> material_bindings = {});
+    std::span<const CharacterMaterialBinding> material_bindings = {},
+    const MonsterCharacterData *monster = nullptr);
 [[nodiscard]] CharacterMetadataPackageData DecodeCharacterMetadataPackage(
     std::span<const std::byte> bytes, AssetId expected_asset_id,
     bool validate_upper_body_mask = true);
+[[nodiscard]] CharacterMetadataPackageData DecodeCharacterMetadataPackage(
+    const PackageView &package, bool validate_upper_body_mask = true);
 void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
                                const GeometryData &geometry);
 

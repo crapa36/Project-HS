@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cfenv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -13,6 +14,30 @@
 #include <stdexcept>
 #include <vector>
 namespace hs::geometry_content {
+GeometryErrorQualificationKey GeometryErrorImplementationKey() noexcept
+{
+    GeometryErrorQualificationKey key{1, 1, render_data::kGeometryAbi, 1};
+#if defined(__clang__)
+    key.compiler=2; key.compiler_version=(std::uint64_t(__clang_major__)<<32u)|(__clang_minor__<<16u)|__clang_patchlevel__;
+#elif defined(_MSC_FULL_VER)
+    key.compiler=1; key.compiler_version=_MSC_FULL_VER;
+#if defined(_MSC_BUILD)
+    key.compiler_version=(key.compiler_version<<16u)|_MSC_BUILD;
+#endif
+#elif defined(__GNUC__)
+    key.compiler=3; key.compiler_version=(std::uint64_t(__GNUC__)<<32u)|(__GNUC_MINOR__<<16u)|__GNUC_PATCHLEVEL__;
+#endif
+#if defined(_M_X64) || defined(__x86_64__)
+    key.target=1;
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    key.target=2;
+#endif
+#if defined(HS_GEOMETRY_ERROR_FP_STRICT) && HS_GEOMETRY_ERROR_FP_STRICT && !defined(_M_FP_FAST) && !defined(__FAST_MATH__)
+    key.floating_point_contract=1;
+#endif
+    key.rounding_mode=std::fegetround();
+    return key;
+}
 namespace {
 struct V { double x{},y{},z{}; };
 V operator+(V a,V b){return {a.x+b.x,a.y+b.y,a.z+b.z};}
@@ -50,7 +75,7 @@ struct Node { Box box; unsigned begin{},end{},left{},right{}; bool leaf{}; };
 struct Bvh {
     std::vector<T> triangles;std::vector<Node> nodes;unsigned root{};
     struct Nearest { double distance{};const T* triangle{}; };
-    explicit Bvh(std::vector<T> source):triangles(std::move(source)){Require(!triangles.empty(),"empty target material surface");root=Build(0,static_cast<unsigned>(triangles.size()));}
+    explicit Bvh(std::vector<T> source):triangles(std::move(source)){Require(!triangles.empty(),"empty target material surface");nodes.reserve(triangles.size()/2+1);root=Build(0,static_cast<unsigned>(triangles.size()));}
     unsigned Build(unsigned begin,unsigned end){
         unsigned id=static_cast<unsigned>(nodes.size());nodes.emplace_back();Node n;n.begin=begin;n.end=end;
         Box centers;for(unsigned i=begin;i<end;++i){for(V p:triangles[i].p)n.box.Add(p);centers.Add((triangles[i].p[0]+triangles[i].p[1]+triangles[i].p[2])*(1.0/3));}
@@ -74,33 +99,87 @@ struct Bvh {
         Require(nearest!=nullptr,"BVH target has no nearest triangle");
         return {std::sqrt(best),nearest};
     }
-    double Distance(V p)const{return Closest(p).distance;}
 };
 struct Patch {T t;double upper{};std::uint64_t serial{};};
 struct Highest { bool operator()(const Patch& a,const Patch& b)const{return a.upper==b.upper?a.serial>b.serial:a.upper<b.upper;} };
 using SurfaceKey=std::array<double,10>;
 SurfaceKey Key(const T& t){auto p=t.p;std::sort(p.begin(),p.end(),[](V a,V b){return std::array<double,3>{a.x,a.y,a.z}<std::array<double,3>{b.x,b.y,b.z};});return {double(t.material),p[0].x,p[0].y,p[0].z,p[1].x,p[1].y,p[1].z,p[2].x,p[2].y,p[2].z};}
+bool Qualified(const GeometryErrorQualification* qualification,const std::vector<T>& a,const std::vector<T>& b)
+{
+    if(!qualification) return false;
+    const auto key=GeometryErrorImplementationKey();
+    const auto &q=*qualification;
+    if(!key.compiler || !key.target || key.floating_point_contract!=1 || key.rounding_mode!=FE_TONEAREST ||
+       q.key!=key || !std::numeric_limits<double>::is_iec559 || sizeof(double)!=8 ||
+       !std::isfinite(q.maximum_absolute_coordinate) || q.maximum_absolute_coordinate<0 ||
+       !std::isfinite(q.minimum_positive_edge_squared) || q.minimum_positive_edge_squared<0 ||
+       !std::isfinite(q.minimum_positive_area_squared) || q.minimum_positive_area_squared<0 ||
+       !q.maximum_triangles_per_surface || a.size()>q.maximum_triangles_per_surface || b.size()>q.maximum_triangles_per_surface) return false;
+    for(const auto* surface:{&a,&b}) for(const auto &triangle:*surface)
+    {
+        for(const auto p:triangle.p)
+            if(std::max({std::abs(p.x),std::abs(p.y),std::abs(p.z)})>q.maximum_absolute_coordinate) return false;
+        for(unsigned i=0;i<3;++i)
+        {
+            const auto edge=Norm2(triangle.p[i]-triangle.p[(i+1)%3]);
+            if(edge>0 && edge<q.minimum_positive_edge_squared) return false;
+        }
+        const auto ab=triangle.p[1]-triangle.p[0],ac=triangle.p[2]-triangle.p[0];
+        const V cross{ab.y*ac.z-ab.z*ac.y,ab.z*ac.x-ab.x*ac.z,ab.x*ac.y-ab.y*ac.x};
+        const auto area=Norm2(cross);
+        if((area==0 && !q.includes_degenerate_triangles) || (area>0 && area<q.minimum_positive_area_squared)) return false;
+    }
+    return true;
+}
 GeometryErrorBounds Directed(const std::vector<T>& source,const std::vector<T>& target,double tolerance,std::uint64_t maxQueries,
-                             std::uint64_t profileId,const char* label){
+                             std::uint64_t profileId,const char* label,bool qualified,GeometryErrorCheckMode mode){
     const bool profile=profileId!=0;
     const auto started=std::chrono::steady_clock::now();
-    std::map<unsigned,std::vector<T>> grouped;std::map<SurfaceKey,bool> identical;double coordinateScale=1;
-    for(auto t:target){grouped[t.material].push_back(t);identical.emplace(Key(t),true);for(V p:t.p)coordinateScale=std::max({coordinateScale,std::abs(p.x),std::abs(p.y),std::abs(p.z)});}
+    std::map<unsigned,std::vector<T>> grouped;std::vector<SurfaceKey> identical;identical.reserve(target.size());double coordinateScale=1;
+    for(auto t:target){grouped[t.material].push_back(t);identical.push_back(Key(t));for(V p:t.p)coordinateScale=std::max({coordinateScale,std::abs(p.x),std::abs(p.y),std::abs(p.z)});}
+    std::sort(identical.begin(),identical.end());
     for(auto t:source)for(V p:t.p)coordinateScale=std::max({coordinateScale,std::abs(p.x),std::abs(p.y),std::abs(p.z)});
     // Practical double-precision allowance, separate from the geometric proof.
     // This is deliberately much larger than one double ULP for these fixtures.
     const double numericMargin=coordinateScale*1e-9;
     std::map<unsigned,Bvh> surfaces;for(auto& [material,triangles]:grouped)surfaces.emplace(material,Bvh(std::move(triangles)));
+    std::uint64_t oracle_queries=0;
+    const auto check_query=[&](V point,unsigned material) {
+        const auto found=surfaces.find(material);Require(found!=surfaces.end(),"authored LOD removes a complete material surface");
+        double exhaustive=INFINITY;
+        for(const auto &triangle:found->second.triangles) exhaustive=std::min(exhaustive,TriangleDistance2(point,triangle));
+        const auto accelerated=found->second.Closest(point).distance;
+        Require(std::isfinite(exhaustive) && std::isfinite(accelerated) &&
+            std::abs(accelerated-std::sqrt(exhaustive))<=numericMargin,"BVH/exhaustive mismatch");
+        ++oracle_queries;
+    };
+    if(mode==GeometryErrorCheckMode::Exhaustive)
+    {
+        for(const auto &triangle:source)
+        {
+            check_query((triangle.p[0]+triangle.p[1]+triangle.p[2])*(1.0/3),triangle.material);
+            // The explicit adversarial corpus includes vertices and edge ties,
+            // including repeated points and zero-area/collinear triangles.
+            for(unsigned i=0;i<3;++i) {
+                check_query(triangle.p[i],triangle.material);
+                check_query((triangle.p[i]+triangle.p[(i+1)%3])*0.5,triangle.material);
+            }
+        }
+    }
+    else if(!qualified)
+    {
+        const auto step=std::max<std::size_t>(1,source.size()/12);
+        for(std::size_t i=0,count=0;i<source.size() && count<12;i+=step,++count)
+            check_query((source[i].p[0]+source[i].p[1]+source[i].p[2])*(1.0/3),source[i].material);
+    }
+    if(profile)std::fprintf(stderr,"hs.hlod.profile call=%llu direction=%s phase=oracle queries=%llu qualified=%u mode=%s\n",
+        static_cast<unsigned long long>(profileId),label,static_cast<unsigned long long>(oracle_queries),
+        qualified?1u:0u,mode==GeometryErrorCheckMode::Exhaustive?"exhaustive":"normal");
     if(profile)std::fprintf(stderr,"hs.hlod.profile call=%llu direction=%s phase=bvh source=%zu target=%zu materials=%zu elapsed_ms=%lld\n",
         static_cast<unsigned long long>(profileId),label,source.size(),target.size(),surfaces.size(),
         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count()));
-    unsigned bvhChecks=0;
-    for(std::size_t i=0;i<source.size()&&bvhChecks<12;i+=std::max<std::size_t>(1,source.size()/12)){
-        const T& t=source[i];auto found=surfaces.find(t.material);Require(found!=surfaces.end(),"missing target material");V p=(t.p[0]+t.p[1]+t.p[2])*(1.0/3);double exhaustive=INFINITY;
-        for(const auto& candidate:found->second.triangles)exhaustive=std::min(exhaustive,TriangleDistance2(p,candidate));
-        Require(std::abs(found->second.Distance(p)-std::sqrt(exhaustive))<=numericMargin,"BVH closest distance differs from exhaustive oracle");++bvhChecks;
-    }
-    std::priority_queue<Patch,std::vector<Patch>,Highest> patches;
+    std::vector<Patch> storage;storage.reserve(source.size());
+    std::priority_queue<Patch,std::vector<Patch>,Highest> patches(Highest{},std::move(storage));
     std::uint64_t serial=0,queries=0;double lower=0;
     auto insert=[&](T t,double parentUpper){auto found=surfaces.find(t.material);Require(found!=surfaces.end(),"authored LOD removes a complete material surface");V center=(t.p[0]+t.p[1]+t.p[2])*(1.0/3);const auto closest=found->second.Closest(center);double distance=closest.distance;++queries;lower=std::max(lower,std::max(0.0,distance-numericMargin));double radius=std::sqrt(std::max({Norm2(t.p[0]-center),Norm2(t.p[1]-center),Norm2(t.p[2]-center)}));
         // The distance to any closed target set is 1-Lipschitz. Every point of
@@ -120,7 +199,7 @@ GeometryErrorBounds Directed(const std::vector<T>& source,const std::vector<T>& 
             TriangleDistance2(t.p[2],triangle)}));
         const double certifiedBound=std::min(distance+radius,convexBound);
         double upper=std::min(parentUpper,std::nextafter(certifiedBound+numericMargin,INFINITY));patches.push({t,upper,serial++});};
-    for(auto t:source)if(!identical.contains(Key(t)))insert(t,INFINITY);
+    for(auto t:source)if(!std::binary_search(identical.data(),identical.data()+identical.size(),Key(t)))insert(t,INFINITY);
     // Every source face needs initial coverage; a refinement budget cannot
     // invalidate large but otherwise valid surfaces before that coverage exists.
     const auto initialQueries=queries;
@@ -134,12 +213,13 @@ GeometryErrorBounds Directed(const std::vector<T>& source,const std::vector<T>& 
         static_cast<unsigned long long>(profileId),label,static_cast<unsigned long long>(initialQueries),
         static_cast<unsigned long long>(queries-initialQueries),patches.size(),lower,upper,tolerance,
         static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-started).count()));
-    return {lower,upper};
+    return {lower,upper,oracle_queries,qualified && mode!=GeometryErrorCheckMode::Exhaustive};
 }
 std::vector<T> Surface(std::span<const render_data::ExpandedVertex> vertices,
                        std::span<const std::uint16_t> material_mapping) {
     Require(!vertices.empty() && vertices.size()%3==0,"invalid error surface");
-    std::vector<T> out;
+    Require(vertices.size()/3<=std::numeric_limits<unsigned>::max(),"error surface exceeds BVH triangle addressing");
+    std::vector<T> out;out.reserve(vertices.size()/3);
     for(std::size_t i=0;i<vertices.size();i+=3){
         const auto source_material=vertices[i].material_index;
         T t;
@@ -150,14 +230,16 @@ std::vector<T> Surface(std::span<const render_data::ExpandedVertex> vertices,
     }return out;
 }
 } // namespace
-GeometryErrorBounds MeasureGeometryError(std::span<const render_data::ExpandedVertex> fine,std::span<const render_data::ExpandedVertex> coarse,std::span<const std::uint16_t> material_mapping,std::uint64_t refinement_budget) {
+GeometryErrorBounds MeasureGeometryError(std::span<const render_data::ExpandedVertex> fine,std::span<const render_data::ExpandedVertex> coarse,std::span<const std::uint16_t> material_mapping,std::uint64_t refinement_budget,GeometryErrorChecks checks) {
     const auto a=Surface(fine,material_mapping),b=Surface(coarse,material_mapping);Box box;for(const auto&t:a)for(auto p:t.p)box.Add(p);const double tolerance=std::sqrt(Norm2(box.hi-box.lo))*0.005;
+    const bool qualified=checks.mode==GeometryErrorCheckMode::Normal && Qualified(checks.qualification,a,b);
     static std::atomic<std::uint64_t> profileCounter{0};
     const bool profile=std::getenv("HS_HLOD_GEOMETRY_PROFILE")!=nullptr;
     const auto id=profile?profileCounter.fetch_add(1,std::memory_order_relaxed)+1:0;
     if(profile)std::fprintf(stderr,"hs.hlod.profile call=%llu phase=begin fine=%zu coarse=%zu tolerance=%.7g\n",
         static_cast<unsigned long long>(id),a.size(),b.size(),tolerance);
-    const auto forward=Directed(a,b,tolerance,refinement_budget,id,"forward"),reverse=Directed(b,a,tolerance,refinement_budget,id,"reverse");
-    return {std::max(forward.lower,reverse.lower),std::max(forward.upper,reverse.upper)};
+    const auto forward=Directed(a,b,tolerance,refinement_budget,id,"forward",qualified,checks.mode),reverse=Directed(b,a,tolerance,refinement_budget,id,"reverse",qualified,checks.mode);
+    return {std::max(forward.lower,reverse.lower),std::max(forward.upper,reverse.upper),
+        forward.oracle_queries+reverse.oracle_queries,qualified};
 }
 } // namespace hs::geometry_content

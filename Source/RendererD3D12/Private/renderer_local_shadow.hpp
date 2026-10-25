@@ -87,7 +87,7 @@ struct LocalShadowInputs
     bool reset_cache{};
     // Same original leaf superset, geometry records, current SkinCache and common
     // opacity bindings as VirtualShadow. Removed casters retain previous bounds.
-    std::span<const VirtualShadowCaster> casters;
+    ShadowCasterRange casters;
     std::span<const VirtualShadowDrawGroup> draw_groups;
     std::span<const VirtualShadowNativeRead> native_reads;
     std::vector<std::shared_ptr<const void>> owners; // Placed geometry/material backing, if not renderer-owned.

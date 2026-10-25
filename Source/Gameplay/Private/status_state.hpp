@@ -3,7 +3,9 @@
 #include <hs/game_domain/game_types.hpp>
 
 #include <array>
+#include <algorithm>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace hs::gameplay_detail
@@ -47,6 +49,15 @@ struct StatusState
     std::array<BleedEffect, 5> bleeds{};
     std::uint8_t bleed_count{};
     std::optional<BurnEffect> burn;
+
+    void AddBleed(const BleedEffect &effect, std::size_t maximum_stacks)
+    {
+        maximum_stacks = std::min(maximum_stacks, bleeds.size());
+        if (maximum_stacks == 0) return;
+        if (bleed_count < maximum_stacks) bleeds[bleed_count++] = effect;
+        else *std::ranges::min_element(std::span(bleeds).first(bleed_count),
+                                       {}, &BleedEffect::expires) = effect;
+    }
 };
 
 } // namespace hs::gameplay_detail

@@ -15,14 +15,13 @@ namespace hs
 
 struct ProfileData
 {
-    static constexpr std::uint32_t kSchemaVersion = 1;
+    // Version 2 removes unused unlock masks; the reader accepts version 1 without rewriting it.
+    static constexpr std::uint32_t kSchemaVersion = 2;
 
     std::uint32_t schema_version{kSchemaVersion};
     std::uint32_t best_level{1};
     std::uint64_t total_wins{};
     std::uint64_t total_kills{};
-    std::uint64_t unlocked_skills_mask{0xFF};
-    std::uint64_t unlocked_relics_mask{0xFFF};
 };
 
 static_assert(std::is_trivially_copyable_v<ProfileData> &&

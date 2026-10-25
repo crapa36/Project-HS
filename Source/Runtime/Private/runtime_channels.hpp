@@ -10,11 +10,14 @@
 #include <hs/presentation/projector.hpp>
 
 #include "graphics_settings_commit.hpp"
+#include "runtime_diagnostics.hpp"
+#include "main_wake.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <memory>
+#include <vector>
 
 namespace hs
 {
@@ -23,6 +26,21 @@ struct ResizeCommand
 {
     std::uint32_t width{};
     std::uint32_t height{};
+};
+
+struct QueuedAudioEvent
+{
+    PresentationEvent event;
+    std::uint64_t enqueued_qpc{};
+    enum class Kind : std::uint8_t { Event, Tick } kind{};
+    struct TickInfo
+    {
+        std::uint64_t session_id{};
+        Tick tick{};
+        SessionPhase phase{SessionPhase::MainMenu};
+        Float3 listener_position{};
+    } tick_info;
+    std::uint64_t dequeued_qpc{}; // Main's owned batch only; producer leaves zero.
 };
 
 struct RenderPorts
@@ -34,7 +52,7 @@ struct RenderPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
-    BoundedSpscQueue<PresentationEvent, 1024> &audio_events;
+    BoundedSpscQueue<QueuedAudioEvent, 1024> &render_audio_events;
     BoundedSpscQueue<ResizeCommand, 64> &resize_commands;
     BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> &renderer_settings;
     BoundedSpscQueue<GraphicsSettingsAck, 8> &renderer_settings_acks;
@@ -49,6 +67,8 @@ struct RenderPorts
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &renderer_graphics_ui;
     const std::atomic<std::uint8_t> &session_phase;
     const std::atomic<std::uint8_t> &ui_page;
+    runtime_detail::MainWake *main_wake{};
+    void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
 };
 
 struct SimulationPorts
@@ -63,6 +83,7 @@ struct SimulationPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
+    BoundedSpscQueue<QueuedAudioEvent, 1024> &sim_audio_events;
     BoundedSpscQueue<SettingsData, 8> &presentation_settings;
     BoundedSpscQueue<UiAction, 64> &ui_actions;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
@@ -85,6 +106,47 @@ struct SimulationPorts
     std::atomic<std::uint8_t> &character_details_page;
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &presentation_graphics_ui;
     const std::atomic<bool> &ui_input_rejected;
+    runtime_detail::DiagnosticClock capture_clock{};
+    runtime_detail::MainWake *main_wake{};
+    void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
+
+    void PublishAudioTick(const QueuedAudioEvent::TickInfo &tick)
+    {
+        QueuedAudioEvent packet;
+        packet.kind = QueuedAudioEvent::Kind::Tick;
+        packet.tick_info = tick;
+        packet.enqueued_qpc = capture_clock ? capture_clock() : 0;
+        if (!sim_audio_events.TryPush(packet))
+            dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
+        else NotifyMain();
+    }
+
+    // The same owned values feed recording and one live destination in source order.
+    void ProjectDomainSignalsOnce(std::span<const DomainSignal> signals, float arena_half_extent,
+                                  bool capture_trace, std::vector<PresentationEvent> *record_events)
+    {
+        if (record_events) record_events->clear();
+        for (const auto &signal : signals)
+        {
+            std::array<PresentationEvent, 3> projected{};
+            const auto count = ProjectDomainSignal(signal, projected, arena_half_extent);
+            for (const auto &event : std::span(projected).first(count))
+            {
+                if (record_events) record_events->push_back(event);
+                if (event.kind == PresentationKind::Audio)
+                {
+                    if (!sim_audio_events.TryPush({event, capture_clock ? capture_clock() : 0}))
+                        dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
+                    else NotifyMain();
+                    // Explicit capture retains the original ordered render-owned trace.
+                    // The renderer logs this copy but never forwards or plays it.
+                    if (!capture_trace) continue;
+                }
+                if (!presentation_events.TryPush(event))
+                    dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
 
     void PublishSessionProbe(const SessionProbe &probe)
     {
@@ -95,7 +157,8 @@ struct SimulationPorts
 
 struct RuntimeChannels
 {
-    RuntimeChannels() : snapshots(10'000, 8, 4, kGraphicsUiSnapshotReserve)
+    explicit RuntimeChannels(runtime_detail::MainWake *wake = nullptr)
+        : snapshots(10'000, 8, 4, kGraphicsUiSnapshotReserve), main_wake(wake)
     {
     }
 
@@ -110,7 +173,11 @@ struct RuntimeChannels
     BoundedSpscQueue<ActionEdge, 256> action_edges;
     RenderSnapshotExchange snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
-    BoundedSpscQueue<PresentationEvent, 1024> audio_events;
+    BoundedSpscQueue<QueuedAudioEvent, 1024> sim_audio_events;
+    BoundedSpscQueue<QueuedAudioEvent, 1024> render_audio_events;
+    runtime_detail::DiagnosticClock capture_clock{}; // Assigned before worker publication.
+    runtime_detail::MainWake *main_wake{};
+    void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
     BoundedSpscQueue<ResizeCommand, 64> resize_commands;
     // Requests carry a pointer to the commit owner's immutable in-flight graphics
     // snapshot. Release/acquire queue publication and the acknowledgment queue
@@ -167,17 +234,17 @@ struct RuntimeChannels
     [[nodiscard]] RenderPorts ForRender() noexcept
     {
         return {stop_requested, simulation_done, completed_tick, render_ready, action_edges, snapshots,
-                presentation_events, audio_events, resize_commands, renderer_settings,
+                presentation_events, render_audio_events, resize_commands, renderer_settings,
                 renderer_settings_acks, window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
-                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page};
+                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, main_wake};
     }
 
     [[nodiscard]] SimulationPorts ForSimulation() noexcept
     {
         return {stop_requested, simulation_done, held_input, focus_epoch,
                 camera_target_x, camera_target_z, camera_zoom_percent, action_edges,
-                 snapshots, presentation_events,
+                 snapshots, presentation_events, sim_audio_events,
                 presentation_settings, ui_actions,
                 debug_commands, completed_tick, gameplay_checksum, session_phase,
                 session_probe_mutex, session_probe, ui_page,
@@ -185,7 +252,7 @@ struct RuntimeChannels
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
                 settings_group, settings_page, character_details_page, presentation_graphics_ui,
-                ui_input_rejected};
+                ui_input_rejected, capture_clock, main_wake};
     }
 };
 

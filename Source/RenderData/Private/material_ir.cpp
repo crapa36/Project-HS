@@ -1370,20 +1370,83 @@ std::uint32_t ClosureSidecarBit(MaterialOp op)
 }
 } // namespace
 
+struct PreparedMaterial::Impl
+{
+    MaterialGraph graph;
+    OptimizedGraph optimized;
+    std::vector<bool> uniform;
+    ClosureReflection reflection;
+    std::vector<std::size_t> closure_chain;
+    std::vector<bool> closure_live;
+    std::size_t closure_opacity{kNoMaterialInput};
+    std::vector<bool> closure_opacity_live;
+    std::array<std::vector<bool>, 7> output_live;
+};
+
+PreparedMaterial::PreparedMaterial(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+PreparedMaterial::PreparedMaterial(PreparedMaterial &&) noexcept = default;
+PreparedMaterial &PreparedMaterial::operator=(PreparedMaterial &&) noexcept = default;
+PreparedMaterial::~PreparedMaterial() = default;
+const MaterialGraph &PreparedMaterial::Graph() const { return impl_->graph; }
+
+PreparedMaterial PrepareMaterial(MaterialGraph graph, MaterialPreparationDomain domain)
+{
+    switch (domain)
+    {
+    case MaterialPreparationDomain::Generic: break;
+    case MaterialPreparationDomain::Environment:
+        if (graph.kind != MaterialGraphKind::Terrain) ValidateEnvironmentDomain(graph);
+        break;
+    case MaterialPreparationDomain::Hero: ValidateHeroDomain(graph); break;
+    case MaterialPreparationDomain::Decal:
+        Require(graph.kind == MaterialGraphKind::Decal, "unexpected graph kind");
+        break;
+    default: Require(false, "invalid material preparation domain");
+    }
+    auto values = ValidateMaterialGraph(graph, graph.kind);
+    auto impl = std::make_unique<PreparedMaterial::Impl>();
+    impl->graph = std::move(graph);
+    impl->optimized = Optimize(impl->graph, std::move(values));
+    impl->uniform = UniformNodes(impl->optimized);
+    const std::array outputs{impl->graph.base_color_output, impl->graph.roughness_output,
+        impl->graph.opacity_output, impl->graph.normal_output, impl->graph.ao_output,
+        impl->graph.terrain_output, impl->graph.closure_output};
+    for (std::size_t i = 0; i < outputs.size(); ++i)
+        if (outputs[i] != kNoMaterialInput)
+            impl->output_live[i] = Reachable(impl->optimized.nodes,
+                impl->optimized.representative[outputs[i]]);
+    if (impl->graph.kind == MaterialGraphKind::Decal)
+    {
+        impl->reflection = {static_cast<std::uint32_t>(MaterialClosureCapability::Basic) |
+                            static_cast<std::uint32_t>(MaterialClosureCapability::Emission),
+                            static_cast<std::uint32_t>(MaterialClosureVarying::Emission)};
+        impl->closure_live = Reachable(impl->optimized.nodes,
+            impl->optimized.representative[impl->graph.closure_output]);
+    }
+    else
+    {
+        impl->closure_chain = impl->graph.closure_output == kNoMaterialInput ? std::vector<std::size_t>{} :
+            ClosureChain(impl->optimized, impl->optimized.representative[impl->graph.closure_output]);
+        impl->reflection = ReflectClosure(impl->optimized, impl->closure_chain, impl->uniform,
+                                          impl->graph.normal_space);
+        if (!impl->closure_chain.empty())
+        {
+            const auto closure = impl->optimized.representative[impl->graph.closure_output];
+            impl->closure_live = Reachable(impl->optimized.nodes, closure);
+            impl->closure_opacity = ClosureOpacity(impl->optimized.nodes, closure);
+            impl->closure_opacity_live = Reachable(impl->optimized.nodes, impl->closure_opacity);
+        }
+    }
+    return PreparedMaterial(std::move(impl));
+}
+
 ClosureReflection AnalyzeClosure(const MaterialGraph &graph)
 {
-    if (graph.kind == MaterialGraphKind::Decal)
-    {
-        ValidateDecalMaterialGraph(graph);
-        return {static_cast<std::uint32_t>(MaterialClosureCapability::Basic) |
-                static_cast<std::uint32_t>(MaterialClosureCapability::Emission),
-                static_cast<std::uint32_t>(MaterialClosureVarying::Emission)};
-    }
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, graph.kind));
-    const auto chain = graph.closure_output == kNoMaterialInput ? std::vector<std::size_t>{} :
-        ClosureChain(optimized, optimized.representative[graph.closure_output]);
-    return ReflectClosure(optimized, chain, UniformNodes(optimized), graph.normal_space);
+    return AnalyzeClosure(PrepareMaterial(graph, graph.kind == MaterialGraphKind::Decal
+        ? MaterialPreparationDomain::Decal : MaterialPreparationDomain::Generic));
 }
+
+ClosureReflection AnalyzeClosure(const PreparedMaterial &material) { return material.impl_->reflection; }
 
 std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view function_name)
 {
@@ -1397,11 +1460,25 @@ std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view 
         Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
                 (i != 0 && c >= '0' && c <= '9'), "invalid uniform closure function name");
     }
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, graph.kind));
-    const auto chain = graph.closure_output == kNoMaterialInput ? std::vector<std::size_t>{} :
-        ClosureChain(optimized, optimized.representative[graph.closure_output]);
-    const auto uniform = UniformNodes(optimized);
-    const auto reflection = ReflectClosure(optimized, chain, uniform, graph.normal_space);
+    return EmitUniformClosureHlsl(PrepareMaterial(graph), function_name);
+}
+
+std::string EmitUniformClosureHlsl(const PreparedMaterial &material, std::string_view function_name)
+{
+    const auto &graph = material.impl_->graph;
+    Require(graph.kind != MaterialGraphKind::Decal,
+            "decal domain must be evaluated in the common Surface pass before lighting");
+    Require(!function_name.empty() && function_name.size() <= 128, "invalid uniform closure function name");
+    for (std::size_t i = 0; i < function_name.size(); ++i)
+    {
+        const auto c = function_name[i];
+        Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+                (i != 0 && c >= '0' && c <= '9'), "invalid uniform closure function name");
+    }
+    const auto &optimized = material.impl_->optimized;
+    const auto &chain = material.impl_->closure_chain;
+    const auto &uniform = material.impl_->uniform;
+    const auto &reflection = material.impl_->reflection;
     const auto materialized_mask = reflection.varying_mask;
     std::vector<bool> reachable(optimized.nodes.size());
     for (const auto index : chain)
@@ -1500,9 +1577,16 @@ void ValidateDecalMaterialGraph(const MaterialGraph &graph)
 void ValidateMaterialSampleLayers(const MaterialGraph &graph,
     std::span<const std::uint32_t> texture_layer_counts, std::uint32_t max_context_layer)
 {
-    if (graph.kind != MaterialGraphKind::Terrain && graph.kind != MaterialGraphKind::Decal)
-        ValidateEnvironmentDomain(graph);
-    const auto values = ValidateMaterialGraph(graph, graph.kind);
+    return ValidateMaterialSampleLayers(PrepareMaterial(graph,
+        graph.kind == MaterialGraphKind::Decal ? MaterialPreparationDomain::Decal :
+        MaterialPreparationDomain::Environment), texture_layer_counts, max_context_layer);
+}
+
+void ValidateMaterialSampleLayers(const PreparedMaterial &material,
+    std::span<const std::uint32_t> texture_layer_counts, std::uint32_t max_context_layer)
+{
+    const auto &graph = material.impl_->graph;
+    const auto &values = material.impl_->optimized.values;
     Require(texture_layer_counts.size() == graph.textures.size() && max_context_layer < 2048,
             "invalid texture layer validation shape");
     for (const auto count : texture_layer_counts)
@@ -1679,7 +1763,15 @@ void ValidateMaterialSampleLayers(const MaterialGraph &graph,
 
 std::string EmitRock0MaterialHlsl(const MaterialGraph &graph)
 {
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, MaterialGraphKind::Rock0));
+    Require(graph.kind == MaterialGraphKind::Rock0, "unexpected graph kind");
+    return EmitRock0MaterialHlsl(PrepareMaterial(graph));
+}
+
+std::string EmitRock0MaterialHlsl(const PreparedMaterial &material)
+{
+    const auto &graph = material.impl_->graph;
+    Require(graph.kind == MaterialGraphKind::Rock0, "unexpected graph kind");
+    const auto &optimized = material.impl_->optimized;
     return "// Generated from validated rock_0 MaterialIR.\n" +
         EmitLibraryHelpers(optimized, {graph.base_color_output, graph.roughness_output}) +
         EmitFunction(optimized, graph.base_color_output, MaterialType::Float3,
@@ -1690,7 +1782,15 @@ std::string EmitRock0MaterialHlsl(const MaterialGraph &graph)
 
 std::string EmitLeaf0MaterialHlsl(const MaterialGraph &graph)
 {
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, MaterialGraphKind::Leaf0));
+    Require(graph.kind == MaterialGraphKind::Leaf0, "unexpected graph kind");
+    return EmitLeaf0MaterialHlsl(PrepareMaterial(graph));
+}
+
+std::string EmitLeaf0MaterialHlsl(const PreparedMaterial &material)
+{
+    const auto &graph = material.impl_->graph;
+    Require(graph.kind == MaterialGraphKind::Leaf0, "unexpected graph kind");
+    const auto &optimized = material.impl_->optimized;
     return "// Generated from validated leaf_0 MaterialIR.\n" +
         EmitLibraryHelpers(optimized, {graph.opacity_output}) +
         EmitFunction(optimized, graph.opacity_output, MaterialType::Float,
@@ -1712,7 +1812,24 @@ std::string EmitEnvironmentMaterialHlsl(const MaterialGraph &graph)
     ValidateEnvironmentDomain(graph);
     Require(graph.closure_output == kNoMaterialInput,
             "typed surface closure requires the context surface emitter");
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, graph.kind));
+    return EmitEnvironmentMaterialHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Environment));
+}
+
+std::string EmitEnvironmentMaterialHlsl(const PreparedMaterial &material)
+{
+    const auto &graph = material.impl_->graph;
+    if (graph.kind == MaterialGraphKind::Rock0) return EmitRock0MaterialHlsl(material) +
+        "float3 HsMaterialBaseColor(float3 sampled) { return HsRock0BaseColor(sampled); }\n"
+        "float HsMaterialRoughness(float sampled, float scale) { return HsRock0Roughness(sampled, scale); }\n"
+        "float HsMaterialOpacity(float sampled) { return sampled; }\n";
+    if (graph.kind == MaterialGraphKind::Leaf0) return EmitLeaf0MaterialHlsl(material) +
+        "float3 HsMaterialBaseColor(float3 sampled) { return sampled; }\n"
+        "float HsMaterialRoughness(float sampled, float scale) { return saturate(sampled * scale); }\n"
+        "float HsMaterialOpacity(float sampled) { return HsLeaf0Opacity(sampled); }\n";
+    ValidateEnvironmentDomain(graph);
+    Require(graph.closure_output == kNoMaterialInput,
+            "typed surface closure requires the context surface emitter");
+    const auto &optimized = material.impl_->optimized;
     std::string result = "// Generated from validated environment MaterialIR.\n";
     result += EmitLibraryHelpers(optimized, {graph.base_color_output, graph.roughness_output,
                                              graph.kind == MaterialGraphKind::Masked
@@ -1735,7 +1852,20 @@ std::string EmitEnvironmentMaterialContextHlsl(const MaterialGraph &graph,
     if (graph.kind != MaterialGraphKind::Terrain) ValidateEnvironmentDomain(graph);
     Require(graph.normal_space == MaterialNormalSpace::Tangent ||
             graph.normal_space == MaterialNormalSpace::World, "invalid normal output space");
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, graph.kind));
+    return EmitEnvironmentMaterialContextHlsl(PrepareMaterial(graph,
+        graph.kind == MaterialGraphKind::Terrain ? MaterialPreparationDomain::Generic :
+        MaterialPreparationDomain::Environment), material_ordinal);
+}
+
+std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
+                                              std::size_t material_ordinal)
+{
+    const auto &graph = material.impl_->graph;
+    Require(material_ordinal < kAuthoredMaterialNames.size(), "material ordinal out of range");
+    if (graph.kind != MaterialGraphKind::Terrain) ValidateEnvironmentDomain(graph);
+    Require(graph.normal_space == MaterialNormalSpace::Tangent ||
+            graph.normal_space == MaterialNormalSpace::World, "invalid normal output space");
+    const auto &optimized = material.impl_->optimized;
     std::string result = "// Validated authored context MaterialIR; shader binding ABI 2.\n";
     for (std::size_t slot = 0; slot < graph.textures.size(); ++slot)
         result += "Texture2DArray<float4> HsMaterialTexture" + std::to_string(slot) +
@@ -1759,16 +1889,17 @@ std::string EmitEnvironmentMaterialContextHlsl(const MaterialGraph &graph,
         ? graph.closure_output : graph.base_color_output;
     if (graph.closure_output != kNoMaterialInput)
     {
-        const auto output_reachable = Reachable(optimized.nodes, representative(surface_output));
-        for (std::size_t i = 0; i < surface_reachable.size(); ++i)
-            surface_reachable[i] = output_reachable[i];
+        surface_reachable = material.impl_->closure_live;
     }
     else for (const auto output : {graph.base_color_output, graph.roughness_output,
             graph.normal_output, graph.ao_output,
             graph.kind == MaterialGraphKind::Masked ? graph.opacity_output : kNoMaterialInput})
         if (output != kNoMaterialInput)
         {
-            const auto output_reachable = Reachable(optimized.nodes, representative(output));
+            const auto slot = output == graph.base_color_output ? 0u :
+                output == graph.roughness_output ? 1u : output == graph.opacity_output ? 2u :
+                output == graph.normal_output ? 3u : 4u;
+            const auto &output_reachable = material.impl_->output_live[slot];
             for (std::size_t i = 0; i < surface_reachable.size(); ++i)
                 surface_reachable[i] = surface_reachable[i] || output_reachable[i];
         }
@@ -1794,14 +1925,13 @@ std::string EmitEnvironmentMaterialContextHlsl(const MaterialGraph &graph,
     result += "float HsMaterialEvaluateOpacity(HsMaterialContext ctx)\n{\n";
     if (graph.closure_output != kNoMaterialInput && graph.kind == MaterialGraphKind::Masked)
     {
-        const auto closure = optimized.representative[graph.closure_output];
-        const auto opacity = ClosureOpacity(optimized.nodes, closure);
-        result += EmitContextNodes(optimized, graph, Reachable(optimized.nodes, opacity), material_ordinal * kMaterialTextureSlots) +
+        const auto opacity = material.impl_->closure_opacity;
+        result += EmitContextNodes(optimized, graph, material.impl_->closure_opacity_live, material_ordinal * kMaterialTextureSlots) +
             "    return n" + std::to_string(opacity) + ";\n";
     }
     else if (graph.kind == MaterialGraphKind::Masked)
         result += EmitContextNodes(optimized, graph,
-            Reachable(optimized.nodes, representative(graph.opacity_output)), material_ordinal * kMaterialTextureSlots) +
+            material.impl_->output_live[2], material_ordinal * kMaterialTextureSlots) +
             "    return " + value(graph.opacity_output) + ";\n";
     else result += "    return 1.0;\n";
     return result + "}\n";
@@ -1822,10 +1952,30 @@ std::string EmitHeroMaterialContextHlsl(const MaterialGraph &graph,
         }
     }
     Require(surface_function != opacity_function, "hero material function names must differ");
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, graph.kind));
+    return EmitHeroMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Hero),
+                                      surface_function, opacity_function);
+}
+
+std::string EmitHeroMaterialContextHlsl(const PreparedMaterial &material,
+    std::string_view surface_function, std::string_view opacity_function)
+{
+    const auto &graph = material.impl_->graph;
+    ValidateHeroDomain(graph);
+    for (const auto name : {surface_function, opacity_function})
+    {
+        Require(!name.empty() && name.size() <= 128, "invalid hero material function name");
+        for (std::size_t i = 0; i < name.size(); ++i)
+        {
+            const auto c = name[i];
+            Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+                    (i != 0 && c >= '0' && c <= '9'), "invalid hero material function name");
+        }
+    }
+    Require(surface_function != opacity_function, "hero material function names must differ");
+    const auto &optimized = material.impl_->optimized;
     const auto closure = optimized.representative[graph.closure_output];
-    const auto opacity = ClosureOpacity(optimized.nodes, closure);
-    const auto surface_live = Reachable(optimized.nodes, closure);
+    const auto opacity = material.impl_->closure_opacity;
+    const auto &surface_live = material.impl_->closure_live;
     std::string result = "#include \"material_surface.hlsli\"\n";
     result += EmitLibraryHelpers(optimized, surface_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(surface_function) + "(HsMaterialContext ctx)\n{\n";
@@ -1834,7 +1984,7 @@ std::string EmitHeroMaterialContextHlsl(const MaterialGraph &graph,
     result += "    result.normal_is_world = " +
         std::string(graph.normal_space == MaterialNormalSpace::World ? "true" : "false") + ";\n";
     result += "    return result;\n}\nfloat " + std::string(opacity_function) + "(HsMaterialContext ctx)\n{\n";
-    result += EmitContextNodes(optimized, graph, Reachable(optimized.nodes, opacity));
+    result += EmitContextNodes(optimized, graph, material.impl_->closure_opacity_live);
     return result + "    return n" + std::to_string(opacity) + ";\n}\n";
 }
 
@@ -1848,16 +1998,33 @@ std::string EmitDecalMaterialContextHlsl(const MaterialGraph &graph,
         Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
                 (i != 0 && c >= '0' && c <= '9'), "invalid decal function name");
     }
-    const auto optimized = Optimize(graph, ValidateMaterialGraph(graph, MaterialGraphKind::Decal));
+    Require(graph.kind == MaterialGraphKind::Decal, "unexpected graph kind");
+    return EmitDecalMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Decal),
+                                        function_name, texture_register);
+}
+
+std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &material,
+    std::string_view function_name, std::uint32_t texture_register)
+{
+    const auto &graph = material.impl_->graph;
+    Require(!function_name.empty() && function_name.size() <= 128, "invalid decal function name");
+    for (std::size_t i = 0; i < function_name.size(); ++i)
+    {
+        const char c = function_name[i];
+        Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
+                (i != 0 && c >= '0' && c <= '9'), "invalid decal function name");
+    }
+    Require(graph.kind == MaterialGraphKind::Decal, "unexpected graph kind");
+    const auto &optimized = material.impl_->optimized;
     const auto closure = optimized.representative[graph.closure_output];
     // The producer assigns a dedicated texture register and symbol to each
     // evaluator in its combined program. Decal ordinals never enter the
     // geometry material or texture ABI.
     std::string result = "Texture2DArray<float4> HsMaterialTexture0 : register(t" +
         std::to_string(texture_register) + ", space36);\n";
-    result += EmitLibraryHelpers(optimized, Reachable(optimized.nodes, closure)) + EmitNormalHelpers();
+    result += EmitLibraryHelpers(optimized, material.impl_->closure_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(function_name) + "(HsDecalContext ctx)\n{\n";
-    result += EmitContextNodes(optimized, graph, Reachable(optimized.nodes, closure));
+    result += EmitContextNodes(optimized, graph, material.impl_->closure_live);
     result += "    HsSurfaceClosure result = n" + std::to_string(closure) + ";\n";
     return result + "    result.normal_is_world = true;\n    return result;\n}\n";
 }

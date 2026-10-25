@@ -50,7 +50,7 @@ struct VolumetricCamera
 };
 struct VolumetricRevisions
 {
-    std::uint64_t scene{},light{},volume{};
+    std::uint64_t scene{},light{},volume{},dynamic_scene{};
     bool operator==(const VolumetricRevisions &) const = default;
 };
 struct VolumetricGuide

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <limits>
+#include <queue>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace hs::render_graph
@@ -96,23 +98,6 @@ bool Covered(const Intervals &initialized, const Intervals &ranges)
     });
 }
 
-bool QueueAccessCompatible(QueueHint queue, Access access)
-{
-    switch (queue)
-    {
-    case QueueHint::Direct:
-        return true;
-    case QueueHint::Compute:
-        return access == Access::Common || access == Access::ComputeRead ||
-               access == Access::UnorderedRead || access == Access::UnorderedWrite ||
-               access == Access::CopySource || access == Access::CopyDest ||
-               access == Access::IndirectArgs;
-    case QueueHint::Copy:
-        return access == Access::Common || access == Access::CopySource ||
-               access == Access::CopyDest;
-    }
-    return false;
-}
 } // namespace
 
 Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo> passes,
@@ -158,6 +143,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
     Intervals ranges;
     std::vector<std::uint32_t> seen_pass(resources.size(), UINT32_MAX);
     std::vector<std::size_t> first_use(resources.size());
+    std::unordered_map<std::uint32_t, std::uint32_t> pass_indices;
+    pass_indices.reserve(pass_count);
     for (std::uint32_t index = 0; index < pass_count; ++index)
     {
         const auto &pass = passes[index];
@@ -165,8 +152,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             return fail("RenderGraph pass queue is invalid.");
         if (!pass.has_execute)
             return fail("RenderGraph pass requires an execute callback.");
-        for (std::uint32_t previous = 0; previous < index; ++previous)
-            if (passes[previous].id == pass.id) return fail("RenderGraph pass IDs must be unique.");
+        if (!pass_indices.emplace(pass.id, index).second)
+            return fail("RenderGraph pass IDs must be unique.");
         for (std::size_t i = 0; i < pass.uses.size(); ++i)
         {
             const auto &use = pass.uses[i];
@@ -221,20 +208,19 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             }
         }
     }
-    std::vector<std::vector<std::uint8_t>> edges(pass_count, std::vector<std::uint8_t>(pass_count));
+    std::vector<std::vector<std::uint32_t>> successors(pass_count);
     std::vector<std::uint32_t> indegree(pass_count);
     const auto edge = [&](std::int64_t before, std::int64_t after) {
         if (before < 0 || after < 0 || before == after) return;
-        if (!edges[before][after]) { edges[before][after] = 1; ++indegree[after]; }
+        successors[before].push_back(static_cast<std::uint32_t>(after));
     };
     for (std::uint32_t consumer = 0; consumer < pass_count; ++consumer)
         for (const auto producer_id : passes[consumer].predecessor_ids)
         {
-            const auto producer = std::find_if(passes.begin(), passes.end(),
-                [&](const PassInfo &pass) { return pass.id == producer_id; });
-            if (producer == passes.end() || producer == passes.begin() + consumer)
+            const auto producer = pass_indices.find(producer_id);
+            if (producer == pass_indices.end() || producer->second == consumer)
                 return fail("RenderGraph ordering dependency names an absent or identical pass.");
-            edge(producer - passes.begin(), consumer);
+            edge(producer->second, consumer);
         }
     for (std::size_t resource_index = 0; resource_index < resources.size(); ++resource_index)
     {
@@ -285,14 +271,27 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                             (!r.initialized && !Covered(initialized, Intervals{{0, extent}}))))
             return fail("RenderGraph final access requires the latest fully initialized version.");
     }
+    // Multiple resources/explicit ordering may name the same edge. Finalize
+    // once before topology so it contributes exactly one indegree decrement.
+    for (std::uint32_t before = 0; before < pass_count; ++before)
+    {
+        auto &next = successors[before];
+        std::sort(next.begin(), next.end());
+        next.erase(std::unique(next.begin(), next.end()), next.end());
+        for (const auto after : next)
+            ++indegree[after];
+    }
+    const auto later_id = [&](std::uint32_t left, std::uint32_t right) {
+        return passes[left].id > passes[right].id;
+    };
+    std::priority_queue<std::uint32_t, std::vector<std::uint32_t>, decltype(later_id)> ready_passes(later_id);
+    for (std::uint32_t index = 0; index < pass_count; ++index)
+        if (!indegree[index]) ready_passes.push(index);
     std::vector<std::uint32_t> order;
     order.reserve(pass_count);
     for (std::uint32_t position = 0; position < pass_count; ++position)
     {
-        std::uint32_t ready = pass_count;
-        for (std::uint32_t index = 0; index < pass_count; ++index)
-            if (!indegree[index] && (ready == pass_count || passes[index].id < passes[ready].id)) ready = index;
-        if (ready == pass_count)
+        if (ready_passes.empty())
         {
             // Follow remaining predecessor edges until a pass repeats. This
             // reports an actual cycle instead of every blocked downstream pass.
@@ -312,17 +311,20 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 }
                 chain.push_back(current);
                 for (std::uint32_t predecessor = 0; predecessor < pass_count; ++predecessor)
-                    if (indegree[predecessor] != UINT32_MAX && edges[predecessor][current])
+                    if (indegree[predecessor] != UINT32_MAX &&
+                        std::binary_search(successors[predecessor].begin(), successors[predecessor].end(), current))
                     {
                         current = predecessor;
                         break;
                     }
             }
         }
+        const auto ready = ready_passes.top();
+        ready_passes.pop();
         order.push_back(ready);
         indegree[ready] = UINT32_MAX;
-        for (std::uint32_t next = 0; next < pass_count; ++next)
-            if (edges[ready][next]) --indegree[next];
+        for (const auto next : successors[ready])
+            if (!--indegree[next]) ready_passes.push(next);
     }
     schedule.execution_order = order;
     for (const auto pass : order)
@@ -335,8 +337,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
     std::vector<std::array<std::uint32_t, 3>> earliest_consumer(pass_count, absent);
     std::vector<std::array<std::uint32_t, 3>> later_producer_consumer(pass_count, absent);
     for (std::uint32_t before = 0; before < pass_count; ++before)
-        for (std::uint32_t after = 0; after < pass_count; ++after)
-            if (edges[before][after] && passes[before].queue != passes[after].queue)
+        for (const auto after : successors[before])
+            if (passes[before].queue != passes[after].queue)
             {
                 auto &position = earliest_consumer[before][static_cast<std::size_t>(passes[after].queue)];
                 position = std::min(position, queue_positions[after]);
@@ -352,9 +354,12 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 earliest[queue] = std::min(earliest[queue], earliest_consumer[pass][queue]);
         }
     }
+    std::vector<std::uint32_t> execution_positions(pass_count);
+    for (std::uint32_t position = 0; position < pass_count; ++position)
+        execution_positions[order[position]] = position;
     for (const auto before : order)
-        for (const auto after : order)
-            if (edges[before][after] && passes[before].queue != passes[after].queue)
+        for (const auto after : successors[before])
+            if (passes[before].queue != passes[after].queue)
             {
                 // A later signal on the same producer queue, waited by an
                 // earlier consumer on its queue, already orders this edge.
@@ -366,6 +371,13 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 schedule.cross_queue_dependencies.push_back(
                     {before, after, passes[before].queue, passes[after].queue});
             }
+    // Only surviving handoffs need execution ordering; most edges are dominated.
+    std::sort(schedule.cross_queue_dependencies.begin(), schedule.cross_queue_dependencies.end(),
+        [&](const auto &left, const auto &right) {
+            if (left.producer != right.producer)
+                return execution_positions[left.producer] < execution_positions[right.producer];
+            return execution_positions[left.consumer] < execution_positions[right.consumer];
+        });
     return Result::Success();
 }
 

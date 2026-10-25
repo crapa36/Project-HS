@@ -3,9 +3,13 @@
 #include "renderer_impl.hpp"
 #include "renderer_pipeline_cache.hpp"
 #include "renderer_quality.hpp"
+#include "visibility_encoding.hpp"
 
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/lighting_probe.hpp>
+#include <hs/render_data/static_shadow.hpp>
+#include <hs/render_data/static_shadow_archive.hpp>
+#include <hs/render_data/texture_package.hpp>
 
 #include <bit>
 #include <fstream>
@@ -38,19 +42,25 @@ std::string Hex(std::span<const std::byte> bytes)
     for(auto b:bytes) { const auto value=std::to_integer<unsigned>(b); result+=digits[value>>4]; result+=digits[value&15]; }
     return result;
 }
-std::string Hash(std::span<const std::byte> bytes) { return "sha256:" + Hex(hs::Sha256(bytes)); }
+std::string Hash(std::span<const std::byte> bytes)
+{
+    renderer_detail::StartupOperationScope timing(RendererStartupOperation::Sha256);
+    return "sha256:" + Hex(hs::Sha256(bytes));
+}
 std::vector<std::byte> ReadProduct(const RendererConfig &config,std::string_view id)
 {
     std::filesystem::path path; const auto resolved=config.ResolveProduct(id,path);
     Require(static_cast<bool>(resolved),resolved.Message());
     const auto found=config.product_digests.find(std::string(id));
     Require(found!=config.product_digests.end(),"Generation omits required product digest: "+std::string(id));
+    renderer_detail::StartupOperationScope read_timing(RendererStartupOperation::CheckedBinaryRead);
     std::ifstream stream(path,std::ios::binary|std::ios::ate);
     Require(static_cast<bool>(stream),"Cannot open Generation probe/shader product: "+std::string(id));
     const auto count=stream.tellg(); Require(count>0 && count<=256ll*1024*1024,"Invalid bounded probe/shader product size");
     std::vector<std::byte> bytes(static_cast<std::size_t>(count)); stream.seekg(0);
     Require(static_cast<bool>(stream.read(reinterpret_cast<char *>(bytes.data()),static_cast<std::streamsize>(bytes.size()))),
         "Cannot read exact Generation probe/shader product bytes");
+    read_timing.Stop();
     Require(Hash(bytes)==found->second,"Generation probe/shader digest mismatch: "+std::string(id)); return bytes;
 }
 class Identity
@@ -121,8 +131,13 @@ struct StaticShadowView
     std::uint32_t light_generation{};
     bool enabled{};
 };
+struct StaticShadowBakeBounds
+{
+    DirectX::XMFLOAT3 minimum{}, maximum{};
+};
 StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderScene> &scene,
-    std::span<const LocalProbeCapturePage> pages,std::span<const LightView> lights)
+    std::span<const LocalProbeCapturePage> pages,std::span<const LightView> lights,
+    UINT edge=kShadowEdge, StaticShadowBakeBounds *bake_bounds=nullptr)
 {
     using namespace DirectX;
     StaticShadowView result;
@@ -144,6 +159,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
     XMFLOAT3 maximum{-minimum.x,-minimum.y,-minimum.z};
     for(const auto &instance:scene->instances)
     {
+        if(bake_bounds && !rd::IsStaticShadowCaster(instance)) continue;
         const auto &bounds=pages[PageOrdinal(instance)].bounds; ValidateBounds(bounds);
         Require(std::isfinite(instance.yaw) && std::isfinite(instance.scale.x) && std::isfinite(instance.scale.y) &&
             std::isfinite(instance.scale.z) && instance.scale.x>0 && instance.scale.y>0 && instance.scale.z>0 &&
@@ -156,7 +172,8 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
             const float y=((corner&2)?bounds.maximum[1]:bounds.minimum[1])*instance.scale.y;
             const float z=((corner&4)?bounds.maximum[2]:bounds.minimum[2])*instance.scale.z;
             const float world_x=instance.position.x+x*cosine+z*sine;
-            const float world_y=instance.position.y+y;
+            const bool terrain=instance.mesh==RenderMesh::Ground || instance.mesh==RenderMesh::DirtPatch;
+            const float world_y=instance.position.y+y+(bake_bounds && terrain ? instance.scale.y*.5f : 0.0f);
             const float world_z=instance.position.z-x*sine+z*cosine;
             // Capture zeroes grass benders/time. BendGrass still adds its fixed
             // world-space wind envelope: 0.035 X and 0.035*0.7 Z, at most.
@@ -178,7 +195,7 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
         std::abs(double(maximum.x)),std::abs(double(maximum.y)),std::abs(double(maximum.z))});
     // Two geometry-derived texels plus float transform rounding contain flat
     // axes, raster edges and first-hit PCF taps without camera-dependent fitting.
-    const float padding=static_cast<float>(std::max(diagonal*2.0/kShadowEdge,
+    const float padding=static_cast<float>(std::max(diagonal*2.0/edge,
         coordinate*std::numeric_limits<float>::epsilon()*64.0));
     Require(diagonal>0 && std::isfinite(padding) && padding>0,"Static shadow geometry has no finite projection extent");
     minimum.x-=padding; minimum.y-=padding; minimum.z-=padding;
@@ -186,9 +203,10 @@ StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderSc
     Require(std::isfinite(minimum.x) && std::isfinite(minimum.y) && std::isfinite(minimum.z) &&
         std::isfinite(maximum.x) && std::isfinite(maximum.y) && std::isfinite(maximum.z) &&
         maximum.x>minimum.x && maximum.y>minimum.y && maximum.z>minimum.z,"Static shadow padded projection is not representable");
+    if(bake_bounds) *bake_bounds={minimum,maximum};
     const auto projection=XMMatrixOrthographicOffCenterLH(minimum.x,maximum.x,minimum.y,maximum.y,maximum.z,minimum.z);
     result.enabled=true; result.light_id=primary->stable_id; result.light_generation=primary->generation;
-    result.view.scene=scene; result.view.edge=kShadowEdge;
+    result.view.scene=scene; result.view.edge=edge;
     result.view.near_distance=0; result.view.far_distance=maximum.z-minimum.z;
     XMStoreFloat4x4(&result.view.world_to_view,light_view); XMStoreFloat4x4(&result.view.projection,projection);
     Require(result.view.projection._11>0 && result.view.projection._22>0 && result.view.projection._33<0,
@@ -238,6 +256,7 @@ struct LocalProbeCaptureState
 {
     ComPtr<ID3D12Device> device; ComPtr<D3D12MA::Allocator> allocator; ComPtr<ID3D12RootSignature> root;
     std::array<ComPtr<ID3D12PipelineState>,rd::kAuthoredMaterialNames.size()> materials,shadows;
+    ComPtr<ID3D12PipelineState> procedural_shadow;
     ComPtr<ID3D12PipelineState> sky;
     rd::SceneProbeRevisions baseline;
     std::vector<rd::SceneProbeRecord> probes;
@@ -248,6 +267,8 @@ struct LocalProbeCaptureState
     float revision_foliage_density{};
     std::string layout_identity,shadow_identity;
     StaticShadowView revision_shadow;
+    std::string material_revision_identity, light_revision_identity, layout_revision_identity;
+    rd::SceneProbeRevisions derived_revisions;
 };
 struct LocalProbeCaptureFrame
 {
@@ -298,6 +319,7 @@ struct LocalProbeCaptureFrame
     void DrawInstances(ID3D12GraphicsCommandList *list,bool shadow_pass,const LocalProbeFrustum *frustum=nullptr)
     {
         std::uint32_t previous_ordinal=UINT32_MAX, previous_page=UINT32_MAX;
+        ID3D12PipelineState *previous_pipeline=nullptr;
         ForEachLocalProbeDrawRun(draws,shadow_pass?nullptr:frustum,[&](const LocalProbeDrawRun &run)
         {
             Require(LocalProbeDrawRunValid(run,scene->instances.size()),"Capture source run exceeds packed source/material bounds");
@@ -307,9 +329,12 @@ struct LocalProbeCaptureFrame
                 const auto &bases=base.material_parameter_bases[ordinal/4];
                 const UINT parameter_base=std::array<UINT,4>{bases.x,bases.y,bases.z,bases.w}[ordinal%4];
                 list->SetGraphicsRoot32BitConstant(6,(parameter_base<<1)|1u,1);
-                list->SetPipelineState((shadow_pass?capture->shadows[ordinal]:capture->materials[ordinal]).Get());
                 previous_ordinal=ordinal;
             }
+            auto *pipeline=(shadow_pass?capture->shadows[ordinal]:capture->materials[ordinal]).Get();
+            if(shadow_pass && capture->procedural_shadow && run.page_ordinal==rd::kEnvironmentMaterialNames.size())
+                pipeline=capture->procedural_shadow.Get();
+            if(pipeline!=previous_pipeline) { list->SetPipelineState(pipeline); previous_pipeline=pipeline; }
             if(run.page_ordinal!=previous_page)
             {
                 list->IASetVertexBuffers(0,1,&page.vertex_view); list->IASetIndexBuffer(&page.index_view);
@@ -370,6 +395,82 @@ struct LocalProbeRuntime::Impl
 LocalProbeRuntime::LocalProbeRuntime():impl_(std::make_unique<Impl>()) {}
 LocalProbeRuntime::~LocalProbeRuntime()=default;
 
+namespace
+{
+// Both capture paths clone the canonical mixed CBV/SRV/UAV table. Its layout
+// is initialized centrally by InitializeCanonicalDescriptors, including inactive features.
+void CopyCaptureDescriptors(ID3D12Device *device,D3D12_CPU_DESCRIPTOR_HANDLE destination,
+    D3D12_CPU_DESCRIPTOR_HANDLE source)
+{
+    device->CopyDescriptorsSimple(kCaptureDescriptorCount,destination,source,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+void PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &capture,
+    const RendererConfig &config, RendererPipelineCache *pipeline_cache, bool color,
+    std::span<const bool> selected={}, INT depth_bias=-800, bool procedural_two_sided=false)
+{
+    auto *root=capture->root.Get();
+    const auto vertex=ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil");
+    constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
+        {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"BLENDINDICES",0,DXGI_FORMAT_R16G16B16A16_UINT,0,24,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"BLENDWEIGHT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,32,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"TANGENT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,56,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
+        {"MATERIAL",0,DXGI_FORMAT_R16_UINT,0,72,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC p{}; p.pRootSignature=root; p.VS={vertex.data(),vertex.size()};
+    p.InputLayout={layout,static_cast<UINT>(std::size(layout))}; p.SampleMask=UINT_MAX;
+    p.BlendState.IndependentBlendEnable=TRUE;
+    for(auto &blend:p.BlendState.RenderTarget)
+    {
+        blend.SrcBlend=D3D12_BLEND_ONE; blend.DestBlend=D3D12_BLEND_ZERO; blend.BlendOp=D3D12_BLEND_OP_ADD;
+        blend.SrcBlendAlpha=D3D12_BLEND_ONE; blend.DestBlendAlpha=D3D12_BLEND_ZERO; blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
+        blend.LogicOp=D3D12_LOGIC_OP_NOOP; blend.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
+    }
+    p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID; p.RasterizerState.DepthClipEnable=TRUE;
+    p.DepthStencilState.DepthEnable=TRUE; p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
+    p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+    p.DepthStencilState.StencilReadMask=D3D12_DEFAULT_STENCIL_READ_MASK;
+    p.DepthStencilState.StencilWriteMask=D3D12_DEFAULT_STENCIL_WRITE_MASK;
+    p.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};
+    p.DepthStencilState.BackFace=p.DepthStencilState.FrontFace;
+    p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; p.NumRenderTargets=2;
+    p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT; p.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
+    p.DSVFormat=DXGI_FORMAT_D32_FLOAT; p.SampleDesc={1,0};
+    for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
+    {
+        if(!selected.empty() && !selected[i]) continue;
+        p.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
+        if(color)
+        {
+            const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
+            p.PS={pixel.data(),pixel.size()};
+            Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->materials[i])),"Create static local-probe material capture PSO");
+        }
+        const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
+        auto depth=p; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
+        for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
+        // Virtual pages use zero constant bias; probes retain their directional bias.
+        depth.RasterizerState.DepthBias=depth_bias; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
+        Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i])),"Create pure-static capture shadow PSO");
+        if(procedural_two_sided && i==rd::kTerrainMaterialOrdinal)
+        {
+            depth.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
+            Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->procedural_shadow)),"Create virtual procedural shadow PSO");
+        }
+    }
+    if(color)
+    {
+        const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
+        const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
+        p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
+        p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
+        p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
+        Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky)),"Create local-probe global sky capture PSO");
+    }
+}
+} // namespace
+
 Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,ID3D12RootSignature *root,
     const RendererConfig &config,std::string_view scene_generation,
     LocalProbeRuntimeCandidate &candidate,RendererPipelineCache *pipeline_cache) const
@@ -381,13 +482,13 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     {
         Require(device && allocator && root && pipeline_cache && !config.content_generation_id.empty() && !scene_generation.empty(),
             "Active local probes need native owners, pipeline cache and selected/resident scene Generations");
-        const auto bytes=ReadProduct(config,kProduct); const auto package=rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct));
+        const auto bytes=ReadProduct(config,kProduct); const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct)); });
         auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
         capture->baseline=package.description.revisions; capture->probes=package.probes;
         capture->scene_generation=scene_generation; capture->probe_digest=config.product_digests.at(std::string(kProduct));
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
-        (void)rd::ReadLightingProbePackage(environment,MakeAssetId(kEnvironment));
+        (void)renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadLightingProbePackage(environment,MakeAssetId(kEnvironment)); });
         capture->environment.emplace(kEnvironment,config.product_digests.at(std::string(kEnvironment)));
         Require(Revision(rd::SceneProbeRevisionDomain::Environment,capture->environment)==capture->baseline.environment,
             "Local package baseline environment revision is stale for the selected Generation");
@@ -402,52 +503,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         for(const auto &[id,digest]:config.product_digests)
             if(MaterialIdentity(id)) capture->material_products.emplace(id,digest);
         capture->material_products[std::string(kProduct)]=capture->probe_digest;
-        const auto vertex=ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil");
-        const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
-        const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
-        constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
-            {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"BLENDINDICES",0,DXGI_FORMAT_R16G16B16A16_UINT,0,24,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"BLENDWEIGHT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,32,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,48,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"TANGENT",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,56,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
-            {"MATERIAL",0,DXGI_FORMAT_R16_UINT,0,72,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0}};
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC p{}; p.pRootSignature=root; p.VS={vertex.data(),vertex.size()};
-        p.InputLayout={layout,static_cast<UINT>(std::size(layout))}; p.SampleMask=UINT_MAX;
-        p.BlendState.IndependentBlendEnable=TRUE;
-        for(auto &blend:p.BlendState.RenderTarget)
-        {
-            blend.SrcBlend=D3D12_BLEND_ONE; blend.DestBlend=D3D12_BLEND_ZERO; blend.BlendOp=D3D12_BLEND_OP_ADD;
-            blend.SrcBlendAlpha=D3D12_BLEND_ONE; blend.DestBlendAlpha=D3D12_BLEND_ZERO; blend.BlendOpAlpha=D3D12_BLEND_OP_ADD;
-            blend.LogicOp=D3D12_LOGIC_OP_NOOP; blend.RenderTargetWriteMask=D3D12_COLOR_WRITE_ENABLE_ALL;
-        }
-        p.RasterizerState.FillMode=D3D12_FILL_MODE_SOLID; p.RasterizerState.DepthClipEnable=TRUE;
-        p.DepthStencilState.DepthEnable=TRUE; p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ALL;
-        p.DepthStencilState.DepthFunc=D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        p.DepthStencilState.StencilReadMask=D3D12_DEFAULT_STENCIL_READ_MASK;
-        p.DepthStencilState.StencilWriteMask=D3D12_DEFAULT_STENCIL_WRITE_MASK;
-        p.DepthStencilState.FrontFace={D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_STENCIL_OP_KEEP,D3D12_COMPARISON_FUNC_ALWAYS};
-        p.DepthStencilState.BackFace=p.DepthStencilState.FrontFace;
-        p.PrimitiveTopologyType=D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE; p.NumRenderTargets=2;
-        p.RTVFormats[0]=DXGI_FORMAT_R32G32B32A32_FLOAT; p.RTVFormats[1]=DXGI_FORMAT_R32_FLOAT;
-        p.DSVFormat=DXGI_FORMAT_D32_FLOAT; p.SampleDesc={1,0};
-        for(std::size_t i=0;i<rd::kAuthoredMaterialNames.size();++i)
-        {
-            const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
-            p.PS={pixel.data(),pixel.size()}; p.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK;
-            Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->materials[i])),"Create static local-probe material capture PSO");
-            const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
-            auto depth=p; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
-            for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
-            // Match the renderer's established reversed-depth directional bias.
-            depth.RasterizerState.DepthBias=-800; depth.RasterizerState.SlopeScaledDepthBias=-1.5f;
-            Native(pipeline_cache->CreateGraphics(&depth,IID_PPV_ARGS(&capture->shadows[i])),"Create pure-static capture shadow PSO");
-        }
-        p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
-        p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
-        p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
-        Native(pipeline_cache->CreateGraphics(&p,IID_PPV_ARGS(&capture->sky)),"Create local-probe global sky capture PSO");
+        PrepareCapturePipelines(capture,config,pipeline_cache,true);
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
             try { output=ReadProduct(config,id); return Result::Success(); }
             catch(const std::exception &error) { return Failure(error.what()); }
@@ -539,11 +595,28 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
         if(shadow.enabled)
             for(const auto &row:shadow.view.view_projection.m) for(float value:row) lights.Float(value);
-        auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
-        const Identities light_inputs{{std::string(kProduct),capture->probe_digest},{"native/authoritative-light-view",lights.Finish()}};
-        const Identities layout_inputs{{std::string(kProduct),capture->probe_digest},{"native/immutable-static-scene",capture->layout_identity}};
-        out={Revision(rd::SceneProbeRevisionDomain::Environment,capture->environment),Revision(rd::SceneProbeRevisionDomain::Material,materials),
-            Revision(rd::SceneProbeRevisionDomain::Light,light_inputs),Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs)};
+        // Generation products are immutable; fold them again only when actual native inputs change.
+        if(capture->material_revision_identity!=material_identity)
+        {
+            auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
+            capture->derived_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
+            capture->material_revision_identity=material_identity;
+        }
+        const auto light_identity=lights.Finish();
+        if(capture->light_revision_identity!=light_identity)
+        {
+            const Identities light_inputs{{std::string(kProduct),capture->probe_digest},{"native/authoritative-light-view",light_identity}};
+            capture->derived_revisions.light=Revision(rd::SceneProbeRevisionDomain::Light,light_inputs);
+            capture->light_revision_identity=light_identity;
+        }
+        if(capture->layout_revision_identity!=capture->layout_identity)
+        {
+            const Identities layout_inputs{{std::string(kProduct),capture->probe_digest},{"native/immutable-static-scene",capture->layout_identity}};
+            capture->derived_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs);
+            capture->layout_revision_identity=capture->layout_identity;
+        }
+        out=capture->derived_revisions;
+        out.environment=capture->baseline.environment;
         return Result::Success();
     }
     catch(const std::exception &error) { return Failure(error.what()); }
@@ -660,7 +733,7 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
             if(bank==kFaceCount && frame->shadow.enabled) FillFaceConstants(constants,frame->shadow.view,frame->generation);
             std::memcpy(frame->mapped+std::size_t(bank)*kConstantsStride,&constants,sizeof(constants));
             auto destination=frame->descriptors->GetCPUDescriptorHandleForHeapStart(); destination.ptr+=SIZE_T(bank)*kCaptureDescriptorCount*frame->stride;
-            device->CopyDescriptorsSimple(kCaptureDescriptorCount,destination,in.frame_srv_base,D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            CopyCaptureDescriptors(device,destination,in.frame_srv_base);
             auto shadow_descriptor=destination; shadow_descriptor.ptr+=3u*frame->stride; // Root5 begins at t2; ShadowMap is t5.
             D3D12_SHADER_RESOURCE_VIEW_DESC shadow_srv{}; shadow_srv.Format=DXGI_FORMAT_R32_FLOAT;
             shadow_srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D; shadow_srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -672,7 +745,7 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
         frame->constants_handle=graph.ImportBuffer({frame->constants.resource.Get(),{},QueueHint::Direct},Access::AllShaderRead,"LocalProbe.PrivateFaceConstants");
         std::vector<LocalProbeSceneRead> reads(in.scene_reads.begin(),in.scene_reads.end());
         reads.push_back({graph.Version(frame->constants_handle),Access::AllShaderRead}); reads.push_back({in.static_version,Access::VertexShaderRead});
-        for(const auto &page:frame->pages) { reads.push_back({page.vertex_version,Access::VertexBuffer}); reads.push_back({page.index_version,Access::IndexBuffer}); }
+        for(const auto &page:frame->pages) { reads.push_back({page.vertex_version,Access::VertexShaderRead}); }
         if(frame->shadow.enabled)
         {
             frame->shadow_handle=graph.ImportTexture({frame->shadow_map.resource.Get(),{},QueueHint::Direct},Access::Common,"LocalProbe.PrivateStaticShadow");
@@ -727,5 +800,330 @@ std::uint64_t LocalProbeRuntime::AllocatedBytes() const noexcept
     if(impl_->pending_frame) bytes+=native_bytes(impl_->pending_frame);
     for(const auto &frame:impl_->retired_frames) bytes+=native_bytes(frame);
     return bytes;
+}
+
+// Retained before submission so a failed fence/event cannot release GPU readers.
+struct StaticShadowBakeFrame
+{
+    std::shared_ptr<LocalProbeCaptureFrame> capture;
+    std::vector<AllocationResource> uploads, textures;
+    AllocationResource instances, readback;
+    ComPtr<ID3D12CommandAllocator> allocator;
+    ComPtr<ID3D12GraphicsCommandList> list;
+};
+
+Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
+    const LightView &light,
+    const std::function<Result(const rd::StaticShadowArchiveDescription &)> &begin,
+    const std::function<Result(std::uint32_t,std::int32_t,std::int32_t,std::span<const float>)> &page_sink)
+{
+    std::uint32_t edge=32*rd::kStaticShadowPageInner+2*rd::kStaticShadowPageGuard;
+    try
+    {
+        Require(impl_->initialized && !impl_->frame_submission_faulted && scene && !scene->instances.empty(),
+            "Static shadow bake requires an initialized healthy renderer and a nonempty immutable scene");
+        Require(begin && page_sink,"Paged static shadow bake requires begin and page callbacks");
+        Require(scene->instances.size()<=kLocalProbeSourceCapacity,"Static shadow source count exceeds native capture ABI");
+        if(auto drained=impl_->WaitForGpu();!drained) return drained;
+        impl_->pending_static_shadow_bake.reset();
+        auto owner=std::make_shared<StaticShadowBakeFrame>();
+        auto frame=std::make_shared<LocalProbeCaptureFrame>(); owner->capture=frame;
+        frame->capture=std::make_shared<LocalProbeCaptureState>();
+        frame->capture->device=impl_->device; frame->capture->allocator=impl_->allocator;
+        frame->capture->root=impl_->root_signature; frame->scene=scene; frame->generation=1;
+        frame->stride=impl_->srv_stride; frame->samplers=impl_->sampler_heap;
+        frame->sampler_table=impl_->sampler_heap->GetGPUDescriptorHandleForHeapStart();
+        auto *device=impl_->device.Get();
+        Native(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&owner->allocator)),"Create bake allocator");
+        Native(device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,owner->allocator.Get(),nullptr,IID_PPV_ARGS(&owner->list)),"Create bake commands");
+        auto *list=owner->list.Get();
+        const auto allocate=[&](AllocationResource &resource,D3D12_HEAP_TYPE heap,const D3D12_RESOURCE_DESC &description,
+            D3D12_RESOURCE_STATES state,const D3D12_CLEAR_VALUE *clear=nullptr) {
+            D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=heap;
+            Native(impl_->allocator->CreateResource(&allocation,&description,state,clear,&resource.allocation,
+                IID_PPV_ARGS(&resource.resource)),"Allocate static shadow bake resource");
+        };
+        const auto transition=[&](ID3D12Resource *resource,D3D12_RESOURCE_STATES before,D3D12_RESOURCE_STATES after) {
+            D3D12_RESOURCE_BARRIER barrier{}; barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Transition={resource,D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,before,after}; list->ResourceBarrier(1,&barrier);
+        };
+        std::array<bool,rd::kAuthoredMaterialNames.size()> materials{};
+        bool procedural_two_sided=false;
+        for(const auto &source:scene->instances)
+        {
+            if(!rd::IsStaticShadowCaster(source)) continue;
+            const auto material=MaterialOrdinal(source);
+            auto canonical=source; canonical.asset_id={}; canonical.material_id={};
+            PopulateRenderInstanceIdentity(canonical);
+            Require((!source.asset_id.value || source.asset_id.value==canonical.asset_id.value) &&
+                (!source.material_id.value || source.material_id.value==canonical.material_id.value),
+                "Static shadow bake does not support noncanonical geometry or material overrides");
+            materials[material]=true;
+            if(!rd::IsEnvironmentMesh(source.mesh)) procedural_two_sided=true;
+        }
+        Require(std::any_of(materials.begin(),materials.end(),[](bool used) { return used; }),
+            "Static shadow bake scene contains no eligible static casters");
+        PrepareCapturePipelines(frame->capture,impl_->config,&impl_->pipeline_cache,false,materials,0,procedural_two_sided);
+        frame->pages.resize(rd::kEnvironmentMaterialNames.size()+1);
+        for(std::size_t ordinal=0;ordinal<frame->pages.size();++ordinal)
+        {
+            // Match the pinned terminal LOD2 page used by virtual shadow world queries.
+            const GeometryPageGpu *page=ordinal==rd::kEnvironmentMaterialNames.size()?&impl_->procedural_geometry:
+                &impl_->environment_meshes[ordinal*3+2];
+            auto &capture=frame->pages[ordinal]; capture.bounds=page->metadata.bounds;
+            capture.vertices=page->storage.resource; capture.indices=page->storage.resource;
+            capture.vertex_allocation=page->storage.allocation; capture.index_allocation=page->storage.allocation;
+            capture.vertex_view=page->vertex_view; capture.index_view=page->index_view;
+            capture.index_count=page->index_count; capture.generation=page->generation; capture.page_slot=page->page_slot;
+            capture.complete=page->storage.resource && page->index_count;
+        }
+        StaticShadowBakeBounds bounds;
+        frame->shadow=MakeStaticShadowView(scene,frame->pages,std::span(&light,1),edge,&bounds);
+        Require(frame->shadow.enabled,"Static shadow bake requires a valid shadow-requested directional light");
+        rd::StaticShadowArchiveDescription archive;
+        {
+            const auto &basis=frame->shadow.view.world_to_view;
+            archive.light_right={basis._11,basis._21,basis._31};
+            archive.light_up={basis._12,basis._22,basis._32};
+            archive.light_forward={basis._13,basis._23,basis._33};
+            archive.depth_minimum=bounds.minimum.z; archive.depth_maximum=bounds.maximum.z;
+            archive.layout_digest=rd::StaticShadowLayoutDigest(*scene);
+            // Runtime coverage_extents are cascade half-extents; registration divides
+            // their full width by each level's page count.
+            constexpr std::array<float,3> page_sizes{0.5625f,6.0f,20.0f};
+            std::uint64_t total_pages{};
+            for(std::size_t level=0;level<archive.levels.size();++level)
+            {
+                auto &description=archive.levels[level]; description.page_world_size=page_sizes[level];
+                const double side=description.page_world_size;
+                const double guard=side*rd::kStaticShadowPageGuard/rd::kStaticShadowPageInner;
+                const auto range=[&](float minimum,float maximum,std::int32_t &first,std::uint32_t &count) {
+                    const double lo=std::floor((double(minimum)-guard)/side);
+                    const double hi=std::floor((double(maximum)+guard)/side);
+                    Require(std::isfinite(lo) && std::isfinite(hi) &&
+                        lo>=std::numeric_limits<std::int32_t>::min() && hi<=std::numeric_limits<std::int32_t>::max() &&
+                        hi>=lo && hi-lo+1<=std::numeric_limits<std::uint32_t>::max(),"Static shadow archive page bounds overflow");
+                    first=static_cast<std::int32_t>(lo); count=static_cast<std::uint32_t>(hi-lo+1);
+                };
+                range(bounds.minimum.x,bounds.maximum.x,description.minimum_x,description.width);
+                range(bounds.minimum.y,bounds.maximum.y,description.minimum_y,description.height);
+                const auto count=std::uint64_t(description.width)*description.height;
+                Require(count<=std::numeric_limits<std::uint64_t>::max()-total_pages,"Static shadow archive page count overflows");
+                total_pages+=count;
+            }
+            if(auto accepted=begin(archive);!accepted) return accepted;
+            const auto &coarse=archive.levels.back();
+            edge=std::min(32u,std::max(coarse.width,coarse.height))*rd::kStaticShadowPageInner+2*rd::kStaticShadowPageGuard;
+        }
+        for(std::size_t index=0;index<scene->instances.size();++index)
+        {
+            const auto &source=scene->instances[index]; if(!rd::IsStaticShadowCaster(source)) continue;
+            const auto page=PageOrdinal(source); Require(frame->pages[page].complete,"Bake caster lacks complete source geometry");
+            frame->draws.push_back({static_cast<UINT>(index),MaterialOrdinal(source),{},page});
+        }
+        GpuSceneTableLayout layout{};
+        Require(BuildGpuSceneTableLayout(scene->instances.size(),scene->instances.size(),layout),"Bake static scene table overflows");
+        allocate(owner->instances,D3D12_HEAP_TYPE_UPLOAD,BufferDescription(layout.total_bytes),D3D12_RESOURCE_STATE_GENERIC_READ);
+        std::byte *mapped{}; D3D12_RANGE no_read{};
+        Native(owner->instances.resource->Map(0,&no_read,reinterpret_cast<void **>(&mapped)),"Map bake static scene");
+        std::memset(mapped,0,static_cast<std::size_t>(layout.total_bytes));
+        std::memcpy(mapped,&layout.header,sizeof(layout.header));
+        for(std::size_t index=0;index<scene->instances.size();++index)
+        {
+            const auto &source=scene->instances[index];
+            if(!rd::IsStaticShadowCaster(source)) continue;
+            const bool environment=rd::IsEnvironmentMesh(source.mesh);
+            const auto mesh=static_cast<UINT>(source.mesh)|(environment?kEnvironmentMeshFlag:0u)|
+                (source.mesh==RenderMesh::GroundDetail?source.environment_variant<<8u:0u);
+            const auto seed=source.mesh==RenderMesh::Ground || source.mesh==RenderMesh::DirtPatch || source.mesh==RenderMesh::MeadowSurface
+                ?std::bit_cast<float>(source.environment_seed):0.0f;
+            const GpuInstance instance{{source.position.x,source.position.y+(environment?0:source.scale.y*.5f),source.position.z,0},
+                {source.scale.x,source.scale.y,source.scale.z,1},source.color_rgba,mesh,source.yaw,seed};
+            const auto slot=SerializeGpuSceneSlot(static_cast<UINT>(index),instance,
+                {source.asset_id.value,source.material_id.value,UINT32_MAX,0,1,0});
+            const auto write=[&](UINT offset,const auto &value) { std::memcpy(mapped+offset+index*sizeof(value),&value,sizeof(value)); };
+            write(layout.header.instance_offset,slot.instance); write(layout.header.transform_offset,slot.transform);
+            write(layout.header.mesh_offset,slot.mesh); write(layout.header.material_offset,slot.material);
+            write(layout.header.bounds_offset,slot.bounds); write(layout.header.skin_offset,slot.skin);
+        }
+        owner->instances.resource->Unmap(0,nullptr); frame->static_instances=owner->instances.resource;
+        frame->static_allocation=owner->instances.allocation;
+        FillFaceConstants(frame->base,frame->shadow.view,1);
+        for(std::size_t group=0;group<frame->base.material_parameter_bases.size();++group)
+        {
+            std::array<UINT,4> bases{},masks{};
+            for(std::size_t lane=0;lane<4;++lane) if(const auto ordinal=group*4+lane;ordinal<materials.size())
+            { bases[lane]=impl_->material_parameter_bases[ordinal]; masks[lane]=impl_->material_surface_layouts[ordinal].varying_mask; }
+            frame->base.material_parameter_bases[group]={bases[0],bases[1],bases[2],bases[3]};
+            frame->base.material_varying_masks[group]={masks[0],masks[1],masks[2],masks[3]};
+        }
+        allocate(frame->constants,D3D12_HEAP_TYPE_UPLOAD,BufferDescription(kConstantsStride),D3D12_RESOURCE_STATE_GENERIC_READ);
+        Native(frame->constants.resource->Map(0,&no_read,reinterpret_cast<void **>(&frame->mapped)),"Map bake constants");
+        std::memset(frame->mapped,0,kConstantsStride); std::memcpy(frame->mapped,&frame->base,sizeof(frame->base));
+        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+        heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE; heap.NumDescriptors=kCaptureDescriptorCount;
+        Native(device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&frame->descriptors)),"Create bake descriptors");
+        const auto descriptor=[&](UINT offset) { auto h=frame->descriptors->GetCPUDescriptorHandleForHeapStart(); h.ptr+=SIZE_T(offset)*frame->stride; return h; };
+        CopyCaptureDescriptors(device,descriptor(0),impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart());
+        // Authored opacity samples read this metadata even in a depth-only shader.
+        // These private textures contain the entire mip chain, so every binding
+        // has physical base=resident MinMip=0 and no runtime feedback target.
+        // Structured null reads return uint4(0), independently of the last live frame.
+        D3D12_SHADER_RESOURCE_VIEW_DESC mip_metadata{};
+        mip_metadata.Format=DXGI_FORMAT_UNKNOWN; mip_metadata.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+        mip_metadata.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        mip_metadata.Buffer.NumElements=kTextureFeedbackBindingCount;
+        mip_metadata.Buffer.StructureByteStride=sizeof(UINT)*4;
+        device->CreateShaderResourceView(nullptr,&mip_metadata,descriptor(kTextureFeedbackDescriptorOffset));
+        std::map<std::string,ID3D12Resource *> uploaded_textures;
+        for(std::size_t material=0;material<materials.size();++material) if(materials[material])
+            for(UINT slot=0;slot<rd::kMaterialTextureSlots;++slot)
+            {
+                const auto &id=impl_->environment_material_bindings[material].product_ids[slot]; if(id.empty()) continue;
+                auto found=uploaded_textures.find(id);
+                ID3D12Resource *texture{};
+                if(found!=uploaded_textures.end()) texture=found->second;
+                else
+                {
+                    const auto bytes=ReadProduct(impl_->config,id); const auto package=rd::ReadTexturePackage(bytes,MakeAssetId(id));
+                    const auto &source=package.description;
+                    D3D12_RESOURCE_DESC description{}; description.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+                    description.Width=source.width; description.Height=source.height; description.DepthOrArraySize=static_cast<UINT16>(source.array_size);
+                    description.MipLevels=static_cast<UINT16>(source.mip_count); description.Format=static_cast<DXGI_FORMAT>(source.format); description.SampleDesc.Count=1;
+                    owner->textures.emplace_back(); allocate(owner->textures.back(),D3D12_HEAP_TYPE_DEFAULT,description,D3D12_RESOURCE_STATE_COPY_DEST);
+                    texture=owner->textures.back().resource.Get();
+                    const auto count=source.array_size*source.mip_count;
+                    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count); std::vector<UINT> rows(count); std::vector<UINT64> row_sizes(count);
+                    UINT64 size{}; device->GetCopyableFootprints(&description,0,count,0,footprints.data(),rows.data(),row_sizes.data(),&size);
+                    owner->uploads.emplace_back(); auto &upload=owner->uploads.back();
+                    allocate(upload,D3D12_HEAP_TYPE_UPLOAD,BufferDescription(size),D3D12_RESOURCE_STATE_GENERIC_READ);
+                    std::byte *pixels{}; Native(upload.resource->Map(0,&no_read,reinterpret_cast<void **>(&pixels)),"Map bake full texture");
+                    for(UINT subresource=0;subresource<count;++subresource)
+                    {
+                        const auto &input=package.subresources[subresource];
+                        Require(input.row_pitch==row_sizes[subresource] && UINT64(rows[subresource])*input.row_pitch==input.bytes.size(),"Bake texture footprint mismatch");
+                        for(UINT row=0;row<rows[subresource];++row)
+                            std::memcpy(pixels+footprints[subresource].Offset+SIZE_T(row)*footprints[subresource].Footprint.RowPitch,
+                                input.bytes.data()+SIZE_T(row)*input.row_pitch,static_cast<std::size_t>(row_sizes[subresource]));
+                        D3D12_TEXTURE_COPY_LOCATION destination{}; destination.pResource=texture;
+                        destination.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; destination.SubresourceIndex=subresource;
+                        D3D12_TEXTURE_COPY_LOCATION from{}; from.pResource=upload.resource.Get(); from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                        from.PlacedFootprint=footprints[subresource]; list->CopyTextureRegion(&destination,0,0,0,&from,nullptr);
+                    }
+                    upload.resource->Unmap(0,nullptr);
+                    transition(texture,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    uploaded_textures.emplace(id,texture);
+                }
+                const auto description=texture->GetDesc(); D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+                srv.Format=description.Format; srv.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                srv.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                srv.Texture2DArray.MipLevels=description.MipLevels; srv.Texture2DArray.ArraySize=description.DepthOrArraySize;
+                device->CreateShaderResourceView(texture,&srv,descriptor(kMaterialTextureDescriptorOffset+static_cast<UINT>(material)*rd::kMaterialTextureSlots+slot));
+                for(UINT legacy=0;legacy<impl_->environment_texture_ids.size();++legacy)
+                    if(impl_->environment_texture_ids[legacy]==id)
+                        device->CreateShaderResourceView(texture,&srv,descriptor(kPostTextureDescriptorCount+
+                            kCharacterDescriptorCount+kMonsterPbrDescriptorCount+legacy));
+            }
+        D3D12_RESOURCE_DESC depth{}; depth.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D; depth.Width=depth.Height=edge;
+        depth.DepthOrArraySize=depth.MipLevels=1; depth.Format=DXGI_FORMAT_R32_TYPELESS; depth.SampleDesc.Count=1;
+        depth.Flags=D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL; D3D12_CLEAR_VALUE clear{}; clear.Format=DXGI_FORMAT_D32_FLOAT;
+        allocate(frame->shadow_map,D3D12_HEAP_TYPE_DEFAULT,depth,D3D12_RESOURCE_STATE_DEPTH_WRITE,&clear);
+        D3D12_DESCRIPTOR_HEAP_DESC dsv{}; dsv.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; dsv.NumDescriptors=1;
+        Native(device->CreateDescriptorHeap(&dsv,IID_PPV_ARGS(&frame->shadow_dsv)),"Create bake DSV");
+        D3D12_DEPTH_STENCIL_VIEW_DESC view{}; view.Format=DXGI_FORMAT_D32_FLOAT; view.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2D;
+        const auto target=frame->shadow_dsv->GetCPUDescriptorHandleForHeapStart();
+        device->CreateDepthStencilView(frame->shadow_map.resource.Get(),&view,target);
+        frame->bind=[](ID3D12GraphicsCommandList *) {};
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{}; UINT64 readback_bytes{};
+        device->GetCopyableFootprints(&depth,0,1,0,&footprint,nullptr,nullptr,&readback_bytes);
+        allocate(owner->readback,D3D12_HEAP_TYPE_READBACK,BufferDescription(readback_bytes),D3D12_RESOURCE_STATE_COPY_DEST);
+        D3D12_TEXTURE_COPY_LOCATION destination{}; destination.pResource=owner->readback.resource.Get();
+        destination.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; destination.PlacedFootprint=footprint;
+        D3D12_TEXTURE_COPY_LOCATION from{}; from.pResource=frame->shadow_map.resource.Get(); from.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        bool first_chunk=true;
+        const auto render_chunk=[&](const LocalProbeCaptureView &projection,auto &&consume) -> Result {
+            if(!first_chunk)
+            {
+                Native(owner->allocator->Reset(),"Reset static shadow chunk allocator");
+                Native(list->Reset(owner->allocator.Get(),nullptr),"Reset static shadow chunk commands");
+                transition(frame->shadow_map.resource.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_DEPTH_WRITE);
+            }
+            FillFaceConstants(frame->base,projection,1);
+            std::memcpy(frame->mapped,&frame->base,sizeof(frame->base));
+            frame->BindPrivate(list,0);
+            // The source-base shader bypasses dynamic instances/skin/geometry records.
+            for(UINT root:{1u,2u,11u,12u,14u,16u,17u,18u,19u,20u,25u,27u,28u,31u,35u})
+                list->SetGraphicsRootShaderResourceView(root,0);
+            list->ClearDepthStencilView(target,D3D12_CLEAR_FLAG_DEPTH,0,0,0,nullptr);
+            list->OMSetRenderTargets(0,nullptr,FALSE,&target);
+            const D3D12_VIEWPORT viewport{0,0,float(projection.edge),float(projection.edge),0,1};
+            const D3D12_RECT scissor{0,0,LONG(projection.edge),LONG(projection.edge)};
+            list->RSSetViewports(1,&viewport); list->RSSetScissorRects(1,&scissor); frame->DrawInstances(list,true);
+            transition(frame->shadow_map.resource.Get(),D3D12_RESOURCE_STATE_DEPTH_WRITE,D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->CopyTextureRegion(&destination,0,0,0,&from,nullptr); Native(list->Close(),"Close static shadow bake");
+            impl_->pending_static_shadow_bake=owner;
+            if(auto submitted=impl_->SubmitResidentUtilityUpload(list,owner->allocator.Get(),owner->uploads);!submitted) return submitted;
+            impl_->pending_static_shadow_bake.reset(); first_chunk=false;
+            D3D12_RANGE read{0,static_cast<SIZE_T>(readback_bytes)}; std::byte *pixels{};
+            Native(owner->readback.resource->Map(0,&read,reinterpret_cast<void **>(&pixels)),"Read static shadow depth");
+            try
+            {
+                const auto consumed=consume(pixels+footprint.Offset,footprint.Footprint.RowPitch);
+                owner->readback.resource->Unmap(0,&no_read);
+                return consumed;
+            }
+            catch(...) { owner->readback.resource->Unmap(0,&no_read); throw; }
+        };
+        using namespace DirectX;
+        const auto light_view=XMLoadFloat4x4(&frame->shadow.view.world_to_view);
+        const auto inverse_view=XMMatrixInverse(nullptr,light_view);
+        std::array<float,rd::kStaticShadowPageTexels> tile;
+        // Coarse coverage is offline; finer levels retain the existing runtime cache.
+        constexpr std::uint32_t level=2;
+        {
+            const auto &description=archive.levels[level];
+            for(std::uint64_t y=0;y<description.height;y+=32)
+                for(std::uint64_t x=0;x<description.width;x+=32)
+                {
+                    const auto columns=static_cast<UINT>(std::min<std::uint64_t>(32,description.width-x));
+                    const auto rows=static_cast<UINT>(std::min<std::uint64_t>(32,description.height-y));
+                    const auto span=std::max(columns,rows);
+                    const auto page_x=std::int64_t(description.minimum_x)+static_cast<std::int64_t>(x);
+                    const auto page_y=std::int64_t(description.minimum_y)+static_cast<std::int64_t>(y);
+                    const double side=description.page_world_size;
+                    const double guard=side*rd::kStaticShadowPageGuard/rd::kStaticShadowPageInner;
+                    const float left=static_cast<float>(page_x*side-guard),right=static_cast<float>((page_x+span)*side+guard);
+                    const float bottom=static_cast<float>(page_y*side-guard),top=static_cast<float>((page_y+span)*side+guard);
+                    Require(std::isfinite(left) && std::isfinite(right) && std::isfinite(bottom) && std::isfinite(top) &&
+                        right>left && top>bottom,"Static shadow chunk projection is not representable");
+                    auto projection=frame->shadow.view;
+                    projection.edge=span*rd::kStaticShadowPageInner+2*rd::kStaticShadowPageGuard;
+                    const auto matrix=XMMatrixOrthographicOffCenterLH(left,right,bottom,top,archive.depth_maximum,archive.depth_minimum);
+                    XMStoreFloat4x4(&projection.projection,matrix);
+                    XMStoreFloat4x4(&projection.view_projection,light_view*matrix);
+                    XMFLOAT3 position;
+                    XMStoreFloat3(&position,XMVector3TransformCoord(XMVectorSet(
+                        float((double(left)+right)*.5),float((double(bottom)+top)*.5),archive.depth_minimum,1),inverse_view));
+                    projection.position={position.x,position.y,position.z};
+                    if(auto rendered=render_chunk(projection,[&](const std::byte *pixels,UINT pitch) {
+                        for(UINT local_y=0;local_y<rows;++local_y)
+                            for(UINT local_x=0;local_x<columns;++local_x)
+                            {
+                                const auto source_y=(span-1-local_y)*rd::kStaticShadowPageInner;
+                                const auto source_x=local_x*rd::kStaticShadowPageInner;
+                                for(UINT row=0;row<rd::kStaticShadowPageTile;++row)
+                                    std::memcpy(tile.data()+std::size_t(row)*rd::kStaticShadowPageTile,
+                                        pixels+std::size_t(source_y+row)*pitch+std::size_t(source_x)*sizeof(float),
+                                        rd::kStaticShadowPageTile*sizeof(float));
+                                if(auto accepted=page_sink(level,static_cast<std::int32_t>(page_x+local_x),
+                                    static_cast<std::int32_t>(page_y+local_y),tile);!accepted) return accepted;
+                            }
+                        return Result::Success();
+                    });!rendered) return rendered;
+                }
+        }
+        return Result::Success();
+    }
+    catch(const std::exception &error) { return Failure(error.what()); }
 }
 } // namespace hs

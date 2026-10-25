@@ -21,17 +21,20 @@ GameSimulation::SimulationWorld::SimulationWorld()
     progression->pending_boss_spawns.reserve(3);
     progression->pending_enemy_spawns_delayed.reserve(256);
     actors->pickups.reserve(1'536);
+    progression->pickup_work.Reserve(1'536);
     combat_state->combat.Reserve(4'096);
     combat_state->scheduled_actions.reserve(512);
     combat_state->boss_actions.reserve(32);
     combat_state->cast_hits.reserve(1'024);
     combat_state->area_hits.reserve(1'024);
+    combat_state->cast_hit_index.reserve(1'024);
+    combat_state->area_hit_index.reserve(1'024);
     combat_state->cast_runtimes.reserve(512);
     telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
     combat_state->collision_candidates.reserve(128);
-    combat_state->collision_hit_times.reserve(1'024);
+    combat_state->collision_hits.reserve(128);
     combat_state->live_area_ids.reserve(256);
 }
 
@@ -78,7 +81,6 @@ void GameSimulation::SimulationWorld::InitializePlayerState()
             actors->player.relic_mask |=
                 RelicMask{1} << static_cast<unsigned>(relic);
     }
-    combat_state->relic_rules.Rebuild(actors->player.relic_mask);
 }
 
 std::uint64_t GameSimulation::SimulationWorld::Random(std::uint64_t entity, std::uint64_t purpose) const noexcept
@@ -92,9 +94,9 @@ float GameSimulation::SimulationWorld::RandomUnit(std::uint64_t entity, std::uin
            static_cast<float>(0x1000000u);
 }
 
-EntityId GameSimulation::SimulationWorld::AllocateEntityId() noexcept
+EntityId GameSimulation::SimulationWorld::AllocateEntityId()
 {
-    return {next_entity_id++};
+    return {TakeSimulationIdentity(next_entity_id)};
 }
 
 float GameSimulation::SimulationWorld::EffectiveMoveSpeed() const noexcept
@@ -104,16 +106,16 @@ float GameSimulation::SimulationWorld::EffectiveMoveSpeed() const noexcept
            (1.0f + rules.stats.allocations[index].amount_per_point * actors->player.stats[index]);
 }
 
-bool GameSimulation::SimulationWorld::IsBoss(const EnemyActor &enemy) const noexcept
+bool GameSimulation::SimulationWorld::IsBoss(ConstEnemyRow enemy) const noexcept
 {
-    return enemy.boss.has_value();
+    return enemy.life.boss.has_value();
 }
 
 void GameSimulation::SimulationWorld::EmitSignal(DomainSignalKind kind, Float2 position,
                                                  std::uint8_t context)
 {
     DomainSignal event;
-    event.sequence = ++event_sequence;
+    event.sequence = NextSimulationSequence(event_sequence);
     event.tick = tick;
     event.session_id = session_id;
     event.kind = kind;
@@ -131,7 +133,7 @@ void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 po
     if (length <= 0.0001f) direction = {0.0f, 1.0f};
     else direction = {direction.x / length, direction.y / length};
     DomainSignal event;
-    event.sequence = ++event_sequence;
+    event.sequence = NextSimulationSequence(event_sequence);
     event.tick = tick;
     event.session_id = session_id;
     event.kind = effect;
@@ -144,11 +146,19 @@ void GameSimulation::SimulationWorld::EmitVfx(DomainSignalKind effect, Float2 po
     combat_state->domain_signals.push_back(event);
 }
 
+void GameSimulation::SimulationWorld::PruneVisualLinks()
+{
+    assert(observation.mutation_depth != 0);
+    if (combat_state->visual_links_pruned_tick == tick) return;
+    std::erase_if(combat_state->visual_links, [this](const VisualLinkView &link) { return link.expires <= tick; });
+    combat_state->visual_links_pruned_tick = tick;
+}
+
 void GameSimulation::SimulationWorld::EmitVfxLine(DomainSignalKind effect, Float2 start, Float2 end,
                  float height)
 {
     DomainSignal event;
-    event.sequence = ++event_sequence;
+    event.sequence = NextSimulationSequence(event_sequence);
     event.tick = tick;
     event.session_id = session_id;
     event.kind = effect;
@@ -168,7 +178,7 @@ void GameSimulation::SimulationWorld::EmitVfxLine(DomainSignalKind effect, Float
     case DomainSignalKind::RelicChainLinked: kind = VisualLinkKind::RelicChain; width = .10f; duration = 9; break;
     default: return;
     }
-    std::erase_if(combat_state->visual_links, [this](const VisualLinkView &link) { return link.expires <= tick; });
+    PruneVisualLinks();
     combat_state->visual_links.push_back({event.sequence, kind, event.position, event.target,
                                         width, tick, tick + duration});
 }
@@ -179,27 +189,27 @@ bool GameSimulation::SimulationWorld::SpawnEnemy(EnemyKind kind, Float2 position
     const auto completed_minutes = static_cast<std::uint32_t>(growth_ticks / Seconds(60.0f));
     const auto &definition = rules.enemies[static_cast<std::size_t>(kind)];
     const auto &scaling = rules.enemy_scaling;
-    EnemyActor enemy;
+    PreparedEnemy enemy;
     enemy.id = AllocateEntityId();
-    enemy.random_key = random_key != 0 ? random_key : next_enemy_random_key++;
-    enemy.kind = kind;
-    enemy.position = enemy.previous_position = position;
-    enemy.max_health = enemy.health = RoundDamage(
+    enemy.cold.random_key = random_key != 0 ? random_key : TakeSimulationIdentity(next_enemy_random_key);
+    enemy.life.kind = kind;
+    enemy.motion.position = enemy.motion.previous_position = position;
+    enemy.life.max_health = enemy.life.health = RoundDamage(
         static_cast<float>(definition.health) *
         (1.0f + scaling.hp_fraction_per_completed_minute * completed_minutes));
-    enemy.damage = RoundDamage(
+    enemy.cold.damage = RoundDamage(
         static_cast<float>(definition.damage) *
         (1.0f + scaling.damage_fraction_per_completed_minute * completed_minutes));
-    enemy.move_speed = definition.move_speed;
-    enemy.attack_range = definition.attack_range;
-    enemy.warning_extent = kind == EnemyKind::Ranged
+    enemy.cold.move_speed = definition.move_speed;
+    enemy.cold.attack_range = definition.attack_range;
+    enemy.action.warning_extent = kind == EnemyKind::Ranged
                                ? definition.projectile_range
                                : kind == EnemyKind::Suicide ? definition.suicide_explosion_radius : 0.0f;
     if (kind == EnemyKind::Suicide)
-        enemy.attack_range = definition.suicide_stop_distance;
-    enemy.warning_ticks = definition.warning_ticks;
-    enemy.attack_cooldown_ticks = definition.attack_cooldown_ticks;
-    enemy.spawned_tick = tick;
+        enemy.cold.attack_range = definition.suicide_stop_distance;
+    enemy.action.warning_ticks = definition.warning_ticks;
+    enemy.cold.attack_cooldown_ticks = definition.attack_cooldown_ticks;
+    enemy.life.spawned_tick = tick;
     enemy.status.slows.reserve(8);
     if (pipeline_phase == SimulationPhaseId::Spawn)
         actors->pending_enemy_spawns.push_back(std::move(enemy));
@@ -219,7 +229,7 @@ void GameSimulation::SimulationWorld::QueueEnemySpawn(EnemyKind kind, std::uint6
         return;
     }
     progression->pending_enemy_spawns_delayed.push_back({kind, position, random_key,
-                                            tick + rules.spawn_placement.fallback_warning_ticks, event_sequence + 1, tick});
+                                            tick + rules.spawn_placement.fallback_warning_ticks, PendingSimulationSequence(event_sequence), tick});
     DomainSignalGeometry geometry{};
     geometry.kind = DomainSignalGeometryKind::Circle;
     geometry.radius = rules.enemies[static_cast<std::size_t>(kind)].collision_radius;
@@ -236,7 +246,7 @@ bool GameSimulation::SimulationWorld::SpawnBoss(BossKind kind, Tick warning_tick
     const auto position = ClampToArena(rules.arena_boundary,
                                        actors->player.position.x >= 0.0f ? Float2{-edge, -edge}
                                                                  : Float2{edge, edge}, 1.0f);
-    progression->pending_boss_spawns.push_back({kind, position, tick + warning_ticks, event_sequence + 1, tick});
+    progression->pending_boss_spawns.push_back({kind, position, tick + warning_ticks, PendingSimulationSequence(event_sequence), tick});
     DomainSignalGeometry geometry{};
     geometry.kind = DomainSignalGeometryKind::Circle;
     geometry.radius = rules.boss_common.collision_radius;
@@ -255,17 +265,17 @@ void GameSimulation::SimulationWorld::CommitBossSpawns()
         if (pending.due > tick) continue;
         const auto kind = pending.kind;
         const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
-        EnemyActor boss;
+        PreparedEnemy boss;
         boss.id = AllocateEntityId();
-        boss.random_key = next_enemy_random_key++;
-        boss.boss = kind;
-        boss.position = boss.previous_position = pending.position;
-        boss.max_health = boss.health = definition.health;
-        boss.damage = 0;
-        boss.move_speed = definition.movement_speed;
-        boss.attack_range = definition.projectile_range;
-        boss.spawned_tick = tick;
-        boss.pattern_ready = tick + rules.boss_common.initial_pattern_delay_ticks;
+        boss.cold.random_key = TakeSimulationIdentity(next_enemy_random_key);
+        boss.life.boss = kind;
+        boss.motion.position = boss.motion.previous_position = pending.position;
+        boss.life.max_health = boss.life.health = definition.health;
+        boss.cold.damage = 0;
+        boss.cold.move_speed = definition.movement_speed;
+        boss.cold.attack_range = definition.projectile_range;
+        boss.life.spawned_tick = tick;
+        boss.action.pattern_ready = tick + rules.boss_common.initial_pattern_delay_ticks;
         boss.status.slows.reserve(8);
         if (pipeline_phase == SimulationPhaseId::Spawn)
             actors->pending_enemy_spawns.push_back(std::move(boss));
@@ -300,7 +310,9 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
     pickup.value = value;
     pickup.spawned_tick = tick;
     pickup.guaranteed_boss_chest = guaranteed;
+    assert(actors->pickups.empty() || actors->pickups.back().id.value < pickup.id.value);
     actors->pickups.push_back(pickup);
+    progression->pickup_work.OnSpawn(pickup, rules.arena_half_extent);
     ++Metrics().pickup_drops[static_cast<std::size_t>(kind)];
     if (kind != PickupKind::Experience)
         EmitVfx(DomainSignalKind::PickupSpawned, pickup.position, {}, 1.0f,
@@ -309,7 +321,7 @@ void GameSimulation::SimulationWorld::SpawnPickup(PickupKind kind, Float2 positi
 
 void GameSimulation::SimulationWorld::StartSession()
 {
-    ++session_id;
+    NextSimulationSequence(session_id);
     session_phase = SessionPhase::Playing;
     InitializePlayerState();
     growth_ticks = boss_fight_ticks = tick = 0;
@@ -334,6 +346,7 @@ void GameSimulation::SimulationWorld::StartSession()
     progression->pending_enemy_spawns_delayed.clear();
     actors->areas.clear();
     actors->pickups.clear();
+    progression->pickup_work.Reset();
     combat_state->combat.Clear();
     combat_state->scheduled_actions.clear();
     combat_state->boss_actions.clear();
@@ -344,6 +357,7 @@ void GameSimulation::SimulationWorld::StartSession()
     combat_state->cast_runtimes.clear();
     combat_state->domain_signals.clear();
     combat_state->visual_links.clear();
+    combat_state->visual_links_pruned_tick.reset();
     combat_state->boss_death_visual_count = 0;
     progression->waves.clear();
     progression->cards = {};
@@ -464,43 +478,72 @@ void GameSimulation::SimulationWorld::ProcessInput()
     ConsumeBufferedSkill();
 }
 
-EnemyActor *GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius,
-                         std::span<const std::uint64_t> excluded) noexcept
+void GameSimulation::SimulationWorld::CollectEnemies(Float2 position, float radius,
+                                                       EnemyQuery &query) const
 {
-    EnemyActor *best{};
-    auto best_distance = radius * radius;
-    for (auto &enemy : actors->enemies)
+    // Only these phases share the post-movement swept grid; earlier queries see current actors.
+    if (pipeline_phase >= SimulationPhaseId::CollisionHit &&
+        pipeline_phase <= SimulationPhaseId::DeathDrop &&
+        std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(radius))
     {
-        if (enemy.dead || std::ranges::find(excluded, enemy.id.value) != excluded.end())
+        const auto extent = std::abs(radius);
+        const auto low = -rules.arena_half_extent;
+        const auto high = low + kGridDimension * kGridCellSize;
+        query.Collect(combat_state->enemy_grid,
+            {std::clamp(position.x - extent, low, high), std::clamp(position.y - extent, low, high)},
+            {std::clamp(position.x + extent, low, high), std::clamp(position.y + extent, low, high)},
+            rules.arena_half_extent, actors->enemies.size());
+        return;
+    }
+    for (const auto row : query.rows) query.visited[row] = 0;
+    query.visited.resize(actors->enemies.size(), 0);
+    query.rows.resize(actors->enemies.size());
+    for (std::size_t row = 0; row < query.rows.size(); ++row) query.rows[row] = row;
+}
+
+std::optional<EnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius,
+                         std::span<const std::uint64_t> excluded)
+{
+    auto timing = Measure(SimulationTimingId::EnemyQueries);
+    std::optional<EnemyRow> best{};
+    auto best_distance = radius * radius;
+    CollectEnemies(position, radius, combat_state->nearest_query);
+    for (const auto row : combat_state->nearest_query.rows)
+    {
+        auto enemy = actors->enemies[row];
+        if (enemy.life.dead || std::ranges::find(excluded, enemy.id.value) != excluded.end())
         {
             continue;
         }
-        const auto distance = DistanceSquared(position, enemy.position);
+        const auto distance = DistanceSquared(position, enemy.motion.position);
         if (distance < best_distance ||
             (distance == best_distance && best && enemy.id.value < best->id.value))
         {
-            best = &enemy;
+            best.emplace(enemy);
             best_distance = distance;
         }
     }
     return best;
 }
 
-const EnemyActor *GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius) const noexcept
+std::optional<ConstEnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius) const
 {
-    const EnemyActor *best{};
+    auto timing = Measure(SimulationTimingId::EnemyQueries);
+    std::optional<ConstEnemyRow> best{};
     auto best_distance = radius * radius;
-    for (const auto &enemy : actors->enemies)
+    CollectEnemies(position, radius, combat_state->nearest_query);
+    for (const auto row : combat_state->nearest_query.rows)
     {
-        if (enemy.dead)
+        const auto enemy = actors->enemies[row];
+        if (enemy.life.dead)
         {
             continue;
         }
-        const auto distance = DistanceSquared(position, enemy.position);
+        const auto distance = DistanceSquared(position, enemy.motion.position);
         if (distance < best_distance ||
             (distance == best_distance && best && enemy.id.value < best->id.value))
         {
-            best = &enemy;
+            best.emplace(enemy);
             best_distance = distance;
         }
     }
@@ -512,6 +555,14 @@ void GameSimulation::SimulationWorld::RunPipeline()
     for (const auto phase_id : gameplay_detail::kSimulationPipeline)
     {
         pipeline_phase = phase_id;
+        static constexpr std::array timing_ids{
+            SimulationTimingId::SessionTimer, SimulationTimingId::Spawn, SimulationTimingId::SpawnBarrier,
+            SimulationTimingId::AiIntent, SimulationTimingId::CastAttack, SimulationTimingId::AbilitySpawnBarrier,
+            SimulationTimingId::Movement, SimulationTimingId::SpatialGrid, SimulationTimingId::CollisionHit,
+            SimulationTimingId::DamageStatus, SimulationTimingId::DeathDrop, SimulationTimingId::XpCard,
+            SimulationTimingId::CleanupBarrier, SimulationTimingId::GameplayHash};
+        static_assert(timing_ids.size() == kSimulationPipeline.size());
+        auto phase_timing = Measure(timing_ids[static_cast<std::size_t>(phase_id)]);
         switch (phase_id)
         {
         case SimulationPhaseId::SessionTimer: SessionTimerPhase(); break;
@@ -536,41 +587,36 @@ void GameSimulation::SimulationWorld::RunPipeline()
 
 void GameSimulation::SimulationWorld::CommitSpawnBarrier()
 {
-    actors->enemies.insert(actors->enemies.end(),
-                   std::make_move_iterator(actors->pending_enemy_spawns.begin()),
-                   std::make_move_iterator(actors->pending_enemy_spawns.end()));
-    actors->pending_enemy_spawns.clear();
-    assert(std::ranges::none_of(actors->enemies, [](const EnemyActor &enemy) {
+    actors->enemies.AppendFrom(actors->pending_enemy_spawns);
+    assert(std::ranges::none_of(actors->enemies, [](ConstEnemyRow enemy) {
         return enemy.id.value == 0;
     }));
 }
 
 void GameSimulation::SimulationWorld::CommitAbilitySpawnBarrier()
 {
-    actors->projectiles.insert(actors->projectiles.end(),
-                       std::make_move_iterator(actors->pending_projectile_spawns.begin()),
-                       std::make_move_iterator(actors->pending_projectile_spawns.end()));
-    actors->pending_projectile_spawns.clear();
+    actors->projectiles.AppendFrom(actors->pending_projectile_spawns);
     actors->areas.insert(actors->areas.end(), std::make_move_iterator(actors->pending_area_spawns.begin()),
                  std::make_move_iterator(actors->pending_area_spawns.end()));
     actors->pending_area_spawns.clear();
-    assert(std::ranges::none_of(actors->projectiles, [](const ProjectileActor &projectile) {
+    assert(std::ranges::none_of(actors->projectiles, [](ConstProjectileRow projectile) {
         return projectile.id.value == 0;
     }));
 }
 
 void GameSimulation::SimulationWorld::CommitCleanupBarrier()
 {
-    std::erase_if(actors->enemies, [](const EnemyActor &enemy) { return enemy.dead; });
-    std::erase_if(actors->projectiles, [](const ProjectileActor &projectile) { return projectile.dead; });
-    actors->projectiles.insert(actors->projectiles.end(),
-        std::make_move_iterator(actors->pending_projectile_spawns.begin()),
-        std::make_move_iterator(actors->pending_projectile_spawns.end()));
-    actors->pending_projectile_spawns.clear();
+    actors->enemies.EraseIf([](ConstEnemyRow enemy) { return enemy.life.dead; });
+    actors->projectiles.EraseIf([](ConstProjectileRow projectile) { return projectile.combat.dead; });
+    actors->projectiles.AppendFrom(actors->pending_projectile_spawns);
     std::erase_if(actors->areas, [](const AreaActor &area) { return area.dead; });
-    std::erase_if(actors->pickups, [](const PickupActor &pickup) { return pickup.dead; });
+    if (progression->pickup_work.NeedsCompaction())
+    {
+        std::erase_if(actors->pickups, [](const PickupActor &pickup) { return pickup.dead; });
+        progression->pickup_work.AfterCompaction();
+    }
     if (std::erase_if(combat_state->cast_hits, [this](const CastHitRecord &record) {
-        return record.cast_id + 256 < next_cast_id;
+        return IsOldCast(record.cast_id, next_cast_id);
     }))
     {
         combat_state->cast_hit_index.clear();
@@ -580,12 +626,14 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
             combat_state->cast_hit_index.emplace(std::pair{record.cast_id, record.target}, i);
         }
     }
-    std::erase_if(combat_state->cast_runtimes, [this](const CastRuntime &runtime) {
-        if (runtime.cast_id + 256 >= next_cast_id) return false;
+    auto &live_casts = combat_state->cast_cleanup;
+    live_casts.Prepare(combat_state->cast_runtimes, next_cast_id);
+    if (!live_casts.entries.empty())
+        for (const auto &projectile : actors->projectiles) live_casts.Observe(projectile.combat.cast_id);
+    std::erase_if(combat_state->cast_runtimes, [this, &live_casts](const CastRuntime &runtime) {
+        if (!IsOldCast(runtime.cast_id, next_cast_id)) return false;
         if (runtime.cooldown_ticks_saved == 0) return true;
-        return std::ranges::none_of(actors->projectiles, [&](const ProjectileActor &projectile) {
-            return projectile.cast_id == runtime.cast_id;
-        });
+        return !live_casts.Contains(runtime.cast_id);
     });
     auto &live_areas = combat_state->live_area_ids;
     live_areas.clear();
@@ -627,6 +675,12 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     value(config.scenario.player_invulnerable);
     value(config.scenario.progression_enabled);
     value(config.scenario.auto_collect_progression);
+    if (!config.scenario.automatic_spawning)
+    {
+        // Optional development-policy extension preserves all existing default replay oracles.
+        value(std::uint32_t{0x53504157});
+        value(config.scenario.automatic_spawning);
+    }
     value(tick);
     value(growth_ticks);
     value(boss_fight_ticks);
@@ -724,36 +778,36 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     for (const auto &enemy : actors->enemies)
     {
         value(enemy.id.value);
-        value(enemy.random_key);
-        value(enemy.kind);
-        value(enemy.boss.has_value());
-        if (enemy.boss) value(*enemy.boss);
-        vector2(enemy.position);
-        vector2(enemy.previous_position);
-        vector2(enemy.velocity);
-        vector2(enemy.displacement_per_tick);
-        value(enemy.displacement_ticks);
-        value(enemy.health);
-        value(enemy.max_health);
-        value(enemy.damage);
-        value(enemy.move_speed);
-        value(enemy.attack_range);
-        value(enemy.warning_ticks);
-        value(enemy.attack_cooldown_ticks);
-        value(enemy.next_attack);
-        value(enemy.attack_resolve);
-        value(enemy.attack_cast_id);
-        vector2(enemy.locked_aim);
-        value(enemy.spawned_tick);
-        value(enemy.pattern_ready);
-        value(enemy.last_pattern);
-        value(enemy.repeat_count);
-        value(enemy.final_phase);
-        value(enemy.invulnerable_until);
-        value(enemy.dash_until);
-        value(enemy.dash_damage);
-        value(enemy.dash_hit);
-        value(enemy.phase_pattern_count);
+        value(enemy.cold.random_key);
+        value(enemy.life.kind);
+        value(enemy.life.boss.has_value());
+        if (enemy.life.boss) value(*enemy.life.boss);
+        vector2(enemy.motion.position);
+        vector2(enemy.motion.previous_position);
+        vector2(enemy.motion.velocity);
+        vector2(enemy.motion.displacement_per_tick);
+        value(enemy.motion.displacement_ticks);
+        value(enemy.life.health);
+        value(enemy.life.max_health);
+        value(enemy.cold.damage);
+        value(enemy.cold.move_speed);
+        value(enemy.cold.attack_range);
+        value(enemy.action.warning_ticks);
+        value(enemy.cold.attack_cooldown_ticks);
+        value(enemy.action.next_attack);
+        value(enemy.action.attack_resolve);
+        value(enemy.action.attack_cast_id);
+        vector2(enemy.action.locked_aim);
+        value(enemy.life.spawned_tick);
+        value(enemy.action.pattern_ready);
+        value(enemy.action.last_pattern);
+        value(enemy.action.repeat_count);
+        value(enemy.action.final_phase);
+        value(enemy.action.invulnerable_until);
+        value(enemy.action.dash_until);
+        value(enemy.action.dash_damage);
+        value(enemy.action.dash_hit);
+        value(enemy.action.phase_pattern_count);
         value(enemy.status.bleed_count);
         for (std::size_t index = 0; index < enemy.status.bleed_count; ++index)
         {
@@ -785,22 +839,22 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
             value(slow.source_upgrade);
             value(slow.source_relic);
         }
-        value(enemy.last_damage_skill);
-        value(enemy.last_damage_origin);
-        value(enemy.last_damage_cast);
-        value(enemy.last_damage_upgrade);
-        value(enemy.last_damage_relic);
-        value(enemy.marked_by_skill);
-        value(enemy.marked_damage_coefficient);
-        value(enemy.mark_expires);
-        value(enemy.bleed_burn_ready);
-        value(enemy.different_skill_ready);
-        value(enemy.slow_synergy_ready);
-        value(enemy.boss_pressure_ready);
-        value(enemy.last_active_hit);
-        value(enemy.last_active_hit_tick);
-        value(enemy.attacking);
-        value(enemy.dead);
+        value(enemy.cold.last_damage_skill);
+        value(enemy.cold.last_damage_origin);
+        value(enemy.cold.last_damage_cast);
+        value(enemy.cold.last_damage_upgrade);
+        value(enemy.cold.last_damage_relic);
+        value(enemy.cold.marked_by_skill);
+        value(enemy.cold.marked_damage_coefficient);
+        value(enemy.cold.mark_expires);
+        value(enemy.cold.bleed_burn_ready);
+        value(enemy.cold.different_skill_ready);
+        value(enemy.cold.slow_synergy_ready);
+        value(enemy.cold.boss_pressure_ready);
+        value(enemy.cold.last_active_hit);
+        value(enemy.cold.last_active_hit_tick);
+        value(enemy.action.attacking);
+        value(enemy.life.dead);
     }
 
 
@@ -808,40 +862,40 @@ GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
     for (const auto &projectile : actors->projectiles)
     {
         value(projectile.id.value);
-        value(projectile.player_owned);
-        vector2(projectile.position);
-        vector2(projectile.previous_position);
-        vector2(projectile.velocity);
-        value(projectile.spawned_tick);
-        value(projectile.remaining_range);
-        value(projectile.radius);
-        value(projectile.damage);
-        value(projectile.skill);
-        value(projectile.upgrade_mask);
-        value(projectile.origin);
-        value(projectile.cast_id);
-        value(projectile.source_upgrade);
-        value(projectile.source_relic);
-        value(projectile.source_enemy);
-        value(projectile.pierce_remaining);
-        value(projectile.bounce_remaining);
-        value(projectile.hit_count);
-        for (std::size_t index = 0; index < projectile.hit_count; ++index)
-            value(projectile.hit_ids[index]);
-        value(projectile.explosion_radius);
-        value(projectile.explosion_damage);
-        value(projectile.explosion_source_upgrade);
-        value(projectile.bleed_stacks);
-        value(projectile.burn);
-        value(projectile.slow);
-        value(projectile.returning);
-        value(projectile.homing);
-        value(projectile.homing_target);
-        value(projectile.full_charge);
-        value(projectile.charge_ratio);
-        value(projectile.carried_burn_attack);
-        value(projectile.carried_burn_expires);
-        value(projectile.dead);
+        value(projectile.combat.player_owned);
+        vector2(projectile.motion.position);
+        vector2(projectile.motion.previous_position);
+        vector2(projectile.motion.velocity);
+        value(projectile.combat.spawned_tick);
+        value(projectile.motion.remaining_range);
+        value(projectile.motion.radius);
+        value(projectile.combat.damage);
+        value(projectile.combat.skill);
+        value(projectile.combat.upgrade_mask);
+        value(projectile.combat.origin);
+        value(projectile.combat.cast_id);
+        value(projectile.combat.source_upgrade);
+        value(projectile.combat.source_relic);
+        value(projectile.combat.source_enemy);
+        value(projectile.combat.pierce_remaining);
+        value(projectile.combat.bounce_remaining);
+        value(projectile.combat.hit_count);
+        for (std::size_t index = 0; index < projectile.combat.hit_count; ++index)
+            value(projectile.combat.hit_ids[index]);
+        value(projectile.combat.explosion_radius);
+        value(projectile.combat.explosion_damage);
+        value(projectile.combat.explosion_source_upgrade);
+        value(projectile.combat.bleed_stacks);
+        value(projectile.combat.burn);
+        value(projectile.combat.slow);
+        value(projectile.combat.returning);
+        value(projectile.combat.homing);
+        value(projectile.combat.homing_target);
+        value(projectile.combat.full_charge);
+        value(projectile.combat.charge_ratio);
+        value(projectile.combat.carried_burn_attack);
+        value(projectile.combat.carried_burn_expires);
+        value(projectile.combat.dead);
     }
 
     count(actors->areas.size());
@@ -1059,7 +1113,7 @@ void GameSimulation::SimulationWorld::SessionTimerPhase()
         {
             const bool faster_charge = HasUpgrade(mask, 2);
             if (faster_charge && actors->player.charge_cast_id == 0)
-                actors->player.charge_cast_id = next_cast_id++;
+                actors->player.charge_cast_id = TakeSimulationIdentity(next_cast_id);
             auto elapsed = std::min(tick - actors->player.charge_start,
                                     maximum_ticks);
             if (faster_charge)
@@ -1173,6 +1227,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     {
         return;
     }
+    if (!config.scenario.automatic_spawning) return;
     const auto final_boss_tick = !final_boss_spawned &&
         growth_ticks == rules.progression.boss_spawn_ticks[static_cast<std::size_t>(BossKind::Final)];
     if (!final_boss_tick)
@@ -1185,7 +1240,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         while (spawn_accumulator >= 60.0f)
         {
             spawn_accumulator -= 60.0f;
-            const auto salt = next_enemy_random_key++;
+            const auto salt = TakeSimulationIdentity(next_enemy_random_key);
             QueueEnemySpawn(ChooseEnemyKind(salt), salt);
         }
     }
@@ -1211,7 +1266,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
         while (!final_boss_tick && wave.emitted < desired &&
                (!final_boss_spawned || !rules.progression.stop_normal_spawns_at_final_boss))
         {
-            const auto salt = next_enemy_random_key++;
+            const auto salt = TakeSimulationIdentity(next_enemy_random_key);
             QueueEnemySpawn(ChooseEnemyKind(salt), salt);
             ++wave.emitted;
         }
@@ -1235,7 +1290,7 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     }
 }
 
-float GameSimulation::SimulationWorld::SlowMultiplier(EnemyActor &enemy)
+float GameSimulation::SimulationWorld::SlowMultiplier(EnemyRow enemy)
 {
     std::erase_if(enemy.status.slows,
                   [this](const SlowEffect &slow) { return slow.expires <= tick; });
@@ -1247,21 +1302,22 @@ float GameSimulation::SimulationWorld::SlowMultiplier(EnemyActor &enemy)
     return multiplier;
 }
 
-void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
+void GameSimulation::SimulationWorld::BossAi(EnemyRow boss)
 {
-    if (boss.boss_action_until != 0 && tick > boss.boss_action_until)
+    auto timing = Measure(SimulationTimingId::BossAi);
+    if (boss.action.boss_action_until != 0 && tick > boss.action.boss_action_until)
     {
-        boss.boss_action_started = 0;
-        boss.boss_action_until = 0;
-        boss.boss_action_recoil = false;
+        boss.action.boss_action_started = 0;
+        boss.action.boss_action_until = 0;
+        boss.action.boss_action_recoil = false;
     }
-    if (tick < boss.invulnerable_until)
+    if (tick < boss.action.invulnerable_until)
     {
-        boss.velocity = {};
+        boss.motion.velocity = {};
         return;
     }
-    if (tick < boss.dash_until) return;
-    if (boss.dash_until != 0)
+    if (tick < boss.action.dash_until) return;
+    if (boss.action.dash_until != 0)
     {
         DomainSignalGeometry geometry{};
         geometry.kind = DomainSignalGeometryKind::Circle;
@@ -1270,23 +1326,23 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         geometry.radius = rules.boss_common.collision_radius + rules.stats.player_collision_radius;
         geometry.start_tick = geometry.end_tick = tick;
         geometry.source_id = boss.id.value;
-        EmitVfx(DomainSignalKind::BossDashImpact, boss.position,
-                Normalize(boss.velocity), 1.0f, 0.15f, 0, 0, geometry);
-        boss.velocity = {};
-        boss.dash_until = 0;
-        boss.dash_started = 0;
+        EmitVfx(DomainSignalKind::BossDashImpact, boss.motion.position,
+                Normalize(boss.motion.velocity), 1.0f, 0.15f, 0, 0, geometry);
+        boss.motion.velocity = {};
+        boss.action.dash_until = 0;
+        boss.action.dash_started = 0;
     }
-    const auto kind = *boss.boss;
+    const auto kind = *boss.life.boss;
     const auto &definition = rules.bosses[static_cast<std::size_t>(kind)];
-    const auto to_player = Subtract(actors->player.position, boss.position);
+    const auto to_player = Subtract(actors->player.position, boss.motion.position);
     const auto distance = Length(to_player);
     const auto direction = Normalize(to_player);
-    if (tick < boss.pattern_ready)
+    if (tick < boss.action.pattern_ready)
     {
-        boss.velocity = {};
+        boss.motion.velocity = {};
         return;
     }
-    const auto phase = boss.final_phase;
+    const auto phase = boss.action.final_phase;
     const auto preferred_near = phase == 2
                                     ? definition.phase_two_preferred_distance_near
                                     : definition.preferred_distance_near;
@@ -1296,14 +1352,14 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     if (kind == BossKind::TenMinute && distance > preferred_far)
     {
         const auto navigation_target = SegmentClear2D(
-                                           boss.position, actors->player.position,
+                                           boss.motion.position, actors->player.position,
                                            rules.boss_common.collision_radius,
                                            rules.arena_boundary, ArenaObstacles())
                                            ? actors->player.position
-                                           : navigation->boss_navigation.NextWaypoint(boss.position,
+                                           : TimedNavigationWaypoint(navigation->boss_navigation,boss.motion.position,
                                                                            actors->player.position);
-        boss.velocity = Multiply(Normalize(Subtract(navigation_target, boss.position)),
-                                 boss.move_speed * SlowMultiplier(boss));
+        boss.motion.velocity = Multiply(Normalize(Subtract(navigation_target, boss.motion.position)),
+                                 boss.cold.move_speed * SlowMultiplier(boss));
         return;
     }
 
@@ -1319,7 +1375,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     }
     if (phase_pattern_count == 0)
     {
-        boss.velocity = {};
+        boss.motion.velocity = {};
         return;
     }
 
@@ -1333,21 +1389,21 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     const auto total_pattern_weight = rules.boss_common.preferred_pattern_weight +
                                       rules.boss_common.other_pattern_weight;
     const auto preferred_roll = total_pattern_weight != 0 &&
-        Random(boss.random_key, 0x424F5353504154ull) % total_pattern_weight <
+        Random(boss.cold.random_key, 0x424F5353504154ull) % total_pattern_weight <
             rules.boss_common.preferred_pattern_weight;
     auto pattern = preferred_roll
                        ? preferred_pattern
                        : static_cast<std::uint8_t>((preferred_pattern + 1) % phase_pattern_count);
-    if (pattern == boss.last_pattern &&
-        boss.repeat_count >= rules.boss_common.maximum_same_pattern_repeats)
+    if (pattern == boss.action.last_pattern &&
+        boss.action.repeat_count >= rules.boss_common.maximum_same_pattern_repeats)
         pattern = static_cast<std::uint8_t>((pattern + 1) % phase_pattern_count);
-    boss.repeat_count = pattern == boss.last_pattern ? boss.repeat_count + 1 : 1;
-    boss.last_pattern = pattern;
-    boss.velocity = {};
+    boss.action.repeat_count = pattern == boss.action.last_pattern ? boss.action.repeat_count + 1 : 1;
+    boss.action.last_pattern = pattern;
+    boss.motion.velocity = {};
 
     const auto player_velocity = Multiply(
         Subtract(actors->player.position, actors->player.previous_position), 60.0f);
-    const auto cast_id = next_cast_id++;
+    const auto cast_id = TakeSimulationIdentity(next_cast_id);
     ++Metrics().enemy_attack_attempts[EnemyTelemetryIndex(boss)];
     const auto add = [&](BossAction action) {
         const auto previous = std::ranges::find_if(
@@ -1358,13 +1414,13 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
                                    : previous->due == action.due
                                        ? previous->animation_started
                                        : previous->due;
-        action.warning_sequence = event_sequence + 1;
+        action.warning_sequence = PendingSimulationSequence(event_sequence);
         action.warning_started = tick;
         combat_state->boss_actions.push_back(action);
         const auto context = static_cast<std::uint8_t>(kind);
         const auto position = action.kind == BossActionKind::Dash ||
                                       action.kind == BossActionKind::Volley
-                                  ? boss.position : action.position;
+                                  ? boss.motion.position : action.position;
         const auto signal = action.kind == BossActionKind::Dash
                                 ? DomainSignalKind::BossDashTelegraphed
                             : action.kind == BossActionKind::Volley
@@ -1375,7 +1431,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         if (action.kind == BossActionKind::Dash)
         {
             const auto dash_direction = LengthSquared(action.direction) > 0.0001f
-                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.position));
+                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.motion.position));
             DomainSignalGeometry geometry{};
             geometry.kind = DomainSignalGeometryKind::Line;
             geometry.width = 2.0f * (rules.boss_common.collision_radius +
@@ -1384,15 +1440,15 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
             geometry.start_tick = tick;
             geometry.end_tick = action.due;
             geometry.source_id = action.warning_sequence;
-            const auto end = Add(boss.position, Multiply(dash_direction, action.distance));
+            const auto end = Add(boss.motion.position, Multiply(dash_direction, action.distance));
             geometry.end_position = {end.x, 0.025f, end.y};
-            EmitVfx(signal, boss.position, dash_direction, 1.0f, 0.025f,
+            EmitVfx(signal, boss.motion.position, dash_direction, 1.0f, 0.025f,
                     context, 0, geometry);
         }
         else if (action.kind == BossActionKind::Volley)
         {
             const auto aim_direction = LengthSquared(action.direction) > 0.0001f
-                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.position));
+                ? Normalize(action.direction) : Normalize(Subtract(actors->player.position, boss.motion.position));
             const auto volley_direction = Rotate(aim_direction, action.angle_offset);
             DomainSignalGeometry geometry{};
             geometry.kind = DomainSignalGeometryKind::Cone;
@@ -1401,11 +1457,11 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
             geometry.start_tick = tick;
             geometry.end_tick = action.due;
             geometry.source_id = action.warning_sequence;
-            EmitVfx(signal, boss.position, volley_direction, 1.0f, 0.025f,
+            EmitVfx(signal, boss.motion.position, volley_direction, 1.0f, 0.025f,
                     context, 0, geometry);
             if (action.angle_offset != 0.0f)
                 EmitVfx(DomainSignalKind::BossVolleyOffsetTelegraphed,
-                        boss.position, volley_direction, 1.0f, 0.025f,
+                        boss.motion.position, volley_direction, 1.0f, 0.025f,
                         context, 0, geometry);
         }
         else if (action.kind == BossActionKind::Shockwave)
@@ -1484,7 +1540,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
         action.due = due;
         action.kind = BossActionKind::Shockwave;
         action.boss_id = boss.id.value;
-        action.position = boss.position;
+        action.position = boss.motion.position;
         action.distance = source.start_radius;
         action.radius = source.end_radius;
         action.damage = source.damage;
@@ -1519,7 +1575,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
                                                    selected.radius * 2.0f);
         const auto area_count = std::max<std::uint8_t>(1, selected.area_count);
         const auto angle_offset = RandomUnit(
-            boss.random_key, cast_id ^ 0x47524F554E44ull) * 360.0f;
+            boss.cold.random_key, cast_id ^ 0x47524F554E44ull) * 360.0f;
         for (std::uint32_t index = 0; index < area_count; ++index)
         {
             const auto position = Add(
@@ -1563,15 +1619,15 @@ void GameSimulation::SimulationWorld::BossAi(EnemyActor &boss)
     if (selected.logic == BossPatternLogic::DoubleRetargetedCharge ||
         selected.logic == BossPatternLogic::DoubleOffsetFanProjectiles)
     {
-        ++boss.phase_pattern_count;
+        ++boss.action.phase_pattern_count;
     }
 
-    const auto recovery = kind == BossKind::Final && boss.final_phase == 2
-                              ? (boss.phase_pattern_count % 3 == 0
+    const auto recovery = kind == BossKind::Final && boss.action.final_phase == 2
+                              ? (boss.action.phase_pattern_count % 3 == 0
                                      ? definition.phase2_cycle_recovery_ticks
                                      : definition.phase2_pattern_interval_ticks)
                               : definition.recovery_ticks;
-    boss.pattern_ready = last_due + recovery;
+    boss.action.pattern_ready = last_due + recovery;
 }
 
 void GameSimulation::SimulationWorld::AiIntentPhase()
@@ -1579,51 +1635,52 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
     const auto target_cell = navigation->enemy_navigation.Cell(actors->player.position);
     if (target_cell != navigation->enemy_navigation_target)
     {
-        navigation->enemy_navigation.RebuildFlow(actors->player.position);
-        navigation->boss_navigation.RebuildFlow(actors->player.position);
+        navigation->enemy_navigation.RequestFlow(actors->player.position);
+        navigation->boss_navigation.RequestFlow(actors->player.position);
         navigation->enemy_navigation_target = target_cell;
     }
-    for (auto &enemy : actors->enemies)
+    auto enemy_ai_timing = Measure(SimulationTimingId::EnemyPerceptionDecision);
+    for (auto enemy : actors->enemies)
     {
-        if (enemy.dead)
+        if (enemy.life.dead)
         {
             continue;
         }
-        if (enemy.boss)
+        if (enemy.life.boss)
         {
             BossAi(enemy);
             continue;
         }
-        const auto distance = Length(Subtract(actors->player.position, enemy.position));
-        enemy.velocity = {};
-        if (enemy.attacking)
+        const auto distance = Length(Subtract(actors->player.position, enemy.motion.position));
+        enemy.motion.velocity = {};
+        if (enemy.action.attacking)
         {
-            if (tick >= enemy.attack_resolve)
+            if (tick >= enemy.action.attack_resolve)
             {
-                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.kind)];
-                if (enemy.kind == EnemyKind::Melee)
+                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.life.kind)];
+                if (enemy.life.kind == EnemyKind::Melee)
                 {
                     if (distance <= definition.attack_range &&
-                        SegmentClear2D(enemy.position, actors->player.position, 0.0f,
+                        SegmentClear2D(enemy.motion.position, actors->player.position, 0.0f,
                                        rules.arena_boundary, ArenaObstacles()))
                     {
                         EmitVfx(DomainSignalKind::MeleeEnemyHit, actors->player.position,
-                                enemy.locked_aim, 1.0f, 0.1f);
-                        QueueDamage(0, enemy.damage, SkillKind::Count,
-                                   EffectOrigin::Original, enemy.attack_cast_id,
+                                enemy.action.locked_aim, 1.0f, 0.1f);
+                        QueueDamage(0, enemy.cold.damage, SkillKind::Count,
+                                   EffectOrigin::Original, enemy.action.attack_cast_id,
                                    0, false, 0.0f, 0, kNoTelemetrySource,
                                    kNoTelemetrySource,
                                    static_cast<std::uint8_t>(
-                                       EnemyTelemetryIndex(enemy)), 0, enemy.locked_aim);
+                                       EnemyTelemetryIndex(enemy)), 0, enemy.action.locked_aim);
                     }
                 }
-                else if (enemy.kind == EnemyKind::Ranged)
+                else if (enemy.life.kind == EnemyKind::Ranged)
                 {
-                    auto *shot = FireProjectile(SkillKind::BasicAttack, enemy.position,
-                                                enemy.locked_aim,
-                                                 static_cast<float>(enemy.damage),
+                    auto shot = FireProjectile(SkillKind::BasicAttack, enemy.motion.position,
+                                                enemy.action.locked_aim,
+                                                 static_cast<float>(enemy.cold.damage),
                                                  EffectOrigin::Original,
-                                                 enemy.attack_cast_id, 0, false,
+                                                 enemy.action.attack_cast_id, 0, false,
                                                  kNoTelemetrySource,
                                                  kNoTelemetrySource,
                                                  static_cast<std::uint8_t>(
@@ -1631,9 +1688,9 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                                  enemy.id.value);
                     if (shot)
                     {
-                        shot->velocity = Multiply(enemy.locked_aim,
+                        shot->motion.velocity = Multiply(enemy.action.locked_aim,
                                                    definition.projectile_speed);
-                        shot->remaining_range = definition.projectile_range;
+                        shot->motion.remaining_range = definition.projectile_range;
                     }
                 }
                 else if (distance <= definition.suicide_explosion_radius)
@@ -1642,88 +1699,88 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                     explosion_geometry.kind = DomainSignalGeometryKind::Circle;
                     explosion_geometry.radius = definition.suicide_explosion_radius;
                     EmitVfx(DomainSignalKind::SuicideEnemyExploded,
-                            enemy.position, {}, 1.0f, 0.15f, 0, enemy.id.value,
+                            enemy.motion.position, {}, 1.0f, 0.15f, 0, enemy.id.value,
                             explosion_geometry);
-                    if (SegmentClear2D(enemy.position, actors->player.position, 0.0f,
+                    if (SegmentClear2D(enemy.motion.position, actors->player.position, 0.0f,
                                        rules.arena_boundary, ArenaObstacles()))
-                        QueueDamage(0, enemy.damage, SkillKind::Count,
-                               EffectOrigin::Original, enemy.attack_cast_id,
+                        QueueDamage(0, enemy.cold.damage, SkillKind::Count,
+                               EffectOrigin::Original, enemy.action.attack_cast_id,
                                0, false, 0.0f, 0, kNoTelemetrySource,
                                kNoTelemetrySource,
                                static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)), 0,
-                               Normalize(Subtract(actors->player.position, enemy.position)));
-                    enemy.dead = true;
+                               Normalize(Subtract(actors->player.position, enemy.motion.position)));
+                    enemy.life.dead = true;
                 }
-                enemy.attacking = false;
-                enemy.next_attack = tick + enemy.attack_cooldown_ticks;
+                enemy.action.attacking = false;
+                enemy.action.next_attack = tick + enemy.cold.attack_cooldown_ticks;
             }
             continue;
         }
-        if (tick >= enemy.next_attack &&
-            ((enemy.kind == EnemyKind::Melee && distance <= enemy.attack_range) ||
-             (enemy.kind == EnemyKind::Ranged && distance <= enemy.attack_range) ||
-             (enemy.kind == EnemyKind::Suicide && distance <= enemy.attack_range)))
+        if (tick >= enemy.action.next_attack &&
+            ((enemy.life.kind == EnemyKind::Melee && distance <= enemy.cold.attack_range) ||
+             (enemy.life.kind == EnemyKind::Ranged && distance <= enemy.cold.attack_range) ||
+             (enemy.life.kind == EnemyKind::Suicide && distance <= enemy.cold.attack_range)))
         {
-            const auto attack_direction = Normalize(Subtract(actors->player.position, enemy.position));
+            const auto attack_direction = Normalize(Subtract(actors->player.position, enemy.motion.position));
             ++Metrics().enemy_attack_attempts[EnemyTelemetryIndex(enemy)];
-            enemy.attack_cast_id = next_enemy_attack_id++;
-            enemy.attacking = true;
-            enemy.attack_resolve = tick + enemy.warning_ticks;
-            enemy.locked_aim = attack_direction;
-            if (enemy.kind == EnemyKind::Melee)
+            enemy.action.attack_cast_id = TakeSimulationIdentity(next_enemy_attack_id);
+            enemy.action.attacking = true;
+            enemy.action.attack_resolve = tick + enemy.action.warning_ticks;
+            enemy.action.locked_aim = attack_direction;
+            if (enemy.life.kind == EnemyKind::Melee)
             {
                 DomainSignalGeometry geometry{};
                 geometry.kind = DomainSignalGeometryKind::Circle;
-                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].attack_range;
+                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.life.kind)].attack_range;
                 geometry.start_tick = tick;
-                geometry.end_tick = enemy.attack_resolve;
-                geometry.source_id = enemy.attack_cast_id;
-                EmitVfx(DomainSignalKind::MeleeEnemyWindup, enemy.position,
+                geometry.end_tick = enemy.action.attack_resolve;
+                geometry.source_id = enemy.action.attack_cast_id;
+                EmitVfx(DomainSignalKind::MeleeEnemyWindup, enemy.motion.position,
                         attack_direction, 1.0f, 0.1f, 0, enemy.id.value, geometry);
             }
-            else if (enemy.kind == EnemyKind::Ranged)
+            else if (enemy.life.kind == EnemyKind::Ranged)
             {
-                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.kind)];
-                enemy.warning_sequence = event_sequence + 1;
+                const auto &definition = rules.enemies[static_cast<std::size_t>(enemy.life.kind)];
+                enemy.action.warning_sequence = PendingSimulationSequence(event_sequence);
                 DomainSignalGeometry geometry{};
                 geometry.kind = DomainSignalGeometryKind::Line;
                 geometry.width = 2.0f * definition.ranged_projectile_radius;
                 geometry.range = definition.projectile_range;
                 geometry.start_tick = tick;
-                geometry.end_tick = enemy.attack_resolve;
-                geometry.source_id = enemy.warning_sequence;
-                const auto end = Add(enemy.position, Multiply(enemy.locked_aim, geometry.range));
+                geometry.end_tick = enemy.action.attack_resolve;
+                geometry.source_id = enemy.action.warning_sequence;
+                const auto end = Add(enemy.motion.position, Multiply(enemy.action.locked_aim, geometry.range));
                 geometry.end_position = {end.x, 0.025f, end.y};
-                EmitVfx(DomainSignalKind::RangedEnemyTelegraphed, enemy.position,
-                        enemy.locked_aim, 1.0f, 0.025f, 0, enemy.id.value, geometry);
+                EmitVfx(DomainSignalKind::RangedEnemyTelegraphed, enemy.motion.position,
+                        enemy.action.locked_aim, 1.0f, 0.025f, 0, enemy.id.value, geometry);
             }
-            else if (enemy.kind == EnemyKind::Suicide)
+            else if (enemy.life.kind == EnemyKind::Suicide)
             {
-                enemy.warning_sequence = event_sequence + 1;
+                enemy.action.warning_sequence = PendingSimulationSequence(event_sequence);
                 DomainSignalGeometry geometry{};
                 geometry.kind = DomainSignalGeometryKind::Circle;
-                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].suicide_explosion_radius;
+                geometry.radius = rules.enemies[static_cast<std::size_t>(enemy.life.kind)].suicide_explosion_radius;
                 geometry.start_tick = tick;
-                geometry.end_tick = enemy.attack_resolve;
-                geometry.source_id = enemy.warning_sequence;
-                EmitVfx(DomainSignalKind::SuicideEnemyCharging, enemy.position,
+                geometry.end_tick = enemy.action.attack_resolve;
+                geometry.source_id = enemy.action.warning_sequence;
+                EmitVfx(DomainSignalKind::SuicideEnemyCharging, enemy.motion.position,
                         attack_direction, 1.0f, 0.15f, 0, enemy.id.value, geometry);
             }
             continue;
         }
-        if (enemy.kind != EnemyKind::Ranged || distance > enemy.attack_range)
+        if (enemy.life.kind != EnemyKind::Ranged || distance > enemy.cold.attack_range)
         {
-            const auto radius = rules.enemies[static_cast<std::size_t>(enemy.kind)].collision_radius;
-            const auto navigation_target = SegmentClear2D(enemy.position, actors->player.position,
+            const auto radius = rules.enemies[static_cast<std::size_t>(enemy.life.kind)].collision_radius;
+            const auto navigation_target = SegmentClear2D(enemy.motion.position, actors->player.position,
                                                           radius, rules.arena_boundary,
                                                           ArenaObstacles())
                                                ? actors->player.position
-                                               : navigation->enemy_navigation.NextWaypoint(enemy.position,
+                                               : TimedNavigationWaypoint(navigation->enemy_navigation,enemy.motion.position,
                                                                                 actors->player.position);
-            const auto direction = Normalize(Subtract(navigation_target, enemy.position));
-            enemy.velocity = direction;
+            const auto direction = Normalize(Subtract(navigation_target, enemy.motion.position));
+            enemy.motion.velocity = direction;
         }
-        enemy.velocity = Multiply(enemy.velocity, enemy.move_speed * SlowMultiplier(enemy));
+        enemy.motion.velocity = Multiply(enemy.motion.velocity, enemy.cold.move_speed * SlowMultiplier(enemy));
     }
 }
 

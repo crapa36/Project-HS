@@ -184,6 +184,65 @@ void TestStartupGraphicsAuthority()
     Check(defaults.width == 1280 && defaults.height == 720 && !defaults.borderless &&
               defaults.vsync && defaults.frame_cap == 60,
           "first-run display defaults remain unchanged");
+
+    requested = StronglyDifferentSettings();
+    auto expected_preset = requested;
+    expected_preset.graphics.preset = hs::GraphicsPreset::Ultra;
+    hs::ApplyGraphicsPreset(expected_preset.graphics);
+    hs::ApplicationConfig ultra;
+    ultra.graphics_preset = hs::GraphicsPreset::Ultra;
+    (void)hs::PrepareStartupGraphicsSettings(requested, ultra);
+    Check(requested.graphics.preset == expected_preset.graphics.preset,
+          "typed startup preset is retained");
+#define HS_GRAPHICS_SETTING(id, name, field, type, kind, default_value, default_token, minimum, maximum, group, label_key) \
+    Check(requested.graphics.field == expected_preset.graphics.field, "Ultra resolves graphics field " #field);
+#include <hs/core/graphics_settings.def>
+#undef HS_GRAPHICS_SETTING
+
+    requested = StronglyDifferentSettings();
+    ultra.smoke = true;
+    ultra.vsync = false;
+    ultra.frame_cap = 0;
+    const auto ultra_smoke = hs::PrepareStartupGraphicsSettings(requested, ultra);
+    Check(ultra_smoke.width == 1280 && ultra_smoke.height == 720 && !ultra_smoke.vsync &&
+              ultra_smoke.frame_cap == 0 && requested.graphics.shadow_quality == hs::GraphicsQuality::Ultra &&
+              requested.graphics.particle_quality == hs::GraphicsQuality::Ultra &&
+              requested.graphics.gi_mode == hs::GraphicsGiMode::SoftwareHybrid,
+          "smoke display defaults keep explicit Ultra quality intent");
+
+    requested = StronglyDifferentSettings();
+    hs::ApplicationConfig explicit_preset;
+    explicit_preset.graphics_preset = hs::GraphicsPreset::Ultra;
+    explicit_preset.smoke = true;
+    explicit_preset.width = 1920;
+    explicit_preset.height = 1080;
+    explicit_preset.resolution_explicit = true;
+    explicit_preset.borderless = true;
+    explicit_preset.borderless_explicit = true;
+    explicit_preset.vsync = false;
+    explicit_preset.vsync_explicit = true;
+    explicit_preset.frame_cap = 30;
+    explicit_preset.frame_cap_explicit = true;
+    explicit_preset.render_scale_percent = 75;
+    explicit_preset.render_scale_explicit = true;
+    explicit_preset.shadow_resolution = 1024;
+    explicit_preset.shadow_resolution_explicit = true;
+    explicit_preset.particle_percentage = 50;
+    explicit_preset.particle_percentage_explicit = true;
+    explicit_preset.bloom = false;
+    explicit_preset.bloom_explicit = true;
+    explicit_preset.outline = false;
+    explicit_preset.outline_explicit = true;
+    const auto explicit_effective = hs::PrepareStartupGraphicsSettings(requested, explicit_preset);
+    Check(explicit_effective.width == 1920 && explicit_effective.height == 1080 &&
+              explicit_effective.borderless && !explicit_effective.vsync && explicit_effective.frame_cap == 30 &&
+              explicit_effective.render_scale_percent == 75 && explicit_effective.shadow_resolution == 1024 &&
+              explicit_effective.particle_percentage == 50 && !explicit_effective.bloom && !explicit_effective.outline &&
+              requested.graphics.lighting_quality == hs::GraphicsQuality::Ultra &&
+              requested.graphics.shadow_quality == hs::GraphicsQuality::Medium &&
+              requested.graphics.particle_quality == hs::GraphicsQuality::Low,
+          "explicit startup fields override only their Ultra preset fields");
+
     const auto borderless = Parse({"--borderless"});
     (void)hs::PrepareStartupGraphicsSettings(requested, borderless);
     Check(borderless.borderless_explicit &&

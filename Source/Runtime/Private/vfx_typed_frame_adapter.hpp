@@ -3,7 +3,7 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/render_snapshot.hpp>
 #include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/renderer/vfx_program.hpp>
 
 #include <cstdint>
 #include <span>
@@ -23,7 +23,7 @@ struct VfxTypedFrameInputs
 // function owns no state and does not create a lifetime or geometry value when
 // the source contract does not provide one.
 [[nodiscard]] VfxTypedFrameInputs BuildVfxTypedFrameInputs(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
@@ -36,12 +36,12 @@ class VfxUpgradeMovementState
 {
   public:
     [[nodiscard]] std::vector<VfxPersistentInput> Emit(
-        const VfxProgramData &cooked,
+        const VfxProgramView &cooked,
         std::span<const PresentationEvent> dispatched_events,
         Tick current_tick);
     void Clear() noexcept { owners_.clear(); }
-    [[nodiscard]] std::uint64_t Rebind(const VfxProgramData &previous,
-                                     const VfxProgramData &next) noexcept;
+    [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
+                                     const VfxProgramView &next) noexcept;
     void Swap(VfxUpgradeMovementState &prepared) noexcept { owners_.swap(prepared.owners_); }
 
   private:
@@ -62,7 +62,7 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
 
 // Validate prepared owner-backed events against exact warning/sector recipes.
 // Events without owner metadata retain their already remapped handles.
-void RebindVfxGroundEventOwners(const VfxProgramData &cooked,
+void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
                                 std::vector<VfxEventInput> &events);
 
 } // namespace hs::runtime_detail

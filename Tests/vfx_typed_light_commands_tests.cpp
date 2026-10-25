@@ -1,3 +1,6 @@
+#include <hs/runtime/vfx_image_io.hpp>
+#include "vfx_light_reference.hpp"
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "../Source/Runtime/Private/vfx_typed_light_commands.hpp"
 #include <bit>
 #include <cmath>
@@ -19,7 +22,7 @@ hs::VfxProgramData Program()
   hs::VfxOutputRecord o;o.source=0;o.profile=hs::VfxOutputProfile::Light;o.motion=hs::VfxMotionKind::SingleCappedLightPulse;o.parameters={0,2};o.rgba={.5f,.8f,1,.8f};o.hdr=3;o.min_quality=static_cast<std::uint32_t>(hs::VfxQuality::Medium);p.outputs.push_back(o);return p;
 }
 hs::VfxEventInput Input(){hs::VfxEventInput in;in.effect_handle=1;in.event_tick=100;in.sequence=77;in.payload=hs::VfxPointPayload{{1,2,3},{},{},9};return in;}
-auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick t){return hs::runtime_detail::BuildVfxTypedLightCommands(p,std::span(&i,1),t);}
+auto Run(const hs::VfxProgramData&p,const hs::VfxEventInput&i,hs::Tick t){hs::VfxImageData data; hs::PrepareVfxLightRecipes(p.View(),data.light_effect_ranges,data.light_recipes); auto image=data.View(); image.program=p.View(); auto result=hs::runtime_detail::BuildVfxTypedLightCommands(image,std::span(&i,1),t); vfx_light_test::Compare(result,hs::runtime_detail::light_reference::BuildVfxTypedLightCommands(p,std::span(&i,1),t)); return result;}
 void ClockCurvesAndIdentity()
 {
  auto p=Program();auto i=Input();Check(Run(p,i,129).empty()&&Run(p,i,190).empty(),"source interval ignored");
@@ -52,6 +55,15 @@ void TypedCentersAndHero()
  Check(Run(p,i,120)[0].position.x==7,"cone light did not use actual origin");
  p.effects[0].payload_kind=Hash("PointEventPayload");Check(Run(p,i,120).empty(),"light accepted schema mismatch");
 }
+void PreparedSkipsAndOrder()
+{
+ auto p=Program(); auto i=Input();
+ p.outputs.push_back(p.outputs[0]);p.outputs[1].gradient_row=19;p.sources[0].outputs.count=2;
+ auto result=Run(p,i,145);Check(result.size()==2 && result[0].stable_id!=result[1].stable_id,"prepared output order/identity");
+ p.outputs[0].hdr=-1;Check(Run(p,i,145).size()==1,"invalid row must not discard sibling output");
+ p=Program();p.effect_lookup[0].effect_id=0xfedcba9876543210ull;Check(Run(p,i,145).size()==1,"full-width effect seed");
+ p=Program();p.sources[0].knots[1]=std::numeric_limits<float>::quiet_NaN();Check(Run(p,i,145).empty(),"invalid source envelope");
+}
 void QualityAndInvalidInputs()
 {
  auto p=Program();auto i=Input();i.quality=hs::VfxQuality::Low;Check(Run(p,i,145).empty(),"low quality retained decorative light");
@@ -64,7 +76,7 @@ void QualityAndInvalidInputs()
  p=Program();p.sources[0].parameters={0,1};Check(Run(p,i,145).empty(),"unsupported source parameters ignored");
  p=Program();p.effects[0].input_mode=1;Check(Run(p,i,145).empty(),"persistent input mode coerced to event light");
  p=Program();i.geometry_owner_id=8;i.geometry_start_tick=100;i.geometry_end_tick=100;Check(Run(p,i,145).empty(),"invalid owner clock accepted");
- Check(hs::runtime_detail::BuildVfxTypedLightCommands(p,{},145).empty(),"cancelled event retained light");
+ Check(hs::runtime_detail::BuildVfxTypedLightCommands(hs::VfxImage{}, {},145).empty(),"cancelled event retained light");
 }
 }
-int RunVfxLightTests(){try{ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}
+int RunVfxLightTests(){try{PreparedSkipsAndOrder();ClockCurvesAndIdentity();TypedCentersAndHero();QualityAndInvalidInputs();std::cout<<"Typed light commands passed\n";return 0;}catch(const std::exception&e){std::cerr<<e.what()<<'\n';return 1;}}

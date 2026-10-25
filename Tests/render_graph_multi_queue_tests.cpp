@@ -353,8 +353,11 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                 for (std::size_t j = i + 1; j < lists.size(); ++j)
                     Check(lists[i] && lists[i] != lists[j], "pass command list state remains isolated");
             for (const auto &timing : cpu_passes)
-                Check(timing.cpu_record_valid && timing.cpu_record_begin_qpc <= timing.cpu_record_end_qpc,
-                      "independent recording retains every pass timing");
+                Check(timing.cpu_record_valid && timing.cpu_callback_valid &&
+                          timing.cpu_record_begin_qpc <= timing.cpu_callback_begin_qpc &&
+                          timing.cpu_callback_begin_qpc <= timing.cpu_callback_end_qpc &&
+                          timing.cpu_callback_end_qpc <= timing.cpu_record_end_qpc,
+                      "independent recording retains each callback inside its pass recording interval");
             Check(executor.Wait(completion).Succeeded(), "wait independent graph");
             if (timestamps_enabled)
             {
@@ -456,10 +459,14 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             {
                 Check(pass.cpu_record_valid && pass.cpu_record_end_qpc >= pass.cpu_record_begin_qpc,
                     "recording interval missing or reversed");
+                Check(pass.cpu_callback_valid && pass.cpu_record_begin_qpc <= pass.cpu_callback_begin_qpc &&
+                    pass.cpu_callback_begin_qpc <= pass.cpu_callback_end_qpc &&
+                    pass.cpu_callback_end_qpc <= pass.cpu_record_end_qpc,
+                    "callback interval is missing or outside its recording interval");
                 Check(!pass.cpu_provider_submit_valid, "ordinary pass fabricated provider submission timing");
                 if (pass.pass_id == 302)
-                    Check(static_cast<long double>(pass.cpu_record_end_qpc - pass.cpu_record_begin_qpc) *
-                        1000 / frequency.QuadPart >= 1.0L, "per-pass timing omitted known owner callback delay");
+                    Check(static_cast<long double>(pass.cpu_callback_end_qpc - pass.cpu_callback_begin_qpc) *
+                        1000 / frequency.QuadPart >= 1.0L, "callback timing omitted known owner callback delay");
             }
             Check(timings.cpu_plan_us + timings.cpu_record_us + timings.cpu_submit_us <=
                     static_cast<std::uint64_t>(execute_us), "graph timing stages overlap or exceed execution wall time");
@@ -596,7 +603,7 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
         std::byte *bytes{};
         Hr(uploads[index]->Map(0, &no_read, reinterpret_cast<void **>(&bytes)), "map plan upload");
         for (std::size_t byte = 0; byte < max_capacity; ++byte)
-            bytes[byte] = static_cast<std::byte>((byte * 37 + index * 53 + 11) & 0xff);
+            bytes[byte] = static_cast<std::byte>((byte * 37 + byte / 256 * 19 + index * 53 + 11) & 0xff);
         uploads[index]->Unmap(0, nullptr);
         heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
         Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
@@ -614,6 +621,7 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
         hs::QueueHint queue{hs::QueueHint::Direct};
         bool reversed{};
         std::uint64_t read_size{1024};
+        std::uint64_t read_offset{};
     };
     const auto declare = [&](unsigned frame, Layout layout, bool duplicate = false,
                              bool invalid_version = false, bool missing_callback = false) {
@@ -652,18 +660,18 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
         graph.AddOrderingDependency(layout.reversed ? 20 : 10, layout.reversed ? 10 : 20);
         auto read = graph.AddPass(30, "plan active readback", hs::QueueHint::Copy);
         read.Read(invalid_version ? hs::ResourceVersion{second, 2} : version,
-            hs::Access::CopySource, hs::BufferRange{0, layout.read_size});
+            hs::Access::CopySource, hs::BufferRange{layout.read_offset, layout.read_size});
         (void)read.Write(graph.Version(output), hs::Access::CopyDest);
         // Frame-local work changes within fixed declared capacity, like an
         // active rect/dispatch change. It must not rebuild the structural plan.
         const std::uint64_t active_bytes = input_index ? 256 : 512;
         if (!missing_callback)
-            read.SetExecute([&, frame, second, output, active_bytes](hs::RenderPassContext &context) {
+            read.SetExecute([&, frame, second, output, active_bytes, source_offset = layout.read_offset](hs::RenderPassContext &context) {
                 Check(frame == expected_frame, "reused plan records current active extent");
                 ++callbacks;
                 static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyBufferRegion(
                     static_cast<ID3D12Resource *>(context.Resolve(output)), 0,
-                    static_cast<ID3D12Resource *>(context.Resolve(second)), 0, active_bytes);
+                    static_cast<ID3D12Resource *>(context.Resolve(second)), source_offset, active_bytes);
             });
         return std::array{source, output, first, second};
     };
@@ -692,8 +700,11 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
         const D3D12_RANGE range{0, active_bytes};
         Hr(outputs[input_index]->Map(0, &range, reinterpret_cast<void **>(&bytes)), "map reused plan output");
         for (std::size_t byte = 0; byte < active_bytes; ++byte)
-            Check(bytes[byte] == static_cast<std::byte>((byte * 37 + input_index * 53 + 11) & 0xff),
+        {
+            const auto source_byte = byte + layout.read_offset;
+            Check(bytes[byte] == static_cast<std::byte>((source_byte * 37 + source_byte / 256 * 19 + input_index * 53 + 11) & 0xff),
                 "reused plan uses current imports and current active work");
+        }
         outputs[input_index]->Unmap(0, &no_read);
     };
     Layout layout;
@@ -730,7 +741,28 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
         hs::RenderGraphTestAccess::Reuses(graph) == 2,
         "failed candidates retain the previous successful plan");
 
+    const auto before_rotation_compilations = hs::RenderGraphTestAccess::Compilations(graph);
+    const auto before_rotation_reuses = hs::RenderGraphTestAccess::Reuses(graph);
+    for (unsigned cycle = 0; cycle < 3; ++cycle)
+    {
+        for (unsigned variant = 0; variant < 3; ++variant)
+        {
+            auto rotating = layout;
+            rotating.read_offset = variant * 512;
+            execute(7 + cycle * 3 + variant, rotating);
+        }
+        if (cycle == 0)
+        {
+            (void)declare(0, layout, false, true);
+            Check(!graph.Prepare(pool).Succeeded(), "failed candidate preserves all three cached plans");
+        }
+    }
+    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_rotation_compilations + 2 &&
+        hs::RenderGraphTestAccess::Reuses(graph) == before_rotation_reuses + 7,
+        "three rotating range plans reuse exact schedules with current callbacks and imports");
+
     // Descriptor fields must participate even when allocation size would match.
+    const auto before_descriptor_compilations = hs::RenderGraphTestAccess::Compilations(graph);
     const auto texture_frame = [&](hs::TextureDesc desc) {
         graph.Reset();
         pool.ResetCompletedClaims(fixture.executor.Completed());
@@ -743,8 +775,14 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     };
     texture_frame({16, 16, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
     texture_frame({16, 16, DXGI_FORMAT_R16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == 7,
+    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_descriptor_compilations + 2,
         "format changes invalidate a plan despite matching allocation classes");
+    const auto descriptor_reuses = hs::RenderGraphTestAccess::Reuses(graph);
+    texture_frame({16, 16, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
+    texture_frame({16, 16, DXGI_FORMAT_R16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
+    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_descriptor_compilations + 2 &&
+        hs::RenderGraphTestAccess::Reuses(graph) == descriptor_reuses + 2,
+        "alternating exact descriptors reuse their validated allocation plans");
 
     D3D12_RESOURCE_DESC texture_desc{};
     texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;

@@ -1,3 +1,4 @@
+import argparse
 import json
 import tempfile
 import unittest
@@ -91,6 +92,33 @@ def _write_wav(_audio, path, _torchaudio, _source_rate):
 
 
 class RenderTests(unittest.TestCase):
+    def test_invalid_duration_rejected_before_dependencies(self):
+        for value in (float("nan"), float("inf"), -float("inf"), 0.0, -1.0):
+            with self.subTest(value=value):
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    render._positive(str(value))
+                with mock.patch.object(render, "_dependencies") as deps:
+                    with self.assertRaisesRegex(ValueError, "finite"):
+                        render._generate(types.SimpleNamespace(duration=value, model="small-sfx"))
+                    with self.assertRaisesRegex(ValueError, "finite"):
+                        render._refine(types.SimpleNamespace(duration=value))
+                    deps.assert_not_called()
+        self.assertEqual(render._positive("0.1"), 0.1)
+        render._validate_duration(120.0, "small-sfx")
+
+    def test_nonfinite_mask_rejected_before_dependencies(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            for start, end in ((value, 0.5), (0.0, value)):
+                with self.subTest(start=start, end=end), mock.patch.object(render, "_dependencies") as deps:
+                    with self.assertRaises(ValueError):
+                        render._inpaint(types.SimpleNamespace(mask_start_seconds=start, mask_end_seconds=end))
+                    deps.assert_not_called()
+
+    def test_invalid_input_rate_rejected_before_duration_calculation(self):
+        for rate in (float("nan"), float("inf"), -float("inf"), 0, -1, 44100.5):
+            with self.subTest(rate=rate), self.assertRaisesRegex(ValueError, "sample rate"):
+                render._load_audio(Path("input.wav"), _FakeAudio(sample_rate=rate))
+
     def test_save_validation_rejects_nonfinite_and_constant_audio(self):
         with self.assertRaisesRegex(ValueError, "non-finite"):
             render._validate_audio_tensor(object(), _FakeTorch(False, 1.0, 0.0, 1.0))

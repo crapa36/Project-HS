@@ -295,9 +295,9 @@ Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderFrameInput &input)
 }
 
 Result D3D12Renderer::Impl::PrepareHlodStaticScene(
-    const std::shared_ptr<const StaticRenderScene> &source, std::vector<RenderInstance> &proxies)
+    const std::shared_ptr<const StaticRenderScene> &source, std::span<const RenderInstance> &proxies)
 {
-    proxies.clear();
+    proxies = {};
     if (!hlod_runtime) return Result::Success();
     auto &runtime = *hlod_runtime;
     auto *context = ActiveHlodView();
@@ -307,34 +307,8 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
         view.matching_scene.reset(); InvalidateHlodQualification(view);
         return PumpHlodDemand();
     };
-    if (!source || source->content_generation_id != runtime.content_generation ||
-        source->layout_abi != runtime.scene.layout_abi ||
-        source->eligible_layout_digest != runtime.scene.layout_digest ||
-        source->eligible_static_members.size() != runtime.scene.members.size()) return invalidate();
-    std::unordered_map<std::uint64_t, std::uint32_t> slots;
-    std::vector<render_data::SceneHlodMember> actual;
-    actual.reserve(source->eligible_static_members.size());
-    for (const auto &member : source->eligible_static_members)
-    {
-        if (member.instance_index >= source->instances.size() || !slots.emplace(member.stable_id, member.instance_index).second)
-            return invalidate();
-        const auto &instance = source->instances[member.instance_index];
-        render_data::SceneHlodMember value;
-        value.stable_id = instance.stable_id; value.object_id = member.object_id;
-        value.mesh_semantic = static_cast<std::uint32_t>(instance.mesh);
-        value.variant = instance.environment_variant; value.tint_rgba = instance.color_rgba;
-        value.position = instance.position; value.scale = instance.scale; value.yaw = instance.yaw;
-        if (value.stable_id != member.stable_id) return invalidate();
-        actual.push_back(value);
-    }
-    if (render_data::ComputeSceneHlodLayoutDigest(source->layout_abi, actual) != runtime.scene.layout_digest)
-        return invalidate();
-    for (const auto &member : runtime.scene.members)
-    {
-        const auto slot = slots.find(member.stable_id);
-        if (slot == slots.end() || source->instances[slot->second].asset_id.value != member.asset_id.value)
-            return invalidate();
-    }
+    if (!runtime.prepared_scene.Resolve(source, runtime.scene, runtime.content_generation,
+                                         runtime.proxy_material_ordinals)) return invalidate();
     const auto total = source->instances.size() + runtime.scene.proxies.size();
     if (total > UINT32_MAX) return HlodFailure("HLOD static slot span exceeds32-bit addressing.");
     if (total > view.static_capacity)
@@ -366,19 +340,7 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
     }
     view.matching_scene = source;
     view.proxy_slot_base = static_cast<std::uint32_t>(source->instances.size());
-    proxies.reserve(runtime.scene.proxies.size());
-    for (std::uint32_t index = 0; index < runtime.scene.proxies.size(); ++index)
-    {
-        const auto &proxy = runtime.scene.proxies[index];
-        RenderInstance instance;
-        instance.stable_id = (0x7ull << 60u) | index;
-        instance.mesh = static_cast<RenderMesh>(proxy.mesh_semantic);
-        instance.environment_variant = proxy.variant; instance.color_rgba = proxy.tint_rgba;
-        instance.position = {}; instance.yaw = 0; instance.scale = {1, 1, 1};
-        instance.asset_id = MakeAssetId(runtime.scene.pages[proxy.page_index].logical_id);
-        instance.material_id = MakeAssetId(runtime.scene.dependencies[proxy.material_dependency]);
-        proxies.push_back(instance);
-    }
+    proxies = runtime.prepared_scene.proxies;
     return Result::Success();
 }
 
@@ -386,44 +348,59 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
                                            std::vector<GpuStaticDrawRef> &refs)
 {
     NullHlodExports(device.Get(), srv_cpu_heap.Get(), srv_stride, frame_slot);
-    if (!hlod_runtime || frame_slot >= kFrameCount) return Result::Success();
-    auto &runtime = *hlod_runtime;
-    auto *context = ActiveHlodView();
+    const auto disabled = [&]() {
+        if (static_gpu_scene) refs.resize(static_gpu_scene->draws.leaf_count);
+        return Result::Success();
+    };
+    if (!hlod_runtime || frame_slot >= kFrameCount) return disabled();
+    auto &runtime = *hlod_runtime; auto *context = ActiveHlodView();
     if (!context) return HlodFailure("HLOD frame preparation has no keyed view context.");
     auto &view = *context; auto &native = view.frames[frame_slot];
     native.enabled = false; native.registered = false; native.outputs = {};
     if (!view.matching_scene || !static_gpu_scene || static_gpu_scene->source != view.matching_scene)
-        return Result::Success();
+        return disabled();
     if (!native.completion.IsSatisfiedBy(graph_queue_executor.Completed()) || native.readback_pending)
         return HlodFailure("HLOD frame bank is still leased by GPU/history/demand readers.");
-    native.members.clear(); native.bindings.clear(); native.buckets.clear(); native.material_ordinals.clear();
-    std::unordered_map<std::uint64_t, std::uint32_t> slots;
-    for (const auto &member : view.matching_scene->eligible_static_members) slots.emplace(member.stable_id, member.instance_index);
     const auto generation = static_gpu_scene->instance_generation;
-    for (const auto &member : runtime.scene.members) native.members.push_back({member.stable_id, slots.at(member.stable_id), generation});
-    std::vector<std::uint32_t> order(runtime.scene.proxies.size());
-    std::iota(order.begin(), order.end(), 0u);
-    std::ranges::sort(order, [&](auto a, auto b) { return std::pair{runtime.proxy_material_ordinals[a], a} <
-        std::pair{runtime.proxy_material_ordinals[b], b}; });
-    native.bindings.resize(order.size());
+    const auto leaf_count = static_gpu_scene->draws.leaf_count;
+    const auto &order = runtime.prepared_scene.proxy_order;
+    const bool refs_changed = refs.size() != leaf_count + order.size();
+    refs.resize(leaf_count + order.size());
+    const bool rebuild_bindings = native.prepared_source != view.matching_scene ||
+        native.prepared_generation != generation || native.prepared_leaf_count != leaf_count ||
+        native.prepared_pipeline_revision != pipeline_revision;
+    if (rebuild_bindings)
+    {
+        native.members.clear(); native.bindings.clear(); native.buckets.clear(); native.material_ordinals.clear();
+        native.members.reserve(runtime.scene.members.size());
+        for (std::size_t index = 0; index < runtime.scene.members.size(); ++index)
+            native.members.push_back({runtime.scene.members[index].stable_id,
+                runtime.prepared_scene.member_slots[index], generation});
+        native.bindings.resize(order.size());
+    }
     for (std::uint32_t command = 0; command < order.size(); ++command)
     {
         const auto index = order[command];
         const auto &proxy = runtime.scene.proxies[index];
         const auto material = runtime.proxy_material_ordinals[index];
-        if (native.material_ordinals.empty() || native.material_ordinals.back() != material)
-        {
-            native.material_ordinals.push_back(material);
-            native.buckets.push_back({command, 0u, (material_parameter_bases[material] << 1u) | 1u, 0u});
-        }
-        ++native.buckets.back().command_count;
-        const auto ref_index = static_cast<std::uint32_t>(refs.size());
+        const auto ref_index = static_cast<std::uint32_t>(leaf_count + command);
         const auto slot = view.proxy_slot_base + index;
-        refs.push_back({slot, proxy.mesh_semantic, 1.0f, generation});
+        if (refs_changed) refs[ref_index] = {slot, proxy.mesh_semantic, 1.0f, generation};
         auto &binding = native.bindings[index];
-        binding.logical_page = proxy.page_index; binding.content_generation = runtime.generation;
-        binding.command_ordinal = command; binding.bucket_index = static_cast<std::uint32_t>(native.buckets.size() - 1u);
-        binding.instance_slot = slot; binding.instance_generation = generation; binding.visible_ref_index = ref_index;
+        if (rebuild_bindings)
+        {
+            if (native.material_ordinals.empty() || native.material_ordinals.back() != material)
+            {
+                native.material_ordinals.push_back(material);
+                native.buckets.push_back({command, 0u, (material_parameter_bases[material] << 1u) | 1u, 0u});
+            }
+            ++native.buckets.back().command_count;
+            binding.logical_page = proxy.page_index; binding.content_generation = runtime.generation;
+            binding.command_ordinal = command; binding.bucket_index = static_cast<std::uint32_t>(native.buckets.size() - 1u);
+            binding.instance_slot = slot; binding.instance_generation = generation; binding.visible_ref_index = ref_index;
+        }
+        binding.flags = 0u; binding.geometry_record_id = 0u;
+        binding.physical_page_slot = 0u; binding.page_version = 0u;
         const auto &snapshot = cluster_runtime->frames[frame_slot].snapshot.at(runtime.page_base + proxy.page_index);
         if (!snapshot.resident || snapshot.generation != runtime.generation) continue;
         const auto *page = FindClusterGeometryPage(snapshot.physical_page_slot);
@@ -446,6 +423,10 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
         binding.flags = kHlodProxyResident; binding.geometry_record_id = packed >> 2u;
         binding.physical_page_slot = page->page_slot; binding.page_version = page->generation;
     }
+    native.prepared_source = view.matching_scene;
+    native.prepared_generation = generation;
+    native.prepared_leaf_count = leaf_count;
+    native.prepared_pipeline_revision = pipeline_revision;
     const auto refs_bytes = std::max<std::uint64_t>(16u, refs.size() * sizeof(GpuStaticDrawRef));
     const auto readback_bytes = std::max<std::uint64_t>(4u, runtime.scene.pages.size() * 4u) + 64u;
     const auto ensure = [&](AllocationResource &resource, ResidencyTicket &ticket, std::uint64_t bytes,

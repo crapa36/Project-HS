@@ -222,6 +222,16 @@ void RendererDiagnosticsRecorder::RecordCompleted(const GpuPassTimings &timings)
         pass.begin_qpc = input.begin_qpc; pass.end_qpc = input.end_qpc;
         pass.qpc_frequency = input.qpc_frequency;
         pass.clock_calibrated = input.clock_calibrated;
+        pass.cpu_qpc_frequency = timings.cpu_qpc_frequency;
+        pass.cpu_record_begin_qpc = input.cpu_record_begin_qpc;
+        pass.cpu_record_end_qpc = input.cpu_record_end_qpc;
+        pass.cpu_callback_begin_qpc = input.cpu_callback_begin_qpc;
+        pass.cpu_callback_end_qpc = input.cpu_callback_end_qpc;
+        pass.cpu_provider_submit_begin_qpc = input.cpu_provider_submit_begin_qpc;
+        pass.cpu_provider_submit_end_qpc = input.cpu_provider_submit_end_qpc;
+        pass.cpu_record_valid = input.cpu_record_valid && timings.cpu_qpc_frequency != 0;
+        pass.cpu_callback_valid = input.cpu_callback_valid && timings.cpu_qpc_frequency != 0;
+        pass.cpu_provider_submit_valid = input.cpu_provider_submit_valid && timings.cpu_qpc_frequency != 0;
     }
 }
 
@@ -317,6 +327,16 @@ RendererDiagnosticsSnapshot RendererDiagnosticsRecorder::Snapshot() const
         result.measured = pass.measured; result.clock_calibrated = pass.clock_calibrated;
         result.name_truncated = pass.name_truncated;
         result.nanoseconds = pass.nanoseconds; result.begin_ticks = pass.begin_ticks;
+        result.cpu_qpc_frequency = pass.cpu_qpc_frequency;
+        result.cpu_record_begin_qpc = pass.cpu_record_begin_qpc;
+        result.cpu_record_end_qpc = pass.cpu_record_end_qpc;
+        result.cpu_callback_begin_qpc = pass.cpu_callback_begin_qpc;
+        result.cpu_callback_end_qpc = pass.cpu_callback_end_qpc;
+        result.cpu_provider_submit_begin_qpc = pass.cpu_provider_submit_begin_qpc;
+        result.cpu_provider_submit_end_qpc = pass.cpu_provider_submit_end_qpc;
+        result.cpu_record_valid = pass.cpu_record_valid;
+        result.cpu_callback_valid = pass.cpu_callback_valid;
+        result.cpu_provider_submit_valid = pass.cpu_provider_submit_valid;
         result.end_ticks = pass.end_ticks; result.timestamp_frequency = pass.timestamp_frequency;
         result.clock_domain = "unavailable";
         if (pass.measured && pass.clock_calibrated && pass.qpc_frequency)

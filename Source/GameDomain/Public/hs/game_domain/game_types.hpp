@@ -289,9 +289,97 @@ struct SimulationObservation : SessionProbe
     BalanceTelemetry balance{};
 };
 
+// Opt-in wall-clock observations only. Nested scopes are inclusive; do not sum them as exclusive work.
+enum class SimulationTimingId : std::uint8_t
+{
+    Tick,
+    Input,
+    SessionTimer,
+    Spawn,
+    SpawnBarrier,
+    AiIntent,
+    CastAttack,
+    AbilitySpawnBarrier,
+    Movement,
+    SpatialGrid,
+    CollisionHit,
+    DamageStatus,
+    DeathDrop,
+    XpCard,
+    CleanupBarrier,
+    GameplayHash,
+    EnemyQueries,
+    NavigationQuery,
+    EnemyPerceptionDecision,
+    BossAi,
+    ScheduledBossActions,
+    ScheduledActions,
+    PlayerMovement,
+    EnemyMovement,
+    ProjectileMovement,
+    SeparationBuild,
+    SeparationSolve,
+    SweptGridBuild,
+    ProjectileCollision,
+    AreaCollision,
+    StatusUpdate,
+    DamageFlush,
+    SmallFacts,
+    Count,
+};
+inline constexpr std::size_t kSimulationTimingCount = static_cast<std::size_t>(SimulationTimingId::Count);
+inline constexpr std::array<std::string_view, kSimulationTimingCount> kSimulationTimingNames{
+    "tick",
+    "input",
+    "session_timer",
+    "spawn",
+    "spawn_barrier",
+    "ai_intent",
+    "cast_attack",
+    "ability_spawn_barrier",
+    "movement",
+    "spatial_grid",
+    "collision_hit",
+    "damage_status",
+    "death_drop",
+    "xp_card",
+    "cleanup_barrier",
+    "gameplay_hash",
+    "enemy_queries",
+    "navigation_query",
+    "enemy_perception_decision",
+    "boss_ai",
+    "scheduled_boss_actions",
+    "scheduled_actions",
+    "player_movement",
+    "enemy_movement",
+    "projectile_movement",
+    "separation_build",
+    "separation_solve",
+    "swept_grid_build",
+    "projectile_collision",
+    "area_collision",
+    "status_update",
+    "damage_flush",
+    "small_facts",
+};
+struct SimulationTimingSample
+{
+    std::uint64_t nanoseconds{}, calls{};
+};
+struct SimulationTimingDiagnostics
+{
+    Tick tick{};
+    bool captured{}, completed{};
+    std::array<SimulationTimingSample, kSimulationTimingCount> scopes{};
+    // 64 empty scopes measured at initialization; raw observations are never adjusted by this calibration.
+    SimulationTimingSample empty_scope_calibration{};
+};
+
 struct SimulationDiagnostics
 {
     BalanceTelemetry balance{};
+    SimulationTimingDiagnostics timings{};
 };
 
 enum class DebugCommandKind : std::uint8_t

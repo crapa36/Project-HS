@@ -10,6 +10,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+function File-Sha256([string]$Path) {
+    $hash = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $hash.Dispose()
+    }
+}
 $ensure = Join-Path $PSScriptRoot 'ensure_render_baseline.ps1'
 if (!$BaselineRoot) {
     $BaselineRoot = if ($BaselineDirectory) {
@@ -31,8 +41,8 @@ if ($BaselineDirectory) {
     # cached history. The regular integration smoke still reuses its baseline.
     $ensureArgs.ArtifactsRoot = Join-Path $BaselineRoot ('barrier-pair-' + [Guid]::NewGuid().ToString('N'))
 }
-$executableHash = (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash
-$generationHash = (Get-FileHash -LiteralPath $GenerationPointer -Algorithm SHA256).Hash
+$executableHash = File-Sha256 $Executable
+$generationHash = File-Sha256 $GenerationPointer
 $legacy = @(& $ensure @ensureArgs) | Select-Object -Last 1
 if (!$legacy -or !(Test-Path -LiteralPath $legacy -PathType Container)) {
     throw 'Legacy render baseline is unavailable.'
@@ -154,13 +164,13 @@ function Test-LockstepTimeline([string]$Directory) {
     }
 }
 
-& $Executable --smoke --smoke-render-lockstep --ticks=180 --barriers=enhanced --resize-test `
+& $Executable --smoke --smoke-render-lockstep --validation --ticks=180 --barriers=enhanced --resize-test `
     $generationArgument --artifacts=$enhanced
 if ($LASTEXITCODE -ne 0) {
     throw "Enhanced barrier smoke failed."
 }
-if ((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash -cne $executableHash -or
-    (Get-FileHash -LiteralPath $GenerationPointer -Algorithm SHA256).Hash -cne $generationHash) {
+if ((File-Sha256 $Executable) -cne $executableHash -or
+    (File-Sha256 $GenerationPointer) -cne $generationHash) {
     throw 'Barrier comparison inputs changed between paired captures.'
 }
 
@@ -302,7 +312,7 @@ if ($legacyOnly.Count -ne 0 -or $enhancedOnly.Count -ne 0) {
     throw "Legacy and enhanced GPU pass sets differ: legacy_only=$($legacyOnly -join ', '); enhanced_only=$($enhancedOnly -join ', ')."
 }
 
-& $Executable --smoke --smoke-render-lockstep --ticks=180 --barriers=enhanced --resize-test `
+& $Executable --smoke --smoke-render-lockstep --validation --ticks=180 --barriers=enhanced --resize-test `
     --render-scale=75 --shadow=2048 --particles=50 --no-bloom --no-outline `
     $generationArgument --artifacts=$options
 if ($LASTEXITCODE -ne 0) {

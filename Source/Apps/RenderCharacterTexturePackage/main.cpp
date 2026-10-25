@@ -2,6 +2,7 @@
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/dds_texture.hpp>
 
 #include <algorithm>
 #include <array>
@@ -35,14 +36,14 @@ std::vector<Texture> Textures(std::string_view mode)
     if (mode == "monster-materials")
     {
         for (const auto *name : {"monster_basecolor", "monster_emissive", "monster_ram"})
-            result.push_back({name, {512, 512, 1, 1,
-                std::string_view(name) == "monster_ram" ? rd::kTextureFormatRgba8 :
-                    rd::kTextureFormatRgba8Srgb}});
+            result.push_back({name, {512, 512, 1, 10,
+                std::string_view(name) == "monster_ram" ? rd::kTextureFormatBc7 :
+                    rd::kTextureFormatBc7Srgb}});
         return result;
     }
     std::string_view stem;
     std::uint32_t size = 1, mips = 1, count = 1;
-    if (mode == "archer") { stem = "archer"; size = 2048; count = 5; }
+    if (mode == "archer") { stem = "archer"; size = 2048; mips = 12; count = 5; }
     else if (mode == "slime-melee") { stem = "enemy_melee"; size = 1024; mips = 11; }
     else if (mode == "slime-ranged") { stem = "enemy_ranged"; size = 1024; mips = 11; }
     else if (mode == "slime-suicide") { stem = "enemy_suicide"; size = 1024; mips = 11; }
@@ -55,46 +56,19 @@ std::vector<Texture> Textures(std::string_view mode)
     {
         const auto suffix = std::to_string(index);
         result.push_back({std::string(stem) + "_diffuse_" + suffix,
-                          {size, size, 1, mips, rd::kTextureFormatRgba8Srgb}});
-        const auto normal_size = mode == "archer" && index == 0 ? 1u : size;
+                          {size, size, 1, mips, rd::kTextureFormatBc7Srgb}});
         result.push_back({std::string(stem) + "_normal_" + suffix,
-                          {normal_size, normal_size, 1,
-                           normal_size == 1 ? 1u : mips, rd::kTextureFormatRgba8}});
+                          {size, size, 1, mips, rd::kTextureFormatBc7}});
     }
     return result;
-}
-
-std::uint32_t U32(std::span<const std::byte> bytes, std::size_t offset)
-{
-    Require(offset <= bytes.size() && 4 <= bytes.size() - offset, "truncated DDS header");
-    std::uint32_t value = 0;
-    for (std::size_t i = 0; i < 4; ++i)
-        value |= std::uint32_t(std::to_integer<unsigned>(bytes[offset + i])) << (i * 8);
-    return value;
 }
 
 std::span<const std::byte> DdsPayload(std::span<const std::byte> bytes,
                                       const rd::TextureDescription &expected)
 {
-    Require(bytes.size() >= 128 && U32(bytes, 0) == 0x20534444 &&
-            U32(bytes, 4) == 124 && U32(bytes, 76) == 32 &&
-            U32(bytes, 80) == 65 && U32(bytes, 84) == 0 &&
-            U32(bytes, 88) == 32 && U32(bytes, 92) == 0xff &&
-            U32(bytes, 96) == 0xff00 && U32(bytes, 100) == 0xff0000 &&
-            U32(bytes, 104) == 0xff000000,
-            "expected legacy RGBA8 DDS pixel format");
-    Require(U32(bytes, 8) == (expected.mip_count > 1 ? 0x2100fu : 0x100fu) &&
-            U32(bytes, 12) == expected.height &&
-            U32(bytes, 16) == expected.width &&
-            U32(bytes, 20) == expected.width * 4 &&
-            U32(bytes, 24) == 0 && U32(bytes, 28) == expected.mip_count &&
-            U32(bytes, 108) == (expected.mip_count > 1 ? 0x401008u : 0x1000u) &&
-            U32(bytes, 112) == 0 && U32(bytes, 116) == 0 &&
-            U32(bytes, 120) == 0 && U32(bytes, 124) == 0,
-            "character DDS shape or caps changed");
-    for (std::size_t offset = 32; offset < 76; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS reserved header");
-    return bytes.subspan(128);
+    const auto decoded = rd::DecodeDdsTexture(bytes);
+    rd::ValidateDdsTextureRole(decoded, rd::DdsTextureRole::CharacterFinalBc7, expected);
+    return decoded.payload;
 }
 
 std::string SourceId(const Texture &texture)
@@ -148,8 +122,8 @@ void Produce(std::string_view mode, const fs::path &build_root)
     const auto textures = Textures(mode);
     ap::ActionSpec spec;
     spec.action_id = "render.texture.character." + std::string(mode);
-    spec.recipe_id = "project-hs.render.texture.character.rgba8";
-    spec.recipe_version = 1;
+    spec.recipe_id = "project-hs.render.texture.character.bc7-semantic-v1";
+    spec.recipe_version = 2;
     spec.namespace_path = "render/texture/character/" + std::string(mode);
     std::vector<fs::path> paths;
     for (const auto &texture : textures)

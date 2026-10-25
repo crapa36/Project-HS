@@ -1,9 +1,12 @@
 #pragma once
 
 #include <hs/core/result.hpp>
+#include <hs/core/graphics_settings.hpp>
 #include <hs/core/types.hpp>
+#include <hs/renderer/hero_work.hpp>
 
 #include <filesystem>
+#include <optional>
 #include <vector>
 
 namespace hs
@@ -50,6 +53,10 @@ struct ApplicationConfig
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};
     Float2 skill_vfx_aim{0.0f, 9.0f};
     bool capture_diagnostics{}; // Opt in to full performance CSV/NDJSON; ordinary play writes no detailed logs.
+    std::uint32_t diagnostic_enemy_count{}; // Smoke + diagnostics only; zero keeps ordinary spawning.
+    bool capture_hero_work{}; // Isolated developer native-query capture; ordinary performance runs leave false.
+    HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
+    std::optional<GraphicsPreset> graphics_preset;
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};

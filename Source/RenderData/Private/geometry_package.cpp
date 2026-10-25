@@ -100,7 +100,7 @@ void ValidateGeometryData(const GeometryData&g)
             g.canonical_primitive_remap.size()<=kMaxGeometryIndices/3,"geometry allocation cap");
     GeometryMetadata m;m.flags=g.flags;m.vertex_count=static_cast<std::uint32_t>(g.vertices.size());m.index_count=static_cast<std::uint32_t>(g.indices.size());m.submesh_count=static_cast<std::uint32_t>(g.submeshes.size());m.meshlet_count=static_cast<std::uint32_t>(g.meshlets.size());m.vertex_ref_count=static_cast<std::uint32_t>(g.meshlet_vertex_refs.size());m.bounds=g.bounds;Shape(m);
     Require(g.meshlet_triangles.size()==g.indices.size()/3 && g.canonical_primitive_remap.size()==g.meshlet_triangles.size(),"primitive component counts disagree");
-    (void)EncodeExpandedVertices(g.vertices); // finite scalar and complete record validation
+    ValidateExpandedVertices(g.vertices);
     std::vector<bool>used(g.vertices.size()),seen(g.indices.size()/3);
     for(auto index:g.indices){Require(index<g.vertices.size(),"canonical index range");used[index]=true;}
     Require(std::ranges::all_of(used,[](bool v){return v;}),"unreferenced unique vertex");

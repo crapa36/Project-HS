@@ -1,4 +1,5 @@
 #include "vfx_gradient_cooker.hpp"
+#include <hs/render_data/dds_texture.hpp>
 #include <DirectXPackedVector.h>
 #include <algorithm>
 #include <array>
@@ -23,16 +24,12 @@ nlohmann::json CookVfxGradientDefaults(const nlohmann::json &spec,
     std::ifstream input(source_dds, std::ios::binary);
     if (!input) throw std::runtime_error("Cannot open gradient LUT: " + source_dds.string());
     std::vector<char> bytes{std::istreambuf_iterator<char>(input), {}};
-    const auto word = [&](std::size_t offset) {
-        std::uint32_t result{};
-        if (offset + sizeof(result) > bytes.size()) throw std::runtime_error("Truncated gradient DDS");
-        std::memcpy(&result, bytes.data() + offset, sizeof(result));
-        return result;
-    };
-    if (word(0) != 0x20534444 || word(4) != 124 || word(84) != 0x30315844 ||
-        word(128) != 10 || word(132) != 3 || word(140) != 1 || word(28) != 1 ||
-        word(16) != 256 || word(12) != rows.size() || bytes.size() != 148 + rows.size() * 2048)
-        throw std::runtime_error("Gradient source must be complete linear RGBA16F 256 x row_count DDS");
+    {
+        if (rows.empty() || rows.size() > 16384) throw std::runtime_error("Gradient row extent is invalid");
+        const auto decoded = render_data::DecodeDdsTexture(std::as_bytes(std::span(bytes.data(), bytes.size())));
+        render_data::ValidateDdsTextureRole(decoded, render_data::DdsTextureRole::VfxTexture,
+            {256, static_cast<std::uint32_t>(rows.size()), 1, 1, render_data::kTextureFormatRgba16Float});
+    } // Drop the borrowed source view before extending this buffer with cooked rows.
     std::set<std::pair<std::string, std::string>> pairs;
     for (std::size_t i = 0; i < rows.size(); ++i)
     {

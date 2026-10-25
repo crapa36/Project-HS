@@ -20,7 +20,7 @@ constexpr auto kRicochetBleedExtendEffect=Hash64("particle.upgrade.ricochet.blee
 std::uint32_t Mix(std::uint32_t v){v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;return v^(v>>16);}
 float Random(std::uint32_t seed,std::uint32_t lane){return static_cast<float>(Mix(seed^Mix(lane+0x9e3779b9u))>>8)/16777216.0f;}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
-template<class T> bool Range(VfxRange r,const std::vector<T>&v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
+template<class T> bool Range(VfxRange r,std::span<const T> v){return r.first<=v.size()&&r.count<=v.size()-r.first;}
 Float3 Normalize(Float3 v){const float length=std::hypot(v.x,v.y,v.z);return length>.0001f?Float3{v.x/length,v.y/length,v.z/length}:Float3{0,1,0};}
 Float3 Cross(Float3 a,Float3 b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
 struct Recipe{std::uint32_t shape;VfxMotionKind motion;std::uint8_t mesh;float min_size,max_size,min_speed,max_speed,gravity,cone,min_spin,max_spin;};
@@ -32,7 +32,7 @@ constexpr Recipe recipes[]{
  {Hash("small_shard_mesh"),VfxMotionKind::ShortForwardShardFan,4,.035f,.065f,2.4f,2.4f,-5,70,4,8},
  {Hash("needle_shard_mesh"),VfxMotionKind::ThinShardsForwardCone,7,.07f,.12f,4.2f,4.2f,-3,32,2,5}
 };
-bool ProfileTextures(const VfxProgramData &p,const VfxOutputRecord &output)
+bool ProfileTextures(const VfxProgramView &p,const VfxOutputRecord &output)
 {
  if(!Range(output.textures,p.texture_bindings))return false;
  for(const auto &binding:std::span(p.texture_bindings).subspan(output.textures.first,output.textures.count))
@@ -58,13 +58,13 @@ std::uint64_t StatusEffectId(std::uint8_t kind)
  default:return 0;
  }
 }
-bool UniqueIdentity(const VfxProgramData &p,VfxEffectHandle handle,std::uint64_t id)
+bool UniqueIdentity(const VfxProgramView &p,VfxEffectHandle handle,std::uint64_t id)
 {
  return std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.handle==handle&&e.effect_id==id;})==1&&
         std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.handle==handle;})==1&&
         std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.effect_id==id;})==1;
 }
-bool StatusTextures(const VfxProgramData &p,const VfxOutputRecord &output)
+bool StatusTextures(const VfxProgramView &p,const VfxOutputRecord &output)
 {
  if(!Range(output.textures,p.texture_bindings)||output.textures.count!=2)return false;
  bool gradient=false,curve=false;
@@ -82,7 +82,7 @@ bool StatusTextures(const VfxProgramData &p,const VfxOutputRecord &output)
  return gradient&&curve;
 }
 struct Params{std::uint32_t count{};float gravity{},bounce{},drag{.8f},speed{-1},cone{};};
-std::optional<Params> Parameters(const VfxProgramData &p,const VfxSourceRecord &s,const Recipe &r)
+std::optional<Params> Parameters(const VfxProgramView &p,const VfxSourceRecord &s,const Recipe &r)
 {
  if(!Range(s.parameters,p.parameters))return {};Params result;result.gravity=r.gravity;result.cone=r.cone;
  std::uint32_t seen{};
@@ -106,7 +106,7 @@ std::optional<Params> Parameters(const VfxProgramData &p,const VfxSourceRecord &
     ((seen&16)&&result.speed<=0))return {};return result;
 }
 }
-std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxProgramData &p,std::span<const VfxEventInput> inputs)
+std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxProgramView &p,std::span<const VfxEventInput> inputs)
 {
  std::vector<ParticleSpawnCommand> result;
  for(const auto &input:inputs)
@@ -191,7 +191,7 @@ std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxProgra
 }
 
 std::vector<ParticleSpawnCommand> BuildVfxPersistentStatusShardCommands(
-    const VfxProgramData &p,std::span<const VfxPersistentInput> inputs,Tick current_tick)
+    const VfxProgramView &p,std::span<const VfxPersistentInput> inputs,Tick current_tick)
 {
  std::vector<ParticleSpawnCommand> result;
  for(const auto &input:inputs)

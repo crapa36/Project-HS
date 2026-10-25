@@ -152,7 +152,7 @@ constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::AutoFgCad
 bool Known(std::uint32_t type)
 {
     return type >= static_cast<std::uint32_t>(ChunkType::ExpandedVertices) &&
-           type <= kLastKnownChunk && (type < 37 || type > 42);
+           type <= kLastKnownChunk && (type < 41 || type > 42);
 }
 
 void ValidateKnown(std::uint32_t type, std::uint16_t version,
@@ -244,6 +244,14 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
         Require(stride == 16 && count == 4096 && size == count * stride, "invalid LTC LUT chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::VolumetricVolumes))
         Require(stride == 112 && count <= 256 && size == count * stride, "invalid volumetric medium chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::CharacterDeformationMetadata))
+        Require(stride == 64 && count == 1 && size == stride, "invalid character deformation metadata chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::CharacterFinalMatrices))
+        Require(stride == 64 && count > 0 && count <= 800'000 && size == count * stride, "invalid character final matrices chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::CharacterIntervalBounds))
+        Require(stride == 32 && count > 0 && count <= 800'000 && size == count * stride, "invalid character interval bounds chunk");
+    else if (type == static_cast<std::uint32_t>(ChunkType::CharacterLodDirectory))
+        Require(stride == kGeometryMetadataStride && count > 0 && count <= 16 && size == count * stride, "invalid character LOD directory chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles))
         Require(stride == 140 && count == 4 && size == count * stride, "invalid quality profiles chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::AutoFgCadence))
@@ -268,16 +276,21 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
 }
 } // namespace
 
-std::vector<std::byte> EncodeExpandedVertices(std::span<const ExpandedVertex> vertices)
+void ValidateExpandedVertices(std::span<const ExpandedVertex> vertices)
 {
     Require(!vertices.empty() &&
             vertices.size() <= std::numeric_limits<std::size_t>::max() / kExpandedVertexStride,
             "invalid expanded vertex count");
+    for (const auto &vertex : vertices) ValidateVertex(vertex);
+}
+
+std::vector<std::byte> EncodeExpandedVertices(std::span<const ExpandedVertex> vertices)
+{
+    ValidateExpandedVertices(vertices);
     std::vector<std::byte> bytes(vertices.size() * kExpandedVertexStride);
     for (std::size_t index = 0; index < vertices.size(); ++index)
     {
         const auto &vertex = vertices[index];
-        ValidateVertex(vertex);
         const auto offset = index * kExpandedVertexStride;
         for (std::size_t i = 0; i < 3; ++i)
         {

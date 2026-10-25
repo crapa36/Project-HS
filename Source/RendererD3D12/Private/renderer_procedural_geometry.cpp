@@ -52,8 +52,7 @@ Result D3D12Renderer::Impl::CreateProceduralGeometry(
     if (!list)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Procedural geometry requires a command list.");
-    if (procedural_geometry.vertices.resource || procedural_geometry.indices.resource ||
-        procedural_geometry.meshlets.resource || procedural_geometry.auxiliary.resource ||
+    if (procedural_geometry.storage.resource ||
         procedural_geometry.page_slot != UINT32_MAX)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Procedural geometry page destination is already occupied.");

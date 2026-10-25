@@ -8,6 +8,19 @@
 namespace hs
 {
 
+struct ParticleSpriteBinding
+{
+    ParticleSprite sprite{};
+    std::uint8_t frame_columns{1};
+    std::uint8_t frame_rows{1};
+};
+
+struct RendererVfxSpriteBindings
+{
+    ParticleSpriteBinding bleed_status_sprite, burn_status_sprite, slow_status_sprite,
+        mark_status_sprite, trap_sprite, fire_area_sprite;
+};
+
 struct ParticleSpawnCommand
 {
     Sequence sequence{};

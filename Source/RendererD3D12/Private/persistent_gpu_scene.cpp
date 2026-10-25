@@ -83,7 +83,9 @@ GpuSceneSerializedSlot SerializeGpuSceneSlot(std::uint32_t slot,
     result.material = {
         instance.color, low(metadata.material_id), high(metadata.material_id), 0u};
     result.bounds = {{0.0f, 0.0f, 0.0f, instance.position.w}};
-    result.skin = {metadata.skin_index, metadata.skin_flags, 0u, 0u};
+    result.skin = {metadata.skin_index, metadata.skin_flags,
+                   metadata.skin_vertex_offset, metadata.previous_skin_vertex_offset,
+                   metadata.skin_vertex_stride, metadata.previous_skin_vertex_stride};
     return result;
 }
 
@@ -94,6 +96,9 @@ void PersistentGpuSceneSlots::BeginFrame(bool reset_scene)
     reset_scene_ = reset_scene;
     active_count_ = 0;
     anonymous_count_ = 0;
+    changes_ = {};
+    content_changed_ = false;
+    pending_content_revision_ = content_revision_;
     dirty_slots_.clear();
     dirty_ranges_.clear();
     dirty_ranges_valid_ = true;
@@ -101,12 +106,8 @@ void PersistentGpuSceneSlots::BeginFrame(bool reset_scene)
 
 PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
     PersistentGpuSceneKey key, const GpuInstance &instance,
-    RenderInstance::Revisions revisions, GpuSceneMetadata metadata)
+    GpuSceneMetadata metadata, GpuSceneCanonicalInputs canonical)
 {
-    // Pose/deformation identity belongs to SkinCache and the per-frame draw
-    // indirection. It must not invalidate the persistent transform/material
-    // instance table.
-    revisions.pose = 0;
     if (key.stable_id != 0) key.fallback_ordinal = 0;
     if (key.stable_id == 0 && key.fallback_ordinal == 0)
         key.fallback_ordinal = 1;
@@ -119,11 +120,10 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         if (metadata.skin_flags != 0 &&
             metadata.skin_index == std::numeric_limits<std::uint32_t>::max())
             metadata.skin_index = slot;
-        const bool same_revision = entry.revisions == revisions;
         const bool same =
             std::memcmp(&instances_[slot], &instance, sizeof(GpuInstance)) == 0 &&
-            metadata_[slot] == metadata;
-        return {slot, entry.generation, !same || !same_revision};
+            metadata_[slot] == metadata && entry.canonical == canonical;
+        return {slot, entry.generation, !same};
     }
 
     const auto existing = reset_scene_ ? slots_.end() : slots_.find(key);
@@ -169,6 +169,9 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         instances_[slot] = instance;
         metadata_[slot] = metadata;
         MarkDirty(slot);
+        ++changes_.created;
+        next.revisions = {1, 1, 1, 1};
+        content_changed_ = true;
     }
     else
     {
@@ -178,10 +181,37 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         if (metadata.skin_flags != 0 &&
             metadata.skin_index == std::numeric_limits<std::uint32_t>::max())
             metadata.skin_index = slot;
-        // Source revisions describe snapshots; interpolated rendered payloads
-        // remain the authority for which bytes need uploading.
-        if (std::memcmp(&instances_[slot], &instance, sizeof(GpuInstance)) != 0 ||
-            metadata_[slot] != metadata)
+        const bool payload_changed =
+            std::memcmp(&instances_[slot], &instance, sizeof(GpuInstance)) != 0 ||
+            metadata_[slot] != metadata;
+        const auto &before = instances_[slot];
+        const auto &binding = metadata_[slot];
+        const bool transform_changed =
+            std::memcmp(&before.position, &instance.position, sizeof(instance.position)) != 0 ||
+            std::memcmp(&before.scale, &instance.scale, sizeof(instance.scale)) != 0 ||
+            std::bit_cast<std::uint32_t>(before.yaw) != std::bit_cast<std::uint32_t>(instance.yaw) ||
+            next.canonical.supplied_transform_revision != canonical.supplied_transform_revision;
+        const bool material_changed = before.color != instance.color ||
+            binding.material_id != metadata.material_id || binding.reserved != metadata.reserved ||
+            next.canonical.supplied_material_revision != canonical.supplied_material_revision ||
+            next.canonical.status_visual_mask != canonical.status_visual_mask;
+        const bool content_changed = before.mesh != instance.mesh || binding.asset_id != metadata.asset_id ||
+            std::bit_cast<std::uint32_t>(before.padding) != std::bit_cast<std::uint32_t>(instance.padding) ||
+            next.canonical.content != canonical.content ||
+            next.canonical.geometry_identity != canonical.geometry_identity;
+        const bool pose_changed = next.canonical.pose != canonical.pose ||
+            next.canonical.status_visual_mask != canonical.status_visual_mask;
+        const auto advance = [](std::uint64_t &revision) { if (++revision == 0) ++revision; };
+        if (transform_changed) advance(next.revisions.transform);
+        if (material_changed) advance(next.revisions.material);
+        if (content_changed) advance(next.revisions.content);
+        if (pose_changed) advance(next.revisions.pose);
+        content_changed_ |= material_changed || content_changed;
+        if (payload_changed || next.canonical != canonical) ++changes_.updated;
+        else ++changes_.unchanged;
+        // A pose-only edit changes the canonical scene without uploading
+        // unchanged instance bytes. Deformation has its own physical backing.
+        if (payload_changed)
         {
             previous_payloads_.push_back({slot, instances_[slot], metadata_[slot]});
             instances_[slot] = instance;
@@ -190,7 +220,7 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         }
     }
     next.key = key;
-    next.revisions = revisions;
+    next.canonical = canonical;
     next.active = true;
     if (pending_entries_.size() <= slot) pending_entries_.resize(std::size_t(slot) + 1);
     pending_entries_[slot] = next;
@@ -202,6 +232,13 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
 
 void PersistentGpuSceneSlots::EndFrame()
 {
+    changes_.destroyed = 0;
+    if (!reset_scene_)
+        for (const auto &entry : entries_)
+            if (entry.active && !pending_slots_.contains(entry.key)) ++changes_.destroyed;
+    pending_content_revision_ = content_revision_;
+    if (content_changed_ || changes_.destroyed)
+        if (++pending_content_revision_ == 0) ++pending_content_revision_;
     // Destruction and free-slot reuse are published only after submission.
 }
 
@@ -234,6 +271,7 @@ void PersistentGpuSceneSlots::Commit()
         entries_[slot] = pending_entries_[slot];
     }
     for (const auto &[key, slot] : pending_slots_) slots_.insert_or_assign(key, slot);
+    content_revision_ = pending_content_revision_;
     pending_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
@@ -293,6 +331,9 @@ void PersistentGpuSceneSlots::Clear() noexcept
     dirty_ranges_.clear();
     active_count_ = 0;
     anonymous_count_ = 0;
+    changes_ = {};
+    content_revision_ = pending_content_revision_ = 0;
+    content_changed_ = false;
     dirty_ranges_valid_ = true;
 }
 

@@ -1,9 +1,12 @@
 #include "render_graph.hpp"
 #include "render_graph_membership.hpp"
+#include "renderer_post_subgraphs.hpp"
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
+#include <array>
+#include <memory>
 #include <vector>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
@@ -19,6 +22,22 @@ __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\";
 }
 
 using Microsoft::WRL::ComPtr;
+
+namespace hs
+{
+struct RenderGraphTestAccess
+{
+    static std::uint64_t Compilations(const RenderGraphBuilder &graph)
+    {
+        return graph.PlanCompilationCount();
+    }
+    static std::uint64_t Reuses(const RenderGraphBuilder &graph)
+    {
+        return graph.PlanReuseCount();
+    }
+};
+}
+
 namespace
 {
 void Check(bool condition, const char *message) { if (!condition) throw std::runtime_error(message); }
@@ -224,6 +243,74 @@ void BufferRanges(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *
     f.Submit();
 }
 
+void IdentityFxaaPostSubgraph()
+{
+    hs::RenderGraphBuilder graph;
+    const hs::TextureDesc description{16, 16, DXGI_FORMAT_R16G16B16A16_FLOAT, 0};
+    const auto texture = [&](const char *name) { return graph.CreateTexture(description, name); };
+    hs::PostSubgraphInputs inputs{};
+    inputs.bloom = false;
+    inputs.fxaa_identity = true;
+    inputs.scene_hdr = graph.Version(texture("identity scene"));
+    inputs.composite_hdr = graph.Version(texture("identity composite"));
+    inputs.depth = graph.Version(texture("identity depth"));
+    inputs.normal = graph.Version(texture("identity normal"));
+    inputs.metadata = graph.Version(texture("identity metadata"));
+    inputs.motion = graph.Version(texture("identity motion"));
+    inputs.surface_history = graph.Version(texture("identity surface history"));
+    inputs.temporal_history = graph.Version(texture("identity temporal history"));
+    inputs.ui = graph.Version(texture("identity UI"));
+
+    hs::PostSubgraphTargets targets{};
+    targets.temporal = graph.Version(texture("identity temporal output"));
+    targets.bloom_half = graph.Version(texture("identity bloom half"));
+    targets.bloom_quarter = graph.Version(texture("identity bloom quarter"));
+    targets.bloom_half_combined = graph.Version(texture("identity bloom combined"));
+    targets.post_a = graph.Version(texture("identity post A"));
+    targets.post_b = graph.Version(texture("identity post B"));
+    targets.back_buffer = graph.Version(texture("identity back buffer"));
+    targets.display_linear = graph.Version(texture("identity display linear"));
+    const auto pre_bloom_output = graph.Version(texture("identity pre bloom output"));
+    const auto pre_tone_output = graph.Version(texture("identity pre tone output"));
+    const auto devtools_output = graph.Version(texture("identity devtools output"));
+    const auto same_version = [](hs::ResourceVersion left, hs::ResourceVersion right) {
+        return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
+            left.ordinal == right.ordinal;
+    };
+    bool pre_bloom_called{}, pre_tone_map_called{}, devtools_called{};
+    inputs.pre_bloom = [&](hs::RenderGraphBuilder &, hs::ResourceVersion source, hs::ResourceVersion &output) {
+        pre_bloom_called = same_version(source, hs::ResourceVersion{targets.temporal.resource, targets.temporal.ordinal + 1});
+        output = pre_bloom_output;
+        return hs::Result::Success();
+    };
+    inputs.pre_tone_map = [&](hs::RenderGraphBuilder &, hs::ResourceVersion source, hs::ResourceVersion &output) {
+        pre_tone_map_called = same_version(source, pre_bloom_output);
+        output = pre_tone_output;
+        return hs::Result::Success();
+    };
+    inputs.devtools_ui = [&](hs::RenderGraphBuilder &, hs::ResourceVersion destination, hs::ResourceVersion &output) {
+        devtools_called = same_version(destination, targets.post_a);
+        output = devtools_output;
+        return hs::Result::Success();
+    };
+
+    hs::PostPassCallbacks callbacks;
+    callbacks[0] = [](hs::RenderPassContext &) {};
+    callbacks[5] = [](hs::RenderPassContext &) {};
+    callbacks[8] = [](hs::RenderPassContext &) {};
+    hs::PostSubgraphOutputs outputs;
+    Check(hs::BuildPostSubgraphs(graph, inputs, targets, std::move(callbacks), outputs).Succeeded(),
+          "build identity FXAA subgraph without the omitted copy callback");
+    Check(graph.PassCount() == 3 && graph.DeclaredPassId(0) == 9 &&
+              graph.DeclaredPassId(1) == 14 && graph.DeclaredPassId(2) == 17,
+          "identity FXAA build omits pass 16 while retaining UI order");
+    Check(pre_bloom_called && pre_tone_map_called && devtools_called &&
+              same_version(outputs.display_linear,
+                  hs::ResourceVersion{targets.display_linear.resource, targets.display_linear.ordinal + 1}) &&
+              same_version(outputs.post_a, devtools_output),
+          "identity FXAA build preserves current HDR and DevTools hook inputs/outputs");
+}
+
 void TextureRanges(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
 {
     D3D12_HEAP_PROPERTIES heap{}; heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -392,6 +479,7 @@ void ImportedInitialAccess(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsComma
 
 void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
 {
+    IdentityFxaaPostSubgraph();
     ImportedInitialAccess(f, mode, enhanced);
     BufferRanges(f, mode, enhanced);
     TextureRanges(f, mode, enhanced);
@@ -427,6 +515,96 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     Check(graph.Execute(f.commands.Get(),enhanced,mode).Succeeded()&&called,"execute valid graph"); f.Submit();
     Check(graph.FinalAccess(texture)==hs::Access::ComputeRead,"compute final state");
     first.ResetClaims(); graph.Reset();
+    std::weak_ptr<int> reset_callback_owner;
+    {
+        auto callback_owner = std::make_shared<int>(1);
+        reset_callback_owner = callback_owner;
+        std::array<hs::TextureHandle, 8> reset_textures{};
+        std::array<hs::ResourceVersion, 8> reset_versions{};
+        for (auto &resource : reset_textures) resource = graph.CreateTexture(desc, "reset declaration texture");
+        auto reset_writer = graph.AddPass(10, "reset declaration writer", hs::QueueHint::Direct);
+        for (std::size_t index = 0; index < reset_textures.size(); ++index)
+            reset_versions[index] = reset_writer.Write(graph.Version(reset_textures[index]), hs::Access::UnorderedWrite);
+        reset_writer.SetExecute([owner = callback_owner](auto &) { (void)owner; });
+        auto reset_reader = graph.AddPass(11, "reset declaration reader", hs::QueueHint::Direct);
+        for (const auto version : reset_versions) reset_reader.Read(version, hs::Access::ComputeRead);
+        reset_reader.SetExecute([](auto &) {});
+        auto reset_empty = graph.AddPass(12, "reset declaration empty pass", hs::QueueHint::Direct);
+        reset_empty.SetExecute([](auto &) {});
+        Check(graph.PassCount() == 3 && graph.Prepare(first).Succeeded(),
+              "prepare many per-pass resource uses before reset");
+        first.ResetClaims();
+        callback_owner.reset();
+        graph.Reset();
+        Check(reset_callback_owner.expired(), "reset destroys callbacks while retaining use capacity only");
+    }
+    auto reset_buffer = graph.CreateBuffer({1024, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "reset declaration buffer");
+    auto reset_buffer_writer = graph.AddPass(20, "reset declaration buffer writer", hs::QueueHint::Direct);
+    const auto reset_buffer_version = reset_buffer_writer.Write(graph.Version(reset_buffer), hs::Access::UnorderedWrite);
+    reset_buffer_writer.SetExecute([](auto &) {});
+    auto reset_buffer_reader = graph.AddPass(21, "reset declaration buffer reader", hs::QueueHint::Direct);
+    reset_buffer_reader.Read(reset_buffer_version, hs::Access::UnorderedRead);
+    reset_buffer_reader.SetExecute([](auto &) {});
+    Check(graph.PassCount() == 2 && graph.Prepare(first).Succeeded(),
+          "reset clears prior uses when declaration count shrinks");
+    first.ResetClaims();
+    graph.Reset();
+
+    // Four independently optional declaration shapes must survive the bounded
+    // exact-plan rotation. The second cycle supplies new imports and callbacks.
+    std::array<ComPtr<ID3D12Resource>, 8> plan_imports{};
+    D3D12_RESOURCE_DESC plan_buffer_desc{};
+    plan_buffer_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    plan_buffer_desc.Width = 1024;
+    plan_buffer_desc.Height = 1;
+    plan_buffer_desc.DepthOrArraySize = plan_buffer_desc.MipLevels = 1;
+    plan_buffer_desc.SampleDesc.Count = 1;
+    plan_buffer_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    D3D12_HEAP_PROPERTIES plan_heap{};
+    plan_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    for (auto &import_resource : plan_imports)
+        Hr(f.device->CreateCommittedResource(&plan_heap, D3D12_HEAP_FLAG_NONE, &plan_buffer_desc,
+            D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&import_resource)), "plan-cache import");
+    hs::RenderGraphBuilder plan_graph;
+    const auto plan_compilations_before = hs::RenderGraphTestAccess::Compilations(plan_graph);
+    const auto plan_reuses_before = hs::RenderGraphTestAccess::Reuses(plan_graph);
+    std::uint32_t fresh_callback_calls{};
+    for (std::uint32_t cycle = 0; cycle < 2; ++cycle)
+    {
+        for (std::uint32_t shape = 1; shape <= 4; ++shape)
+        {
+            if (shape != 1 || cycle != 0)
+            {
+                first.ResetClaims();
+                plan_graph.Reset();
+            }
+            std::array<hs::BufferHandle, 4> handles{};
+            const auto import_base = cycle * 4;
+            for (std::uint32_t index = 0; index < shape; ++index)
+                handles[index] = plan_graph.ImportBuffer(
+                    {plan_imports[import_base + index].Get()}, hs::Access::Common, "rotating plan import");
+            auto pass = plan_graph.AddPass(0, "rotating cached declaration", hs::QueueHint::Direct);
+            for (std::uint32_t index = 0; index < shape; ++index)
+                pass.Read(plan_graph.Version(handles[index]), hs::Access::CopySource);
+            pass.SetExecute([&, handles, shape, import_base](hs::RenderPassContext &context) {
+                ++fresh_callback_calls;
+                for (std::uint32_t index = 0; index < shape; ++index)
+                    Check(context.Resolve(handles[index]) == plan_imports[import_base + index].Get(),
+                          "cached plan resolves current frame imports");
+            });
+            Check(plan_graph.Prepare(first).Succeeded(), "prepare rotating exact plan shape");
+            Check(plan_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
+                  "execute rotating exact plan shape");
+            f.Submit();
+        }
+    }
+    Check(hs::RenderGraphTestAccess::Compilations(plan_graph) - plan_compilations_before == 4,
+          "four declaration shapes compile once");
+    Check(hs::RenderGraphTestAccess::Reuses(plan_graph) - plan_reuses_before == 4,
+          "second cycle reuses all four retained exact plans");
+    Check(fresh_callback_calls == 8, "cached plans invoke each current callback");
+    first.ResetClaims();
+
     auto dependency=graph.CreateBuffer({1024,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS},"uav dependency");
     int dependency_callbacks{};
     auto producer=graph.AddPass(0,"uav producer",hs::QueueHint::Direct);

@@ -207,7 +207,7 @@ WorkGroup MakeParent(const Partition &partition, const std::vector<WorkGroup> &g
     std::span<const std::array<float, 3>> positions,
     std::span<const std::array<float, kAttributeCount>> attributes,
     std::span<const unsigned char> locks, std::span<const std::uint16_t> material_mapping,
-    float reduction_ratio)
+    float reduction_ratio, GeometryErrorChecks error_checks)
 {
     WorkGroup parent;
     parent.children = partition.children;
@@ -260,7 +260,7 @@ WorkGroup MakeParent(const Partition &partition, const std::vector<WorkGroup> &g
     const auto coarse = Expand(vertices, parent.representation);
     // Measure against original occurrences, not only the previous simplified
     // level. This avoids accumulating an unqualified simplifier estimate.
-    const auto measured = MeasureGeometryError(patch, coarse, material_mapping);
+    const auto measured = MeasureGeometryError(patch, coarse, material_mapping, 4096, error_checks);
     Require(std::isfinite(measured.lower) && measured.lower >= 0.0 && measured.upper >= measured.lower,
             "invalid qualified geometry error");
     parent.geometric_error = std::max(parent.geometric_error, UpperFloat(measured.upper));
@@ -476,7 +476,7 @@ CookedGeometryHierarchy CookGeometryHierarchy(std::span<const rd::ExpandedVertex
                     continue;
                 }
                 auto parent = MakeParent(partition, groups, geometry.vertices, expanded, positions,
-                    attributes, locks, material_mapping, options.reduction_ratio);
+                    attributes, locks, material_mapping, options.reduction_ratio, options.error_checks);
                 const auto id = Count(groups.size());
                 for (const auto child : parent.children)
                 {

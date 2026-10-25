@@ -204,7 +204,7 @@ void TestSemanticReadModel()
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 1, 0, {3.0f, 4.0f});
     (void)Tick(simulation);
     hs::GameReadModelStorage storage;
-    simulation.WriteReadModel(storage);
+    simulation.CopyReadModelForDevelopment(storage);
     const auto model = storage.View();
     Check(model.tick == simulation.GetObservation().tick, "read model tick");
     Check(model.checksum == simulation.ComputeChecksum(), "read model checksum");
@@ -220,6 +220,29 @@ void TestSemanticReadModel()
 
 void RunGameplayDeterminismTests()
 {
+    {
+        hs::GameSimulation individual, batched;
+        const auto rules = QuietGameData();
+        Check(individual.Initialize({81}, rules).Succeeded() &&
+                  batched.Initialize({81}, rules).Succeeded(), "UI batch initialize");
+        hs::InputFrame input;
+        const std::array actions{
+            hs::UiAction{hs::UiActionKind::ReturnToMainMenu},
+            hs::UiAction{hs::UiActionKind::StartSession},
+            hs::UiAction{hs::UiActionKind::SwapLoadoutSlots, 0, 1},
+            hs::UiAction{hs::UiActionKind::Quit}};
+        for (const auto &action : actions)
+        {
+            individual.ApplyUiAction(action);
+        }
+        input.ui_actions = actions;
+        const auto expected = Tick(individual);
+        const auto actual = batched.TickFixed(input, std::chrono::nanoseconds{16'666'667});
+        Check(actual.checksum == expected.checksum && actual.phase == expected.phase &&
+                  actual.tick == expected.tick, "batched UI preserves ordered final observation");
+        Check(individual.Shutdown().Succeeded() && batched.Shutdown().Succeeded(),
+              "UI batch shutdown");
+    }
     TestPauseStopsTicks();
     TestStationaryCombatSimulationContract();
     TestStationaryProgressionSimulationContract();

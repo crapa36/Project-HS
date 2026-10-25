@@ -79,7 +79,7 @@ void TestTenMinuteBossApproachesAttackRange()
     Check(simulation.GetObservation().balance.enemy_attack_attempts[4] > 0,
           "ten minute boss begins ranged attacks from the expanded 18 meter range");
     hs::GameReadModelStorage boss_model;
-    simulation.WriteReadModel(boss_model);
+    simulation.CopyReadModelForDevelopment(boss_model);
     const auto shockwave = std::ranges::find_if(
         boss_model.View().boss_actions, [](const hs::BossActionView &action) {
             return action.kind == hs::BossActionViewKind::Shockwave;
@@ -115,7 +115,7 @@ void TestTenMinuteBossApproachesAttackRange()
             }
         }
         (void)Tick(volley_simulation,approach);
-        volley_simulation.WriteReadModel(volley_model);
+        volley_simulation.CopyReadModelForDevelopment(volley_model);
         if (!checked_area)
         {
             const auto area=std::ranges::find_if(volley_model.View().boss_actions,[](const auto &action){return action.kind==hs::BossActionViewKind::Area;});
@@ -484,7 +484,7 @@ void TestTenMinuteBossGroundAreasStaySeparated()
     for (std::uint32_t tick = 0; tick < 600 && !damaged_on_intersection; ++tick)
     {
         (void)Tick(ring_simulation);
-        ring_simulation.WriteReadModel(ring_model);
+        ring_simulation.CopyReadModelForDevelopment(ring_model);
         const auto area = std::ranges::find_if(
             ring_model.View().areas, [](const hs::AreaView &value) {
                 return value.kind == hs::AreaViewKind::EnemyDamage &&
@@ -549,7 +549,7 @@ void TestRangedWarningAndExplosiveArea()
                          instance.color_rgba == 0xA03030FFu && instance.scale.z >= 18.0f;
               }), "ranged enemy renders a red pre-attack range line");
     hs::GameReadModelStorage ranged_model;
-    warning_simulation.WriteReadModel(ranged_model);
+    warning_simulation.CopyReadModelForDevelopment(ranged_model);
     Check(ranged_model.View().enemies.size() == 1 &&
           ranged_model.View().enemies[0].warning_sequence != 0 &&
           ranged_model.View().enemies[0].warning_half_width == 0.37f,

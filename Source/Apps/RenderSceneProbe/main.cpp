@@ -13,6 +13,7 @@
 #include <map>
 #include <ranges>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_set>
@@ -118,55 +119,67 @@ std::uint64_t Revision(rd::SceneProbeRevisionDomain domain,const Identities &ide
     return rd::DeriveSceneProbeRevision(domain,inputs);
 }
 
-// Action results identify the real producer namespaces for dependency closure
-// products (including texture roles, static geometry pages and shader groups).
-// Selected upstream results are independently verified by ReadActionResult;
+// The native DAG supplies the eligible Action results, including transitive
+// texture roles, static geometry pages and shader groups. Retired/unrelated
+// results elsewhere under Actions are not inputs to this producer.
+// Selected upstream products are independently verified by their Action snapshot;
 // this index never supplies trusted digests or paths by itself.
 class Products
 {
   public:
-    explicit Products(const fs::path &buildRoot):root_(buildRoot)
+    Products(const fs::path &buildRoot,std::string_view resultList):root_(buildRoot)
     {
-        const auto actions=buildRoot/"Actions"; ap::RequireDirectory(actions);
-        for(const auto &entry:fs::recursive_directory_iterator(actions))
+        const auto actions=(buildRoot/"Actions").lexically_normal(); ap::RequireDirectory(actions);
+        std::istringstream lines{std::string(resultList)};
+        std::set<std::string> selected;
+        for(std::string line;std::getline(lines,line);)
         {
-            if(!entry.is_regular_file() || entry.path().filename()!="result.json") continue;
-            const auto bytes=ap::ReadBytes(entry.path()); const auto result=ap::Json::parse(bytes,nullptr,false);
-            if(result.is_discarded() || !result.is_object() || !result.contains("namespace_path") ||
-                !result.at("namespace_path").is_string() || !result.contains("products") || !result.at("products").is_array()) continue;
-            const auto namespacePath=result.at("namespace_path").get<std::string>();
-            if(entry.path().parent_path().lexically_relative(actions).generic_string()!=namespacePath) continue;
-            for(const auto &product:result.at("products"))
-                if(product.is_object() && product.contains("logical_id") && product.at("logical_id").is_string())
-                {
-                    const auto id=product.at("logical_id").get<std::string>();
-                    const auto [found,inserted]=namespaces_.emplace(id,namespacePath);
-                    Require(inserted || found->second==namespacePath,"upstream logical product has multiple producer namespaces");
-                }
+            if(!line.empty() && line.back()=='\r') line.pop_back();
+            if(line.empty()) continue;
+            const auto path=fs::path(std::u8string(reinterpret_cast<const char8_t *>(line.data()),line.size())).lexically_normal();
+            Require(path.is_absolute() && path.filename()=="result.json","native DAG input must be an absolute ActionResult path");
+            const auto relative=path.parent_path().lexically_relative(actions);
+            Require(!relative.empty() && !relative.is_absolute() &&
+                std::ranges::none_of(relative,[](const fs::path &part){return part==".." || part==".";}),
+                "native DAG ActionResult escapes the build Actions directory");
+            const auto expected=relative.generic_string();
+            if(!selected.insert(expected).second) continue;
+            Require(selected.size()<=4096,"native DAG contains too many Action results");
+            // The snapshot checks that namespace_path matches this native-DAG
+            // path, owns its parsed metadata and verifies each selected payload.
+            snapshots_.try_emplace(expected,root_,expected);
         }
+        Require(!selected.empty(),"native DAG result list is empty");
     }
     void Read(std::string_view id,std::string_view expectedNamespace,Identities &closure)
     {
         const std::string key(id);
+        auto snapshot=snapshots_.end();
+        for(auto candidate=snapshots_.begin();candidate!=snapshots_.end();++candidate)
+            if(candidate->second.HasProduct(key))
+            {
+                Require(snapshot==snapshots_.end(),"upstream logical product has multiple producer namespaces: "+key);
+                snapshot=candidate;
+            }
+        Require(snapshot!=snapshots_.end(),"required upstream product has no selected ActionResult: "+key);
+        Require(expectedNamespace.empty() || snapshot->first==expectedNamespace,"upstream product namespace disagrees with producer contract");
         if(const auto existing=verified_.find(key);existing!=verified_.end())
         { AddClosure(key,closure); return; }
-        const auto found=namespaces_.find(key);
-        Require(found!=namespaces_.end(),"required upstream product has no current ActionResult: "+key);
-        Require(expectedNamespace.empty() || found->second==expectedNamespace,"upstream product namespace disagrees with producer contract");
         Require(visiting_.insert(key).second,"cycle in actual upstream product dependency closure");
         ap::UpstreamProduct upstream; fs::path path;
-        const auto action=ap::ReadActionResult(root_,found->second,key,upstream,path);
+        if(key=="render/lighting/default_probe.rpkg")
+        {
+            const auto bytes=snapshot->second.ReadProductBytes(key,upstream);
+            (void)rd::ReadLightingProbePackage(Bytes(bytes),hs::MakeAssetId(key));
+        }
+        else snapshot->second.ReadProduct(key,upstream,path);
+        const auto &product=snapshot->second.ProductMetadata(key);
         std::vector<std::string> dependencies;
-        for(const auto &product:action.at("products")) if(product.at("logical_id")==key && product.contains("dependencies"))
+        if(product.contains("dependencies"))
         {
             Require(product.at("dependencies").is_array(),"upstream product dependencies must be an array");
             for(const auto &dependency:product.at("dependencies"))
             { Require(dependency.is_string(),"upstream product dependency must be a logical ID"); dependencies.push_back(dependency.get<std::string>()); }
-        }
-        if(key=="render/lighting/default_probe.rpkg")
-        {
-            const auto bytes=ap::ReadBytes(path);
-            (void)rd::ReadLightingProbePackage(Bytes(bytes),hs::MakeAssetId(key));
         }
         for(const auto &dependency:dependencies) Read(dependency,{},closure);
         visiting_.erase(key); verified_.emplace(key,Entry{upstream,std::move(dependencies)});
@@ -183,24 +196,26 @@ class Products
         for(const auto &dependency:entry.dependencies) AddClosure(dependency,closure);
     }
     fs::path root_;
-    std::map<std::string,std::string> namespaces_;
+    std::map<std::string,ap::ActionResultSnapshot> snapshots_;
     std::map<std::string,Entry> verified_;
     std::set<std::string> visiting_;
 };
 
-void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path &executable)
+void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path &resultList)
 {
     Require(sourceRoot.is_absolute() && buildRoot.is_absolute(),"source/build roots must be absolute");
     ap::RequireDirectory(sourceRoot); ap::MakeDirectory(buildRoot);
     ap::ActionSpec spec; spec.action_id="render.lighting.local-probes";
     spec.recipe_id="project-hs.render.scene-probe"; spec.recipe_version=1; spec.namespace_path=kNamespace;
-    spec.inputs.push_back(ap::HashInput("tool/hs_render_scene_probe",executable));
     const auto sourcePath=sourceRoot/"ContentSource/Lighting/local_probes.json";
     const auto sourceBytes=ap::ReadBytes(sourcePath);
     spec.inputs.push_back({"ContentSource/Lighting/local_probes.json",sourcePath,ap::Sha256Bytes(Bytes(sourceBytes))});
     auto source=ParseSource(sourceBytes);
     spec.inputs.push_back(ap::HashInput("Schemas/scene_probe.schema.json",sourceRoot/"Schemas/scene_probe.schema.json"));
-    Products products(buildRoot); Identities environment,materials,lights,layout;
+    Require(resultList.is_absolute(),"native DAG result-list path must be absolute");
+    const auto resultBytes=ap::ReadBytes(resultList);
+    spec.inputs.push_back({"native-dag/scene-probe-results",resultList,ap::Sha256Bytes(Bytes(resultBytes))});
+    Products products(buildRoot,resultBytes); Identities environment,materials,lights,layout;
     std::set<std::string> directDependencies;
     auto read=[&](std::string id,std::string nameSpace,Identities &identity) {
         products.Read(id,nameSpace,identity); directDependencies.insert(std::move(id));
@@ -271,7 +286,7 @@ int wmain(int argc,wchar_t **argv)
 int main(int argc,char **argv)
 #endif
 {
-    fs::path sourceRoot,buildRoot; bool produce=false;
+    fs::path sourceRoot,buildRoot,resultList; bool produce=false;
     try
     {
         for(int i=1;i<argc;++i)
@@ -280,16 +295,18 @@ int main(int argc,char **argv)
             if(arg=="--produce" && !produce) produce=true;
             else if(arg=="--source-root" && sourceRoot.empty() && ++i<argc) sourceRoot=argv[i];
             else if(arg=="--build-root" && buildRoot.empty() && ++i<argc) buildRoot=argv[i];
-            else throw std::runtime_error("usage: hs_render_scene_probe [--produce] --source-root <absolute> --build-root <absolute>");
+            else if(arg=="--result-list" && resultList.empty() && ++i<argc) resultList=argv[i];
+            else throw std::runtime_error("usage: hs_render_scene_probe [--produce] --source-root <absolute> --build-root <absolute> --result-list <absolute>");
         }
-        Require(!sourceRoot.empty() && !buildRoot.empty(),"usage: hs_render_scene_probe [--produce] --source-root <absolute> --build-root <absolute>");
-        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal(),fs::absolute(fs::path(argv[0])).lexically_normal()); return 0;
+        Require(!sourceRoot.empty() && !buildRoot.empty() && !resultList.empty(),"usage: hs_render_scene_probe [--produce] --source-root <absolute> --build-root <absolute> --result-list <absolute>");
+        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal(),resultList.lexically_normal()); return 0;
     }
     catch(const std::exception &error)
     {
         ap::ReportFailure("hs_render_scene_probe", error.what(),
                           {{"action_id", "render.lighting.local-probes"}, {"produce", produce},
-                           {"source_root", ap::DiagnosticPath(sourceRoot)}, {"build_root", ap::DiagnosticPath(buildRoot)}});
+                           {"source_root", ap::DiagnosticPath(sourceRoot)}, {"build_root", ap::DiagnosticPath(buildRoot)},
+                           {"result_list", ap::DiagnosticPath(resultList)}});
         return 1;
     }
 }

@@ -418,6 +418,12 @@ Result VolumetricSystem::Register(RenderGraphBuilder &graph,const VolumetricInpu
     for(UINT i=0;i<5;++i)if(shadows?!ResourceRead(graph,shadowVersions[i],in.shadows.resources[i]):
         (in.shadows.resources[i]!=nullptr||bool(shadowVersions[i].resource)))
         return Fail(ErrorCode::InvalidArgument,"Volumetric ShadowData must contain all five current resources or be absent.");
+    if(in.shadows.resources[5]?!ResourceRead(graph,in.shadows.root_static,in.shadows.resources[5]):
+        bool(in.shadows.root_static.resource))
+        return Fail(ErrorCode::InvalidArgument,"Volumetric fixed-root static resource/version mismatch.");
+    if(in.shadows.resources[6]?!ResourceRead(graph,in.shadows.root_dynamic,in.shadows.resources[6]):
+        bool(in.shadows.root_dynamic.resource))
+        return Fail(ErrorCode::InvalidArgument,"Volumetric fixed-root dynamic resource/version mismatch.");
     const ResourceVersion localShadowVersions[]{in.local_shadows.metadata,in.local_shadows.records,
         in.local_shadows.static_bank,in.local_shadows.dynamic_bank,in.local_shadows.draw_records};
     const bool localShadows=in.local_shadows.resources[0]!=nullptr;

@@ -14,8 +14,10 @@ except ImportError:
 SIDECAR_FIELDS = {"cue_id", "generator", "model", "prompt", "negative_prompt", "source_audio", "init_noise_level", "seed", "duration", "created_at"}
 
 def _duration(value: Any) -> float:
-    if isinstance(value, (int, float)): return float(value)
-    return float(str(value).strip().lower().removesuffix("s").split("-", 1)[0])
+    result = float(value) if isinstance(value, (int, float)) else float(str(value).strip().lower().removesuffix("s").split("-", 1)[0])
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError("duration must be finite and greater than zero")
+    return result
 
 def _entries(path: Path) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -134,7 +136,12 @@ def _finite_wav(path: Path) -> None:
 def _stable(model: Any, cue: dict[str, Any], seed: int, raw: Path, loop_crossfade: bool = False) -> None:
     try: import tools.audio.render as render
     except ImportError: import render
-    sample_rate = int(getattr(model, "sample_rate", 0) or getattr(getattr(model, "model", None), "sample_rate", 44100))
+    sample_rate = getattr(model, "sample_rate", None)
+    if sample_rate is None:
+        sample_rate = getattr(getattr(model, "model", None), "sample_rate", 44100)
+    if not math.isfinite(sample_rate) or sample_rate <= 0 or int(sample_rate) != sample_rate:
+        raise ValueError("sample rate must be a finite positive integer")
+    sample_rate = int(sample_rate)
     target = _duration(cue["duration"]); overlap = .25 if loop_crossfade else 0.0; request = max(2.0, target + overlap) if target < 2 else target + overlap
     audio = model.generate(prompt=cue.get("prompt", ""), negative_prompt=cue.get("negative_prompt"), duration=request, seed=seed)
     audio = _crop(audio, sample_rate, target + overlap)
@@ -158,6 +165,12 @@ def run(plan: Path, output_root: Path, *, generator_filter: str | None = None, c
     entries = [cue for cue in _entries(plan) if (not generator_filter or _generator(cue) == generator_filter) and (not cue_ids or cue.get("cue_id") in cue_ids)]; output_root = output_root.resolve(); output_root.mkdir(parents=True, exist_ok=True); models: dict[str, Any] = {}; results: list[Path] = []
     for cue in entries:
         if not cue.get("cue_id"): raise ValueError("cue_id is required")
+        _duration(cue["duration"])
+        if not math.isfinite(float(cue.get("gain_db", 0.0))):
+            raise ValueError("gain_db must be finite")
+        cutoff = cue.get("lowpass_hz")
+        if cutoff is not None and (not math.isfinite(cutoff) or not 0 < cutoff < _finalize.TARGET_RATE / 2):
+            raise ValueError("lowpass_hz must be finite and between zero and Nyquist")
         generator = _generator(cue); folder = _safe(output_root, str(cue["cue_id"])); _ensure_plan_contract(folder, cue, generator); count, base = int(cue.get("count", 1)), int(cue.get("seed", 0)); hashes: set[str] = set()
         if generator not in models and generator != "micro-dsp":
             if generator.startswith("stable"):
@@ -181,7 +194,11 @@ def run(plan: Path, output_root: Path, *, generator_filter: str | None = None, c
                     elif generator == "chatterbox":
                         try: from . import vocal
                         except ImportError: import vocal
-                        vocal._seed(actual_seed); tag = _event_tag(cue.get("prompt")); audio = models[generator].generate(tag); rate = int(getattr(models[generator], "sr", 24000)); vocal._write_raw(raw, vocal._extract_event(vocal._audio_values(audio), rate), rate)
+                        rate = getattr(models[generator], "sr", 24000)
+                        if not math.isfinite(rate) or rate <= 0 or int(rate) != rate:
+                            raise ValueError("sample rate must be a finite positive integer")
+                        rate = int(rate)
+                        vocal._seed(actual_seed); tag = _event_tag(cue.get("prompt")); audio = models[generator].generate(tag); vocal._write_raw(raw, vocal._extract_event(vocal._audio_values(audio), rate), rate)
                     else: _micro(cue, actual_seed, raw)
                     _finite_wav(raw); _finalize.finalize(raw, final, kind=cue.get("kind", "spatial-sfx"), loop=bool(cue.get("loop")), gain_db=float(cue.get("gain_db", 0.0)), lowpass_hz=cue.get("lowpass_hz")); actual_duration, digest = _wav_contract(final, cue.get("kind", "spatial-sfx"), bool(cue.get("loop")), _duration(cue["duration"]) * .5)
                     if digest in hashes: raise ValueError(f"duplicate variation PCM: {final}")

@@ -5,8 +5,11 @@
 #include "../Content/arena_layout_payload.hpp"
 #include "../Content/content_cooker.hpp"
 #include "../Content/content_paths.hpp"
+#include "../Content/release_presentation_codegen.hpp"
+#include "../Content/release_simulation_codegen.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/presentation/presentation_catalog_io.hpp>
 
 #include <array>
 #include <algorithm>
@@ -51,11 +54,10 @@ std::span<const std::byte> Bytes(const T &value)
     return std::as_bytes(std::span(&value, 1));
 }
 
-std::uint64_t ParseLegacyHash(const fs::path &path)
+std::uint64_t ParseLegacyHash(std::string_view text)
 {
-    auto text = ap::ReadBytes(path);
     if (text.ends_with('\n'))
-        text.pop_back();
+        text.remove_suffix(1);
     std::uint64_t value = 0;
     const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     Require(error == std::errc{} && end == text.data() + text.size(),
@@ -107,13 +109,14 @@ void Produce(std::string_view mode, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "game-data." + std::string(mode);
     spec.recipe_id = "project-hs.game-data." + std::string(mode);
-    spec.recipe_version = mode == "simulation-payload" ? 3 :
-                          mode == "finalize-simulation" ? 2 : 1;
+    spec.recipe_version = mode == "simulation-payload" ? 4 :
+                          (mode == "finalize-simulation" || mode == "presentation-payload") ? 2 : 1;
     spec.namespace_path = "game-data/" + std::string(mode);
     std::string filename;
     std::string logical_id;
     std::string bytes;
     std::string arena_layout_bytes;
+    std::string generated_cpp;
 
     if (mode == "simulation-payload" || mode == "presentation-payload")
     {
@@ -137,6 +140,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
         if (mode == "simulation-payload")
         {
             const auto rules = hs::content::BuildGameData(sources).simulation_rules;
+            generated_cpp = hs::content::EmitReleaseSimulationCpp(rules);
             const auto payload = hs::CanonicalSimulationRulesBytes(rules);
             Require(payload.size() == sizeof(rules),
                     "canonical simulation payload size differs from cooked ABI");
@@ -150,6 +154,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
         else
         {
             const auto presentation = hs::content::BuildPresentationCatalog(sources);
+            generated_cpp = hs::content::EmitReleasePresentationCpp(presentation);
             const auto payload = Bytes(presentation);
             bytes.assign(reinterpret_cast<const char *>(payload.data()), payload.size());
             filename = "presentation_catalog.payload";
@@ -186,25 +191,20 @@ void Produce(std::string_view mode, const fs::path &source_root,
         const auto simulation = mode == "finalize-simulation";
         ap::UpstreamProduct payload_dependency;
         ap::UpstreamProduct hash_dependency;
-        fs::path payload_path;
-        fs::path hash_path;
         const auto payload_mode = simulation ? "simulation-payload" : "presentation-payload";
         const auto hash_mode = simulation ? "gameplay-identity" : "content-identity";
-        ap::ReadActionResult(build_root, "game-data/" + std::string(payload_mode),
-                             "game-data/" + std::string(payload_mode),
-                             payload_dependency, payload_path);
-        ap::ReadActionResult(build_root, "game-data/" + std::string(hash_mode),
-                             "game-data/" + std::string(hash_mode),
-                             hash_dependency, hash_path);
+        const ap::ActionResultSnapshot payload_result(build_root, "game-data/" + std::string(payload_mode));
+        const ap::ActionResultSnapshot hash_result(build_root, "game-data/" + std::string(hash_mode));
+        const auto payload = payload_result.ReadProductBytes("game-data/" + std::string(payload_mode), payload_dependency);
+        const auto hash_bytes = hash_result.ReadProductBytes("game-data/" + std::string(hash_mode), hash_dependency);
         spec.upstream = {payload_dependency, hash_dependency};
-        const auto payload = ap::ReadBytes(payload_path);
         Require(payload.size() == (simulation ? sizeof(hs::SimulationRules)
                                               : sizeof(hs::PresentationCatalog)),
                 "semantic payload has unexpected ABI size");
         bytes = BuildCooked(payload,
                             simulation ? hs::SimulationRulesSchemaHash()
                                        : hs::PresentationCatalogSchemaHash(),
-                            ParseLegacyHash(hash_path));
+                            ParseLegacyHash(hash_bytes));
         filename = simulation ? "simulation_rules.hsbin" : "presentation_catalog.hsbin";
         logical_id = simulation ? "game-data/simulation-rules" :
                                   "game-data/presentation-catalog";
@@ -224,6 +224,15 @@ void Produce(std::string_view mode, const fs::path &source_root,
             ap::WriteBytes(arena_path, Bytes(std::string_view(arena_layout_bytes)));
             products.push_back(ap::HashProduct("game-data/arena-layout", "arena_layout.json",
                                                arena_path));
+        }
+        if (!generated_cpp.empty())
+        {
+            const bool simulation = mode == "simulation-payload";
+            const auto cpp_name = simulation ? "simulation_rules.generated.cpp" : "presentation_catalog.generated.cpp";
+            const auto cpp_path = stage / cpp_name;
+            ap::WriteBytes(cpp_path, Bytes(std::string_view(generated_cpp)));
+            products.push_back(ap::HashProduct(simulation ? "game-data/simulation-cpp" : "game-data/presentation-cpp",
+                                               cpp_name, cpp_path));
         }
         ap::Publish(build_root, spec, stage, std::move(products));
     }

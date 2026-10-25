@@ -7,8 +7,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <compare>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <limits>
 #include <map>
@@ -23,6 +26,12 @@ namespace
 {
 namespace rd = render_data;
 constexpr std::size_t kAttributeCount = 18;
+using ProfileClock = std::chrono::steady_clock;
+struct CookProfile
+{
+    bool enabled = std::getenv("HS_HLOD_GEOMETRY_PROFILE") != nullptr;
+    double leaf_ms{}, simplify_ms{}, error_wall_ms{}, pages_ms{};
+};
 void Require(bool condition, const char *reason)
 {
     if (!condition) throw std::runtime_error(std::string("scene HLOD cooker: ") + reason);
@@ -108,9 +117,9 @@ std::array<float, 3> Normalize(std::array<float, 3> vector)
     for (auto &value : vector) value = static_cast<float>(double(value) * inverse);
     return vector;
 }
-std::array<float, 3> TransformPosition(std::array<float, 3> position, const RenderInstance &instance)
+std::array<float, 3> TransformPosition(std::array<float, 3> position, const RenderInstance &instance,
+                                     float sine, float cosine)
 {
-    const auto sine = std::sin(instance.yaw), cosine = std::cos(instance.yaw);
     const std::array scale{instance.scale.x, instance.scale.y, instance.scale.z};
     const std::array translation{instance.position.x, instance.position.y, instance.position.z};
     for (std::size_t lane = 0; lane < 3; ++lane) position[lane] *= scale[lane];
@@ -119,14 +128,13 @@ std::array<float, 3> TransformPosition(std::array<float, 3> position, const Rend
     for (std::size_t lane = 0; lane < 3; ++lane) position[lane] += translation[lane];
     return position;
 }
-rd::ExpandedVertex Bake(rd::ExpandedVertex v, const RenderInstance &instance)
+rd::ExpandedVertex Bake(rd::ExpandedVertex v, const RenderInstance &instance, float sine, float cosine)
 {
-    const auto sine = std::sin(instance.yaw), cosine = std::cos(instance.yaw);
     const auto rotate = [&](std::array<float, 3> p) {
         return std::array{p[0] * cosine + p[2] * sine, p[1], -p[0] * sine + p[2] * cosine};
     };
     const std::array scale{instance.scale.x, instance.scale.y, instance.scale.z};
-    v.position = TransformPosition(v.position, instance);
+    v.position = TransformPosition(v.position, instance, sine, cosine);
     for (std::size_t lane = 0; lane < 3; ++lane) v.normal[lane] /= scale[lane];
     v.normal = Normalize(rotate(v.normal));
     // Tangents transform covariantly; reflection also flips handedness.
@@ -138,6 +146,7 @@ rd::ExpandedVertex Bake(rd::ExpandedVertex v, const RenderInstance &instance)
 }
 rd::GeometryBounds TransformBounds(const rd::GeometryBounds &source, const RenderInstance &instance)
 {
+    const auto sine = std::sin(instance.yaw), cosine = std::cos(instance.yaw);
     std::array<std::array<float, 3>, 8> corners{};
     std::array<double, 3> minimum{std::numeric_limits<double>::infinity(),
                                   std::numeric_limits<double>::infinity(),
@@ -151,7 +160,7 @@ rd::GeometryBounds TransformBounds(const rd::GeometryBounds &source, const Rende
             (mask & 1) ? source.maximum[0] : source.minimum[0],
             (mask & 2) ? source.maximum[1] : source.minimum[1],
             (mask & 4) ? source.maximum[2] : source.minimum[2]};
-        corners[mask] = TransformPosition(corner, instance);
+        corners[mask] = TransformPosition(corner, instance, sine, cosine);
         for (std::size_t lane = 0; lane < 3; ++lane)
         {
             Require(std::isfinite(corners[mask][lane]), "nonfinite transformed source bounds");
@@ -224,17 +233,9 @@ std::vector<rd::ExpandedVertex> Simplify(std::span<const rd::ExpandedVertex> exp
 {
     Require(!expanded.empty() && expanded.size() % 3 == 0 && expanded.size() <= rd::kMaxGeometryIndices,
             "invalid expanded simplification input");
-    const auto encoded = rd::EncodeExpandedVertices(expanded);
-    std::vector<unsigned> remap(expanded.size());
-    const auto unique_count = meshopt_generateVertexRemap(remap.data(), nullptr, expanded.size(),
-        encoded.data(), expanded.size(), rd::kExpandedVertexStride);
-    Require(unique_count > 0, "empty simplification vertex remap");
-    std::vector<std::byte> unique(unique_count * rd::kExpandedVertexStride);
-    meshopt_remapVertexBuffer(unique.data(), encoded.data(), expanded.size(), rd::kExpandedVertexStride,
-                              remap.data());
-    std::vector<unsigned> indices(expanded.size());
-    meshopt_remapIndexBuffer(indices.data(), nullptr, expanded.size(), remap.data());
-    const auto vertices = rd::DecodeExpandedVertices(unique);
+    std::vector<rd::ExpandedVertex> vertices;
+    std::vector<unsigned> indices;
+    IndexVertices(expanded, vertices, indices);
     std::vector<std::array<float, 3>> positions;
     std::vector<std::array<float, kAttributeCount>> attributes;
     positions.reserve(vertices.size()); attributes.reserve(vertices.size());
@@ -271,6 +272,11 @@ void BakeInto(Representation &target, const BakedMember &member)
     const auto &geometry = *source.geometry;
     const auto &record = member.record;
     const bool reflected = double(member.instance.scale.x) * member.instance.scale.y * member.instance.scale.z < 0;
+    const auto sine = std::sin(member.instance.yaw), cosine = std::cos(member.instance.yaw);
+    // Expand in authored order, but transform each referenced source vertex
+    // only once. Unreferenced vertices remain untransformed, as before.
+    std::vector<rd::ExpandedVertex> baked(geometry.vertices.size());
+    std::vector<std::uint8_t> ready(geometry.vertices.size());
     for (std::size_t first = 0; first < geometry.indices.size(); first += 3)
     {
         const auto selector = geometry.vertices[geometry.indices[first]].material_index;
@@ -283,7 +289,13 @@ void BakeInto(Representation &target, const BakedMember &member)
         for (std::size_t lane = 0; lane < 3; ++lane)
         {
             const auto oriented_lane = reflected && lane > 0 ? 3 - lane : lane;
-            auto vertex = Bake(geometry.vertices[geometry.indices[first + oriented_lane]], member.instance);
+            const auto index = geometry.indices[first + oriented_lane];
+            if (!ready[index])
+            {
+                baked[index] = Bake(geometry.vertices[index], member.instance, sine, cosine);
+                ready[index] = 1;
+            }
+            const auto &vertex = baked[index];
             Require(vertex.material_index == selector, "source triangle crosses selector boundary");
             vertices.push_back(vertex);
         }
@@ -362,10 +374,11 @@ void AppendPage(rd::GeometryData &page, const rd::GeometryData &fragment)
 class Builder
 {
 public:
-    Builder(CookedSceneHlod &output, std::vector<Object> objects, std::string_view prefix, SceneHlodCookOptions options)
+    Builder(CookedSceneHlod &output, std::vector<Object> objects, std::string_view prefix, SceneHlodCookOptions options,
+            CookProfile &profile)
         : output_(output), objects_(std::move(objects)), prefix_(prefix), options_(options),
           tasks_(options.error_worker_count == 0 ? hs::TaskSystem::DefaultWorkerCount()
-                                                  : options.error_worker_count) {}
+                                                  : options.error_worker_count), profile_(profile) {}
     void Run()
     {
         output_.scene.roots = Build(0, objects_.size());
@@ -385,6 +398,7 @@ private:
         Require(begin < end, "empty spatial group");
         if (end - begin <= options_.objects_per_leaf)
         {
+            const auto leaf_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
             rd::SceneHlodGroup group; group.first_member = Count(output_.scene.members.size());
             Representation original; std::vector<rd::GeometryBounds> bounds;
             for (auto index = begin; index < end; ++index)
@@ -396,7 +410,9 @@ private:
                 }
             group.member_count = Count(output_.scene.members.size()) - group.first_member; group.bounds = Union(bounds);
             const auto id = Count(output_.scene.groups.size()); output_.scene.groups.push_back(group);
-            representations_.push_back(std::move(original)); return {id};
+            representations_.push_back(std::move(original));
+            if (profile_.enabled) profile_.leaf_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - leaf_start).count();
+            return {id};
         }
         std::vector<rd::GeometryBounds> object_bounds;
         for (auto i = begin; i < end; ++i) object_bounds.push_back(objects_[i].bounds);
@@ -418,13 +434,16 @@ private:
         Representation input;
         for (const auto child : children) if (!Append(input, representations_[child])) return children;
         Representation coarse;
+        const auto simplify_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
         for (const auto &[key, vertices] : input) coarse[key] = Simplify(vertices, options_.reduction_ratio);
+        if (profile_.enabled) profile_.simplify_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - simplify_start).count();
         // A retained duplicate is never published as a coarser object group.
         if (TriangleCount(coarse) >= TriangleCount(input)) return children;
         // Never publish a representation that requires an unbounded atomic
         // residency set. Children remain complete roots when this parent does
         // not fit; do this before the costly geometric-error qualification.
-        if (PlanPages(coarse, options_.max_page_triangles).page_count > options_.max_group_pages)
+        const auto plan = PlanPages(coarse, options_.max_page_triangles);
+        if (plan.page_count > options_.max_group_pages)
             return children;
         rd::SceneHlodGroup group; group.first_member = output_.scene.groups[children.front()].first_member;
         const auto &last = output_.scene.groups[children.back()];
@@ -445,16 +464,18 @@ private:
             rows.push_back({input.at(key), vertices});
         if (!rows.empty())
         {
+            const auto error_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
             hs::TaskGroup tasks;
             tasks_.ParallelFor(tasks, {"scene HLOD geometric error"}, rows.size(), 1,
-                [&rows, error_budget = options_.error_refinement_budget](std::size_t begin, std::size_t end) {
+                [&rows, error_budget = options_.error_refinement_budget,
+                 error_checks = options_.error_checks](std::size_t begin, std::size_t end) {
                     for (std::size_t index = begin; index < end; ++index)
                     {
                         auto &row = rows[index];
                         try
                         {
                             row.measured = MeasureGeometryError(
-                                row.fine, row.coarse, {}, error_budget);
+                                row.fine, row.coarse, {}, error_budget, error_checks);
                         }
                         catch (...)
                         {
@@ -463,6 +484,7 @@ private:
                     }
                 });
             const auto wait = tasks_.Wait(tasks);
+            if (profile_.enabled) profile_.error_wall_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - error_start).count();
             Require(wait.Succeeded(), "geometric error worker failure");
         }
         for (const auto &row : rows)
@@ -489,14 +511,16 @@ private:
         for (const auto child : children) output_.scene.groups[child].parent = id;
         output_.scene.children.insert(output_.scene.children.end(), children.begin(), children.end());
         output_.scene.groups.push_back(group); representations_.push_back(std::move(coarse));
-        Pages(id);
+        // Moving the map retains its element addresses and vertex buffers,
+        // so the plan's key pointers and spans remain valid.
+        Pages(id, plan);
         for (const auto child : children) representations_[child].clear();
         return {id};
     }
-    void Pages(std::uint32_t id)
+    void Pages(std::uint32_t id, const PackedPlan &plan)
     {
+        const auto pages_start = profile_.enabled ? ProfileClock::now() : ProfileClock::time_point{};
         auto &group = output_.scene.groups[id]; group.first_proxy = Count(output_.scene.proxies.size());
-        const auto plan = PlanPages(representations_[id], options_.max_page_triangles);
         const auto base = Count(output_.pages.size());
         output_.pages.resize(base + plan.page_count);
         output_.scene.pages.resize(base + plan.page_count);
@@ -531,12 +555,14 @@ private:
         for (std::uint32_t p = group.first_proxy; p < group.first_proxy + group.proxy_count; ++p)
             bounds.push_back(output_.scene.proxies[p].bounds);
         group.bounds = Union(bounds);
+        if (profile_.enabled) profile_.pages_ms += std::chrono::duration<double, std::milli>(ProfileClock::now() - pages_start).count();
     }
     CookedSceneHlod &output_;
     std::vector<Object> objects_;
     std::string prefix_;
     SceneHlodCookOptions options_;
     hs::TaskSystem tasks_;
+    CookProfile &profile_;
     std::vector<Representation> representations_;
 };
 } // namespace
@@ -545,6 +571,8 @@ CookedSceneHlod CookSceneHlod(AssetId scene_asset_id, std::uint32_t layout_abi,
     const std::array<std::byte, 32> &layout_digest, std::span<const SceneHlodCookMember> members,
     std::span<const SceneHlodCookSource> sources, std::string_view prefix, SceneHlodCookOptions options)
 {
+    CookProfile profile;
+    const auto total_start = profile.enabled ? ProfileClock::now() : ProfileClock::time_point{};
     Require(scene_asset_id.value && layout_abi && !members.empty() && members.size() <= 1'000'000 &&
             options.objects_per_leaf > 0 && options.objects_per_leaf <= 64 &&
             options.children_per_group >= 2 && options.children_per_group <= 16 &&
@@ -604,7 +632,7 @@ CookedSceneHlod CookSceneHlod(AssetId scene_asset_id, std::uint32_t layout_abi,
         for (const auto &member : object.members) bounds.push_back(member.record.bounds);
         object.bounds = Union(bounds); spatial.push_back(std::move(object));
     }
-    Builder(output, std::move(spatial), prefix, options).Run();
+    Builder(output, std::move(spatial), prefix, options, profile).Run();
     // Pages are emitted in postorder, so update ancestor spheres after page
     // packing rather than trusting a different partition sphere center.
     for (auto &group : output.scene.groups)
@@ -628,6 +656,17 @@ CookedSceneHlod CookSceneHlod(AssetId scene_asset_id, std::uint32_t layout_abi,
     for (auto &proxy : output.scene.proxies)
         proxy.material_dependency = dependency_index(proxy.material_dependency);
     output.scene.dependencies = std::move(canonical_dependencies);
-    rd::ValidateSceneHlodPages(output.scene, output.pages); return output;
+    const auto validate_start = profile.enabled ? ProfileClock::now() : ProfileClock::time_point{};
+    rd::ValidateSceneHlodPages(output.scene, output.pages);
+    if (profile.enabled)
+    {
+        const auto finished = ProfileClock::now();
+        std::fprintf(stderr, "hlod-cook-profile members=%zu groups=%zu pages=%zu leaf_ms=%.3f simplify_ms=%.3f error_wall_ms=%.3f pages_ms=%.3f final_validate_ms=%.3f total_ms=%.3f\n",
+            members.size(), output.scene.groups.size(), output.pages.size(), profile.leaf_ms, profile.simplify_ms,
+            profile.error_wall_ms, profile.pages_ms,
+            std::chrono::duration<double, std::milli>(finished - validate_start).count(),
+            std::chrono::duration<double, std::milli>(finished - total_start).count());
+    }
+    return output;
 }
 } // namespace hs::geometry_content

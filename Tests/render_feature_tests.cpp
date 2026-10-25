@@ -148,6 +148,77 @@ void ExternalPostTopology()
           "external reconstruction output must be a texture");
 }
 
+void IdentityFxaaTopology()
+{
+    for (const bool outline : {false, true})
+        for (const bool overlay : {false, true})
+        {
+            PostFixture fixture;
+            fixture.inputs.outline = outline;
+            fixture.inputs.fxaa_identity = true;
+            fixture.targets.display_linear = Texture(21, 3);
+            if (overlay)
+            {
+                fixture.inputs.screen_overlay_upload = Texture(22);
+                fixture.inputs.screen_overlay_gradient = Texture(23);
+            }
+            PostSubgraphPlan plan;
+            Check(CompilePostSubgraphs(fixture.inputs, fixture.targets, plan).Succeeded(),
+                  "compile identity FXAA plan");
+            const auto &tone_map = Pass(plan, 14);
+            const auto &color_output = outline ? Pass(plan, 15).output : tone_map.output;
+            Check(SameVersion(tone_map.output, outline ? Texture(2, 1) : Texture(21, 4)),
+                  "identity FXAA routes tone map to display linear only without outline");
+            if (outline)
+                Check(SameVersion(Pass(plan, 15).output, Texture(21, 4)) &&
+                          SameVersion(Pass(plan, 15).predecessor, Texture(21, 3)) &&
+                          SameVersion(Pass(plan, 15).reads[0].version, tone_map.output),
+                      "identity FXAA routes outline directly to display linear");
+            Check(SameVersion(plan.outputs.display_linear,
+                              Texture(21, overlay ? 5 : 4)) &&
+                      SameVersion(Pass(plan, 17).reads.back().version, plan.outputs.display_linear),
+                  "Game UI reads the actual final display-linear version");
+            Check(SameVersion(plan.outputs.post_a, Texture(2, outline ? 1 : 0)) &&
+                      SameVersion(plan.outputs.post_b, Texture(14, 0)),
+                  "identity FXAA preserves unused ping-pong target versions");
+            Check(tone_map.additional_outputs.empty(), "steady identity FXAA does not rewrite post A");
+            const auto overlay_pass = std::ranges::find(plan.passes, 16u, &PostPassPlan::id);
+            if (overlay)
+            {
+                Check(overlay_pass != plan.passes.end() && overlay_pass->name == "Screen Overlay" &&
+                          overlay_pass->read_write && overlay_pass->reads.empty() &&
+                          SameVersion(overlay_pass->predecessor, color_output) &&
+                          SameVersion(overlay_pass->output, plan.outputs.display_linear),
+                      "identity FXAA retains an overlay-only read-write without color input");
+            }
+            else
+                Check(overlay_pass == plan.passes.end(), "identity FXAA omits the unused pass 16 copy");
+
+        }
+
+    PostFixture no_linear_target;
+    no_linear_target.inputs.fxaa_identity = true;
+    PostSubgraphPlan legacy_plan;
+    Check(CompilePostSubgraphs(no_linear_target.inputs, no_linear_target.targets, legacy_plan).Succeeded() &&
+              Pass(legacy_plan, 16).name == "FXAA" &&
+              SameVersion(Pass(legacy_plan, 16).output, Texture(15, 1)),
+          "identity FXAA leaves the legacy path unchanged without a linear target");
+
+    PostFixture initialize_post;
+    initialize_post.inputs.fxaa_identity = true;
+    initialize_post.inputs.initialize_post_targets = true;
+    initialize_post.targets.display_linear = Texture(21, 3);
+    PostSubgraphPlan initialization_plan;
+    Check(CompilePostSubgraphs(initialize_post.inputs, initialize_post.targets, initialization_plan).Succeeded(),
+          "compile first-use identity FXAA plan");
+    const auto &initialization_tone_map = Pass(initialization_plan, 14);
+    Check(initialization_tone_map.additional_outputs.size() == 1 &&
+              SameVersion(initialization_tone_map.additional_outputs[0].first, Texture(2, 0)) &&
+              SameVersion(initialization_tone_map.additional_outputs[0].second, Texture(2, 1)) &&
+              SameVersion(initialization_plan.outputs.post_a, Texture(2, 1)),
+          "first-use identity tone map initializes post A exactly once");
+}
+
 } // namespace
 
 int main()
@@ -170,6 +241,7 @@ int main()
         plan.software_gi_enabled = false;
         ConfiguredPostTopology();
         ExternalPostTopology();
+        IdentityFxaaTopology();
         std::puts("Configured post topology checks passed.");
         return 0;
     }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "render_scene_extractor.hpp"
+#include "renderer_scene_sample.hpp"
 
 #include <hs/core/render_snapshot.hpp>
 
@@ -13,8 +13,8 @@ namespace hs
 
 struct SkinCacheSample
 {
-    std::uint64_t current_pose_revision{};
-    std::uint64_t previous_pose_revision{};
+    RenderPoseKey current_pose{};
+    RenderPoseKey previous_pose{};
     CharacterAnimationClip current_clip{CharacterAnimationClip::Idle};
     CharacterAnimationClip previous_clip{CharacterAnimationClip::Idle};
     float current_time{};
@@ -45,8 +45,8 @@ class SkinCache
     using KeyHash = RenderSceneInstanceKeyHash;
     struct Entry
     {
-        std::uint64_t pose_revision{};
-        std::uint64_t content_revision{};
+        RenderPoseKey pose{};
+        RenderContentKey content{};
         CharacterAnimationClip clip{CharacterAnimationClip::Idle};
         float time{};
     };

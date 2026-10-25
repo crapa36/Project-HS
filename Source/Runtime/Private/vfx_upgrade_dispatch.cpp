@@ -22,7 +22,7 @@ Result Invalid(std::string_view message)
     return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_upgrade_dispatch",std::string(message));
 }
 }
-Result DispatchVfxUpgradeEvents(const VfxProgramData &program,
+Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
                                 std::span<const PresentationEvent> events,
                                 std::vector<PresentationEvent> &output)
 {

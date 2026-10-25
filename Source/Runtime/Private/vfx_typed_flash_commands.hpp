@@ -1,7 +1,7 @@
 #pragma once
 
 #include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/renderer/vfx_program.hpp>
 
 #include <span>
 #include <vector>
@@ -14,20 +14,20 @@ namespace hs::runtime_detail
 // restart the flash. Successful pickup bursts identify the legacy collection
 // layers they replace; rejected recipes retain their compatibility visuals.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxEventInput> inputs,
     std::vector<Sequence> *superseded_pickup_sequences = nullptr);
 
 // Rebuild these attachment sprites from the live owner every frame. The returned
 // age is local to status_stamp's authored knot interval; callers do not retain it.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
-    const VfxProgramData &program,
+    const VfxProgramView &program,
     std::span<const VfxPersistentInput> inputs);
 
 // Real area presence owns the source interval. Rate births use the 60 Hz
 // schedule; each tongue ends at that interval's end, with no invented TTL.
 [[nodiscard]] std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
-    const VfxProgramData &program, std::span<const VfxPersistentInput> inputs,
+    const VfxProgramView &program, std::span<const VfxPersistentInput> inputs,
     Tick current_tick);
 
 struct VfxOwnedStatusTickFlashCommand
@@ -40,7 +40,7 @@ struct VfxOwnedStatusTickFlashCommand
 // owner and status episode are live. The sequence identifies the event whose
 // legacy visuals may be suppressed after this conversion succeeds.
 [[nodiscard]] std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> persistent);
 

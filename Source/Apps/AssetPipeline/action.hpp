@@ -52,14 +52,6 @@ struct ActionSpec
     std::vector<UpstreamProduct> upstream;
 };
 
-enum class ProductReadPolicy
-{
-    VerifyIntegrity,
-    // Authenticate ActionResult metadata and check regular-file size without
-    // hashing the product bytes. Use only after the caller checks ActionKey.
-    MetadataOnly,
-};
-
 class ActionResultSnapshot
 {
   public:
@@ -72,10 +64,13 @@ class ActionResultSnapshot
     [[nodiscard]] std::string_view ActionId() const;
     [[nodiscard]] std::string_view ActionKeyValue() const;
     [[nodiscard]] std::size_t ProductCount() const;
+    [[nodiscard]] bool HasProduct(std::string_view product_id) const;
     [[nodiscard]] const Json &ProductMetadata(std::string_view product_id) const;
     void ReadProduct(std::string_view product_id, UpstreamProduct &dependency,
-                     fs::path &product_path,
-                     ProductReadPolicy policy = ProductReadPolicy::VerifyIntegrity) const;
+                     fs::path &product_path) const;
+    // Decode this owned buffer instead of reopening the verified product path.
+    [[nodiscard]] std::string ReadProductBytes(std::string_view product_id,
+                                               UpstreamProduct &dependency) const;
 
   private:
     fs::path build_root_;
@@ -83,9 +78,11 @@ class ActionResultSnapshot
     std::string namespace_path_;
     Json result_;
     std::map<std::string, std::size_t> product_indexes_;
+    void ResolveProduct(std::string_view product_id, UpstreamProduct &dependency,
+                        fs::path &product_path) const;
 
     friend Json ReadActionResult(const fs::path &, std::string_view, std::string_view,
-                                 UpstreamProduct &, fs::path &, ProductReadPolicy);
+                                 UpstreamProduct &, fs::path &);
 };
 
 class Sha256Stream
@@ -119,8 +116,7 @@ class Sha256Stream
                                     std::string_view namespace_path,
                                     std::string_view product_id,
                                     UpstreamProduct &dependency,
-                                    fs::path &product_path,
-                                    ProductReadPolicy policy = ProductReadPolicy::VerifyIntegrity);
+                                    fs::path &product_path);
 void WriteBytes(const fs::path &path, std::span<const std::byte> bytes);
 void AtomicWriteIfDifferent(const fs::path &path, std::string_view bytes);
 void TouchActionResult(const fs::path &path);

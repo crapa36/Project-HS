@@ -1,4 +1,6 @@
 #include "gameplay_test_support.hpp"
+#include "../Source/Runtime/Private/process_scene.hpp"
+#include <type_traits>
 #include <hs/presentation/meadow_surface.hpp>
 
 #include <algorithm>
@@ -128,7 +130,7 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
     for (const auto &descriptor : hs::GraphicsSettingDescriptors())
         receipt.resolved.push_back({descriptor.id, "fixture applied value", "Fixture native applied status"});
     hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     hs::RenderSnapshotStorage snapshot(16, 2, 2, hs::kGraphicsUiSnapshotReserve);
     auto ui = test_ui;
     ui.settings_group = 0;
@@ -144,7 +146,7 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
             if (count > maximum_rows) { maximum_rows = count; ui = candidate; }
         }
     Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, ui,
-              hs::SettingsData{}, snapshot, 0xFF, nullptr, nullptr, nullptr, &receipt),
+              hs::SettingsData{}, snapshot, 0xFF, nullptr, nullptr, &receipt),
           "settings telemetry fits the bounded production snapshot reserve");
     Check(snapshot.View().ui.size() <= hs::kGraphicsUiSnapshotReserve,
           "fully annotated settings rows and telemetry retain bounded capacity");
@@ -234,7 +236,7 @@ void TestCursorMovement()
               std::abs(negative_edge.y) < 0.0001f,
           "new RMB click replaces destination and reaches it");
     hs::GameReadModelStorage movement_model;
-    simulation.WriteReadModel(movement_model);
+    simulation.CopyReadModelForDevelopment(movement_model);
     Check(!movement_model.View().player.locomotion_moving &&
               movement_model.View().player.movement_stopped_tick != 0,
           "actual movement stop retains its presentation clock");
@@ -461,7 +463,7 @@ void TestCharacterInformationPage()
         hs::SettingsData remapped;
         remapped.skill_virtual_keys = {'Z', 'X', 0x71, '4'};
         hs::GameReadModelStorage model;
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         snapshot.Clear();
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
                   remapped, snapshot), "remapped skill labels snapshot");
@@ -658,7 +660,7 @@ void TestSkillUpgradeCardsHaveDescriptions()
 
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
     hs::GameReadModelStorage exhausted;
-    simulation.WriteReadModel(exhausted);
+    simulation.CopyReadModelForDevelopment(exhausted);
     exhausted.session.level_rerolls_remaining = 0;
     Check(hs::ProjectRenderSnapshot(exhausted.View(), DefaultContent().presentation, {}, {}, snapshot),
           "exhausted reroll snapshot");
@@ -1249,11 +1251,11 @@ void TestStaticEnvironmentSceneLease()
     model.arena_boundary.points[1] = {-16, 16};
     model.arena_boundary.points[2] = {16, 16};
     model.arena_boundary.points[3] = {16, -16};
-    hs::StaticEnvironmentSceneCache cache("test-generation");
+    hs::runtime_detail::ProcessSceneFactory cache("test-generation");
     hs::RenderSnapshotStorage snapshot(4, 4, 2, 128);
     Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
                                     test_ui, hs::SettingsData{}, snapshot, 0xFF,
-                                    nullptr, &cache), "static scene projection");
+                                    nullptr, cache.Resolve(model.View())), "static scene projection");
     const auto first = snapshot.View().static_scene;
     Check(first && first->content_generation_id == "test-generation" &&
               first->instances.size() > 1 && snapshot.View().instances.size() == 1 &&
@@ -1332,7 +1334,7 @@ void TestStaticEnvironmentSceneLease()
         Check(detail_variants[variant], std::format("normal play scene omits ground-detail variant {}", variant));
     auto cook_model = model;
     cook_model.seed = 0;
-    hs::StaticEnvironmentSceneCache cook_cache("test-generation");
+    hs::runtime_detail::ProcessSceneFactory cook_cache("test-generation");
     const auto cook_scene = cook_cache.Resolve(cook_model.View());
     Check(cook_scene->eligible_layout_digest == first->eligible_layout_digest &&
           cook_scene->eligible_static_members.size() == first->eligible_static_members.size(),
@@ -1353,8 +1355,23 @@ void TestStaticEnvironmentSceneLease()
     const auto obstacles = cache.Resolve(model.View());
     Check(obstacles != boundary, "obstacle list invalidates static scene");
     model.session_id = 4;
-    Check(cache.Resolve(model.View()) != obstacles,
-          "new simulation session invalidates static scene");
+    Check(cache.Resolve(model.View()) == obstacles,
+          "session restart preserves the process scene and its exact static identities");
+    const auto prior_instances = obstacles->instances.data();
+    const auto prior_members = obstacles->eligible_static_members.data();
+    model.seed = 20;
+    const auto reseeded = cache.Resolve(model.View());
+    Check(reseeded != obstacles && obstacles->instances.data() == prior_instances &&
+              obstacles->eligible_static_members.data() == prior_members,
+          "new launch seed replaces only the owner while old packet spans stay leased");
+    Check(!reseeded->static_keys.empty() && reseeded->static_keys.size() == reseeded->instances.size() &&
+              std::ranges::is_sorted(reseeded->static_keys, {}, &hs::RenderSceneInstanceKey::stable_id),
+          "static keys are frozen in the process owner before publication");
+    for (const auto &instance : reseeded->instances)
+        Check(instance.stable_id && instance.revisions == hs::DeriveRenderInstanceRevisions(instance),
+              "static revisions must reflect actual seeded rows");
+    static_assert(!std::is_move_constructible_v<hs::ProcessSceneLayout>);
+    static_assert(!std::is_copy_constructible_v<hs::ProcessSceneLayout>);
 }
 
 void TestProjectileUpgradeAttachmentEpisodes()
@@ -1392,8 +1409,15 @@ void TestProjectileUpgradeAttachmentEpisodes()
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 8);
     const auto project = [&] {
         snapshot.Clear();
-        Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
-            test_ui, hs::SettingsData{}, snapshot), "projectile upgrade owner snapshot");
+        const auto owned = model.View();
+        const auto borrowed = hs::development::BorrowOwnedReadModel(owned);
+        if (owned.projectiles.size() > 1)
+            Check(borrowed.projectiles[1].bleed_extend_ticks.data() ==
+                      owned.projectiles[1].bleed_extend_ticks.data(),
+                  "projection borrows complete original episode history without copying or renumbering");
+        Check(hs::ProjectTick(borrowed, DefaultContent().presentation,
+            test_ui, hs::SettingsData{}, snapshot,
+            hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(borrowed, {}))), "projectile upgrade owner snapshot");
     };
     const auto find = [&](hs::PersistentVfxKind kind, hs::Tick started)
         -> const hs::PersistentVfxVisual * {
@@ -1641,7 +1665,7 @@ void TestSessionIdentityAcrossPresentationReset()
 
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::StartSession}).Succeeded(),
           "first session starts");
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     const auto first_id = model.View().session_id;
     Check(first_id != 0, "first session receives a nonzero identity");
     Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
@@ -1659,7 +1683,7 @@ void TestSessionIdentityAcrossPresentationReset()
 
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::StartSession}).Succeeded(),
           "second session starts");
-    simulation.WriteReadModel(model);
+    simulation.CopyReadModelForDevelopment(model);
     const auto second_id = model.View().session_id;
     Check(second_id > first_id, "session identity increases across reset");
     snapshot.Clear();
@@ -2046,56 +2070,47 @@ void TestPlayerAttachmentOwnerWindows()
         "a new session reused the previous player owner");
 }
 
-void TestPresentationSceneDeltaPublication()
+void TestPresentationCompletePacket()
 {
     hs::GameReadModelStorage model;
     model.session_id = 41;
     model.tick = 1;
     hs::RenderSnapshotStorage snapshot(64, 8, 4, 16);
-    hs::RenderSceneProjectionState scene_state;
     const auto project = [&] {
         snapshot.Clear();
-        return hs::ProjectRenderSnapshot(
-            model.View(), DefaultContent().presentation, test_ui, hs::SettingsData{},
-            snapshot, 0xFF, nullptr, nullptr, &scene_state);
+        return hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+            test_ui, hs::SettingsData{}, snapshot);
     };
-
-    Check(project(), "initial scene delta projection");
-    const auto initial = snapshot.View().scene_delta;
-    Check(initial.published && initial.base_generation == 0 &&
-              initial.generation == 1 && initial.created == snapshot.View().instances.size() &&
-              initial.updated == 0 && initial.unchanged == 0,
-          "Presentation publishes a fresh generation-1 scene delta");
-    scene_state.Commit();
-
+    Check(project(), "initial complete packet projection");
+    const auto count = snapshot.View().instances.size();
+    Check(count != 0 && !snapshot.View().poses.empty(), "complete packet retains instance and pose operands");
+    const auto check_complete = [&] {
+        const auto packet = snapshot.View();
+        Check(packet.instances.size() == count && packet.header.tick == model.tick &&
+                  packet.header.session_id == model.session_id,
+              "packet reuse or skipped publication cannot omit unchanged rows");
+        for (const auto &instance : packet.instances)
+            Check(instance.revisions == hs::RenderInstance::Revisions{},
+                  "dynamic projection must not hash source revisions");
+        for (const auto &pose : packet.poses)
+            Check(pose.revision == 0, "dynamic projection must publish actual pose operands without hashes");
+        const auto player = std::ranges::find(packet.instances, hs::RenderMesh::Archer, &hs::RenderInstance::mesh);
+        Check(player != packet.instances.end() && player->position.x == model.player.position.x &&
+                  player->position.z == model.player.position.y && player->asset_id.value != 0,
+              "complete packet lost the final player transform or binding");
+    };
+    check_complete();
+    model.tick += 4; // Renderer may skip any number of complete publications.
+    model.player.position = {3, -2};
+    Check(project(), "complete packet after skipped publication");
+    check_complete();
+    Check(project(), "reused complete packet");
+    check_complete();
+    ++model.session_id;
     ++model.tick;
-    Check(project(), "unchanged scene delta projection");
-    const auto unchanged = snapshot.View().scene_delta;
-    Check(unchanged.published && unchanged.base_generation == 1 &&
-              unchanged.generation == 2 && unchanged.created == 0 &&
-              unchanged.updated + unchanged.unchanged ==
-                  snapshot.View().instances.size(),
-          "Presentation scene delta advances from the committed generation");
-    scene_state.Abort();
-
-    ++model.tick;
-    Check(project(), "scene delta after abort");
-    const auto after_abort = snapshot.View().scene_delta;
-    Check(after_abort.base_generation == 1 && after_abort.generation == 2,
-          "abandoned snapshot cannot advance Presentation scene history");
-    scene_state.Commit();
-
-    model.session_id = 42;
-    ++model.tick;
-    Check(project(), "new-session scene delta projection");
-    const auto reset = snapshot.View().scene_delta;
-    Check(reset.base_generation == 0 && reset.generation == 1 &&
-              reset.created == snapshot.View().instances.size() &&
-              reset.destroyed.empty(),
-          "new session publishes a fresh SceneDelta generation");
-    scene_state.Abort();
+    Check(project(), "new-session complete packet");
+    check_complete();
 }
-
 void TestBossDeathCaptureWithoutPriorSnapshot()
 {
     hs::GameReadModelStorage model;
@@ -2139,10 +2154,57 @@ void TestBossDeathCaptureWithoutPriorSnapshot()
           "capture inserted a dead actor into the ordinary snapshot scene");
 }
 
+void TestBorrowedProjectionOwnsPublication()
+{
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({319}, QuietGameData()).Succeeded(), "borrowed projection initialize");
+    Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {6, 0});
+    hs::HeldInputState held{}; held.basic_attack_held = true; held.aim_world = {20, 0, 0};
+    for (int frame = 0; frame < 18; ++frame) (void)Tick(simulation, held);
+    hs::GameReadModelStorage legacy;
+    simulation.CopyReadModelForDevelopment(legacy);
+    hs::RenderSnapshotStorage projected(64, 64, 8, 64), fixture(64, 64, 8, 64);
+    {
+        auto read = simulation.BorrowTickReadView();
+        Check(hs::ProjectTick(read.View(), DefaultContent().presentation, {}, {}, projected,
+                  hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read.View(), {}))) &&
+                  hs::ProjectRenderSnapshot(legacy.View(), DefaultContent().presentation, {}, {}, fixture),
+              "borrowed and explicit owned fixture projection succeed");
+    }
+    const auto a = projected.View(), b = fixture.View();
+    Check(a.header.tick == b.header.tick && a.header.session_id == b.header.session_id &&
+              a.instances.size() == b.instances.size() && a.poses.size() == b.poses.size() &&
+              a.persistent_vfx.size() == b.persistent_vfx.size() && a.ui.size() == b.ui.size(),
+          "borrowed projection preserves emitted row counts and publication identity");
+    for (std::size_t row = 0; row < a.instances.size(); ++row)
+        Check(a.instances[row].stable_id == b.instances[row].stable_id &&
+                  a.instances[row].revisions == b.instances[row].revisions,
+              "borrowed projection preserves exact transform, content, material and pose signatures");
+    for (std::size_t row = 0; row < a.poses.size(); ++row)
+        Check(a.poses[row].revision == b.poses[row].revision, "borrowed animation operands match owned format");
+    for (std::size_t row = 0; row < a.persistent_vfx.size(); ++row)
+        Check(a.persistent_vfx[row].stable_id == b.persistent_vfx[row].stable_id &&
+                  a.persistent_vfx[row].kind == b.persistent_vfx[row].kind &&
+                  a.persistent_vfx[row].active_tick == b.persistent_vfx[row].active_tick &&
+                  a.persistent_vfx[row].expires == b.persistent_vfx[row].expires,
+              "borrowed VFX retains emission order, activation and episode identities");
+    Check(!a.instances.empty(), "borrowed packet has live payload");
+    const auto saved_tick = a.header.tick;
+    const auto saved_id = a.instances.front().stable_id;
+    const auto saved_revision = a.instances.front().revisions;
+    Debug(simulation, hs::DebugCommandKind::StartSession);
+    Check(projected.View().header.tick == saved_tick &&
+              projected.View().instances.front().stable_id == saved_id &&
+              projected.View().instances.front().revisions == saved_revision,
+          "published payload remains owned after borrow ends and authoritative actors reset");
+    Check(simulation.Shutdown().Succeeded(), "borrowed projection shutdown");
+}
+
 void RunGameplayPresentationTests()
 {
+    TestBorrowedProjectionOwnsPublication();
     TestBossDeathCaptureWithoutPriorSnapshot();
-    TestPresentationSceneDeltaPublication();
+    TestPresentationCompletePacket();
     TestPlayerAttachmentOwnerWindows();
     TestStatusEpisodeSnapshot();
     TestCircleWarningProjection();

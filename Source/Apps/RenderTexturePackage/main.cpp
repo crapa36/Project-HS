@@ -2,6 +2,7 @@
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
+#include <hs/render_data/dds_texture.hpp>
 
 #include <algorithm>
 #include <array>
@@ -85,73 +86,12 @@ void Require(bool ok, std::string_view message)
     if (!ok) throw std::runtime_error("hs_render_texture_package: " + std::string(message));
 }
 
-std::uint32_t U32(std::span<const std::byte> bytes, std::size_t offset)
-{
-    Require(offset <= bytes.size() && 4 <= bytes.size() - offset, "truncated DDS header");
-    std::uint32_t value = 0;
-    for (std::size_t i = 0; i < 4; ++i)
-        value |= std::uint32_t(std::to_integer<unsigned>(bytes[offset + i])) << (8 * i);
-    return value;
-}
-
 std::span<const std::byte> DdsPayload(std::span<const std::byte> bytes,
                                       rd::TextureDescription expected)
 {
-    Require(bytes.size() >= 148 && U32(bytes, 0) == 0x20534444 &&
-            U32(bytes, 4) == 124 && U32(bytes, 76) == 32 &&
-            U32(bytes, 80) == 4 && U32(bytes, 84) == 0x30315844,
-            "expected DDS with DX10 pixel format");
-    Require(U32(bytes, 12) == expected.height &&
-            U32(bytes, 16) == expected.width &&
-            U32(bytes, 28) == expected.mip_count &&
-            U32(bytes, 128) == expected.format &&
-            U32(bytes, 132) == 3 && // D3D10_RESOURCE_DIMENSION_TEXTURE2D
-            U32(bytes, 136) == 0 && U32(bytes, 140) == expected.array_size &&
-            U32(bytes, 144) == 0,
-            "environment DDS shape or format changed");
-    const bool bc4 = expected.format == rd::kTextureFormatBc4;
-    const bool bc = bc4 || expected.format == rd::kTextureFormatBc5 ||
-                    expected.format == rd::kTextureFormatBc7 ||
-                    expected.format == rd::kTextureFormatBc7Srgb;
-    const bool rgba32 = expected.format == rd::kTextureFormatRgba32Float;
-    Require(bc || rgba32, "unsupported environment DDS format");
-    const auto block_bytes = bc4 ? 8u : 16u;
-    const auto base_row_pitch = bc ?
-        ((expected.width + 3) / 4) * block_bytes : expected.width * 16u;
-    const auto header_pitch = bc ? base_row_pitch * ((expected.height + 3) / 4)
-                                 : base_row_pitch;
-    const auto flags = U32(bytes, 8);
-    const auto common_flags = 0x1007u | (expected.mip_count > 1 ? 0x20000u : 0u);
-    const auto required_caps = 0x1000u | (expected.mip_count > 1 ? 0x400008u : 0u);
-    Require((bc ? ((flags & (common_flags | 0x80000u)) ==
-                       (common_flags | 0x80000u)) :
-                    ((flags & (common_flags | 0x8u)) == (common_flags | 0x8u) &&
-                     (flags & 0x80000u) == 0)) &&
-            U32(bytes, 20) == header_pitch &&
-            U32(bytes, 24) == 1 &&
-            (U32(bytes, 108) & required_caps) == required_caps &&
-            U32(bytes, 112) == 0 && U32(bytes, 116) == 0 &&
-            U32(bytes, 120) == 0 && U32(bytes, 124) == 0,
-            "invalid DDS dimensions, caps, or array flags");
-    for (std::size_t offset = 32; offset < 76; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS reserved header");
-    for (std::size_t offset = 88; offset < 108; offset += 4)
-        Require(U32(bytes, offset) == 0, "nonzero DDS pixel format fields");
-    std::uint64_t payload_size = 0;
-    for (std::uint32_t slice = 0; slice < expected.array_size; ++slice)
-        for (std::uint32_t mip = 0; mip < expected.mip_count; ++mip)
-        {
-            const auto width = std::max(1u, expected.width >> mip);
-            const auto height = std::max(1u, expected.height >> mip);
-            const auto row_pitch = bc ? ((width + 3) / 4) * block_bytes : width * 16u;
-            const auto slice_pitch = bc ? row_pitch * ((height + 3) / 4) : row_pitch * height;
-            Require(row_pitch > 0 && slice_pitch > 0 &&
-                    payload_size <= std::numeric_limits<std::size_t>::max() - slice_pitch,
-                    "DDS subresource range overflow");
-            payload_size += slice_pitch;
-        }
-    Require(payload_size == bytes.size() - 148, "DDS subresource ranges do not exactly cover payload");
-    return bytes.subspan(148, static_cast<std::size_t>(payload_size));
+    const auto decoded = rd::DecodeDdsTexture(bytes);
+    rd::ValidateDdsTextureRole(decoded, rd::DdsTextureRole::Environment, expected);
+    return decoded.payload;
 }
 
 bool Current(const fs::path &build_root, const ap::ActionSpec &spec,

@@ -80,6 +80,7 @@ struct FrameContext
     AllocationResource static_retest_args;
     AllocationResource dynamic_visible_refs;
     AllocationResource dynamic_draw_args;
+    AllocationResource ribbon_arguments;
     AllocationResource geometry_draw_records;
     AllocationResource geometry_draw_records_upload;
     std::vector<renderer_detail::GpuGeometryDrawRecord> geometry_draw_records_cpu;
@@ -93,7 +94,6 @@ struct FrameContext
     std::size_t dynamic_visible_capacity{};
     std::size_t skin_cache_vertex_capacity{};
     std::size_t skin_cache_bound_capacity{};
-    std::size_t skin_cache_slot_stride{};
     bool skin_cache_vertex_read{};
     bool skin_cache_bounds_read{};
     bool skin_cache_valid{};

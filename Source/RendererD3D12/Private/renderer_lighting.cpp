@@ -134,7 +134,8 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidat
     constexpr std::array products{"render/shader/virtual_shadow_init_cs.dxil",
         "render/shader/virtual_shadow_feedback_cs.dxil", "render/shader/virtual_shadow_resident_cs.dxil",
         "render/shader/virtual_shadow_cull_cs.dxil", "render/shader/virtual_shadow_publish_cs.dxil",
-        "render/shader/virtual_shadow_clear_vs.dxil", "render/shader/virtual_shadow_clear_ps.dxil"};
+        "render/shader/virtual_shadow_clear_vs.dxil", "render/shader/virtual_shadow_clear_ps.dxil",
+        "render/shader/virtual_shadow_seed_ps.dxil"};
     VirtualShadowProfile profile;
     profile.enabled = candidate_config.shadow_mode == GraphicsShadowMode::Raster &&
         std::ranges::all_of(products, [&](const auto id) { return candidate_config.product_paths.contains(id); });
@@ -166,12 +167,15 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const RendererConfig &candidat
     profile.gpu_budget_bytes = memory.Budget > memory.CurrentUsage ? memory.Budget - memory.CurrentUsage : 0;
     profile.filter_samples = QualityProfileFor(candidate_config.shadow_quality).shadow_filter_samples;
     profile.max_casters = 65536;
-    profile.max_receivers = 256;
+    // Keep the volume/probe reserve in addition to one receiver per monster caster.
+    profile.max_receivers = profile.max_casters + 256;
     profile.max_draw_groups = 128;
     profile.command_capacity = 65536;
     profile.frame_slots = kFrameCount;
     profile.virtual_sides = {32, 8, 8};
     profile.render_capacity = capacity;
+    profile.fixed_root_depth_span = candidate_config.shadow_distance_m * 2.0f;
+    if(auto loaded=VirtualShadowSystem::LoadBake(candidate_config,profile,baked_shadow_source);!loaded) return loaded;
     return virtual_shadows.Prepare(device.Get(), allocator, profile,
         [candidate_config](std::string_view logical_id, std::vector<std::byte> &bytes) {
             std::filesystem::path path;
@@ -374,6 +378,6 @@ Result D3D12Renderer::Impl::PrepareHeroTransparency(const RendererConfig &candid
             std::filesystem::path path;
             if (auto resolved = candidate_config.ResolveProduct(logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
-        }, candidate);
+        }, pipeline_cache, candidate, candidate_config.capture_hero_work, candidate_config.hero_work_mode);
 }
 } // namespace hs

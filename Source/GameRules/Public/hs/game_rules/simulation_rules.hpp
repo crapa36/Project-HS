@@ -1,6 +1,5 @@
 #pragma once
 
-#include <hs/core/result.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/game_domain/arena_boundary.hpp>
 #include <hs/game_domain/arena_obstacle.hpp>
@@ -8,7 +7,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <vector>
 
 namespace hs
@@ -642,8 +640,9 @@ struct SimulationRules
 [[nodiscard]] std::uint64_t SimulationRulesHash(const SimulationRules &rules) noexcept;
 // The cooked ABI image retains member offsets and zeroes every padding byte.
 [[nodiscard]] std::vector<std::byte> CanonicalSimulationRulesBytes(const SimulationRules &rules);
-[[nodiscard]] Result LoadSimulationRules(const std::filesystem::path &path,
-                                         SimulationRules &rules,
-                                         std::uint64_t *content_hash = nullptr);
+namespace shipping
+{
+[[nodiscard]] const SimulationRules &Simulation() noexcept;
+}
 
 } // namespace hs

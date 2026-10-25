@@ -2,7 +2,7 @@
 
 #include <hs/renderer/vfx_entity_surface_input.hpp>
 #include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/renderer/vfx_program.hpp>
 
 #include <span>
 #include <memory>
@@ -32,7 +32,7 @@ struct VfxEntitySurfacePersistentCapture
 // Converts only the two fixed boss transitions and the live phase-transition
 // emissive edge. Caller owns event retention and snapshot/capture provenance.
 [[nodiscard]] std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
-    const VfxProgramData &program,
+    const VfxProgramView &program,
     std::span<const VfxEntitySurfaceEventCapture> events,
     std::span<const VfxEntitySurfacePersistentCapture> persistent,
     Tick current_tick,

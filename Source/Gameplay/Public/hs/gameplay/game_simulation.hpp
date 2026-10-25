@@ -5,7 +5,7 @@
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/game_domain/domain_signal.hpp>
-#include <hs/game_domain/game_read_model.hpp>
+#include <hs/game_domain/tick_read_view.hpp>
 
 #include <chrono>
 #include <cstdint>
@@ -21,6 +21,7 @@ struct SimulationScenarioPolicy
     bool player_invulnerable{};
     bool progression_enabled{true};
     bool auto_collect_progression{};
+    bool automatic_spawning{true};
 };
 
 struct SimulationConfig
@@ -31,6 +32,7 @@ struct SimulationConfig
     SimulationScenarioPolicy scenario{};
     // Recorded/test sessions publish checksums; ordinary play can request them explicitly.
     bool capture_checksums{true};
+    bool capture_timings{false};
 };
 
 struct TickResult
@@ -43,7 +45,25 @@ struct TickResult
 
 class GameSimulation
 {
+    struct SimulationWorld;
+    friend struct GameplayTestAccess;
   public:
+    class ScopedTickReadView
+    {
+      public:
+        ~ScopedTickReadView();
+        ScopedTickReadView(ScopedTickReadView &&other) noexcept;
+        ScopedTickReadView(const ScopedTickReadView &) = delete;
+        ScopedTickReadView &operator=(const ScopedTickReadView &) = delete;
+        ScopedTickReadView &operator=(ScopedTickReadView &&) = delete;
+        [[nodiscard]] const TickReadView &View() const &;
+        const TickReadView &View() const && = delete;
+      private:
+        friend class GameSimulation;
+        ScopedTickReadView(SimulationWorld &owner, TickReadView view);
+        SimulationWorld *owner_{};
+        TickReadView view_;
+    };
     GameSimulation();
     ~GameSimulation();
 
@@ -58,19 +78,21 @@ class GameSimulation
     // Always returns the current checksum, even when automatic capture is disabled.
     [[nodiscard]] GameplayChecksum ComputeChecksum() const;
     [[nodiscard]] const SimulationRules &Rules() const noexcept;
-    [[nodiscard]] SessionProbe GetSessionProbe() const noexcept;
-    [[nodiscard]] SimulationDiagnostics GetDiagnostics() const noexcept;
-    [[nodiscard]] SimulationObservation GetObservation() const noexcept;
-    void WriteReadModel(GameReadModelStorage &model) const;
+    [[nodiscard]] SessionProbe GetSessionProbe() const;
+    [[nodiscard]] SimulationDiagnostics GetDiagnostics() const;
+    [[nodiscard]] SimulationTimingDiagnostics GetTimingDiagnostics() const;
+    [[nodiscard]] SimulationObservation GetObservation() const;
+    [[nodiscard]] ScopedTickReadView BorrowTickReadView() const;
+    // Owned-format export for development fixtures; ordinary consumers borrow instead.
+    void CopyReadModelForDevelopment(GameReadModelStorage &model) const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);
     void ApplyUiAction(const UiAction &action);
     [[nodiscard]] Result ApplySimulationRules(const SimulationRules &rules);
     [[nodiscard]] std::span<const DomainSignal> PendingDomainSignals() const noexcept;
-    void ClearDomainSignals() noexcept;
+    void ClearDomainSignals();
     [[nodiscard]] Result Shutdown();
 
   private:
-    struct SimulationWorld;
     std::unique_ptr<SimulationWorld> impl_;
 };
 

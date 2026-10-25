@@ -162,7 +162,7 @@ constexpr std::array kPersistentBindings{
     PersistentBinding{PersistentVfxKind::PlayerLowHealthVignette, Hash64("post.player.low_health_vignette"), kContextPayload},
 };
 
-const VfxEffectLookupRecord *FindLookup(const VfxProgramData &cooked,
+const VfxEffectLookupRecord *FindLookup(const VfxProgramView &cooked,
                                         std::uint64_t effect_id) noexcept
 {
     const auto found = std::find_if(cooked.effect_lookup.begin(), cooked.effect_lookup.end(),
@@ -170,7 +170,7 @@ const VfxEffectLookupRecord *FindLookup(const VfxProgramData &cooked,
     return found == cooked.effect_lookup.end() ? nullptr : &*found;
 }
 
-const VfxEffectRecord *FindEffect(const VfxProgramData &cooked,
+const VfxEffectRecord *FindEffect(const VfxProgramView &cooked,
                                   std::uint32_t handle) noexcept
 {
     if (handle == 0 || handle > cooked.effects.size()) return nullptr;
@@ -206,7 +206,7 @@ const DamageTrailSupplement *FindDamageTrailSupplement(
     return found == kDamageTrailSupplements.end() ? nullptr : &*found;
 }
 
-bool UpgradeBindingContains(const VfxProgramData &cooked,
+bool UpgradeBindingContains(const VfxProgramView &cooked,
                             std::uint64_t skill_id,
                             std::uint32_t ordinal,
                             std::uint32_t effect_handle) noexcept
@@ -568,7 +568,7 @@ bool MakeProjectileHead(const PersistentVfxVisual &visual,
     return true;
 }
 
-std::optional<float> DeliveryHeadRadius(const VfxProgramData &cooked,
+std::optional<float> DeliveryHeadRadius(const VfxProgramView &cooked,
                                        const VfxEffectRecord &effect) noexcept
 {
     if (effect.sources.first > cooked.sources.size() || effect.sources.count >
@@ -675,7 +675,7 @@ bool FiniteWarningOwner(const PersistentVfxVisual &owner, Tick current_tick) noe
 } // namespace
 
 VfxTypedFrameInputs BuildVfxTypedFrameInputs(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
@@ -1407,8 +1407,8 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
     return result;
 }
 
-std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramData &previous,
-                                           const VfxProgramData &next) noexcept
+std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
+                                           const VfxProgramView &next) noexcept
 {
     const auto count = owners_.size();
     std::erase_if(owners_, [&](Owner &owner) {
@@ -1425,7 +1425,7 @@ std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramData &previous,
 }
 
 std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const PresentationEvent> dispatched_events,
     Tick current_tick)
 {
@@ -1586,7 +1586,7 @@ void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
     events = std::move(refreshed);
 }
 
-void RebindVfxGroundEventOwners(const VfxProgramData &cooked,
+void RebindVfxGroundEventOwners(const VfxProgramView &cooked,
                                 std::vector<VfxEventInput> &events)
 {
     std::vector<VfxEventInput> rebound;

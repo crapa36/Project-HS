@@ -44,6 +44,64 @@ void ExerciseRelics(std::span<const std::uint8_t> relics)
     Check(simulation.Shutdown().Succeeded(), "relic shutdown");
 }
 
+void TestBasicKillTrackerHitExclusion()
+{
+    for (const auto first_side : {1.0f, -1.0f})
+    {
+        auto data = QuietGameData();
+        data.arena_obstacle_count = 0;
+        for (auto &enemy : data.enemies) enemy.move_speed = 0.0f;
+        data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)].health = 10'000;
+        data.enemies[static_cast<std::size_t>(hs::EnemyKind::Ranged)].health = 1;
+        auto &basic = data.skills[static_cast<std::size_t>(hs::SkillKind::BasicAttack)];
+        basic.pierce_count = 1;
+        basic.range = 30.0f;
+        data.relics.basic_kill_tracker.search_radius = 10.0f;
+        hs::GameSimulation simulation;
+        Check(simulation.Initialize({229}, data).Succeeded(), "basic tracker initialize");
+        Debug(simulation, hs::DebugCommandKind::GrantRelic,
+              static_cast<std::uint64_t>(hs::RelicKind::BasicKillTracker));
+        // One original piercing arrow hits the durable nearest enemy, then kills the ranged enemy.
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {6.0f, 0.0f});
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Ranged), 0, {8.0f, 0.0f});
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {8.0f, first_side * 4.0f});
+        Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
+              static_cast<std::uint64_t>(hs::EnemyKind::Melee), 0, {8.0f, -first_side * 4.0f});
+        hs::HeldInputState held;
+        held.aim_world = {20.0f, 0.0f, 0.0f};
+        held.basic_attack_held = true;
+        bool tracked{};
+        for (unsigned tick = 0; tick < 180 && !tracked; ++tick)
+        {
+            (void)Tick(simulation, held);
+            for (const auto &signal : simulation.PendingDomainSignals())
+            {
+                if (signal.kind != hs::DomainSignalKind::TrackingArrowFired) continue;
+                Check(std::abs(signal.position.x - 8.0f) < 0.001f &&
+                          std::abs(signal.direction.x) < 0.001f &&
+                          signal.direction.z * first_side > 0.999f,
+                      "basic tracker excludes already-hit nearest target and preserves first equal-distance candidate");
+                tracked = true;
+                break;
+            }
+        }
+        Check(tracked && simulation.GetObservation().kills == 1,
+              "basic tracker fixture produces the original attack kill");
+        hs::GameReadModelStorage model;
+        simulation.CopyReadModelForDevelopment(model);
+        const auto durable = std::ranges::find_if(model.View().enemies, [](const hs::EnemyView &enemy) {
+            return enemy.position.x == 6.0f && enemy.position.y == 0.0f;
+        });
+        Check(durable != model.View().enemies.end() && durable->health > 0 &&
+                  durable->health < durable->max_health,
+              "excluded nearest enemy was hit by the original cast and remains alive");
+        Check(simulation.Shutdown().Succeeded(), "basic tracker shutdown");
+    }
+}
+
 } // namespace
 
 void TestRelicCombinations()
@@ -121,6 +179,7 @@ void TestAlternatingSkillRelicTelemetry()
 
 void TestRemadeRelics()
 {
+    TestBasicKillTrackerHitExclusion();
     auto data = QuietGameData();
     data.enemies[0].health = 1;
     data.enemies[0].move_speed = 0.0f;
@@ -189,11 +248,11 @@ void TestRemadeRelics()
 
 void TestIncomingDamageRelics()
 {
-    const auto first_hit = [](hs::RelicKind relic, bool low_health) {
+    const auto first_hit = [](hs::RelicKind relic, bool low_health, bool both = false) {
         auto data = QuietGameData();
         auto &melee = data.enemies[static_cast<std::size_t>(hs::EnemyKind::Melee)];
         melee.move_speed = 0.0f;
-        melee.damage = 20;
+        melee.damage = both ? 7 : 20;
         melee.warning_ticks = 1;
 
         hs::GameSimulation simulation;
@@ -201,6 +260,9 @@ void TestIncomingDamageRelics()
               "incoming damage relic initialize");
         Debug(simulation, hs::DebugCommandKind::GrantRelic,
               static_cast<std::uint64_t>(relic));
+        if (both)
+            Debug(simulation, hs::DebugCommandKind::GrantRelic,
+                  static_cast<std::uint64_t>(hs::RelicKind::LowHealthSurvival));
         if (low_health)
             Debug(simulation, hs::DebugCommandKind::DamagePlayer, 65);
         Debug(simulation, hs::DebugCommandKind::SpawnEnemy,
@@ -224,6 +286,9 @@ void TestIncomingDamageRelics()
     const auto survival = first_hit(hs::RelicKind::LowHealthSurvival, true);
     Check(survival.first == 12 && survival.second == 1,
           "low-health survival reduces one threshold hit by forty percent");
+    const auto combined = first_hit(hs::RelicKind::PreDamageGuard, true, true);
+    Check(combined.first == 4 && combined.second == 1,
+          "incoming relics preserve sequential rounding and pre-damage guard attribution");
 }
 
 void TestSameTickLethalDamageAttribution()

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <map>
+#include <unordered_map>
 
 namespace hs
 {
@@ -12,38 +12,57 @@ struct ActorState
     PlayerState player{};
     // Tick-indexed ring, including tick zero; bounded by the authored echo age.
     std::vector<Float2> player_position_history;
-    std::vector<EnemyActor> enemies;
-    std::vector<ProjectileActor> projectiles;
+    EnemyStore enemies;
+    ProjectileStore projectiles;
     std::vector<AreaActor> areas;
     std::vector<PickupActor> pickups;
-    std::vector<EnemyActor> pending_enemy_spawns;
-    std::vector<ProjectileActor> pending_projectile_spawns;
+    EnemyStore pending_enemy_spawns;
+    ProjectileStore pending_projectile_spawns;
     std::vector<AreaActor> pending_area_spawns;
 };
 
 struct CombatState
 {
+    struct HitKeyHash
+    {
+        std::size_t operator()(const std::pair<std::uint64_t, std::uint64_t> &key) const noexcept
+        {
+            const auto mix = [](std::uint64_t value) {
+                value += 0x9e3779b97f4a7c15ull;
+                value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+                value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+                return value ^ (value >> 31);
+            };
+            return static_cast<std::size_t>(mix(key.first ^ mix(key.second)));
+        }
+    };
+    using HitIndex = std::unordered_map<std::pair<std::uint64_t, std::uint64_t>,
+                                       std::size_t, HitKeyHash>;
     DamageCommandBuffer combat;
-    RelicRuleTable relic_rules;
     std::vector<ScheduledAction> scheduled_actions;
     std::vector<BossAction> boss_actions;
     std::vector<CastHitRecord> cast_hits;
     std::vector<AreaHitRecord> area_hits;
-    std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> cast_hit_index, area_hit_index;
+    // Derived lookup only; authoritative traversal and checksums use the vectors above.
+    HitIndex cast_hit_index, area_hit_index;
     std::vector<std::uint64_t> live_area_ids;
     std::vector<CastRuntime> cast_runtimes;
+    CastCleanupMembership cast_cleanup;
     std::vector<DomainSignal> domain_signals;
     // Presentation metadata only; intentionally excluded from the checksum.
     std::vector<VisualLinkView> visual_links;
+    std::optional<Tick> visual_links_pruned_tick;
     // Fixed backing avoids allocation/order changes in the death phase. No
     // visual TTL enters Gameplay; Runtime uses the cooked death source clock.
     std::array<BossDeathVisualView, kCosmeticOwnerCapacity> boss_death_visuals{};
     std::size_t boss_death_visual_count{};
     EnemySpatialGrid enemy_grid;
+    EnemyQuery nearest_query, area_query, chain_query;
     // Transient compact working set for the ordered separation pass; never authoritative.
     std::vector<Float2> separation_positions;
     std::vector<std::size_t> collision_candidates;
-    std::vector<float> collision_hit_times;
+    struct CollisionHit { std::size_t enemy; float time; };
+    std::vector<CollisionHit> collision_hits;
 };
 
 struct NavigationState
@@ -57,6 +76,7 @@ struct NavigationState
 
 struct ProgressionState
 {
+    PickupWorkOwner pickup_work;
     std::array<CardView, 3> cards{};
     std::uint8_t card_count{};
     std::vector<ActiveWave> waves;

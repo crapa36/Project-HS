@@ -1,5 +1,6 @@
 #include "renderer_ltc.hpp"
 #include "d3d12_resources.hpp"
+#include "renderer_startup.hpp"
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/ltc_lut.hpp>
 #include <D3D12MemAlloc.h>
@@ -29,8 +30,8 @@ Result Allocate(D3D12MA::Allocator *allocator,D3D12_HEAP_TYPE heap,
     D3D12_RESOURCE_DESC description,D3D12_RESOURCE_STATES initial,AllocationResource &target)
 {
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=heap;
-    const auto native=allocator->CreateResource(&allocation,&description,initial,nullptr,&target.allocation,
-        IID_PPV_ARGS(target.resource.ReleaseAndGetAddressOf()));
+    const auto native=renderer_detail::MeasureStartupOperation(RendererStartupOperation::NativeResourceAllocation, [&] { return allocator->CreateResource(&allocation,&description,initial,nullptr,&target.allocation,
+        IID_PPV_ARGS(target.resource.ReleaseAndGetAddressOf())); });
     return FAILED(native)?NativeFailure("Allocate LTC resource",native):Result::Success();
 }
 } // namespace
@@ -76,7 +77,7 @@ Result LtcLutSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
     if(!device || !allocator) return Failure(ErrorCode::InvalidArgument,"LTC preparation requires a device and allocator.");
     try
     {
-        const auto package=render_data::ReadLtcLutPackage(bytes,MakeAssetId(kProduct));
+        const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadLtcLutPackage(bytes,MakeAssetId(kProduct)); });
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support{DXGI_FORMAT_R32G32B32A32_FLOAT};
         const auto queried=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
         if(FAILED(queried)) return NativeFailure("Query LTC format",queried);
@@ -105,6 +106,7 @@ Result LtcLutSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
         std::byte *mapped=nullptr; D3D12_RANGE empty{0,0};
         const auto mappedResult=storage->upload.resource->Map(0,&empty,reinterpret_cast<void **>(&mapped));
         if(FAILED(mappedResult)) return NativeFailure("Map LTC staging",mappedResult);
+        renderer_detail::StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
         const std::array sources{&package.matrix,&package.amplitude};
         for(std::uint32_t i=0;i<2;++i)
         {
@@ -114,6 +116,8 @@ Result LtcLutSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,
                     source.bytes.data()+SIZE_T(y)*source.row_pitch,source.row_pitch);
         }
         D3D12_RANGE written{0,static_cast<SIZE_T>(end)}; storage->upload.resource->Unmap(0,&written);
+        pack_timing.Stop();
+        renderer_detail::StartupOperationScope descriptors_timing(RendererStartupOperation::DescriptorWrite);
         D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=2;
         const auto created=device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(storage->descriptors.ReleaseAndGetAddressOf()));
         if(FAILED(created)) return NativeFailure("Create LTC SRVs",created);

@@ -38,7 +38,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
             if (auto resolved = candidate.ResolveProduct(id, path); !resolved) return resolved;
             std::vector<std::byte> bytes;
             if (auto read = ReadBinary(path, bytes); !read) return read;
-            const auto definitions = render_data::ReadMaterialParameterPackage(bytes, MakeAssetId(id));
+            const auto definitions = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadMaterialParameterPackage(bytes, MakeAssetId(id)); });
             for (const std::string_view required : {"metallic", "roughness_scale"})
                 if (!hero && std::ranges::find(definitions, required,
                         &render_data::MaterialParameterDefinition::id) == definitions.end())
@@ -54,12 +54,12 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
             if (auto resolved = candidate.ResolveProduct(material_id, path); !resolved) return resolved;
             std::vector<std::byte> material_bytes;
             if (auto read = ReadBinary(path, material_bytes); !read) return read;
-            const auto material = render_data::ReadPackage(material_bytes, MakeAssetId(material_id));
+            const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(material_bytes, MakeAssetId(material_id)); });
             const auto layout = std::ranges::find(material.chunks,
                 render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
             if (layout == material.chunks.end() || !layout->required || layout->version != 1 ||
                 layout->count != 1 || layout->stride != 32 ||
-                render_data::DecodeMaterialParameterLayout(layout->bytes) !=
+                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout->bytes); }) !=
                     material_parameter_candidate_layouts[ordinal])
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Material parameter layout disagrees with its shader/material package: " + id);
@@ -218,7 +218,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         {
             try
             {
-                package = render_data::ReadTexturePackage(storage, MakeAssetId(logical_id));
+                package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(storage, MakeAssetId(logical_id)); });
             }
             catch (const std::exception &error)
             {
@@ -288,6 +288,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         std::byte *mapped{}; D3D12_RANGE no_read{};
         result = uploads.back().resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
         if (FAILED(result)) return HResultFailure("Map environment upload", result);
+        StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
         for (UINT subresource = 0; subresource < count; ++subresource)
         {
             const auto target_slice = subresource / target_mips;
@@ -311,6 +312,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
             command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
         }
         uploads.back().resource->Unmap(0, nullptr);
+        pack_timing.Stop();
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = texture.resource.Get();
@@ -355,6 +357,7 @@ void D3D12Renderer::Impl::WriteEnvironmentTextureDescriptor(
     std::uint32_t frame_slot, std::uint32_t texture_index, ID3D12Resource *resource,
     DXGI_FORMAT format, std::uint32_t mip_count, std::uint32_t array_size) const noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr +=
         (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
@@ -396,7 +399,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
         return resolved;
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
-    const auto package = render_data::ReadTexturePackage(bytes, MakeAssetId(binding.product_id));
+    const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(bytes, MakeAssetId(binding.product_id)); });
     render_data::ValidateMaterialTexturePackage(binding, package.description, required_layer);
     for (const auto &dependency : package.dependencies)
     {
@@ -456,6 +459,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
     const auto mapped_result = uploads.back().resource->Map(
         0, &no_read, reinterpret_cast<void **>(&mapped));
     if (FAILED(mapped_result)) return HResultFailure("Map material texture upload", mapped_result);
+    StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
     for (UINT subresource = 0; subresource < count; ++subresource)
     {
         const auto source_index = (subresource / target_mips) * source_description.mip_count +
@@ -477,6 +481,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
         command_list->CopyTextureRegion(&destination, 0, 0, 0, &source_location, nullptr);
     }
     uploads.back().resource->Unmap(0, nullptr);
+    pack_timing.Stop();
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Transition.pResource = texture.texture.resource.Get();
@@ -495,6 +500,7 @@ void D3D12Renderer::Impl::WriteEnvironmentMaterialTextureDescriptor(
     std::uint32_t frame_slot, std::uint32_t material, std::uint32_t slot,
     ID3D12Resource *resource) const noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
                    kMaterialTextureDescriptorOffset +
@@ -517,6 +523,7 @@ void D3D12Renderer::Impl::WriteEnvironmentMaterialTextureDescriptor(
 
 void D3D12Renderer::Impl::PublishEnvironmentMaterialTextures(std::uint32_t frame_slot) const noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     for (std::uint32_t material = 0; material < environment_material_bindings.size(); ++material)
         for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
         {
@@ -764,8 +771,8 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     render_data::TexturePackageView package;
     try
     {
-        package = render_data::ReadTexturePackage(
-            stream.decoded_storage, MakeAssetId(environment_stream.logical_id));
+        package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(
+            stream.decoded_storage, MakeAssetId(environment_stream.logical_id)); });
     }
     catch (const std::exception &error)
     {

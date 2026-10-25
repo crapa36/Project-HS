@@ -117,7 +117,7 @@ bool SourceEnvelope(const VfxSourceRecord &source, float age, float &envelope) n
     return std::isfinite(envelope) && envelope > 0.0f;
 }
 
-std::optional<float> FloatParameter(const VfxProgramData &cooked,
+std::optional<float> FloatParameter(const VfxProgramView &cooked,
                                    const VfxOutputRecord &output,
                                    std::uint32_t key) noexcept
 {
@@ -136,7 +136,7 @@ std::optional<float> FloatParameter(const VfxProgramData &cooked,
     return std::nullopt;
 }
 
-const VfxParameterRecord *TypedParameter(const VfxProgramData &p, const VfxOutputRecord &o, std::uint32_t key, VfxParameterType type)
+const VfxParameterRecord *TypedParameter(const VfxProgramView &p, const VfxOutputRecord &o, std::uint32_t key, VfxParameterType type)
 {
     if (o.parameters.first > p.parameters.size() || o.parameters.count > p.parameters.size() - o.parameters.first) return nullptr;
     const VfxParameterRecord *found = nullptr;
@@ -144,7 +144,7 @@ const VfxParameterRecord *TypedParameter(const VfxProgramData &p, const VfxOutpu
         if (v.key == key) { if (found || v.type != type) return nullptr; found = &v; }
     return found;
 }
-std::optional<float> IntegratedPulse(const VfxProgramData &p, const VfxOutputRecord &o, float age, float duration)
+std::optional<float> IntegratedPulse(const VfxProgramView &p, const VfxOutputRecord &o, float age, float duration)
 {
     const auto *parameter = TypedParameter(p,o,Hash32("pulse_curve_ref"),VfxParameterType::CurveRow);
     if (!parameter || parameter->bits >= p.curves.size()) return {};
@@ -201,7 +201,7 @@ struct GroundOwner
     float command_lifetime{};
 };
 
-void AppendSourceOutputs(const VfxProgramData &cooked, std::size_t source_index,
+void AppendSourceOutputs(const VfxProgramView &cooked, std::size_t source_index,
                          const GroundOwner &owner,
                          std::vector<VfxTypedGroundCommand> &result)
 {
@@ -368,7 +368,7 @@ void AppendSourceOutputs(const VfxProgramData &cooked, std::size_t source_index,
         result.push_back(item);
     }
 }
-void AppendWaveGroundOutputs(const VfxProgramData &cooked, const VfxEffectRecord &effect,
+void AppendWaveGroundOutputs(const VfxProgramView &cooked, const VfxEffectRecord &effect,
                             const VfxEventInput &input, float age,
                             std::vector<VfxTypedGroundCommand> &result)
 {
@@ -424,7 +424,7 @@ void AppendWaveGroundOutputs(const VfxProgramData &cooked, const VfxEffectRecord
     }
 }
 
-void AppendExpandingRingOutputs(const VfxProgramData &cooked, std::size_t source_index,
+void AppendExpandingRingOutputs(const VfxProgramView &cooked, std::size_t source_index,
                                 const VfxEventInput &input, float age, float envelope,
                                 float duration, std::vector<VfxTypedGroundCommand> &result)
 {
@@ -501,7 +501,7 @@ void AppendExpandingRingOutputs(const VfxProgramData &cooked, std::size_t source
         result.push_back(item);
     }
 }
-bool HexMask(const VfxProgramData &cooked, const VfxOutputRecord &output,
+bool HexMask(const VfxProgramView &cooked, const VfxOutputRecord &output,
              const VfxEventInput &input, std::uint32_t &slice, float &strength)
 {
     const auto first = static_cast<std::size_t>(output.textures.first);
@@ -538,7 +538,7 @@ bool HexMask(const VfxProgramData &cooked, const VfxOutputRecord &output,
     return true;
 }
 
-void AppendHexConstellationOutputs(const VfxProgramData &cooked, std::size_t source_index,
+void AppendHexConstellationOutputs(const VfxProgramView &cooked, std::size_t source_index,
                                    const VfxEventInput &input, float age, float envelope,
                                    float duration, std::vector<VfxTypedGroundCommand> &result)
 {
@@ -619,7 +619,7 @@ void AppendHexConstellationOutputs(const VfxProgramData &cooked, std::size_t sou
         result.push_back(item);
     }
 }
-void AppendBossSignatureOutputs(const VfxProgramData &cooked, std::size_t source_index,
+void AppendBossSignatureOutputs(const VfxProgramView &cooked, std::size_t source_index,
                                 const VfxEventInput &input, float age, float envelope,
                                 float duration, std::vector<VfxTypedGroundCommand> &result)
 {
@@ -718,7 +718,7 @@ void AppendBossSignatureOutputs(const VfxProgramData &cooked, std::size_t source
         result.push_back(item);
     }
 }
-void AppendRemainingEventGroundOutputs(const VfxProgramData &cooked, std::size_t source_index,
+void AppendRemainingEventGroundOutputs(const VfxProgramView &cooked, std::size_t source_index,
                                        const VfxEventInput &input, float age, float envelope,
                                        float duration, std::vector<VfxTypedGroundCommand> &result)
 {
@@ -845,7 +845,7 @@ void AppendRemainingEventGroundOutputs(const VfxProgramData &cooked, std::size_t
         result.push_back(item);
     }
 }
-bool StateRingTextures(const VfxProgramData &cooked,
+bool StateRingTextures(const VfxProgramView &cooked,
                        const VfxOutputRecord &output)
 {
     const auto first = static_cast<std::size_t>(output.textures.first);
@@ -883,7 +883,7 @@ bool StateRingTextures(const VfxProgramData &cooked,
     return gradient && curve && optional_mask;
 }
 
-bool PickupRelicTextures(const VfxProgramData &cooked,
+bool PickupRelicTextures(const VfxProgramView &cooked,
                          const VfxOutputRecord &output,
                          const VfxPersistentInput &input,
                          std::uint32_t &slice, float &strength)
@@ -960,7 +960,7 @@ bool PickupRelicTextures(const VfxProgramData &cooked,
     return gradient && curve && optional_mask && authored_mask;
 }
 
-bool ChargedPulseTextures(const VfxProgramData &cooked,
+bool ChargedPulseTextures(const VfxProgramView &cooked,
                           const VfxOutputRecord &output)
 {
     if (!StateRingTextures(cooked, output)) return false;
@@ -977,7 +977,7 @@ bool ChargedPulseTextures(const VfxProgramData &cooked,
     return true;
 }
 
-void AppendChargedPulseGroundOutputs(const VfxProgramData &cooked,
+void AppendChargedPulseGroundOutputs(const VfxProgramView &cooked,
                                      const VfxEffectRecord &effect,
                                      const VfxEventInput &input, float age,
                                      std::vector<VfxTypedGroundCommand> &result)
@@ -1108,7 +1108,7 @@ void AppendChargedPulseGroundOutputs(const VfxProgramData &cooked,
     result.insert(result.end(), commands.begin(), commands.end());
 }
 
-void AppendPersistentEntityGroundOutputs(const VfxProgramData &cooked,
+void AppendPersistentEntityGroundOutputs(const VfxProgramView &cooked,
                                   const VfxPersistentInput &input, Tick current_tick,
                                   std::vector<VfxTypedGroundCommand> &result)
 {
@@ -1410,7 +1410,7 @@ void AppendPersistentEntityGroundOutputs(const VfxProgramData &cooked,
         }
     }
 }
-void AppendPersistentChevronOutputs(const VfxProgramData &cooked,
+void AppendPersistentChevronOutputs(const VfxProgramView &cooked,
                                     std::size_t source_index,
                                     const VfxPersistentInput &input,
                                     const VfxLinePayload &line, Tick current_tick,
@@ -1507,7 +1507,7 @@ void AppendPersistentChevronOutputs(const VfxProgramData &cooked,
         result.push_back(item);
     }
 }
-void AppendSafeSector(const VfxProgramData &cooked, const VfxEventInput &input,
+void AppendSafeSector(const VfxProgramView &cooked, const VfxEventInput &input,
                       Tick tick, std::vector<VfxTypedGroundCommand> &result)
 {
     if (input.effect_handle == 0 || input.effect_handle > cooked.effects.size()) return;
@@ -1582,7 +1582,7 @@ void AppendSafeSector(const VfxProgramData &cooked, const VfxEventInput &input,
 } // namespace
 
 std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxPersistentInput> inputs,
     Tick current_tick)
 {
@@ -1707,7 +1707,7 @@ std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
 }
 
 std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
-    const VfxProgramData &cooked,
+    const VfxProgramView &cooked,
     std::span<const VfxEventInput> inputs,
     Tick current_tick)
 {

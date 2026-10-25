@@ -284,6 +284,12 @@ Result D3D12Renderer::Impl::PrepareResidentAssetData(Impl &candidate)
         vector(candidate.archer_inverse_bind_matrices); vector(candidate.archer_transforms);
         vector(candidate.archer_upper_body_weights); vector(candidate.archer_support_vertices);
         vector(candidate.archer_material_bindings);
+        for (const auto &monster : candidate.monster_assets)
+        {
+            vector(monster.material_bindings);
+            vector(monster.geometry_lods);
+            vector(monster.interval_bounds);
+        }
         const auto &animation = candidate.archer_named_animations;
         vector(animation.bone_names); vector(animation.parents); vector(animation.inverse_bind_matrices);
         vector(animation.clips); vector(animation.transforms); vector(animation.sockets);
@@ -478,14 +484,17 @@ Result D3D12Renderer::Impl::SubmitResidentUtilityUpload(ID3D12GraphicsCommandLis
     auto &retained = resident_utility_submissions.back();
     retained.uploads = std::move(uploads);
     ID3D12CommandList *lists[]{list};
+    StartupOperationScope submit_timing(RendererStartupOperation::UploadSubmit);
     queue->ExecuteCommandLists(1, lists);
     auto hr = queue->Signal(fence.Get(), retained.fence_value);
+    submit_timing.Stop();
     if (FAILED(hr))
     {
         frame_submission_faulted = true;
         return CheckDevice(hr, "Signal resident utility upload completion");
     }
     retained.signaled = true;
+    StartupOperationScope wait_timing(RendererStartupOperation::GpuCompletionAdmission);
     if (fence->GetCompletedValue() < retained.fence_value)
     {
         hr = fence->SetEventOnCompletion(retained.fence_value, fence_event);
@@ -494,7 +503,7 @@ Result D3D12Renderer::Impl::SubmitResidentUtilityUpload(ID3D12GraphicsCommandLis
             frame_submission_faulted = true;
             return HResultFailure("Set resident utility upload completion event", hr);
         }
-        const auto wait = WaitForSingleObject(fence_event, INFINITE);
+        const auto wait = MeasureStartupOperation(RendererStartupOperation::GpuFenceWait, [&] { return WaitForSingleObject(fence_event, INFINITE); });
         if (wait != WAIT_OBJECT_0)
         {
             frame_submission_faulted = true;
@@ -502,6 +511,7 @@ Result D3D12Renderer::Impl::SubmitResidentUtilityUpload(ID3D12GraphicsCommandLis
                 wait == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : E_FAIL);
         }
     }
+    wait_timing.Stop();
     if (FAILED(device->GetDeviceRemovedReason()))
     {
         frame_submission_faulted = true;

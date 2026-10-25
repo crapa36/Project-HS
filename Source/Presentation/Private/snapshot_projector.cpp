@@ -1,6 +1,7 @@
 #include <hs/presentation/projector.hpp>
 #include <hs/presentation/meadow_surface.hpp>
-#include "environment_projector.hpp"
+#include <hs/presentation/environment_layout.hpp>
+#include <hs/presentation/process_scene.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -26,102 +27,7 @@ Float2 Add(Float2 a,Float2 b) noexcept{return {a.x+b.x,a.y+b.y};} Float2 Subtrac
 float LengthSquared(Float2 v) noexcept{return v.x*v.x+v.y*v.y;} Float2 Normalize(Float2 v) noexcept{auto l=std::sqrt(LengthSquared(v));return l>.0001f?Multiply(v,1/l):Float2{0,1};} Float2 Rotate(Float2 v,float r) noexcept{auto c=std::cos(r),s=std::sin(r);return {v.x*c-v.y*s,v.x*s+v.y*c};}
 } // namespace
 
-bool RenderSceneProjectionState::Build(std::span<const RenderInstance> instances,
-                                       std::uint64_t session_id,
-                                       RenderSceneDelta &delta)
-{
-    Abort();
-    delta = {};
-    if (instances.size() > std::numeric_limits<std::uint32_t>::max()) return false;
-
-    const bool reset_history = !initialized_ || committed_session_id_ != session_id;
-    delta.base_generation = reset_history ? 0 : generation_;
-    delta.generation = reset_history ? 1 : generation_ + 1;
-    if (delta.generation == 0) return false;
-    pending_session_id_ = session_id;
-    pending_generation_ = delta.generation;
-    pending_.reserve(instances.size());
-    delta.instances.reserve(instances.size());
-
-    for (std::size_t index = 0; index < instances.size(); ++index)
-    {
-        auto source = instances[index];
-        PopulateRenderInstanceRevisions(source);
-        const auto key = MakeRenderSceneInstanceKey(
-            source.stable_id, static_cast<std::uint32_t>(index));
-        if (!pending_.emplace(key, source.revisions).second)
-        {
-            Abort();
-            return false;
-        }
-
-        RenderSceneDeltaItem item;
-        item.key = key;
-        item.source_index = static_cast<std::uint32_t>(index);
-        item.revisions = source.revisions;
-        const auto previous = reset_history ? previous_.end() : previous_.find(key);
-        if (previous == previous_.end())
-        {
-            item.kind = RenderSceneDeltaKind::Created;
-            item.revision_mask = kRenderSceneAllRevisions;
-            ++delta.created;
-        }
-        else
-        {
-            item.revision_mask = CompareRenderInstanceRevisions(
-                previous->second, source.revisions);
-            item.kind = item.revision_mask == 0 ? RenderSceneDeltaKind::Unchanged
-                                                : RenderSceneDeltaKind::Updated;
-            if (item.kind == RenderSceneDeltaKind::Updated) ++delta.updated;
-            else ++delta.unchanged;
-        }
-        delta.instances.push_back(item);
-    }
-
-    if (!reset_history)
-    {
-        delta.destroyed.reserve(previous_.size());
-        for (const auto &[key, revisions] : previous_)
-        {
-            static_cast<void>(revisions);
-            if (!pending_.contains(key)) delta.destroyed.push_back(key);
-        }
-    }
-    pending_valid_ = true;
-    return true;
-}
-
-void RenderSceneProjectionState::Commit() noexcept
-{
-    if (!pending_valid_) return;
-    previous_.swap(pending_);
-    pending_.clear();
-    committed_session_id_ = pending_session_id_;
-    generation_ = pending_generation_;
-    initialized_ = true;
-    pending_valid_ = false;
-    pending_session_id_ = 0;
-    pending_generation_ = 0;
-}
-
-void RenderSceneProjectionState::Abort() noexcept
-{
-    pending_.clear();
-    pending_valid_ = false;
-    pending_session_id_ = 0;
-    pending_generation_ = 0;
-}
-
-void RenderSceneProjectionState::Clear() noexcept
-{
-    previous_.clear();
-    Abort();
-    committed_session_id_ = 0;
-    generation_ = 0;
-    initialized_ = false;
-}
-
-void EnemyAnimationState::Update(const GameReadModel &model,
+void EnemyAnimationState::Update(const TickReadView &model,
                                  std::span<const DomainSignal> signals)
 {
     const bool reset = initialized_ &&
@@ -244,8 +150,9 @@ std::optional<float> EnemyAnimationState::CancelProgress(std::uint64_t id) const
 namespace
 {
 struct EnemyProjection { RenderInstance instance; AnimationPoseRef pose; Float2 facing; };
+template <typename Actions>
 EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
-    std::span<const BossActionView> actions, const EnemyAnimationState *enemy_animations)
+    const Actions &actions, const EnemyAnimationState *enemy_animations)
 {
     const auto color = enemy.boss == BossKind::Final ? 0xFF4040E8u :
                        enemy.boss == BossKind::TenMinute ? 0xFFB040E8u :
@@ -343,25 +250,21 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
         enemy_pose.normalized_time =
             static_cast<float>((tick + enemy.id.value * 17) % 120) / 120.0f;
     }
-    PopulateRenderInstanceRevisions(instance);
-    enemy_pose.revision = DeriveAnimationPoseRevision(enemy_pose);
-    instance.revisions.pose = enemy_pose.revision;
+    PopulateRenderInstanceIdentity(instance);
     return {instance, enemy_pose, facing};
 }
 } // namespace
 
-bool ProjectRenderSnapshot(const GameReadModel &model,
+bool ProjectTick(const TickReadView &model,
                            const PresentationCatalog &presentation,
                            const PresentationUiState &ui,
                            const SettingsData &settings,
                            RenderSnapshotStorage &snapshot,
+                           std::shared_ptr<const StaticRenderScene> environment_scene,
                            std::uint8_t pending_rebind_slot,
                            const EnemyAnimationState *enemy_animations,
-                           StaticEnvironmentSceneCache *environment_cache,
-                           RenderSceneProjectionState *scene_state,
                            const GraphicsSettingsUiModel *graphics_ui)
 {
-    if (scene_state) scene_state->Abort();
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
     snapshot.header.checksum = model.checksum;
@@ -376,7 +279,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
     // Project simulation-relative heights exactly once, including independent trail endpoints.
     const auto add_instance = [&](RenderInstance instance) {
         instance.position = grounded(instance.position);
-        return snapshot.AddInstance(instance);
+        PopulateRenderInstanceIdentity(instance);
+        return snapshot.AppendInstance(instance);
     };
     const auto add_visual = [&](PersistentVfxVisual visual) {
         const bool body_trail = visual.projectile_owner_id != 0 &&
@@ -633,7 +537,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
                                         static_cast<float>(kAnimationBlendOutTicks);
         pose.upper_body_weight = std::clamp(std::min(fade_in, fade_out), 0.0f, 1.0f);
     }
-    complete &= snapshot.AddPose(pose);
+    complete &= snapshot.AppendPose(pose);
 
     if (model.player.charging &&
         model.player.charging_skill == SkillKind::ChargedShot)
@@ -651,8 +555,8 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
              model.player.charge_start});
     }
 
-    snapshot.SetStaticScene(environment_cache ? environment_cache->Resolve(model)
-        : BuildStaticEnvironmentScene(model, {}));
+    if (!environment_scene) return false;
+    snapshot.SetStaticScene(std::move(environment_scene));
     for (const auto &enemy : model.enemies)
     {
         if (enemy.dead) continue;
@@ -747,7 +651,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         }
         auto enemy_pose = projected.pose;
         enemy_pose.instance_index = static_cast<std::uint32_t>(instance_index);
-        complete &= snapshot.AddPose(enemy_pose);
+        complete &= snapshot.AppendPose(enemy_pose);
         if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking &&
             model.tick < enemy.attack_resolve)
         {
@@ -818,7 +722,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         // Same mesh, transform and pose path even without a prior live snapshot.
         auto projected = ProjectEnemy(death.enemy, death.tick, actions, nullptr);
         projected.instance.position = grounded(projected.instance.position);
-        complete &= snapshot.AddCapturedInstance({model.session_id, death.enemy.id.value,
+        complete &= snapshot.AppendCapturedInstance({model.session_id, death.enemy.id.value,
             death.sequence, death.tick, projected.instance, projected.pose});
     }
     if (enemy_animations)
@@ -841,7 +745,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             pose.instance_index = static_cast<std::uint32_t>(index);
             pose.clip = CharacterAnimationClip::Death;
             pose.normalized_time = std::clamp(static_cast<float>(elapsed) / 48.0f, 0.0f, 1.0f);
-            complete &= snapshot.AddPose(pose);
+            complete &= snapshot.AppendPose(pose);
         }
     }
     for (const auto &delivery : model.scheduled_area_deliveries)
@@ -1526,7 +1430,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             complete &= add_visual(timer);
         }
     LightView sun{};
-    sun.direction = {-0.45f, -0.82f, 0.35f};
+    sun.direction = kEnvironmentSunDirection;
     sun.quantity = 3.0f * kLightWhiteLumensPerWatt;
     sun.color = {1.0f, 0.92f, 0.78f};
     sun.stable_id = 0x48535f53554e0001ull;
@@ -1639,7 +1543,7 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
               "도탄 화살의 기본 쿨타임이 감소해 더 자주 사용할 수 있습니다."}},
             {{"첫 화살비가 시작된 뒤 시전 방향 앞쪽에 더 작고 짧은 두 번째 화살비가 생깁니다.",
               "첫 피해가 발생할 때 범위 안의 일반 적을 중심으로 끌어당깁니다.",
-              "같은 화살비가 한 적을 세 번 맞힐 때마다 강한 출혈을 부여합니다.",
+              "같은 화살비가 한 적을 두 번 맞힐 때마다 출혈 3중첩을 부여합니다.",
               "맞은 적을 태우고 그 자리에 작은 불장판을 만듭니다. 한 번의 시전당 최대 4개 생성됩니다.",
               "화살비가 피해를 줄 때마다 범위 근처의 가장 가까운 적에게 추적 화살을 발사합니다.",
               "화살비 안에 머무는 적에게 강한 둔화를 피해 주기마다 새로 부여합니다.",
@@ -1902,23 +1806,23 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
             }
         }
 
-        std::vector<const EnemyView *> bosses;
+        std::vector<EnemyView> bosses;
         for (const auto &enemy : model.enemies)
         {
-            if (enemy.boss && !enemy.dead) bosses.push_back(&enemy);
+            if (enemy.boss && !enemy.dead) bosses.push_back(enemy);
         }
         std::ranges::sort(bosses,
-                          [](const EnemyView *left, const EnemyView *right) {
-            const auto left_final = left->boss == BossKind::Final;
-            const auto right_final = right->boss == BossKind::Final;
+                          [](const EnemyView &left, const EnemyView &right) {
+            const auto left_final = left.boss == BossKind::Final;
+            const auto right_final = right.boss == BossKind::Final;
             return left_final != right_final ? left_final :
-                   left->spawned_tick < right->spawned_tick;
+                   left.spawned_tick < right.spawned_tick;
         });
         constexpr std::array<std::string_view, 3> boss_names{
             "5분 보스", "10분 보스", "최종 보스"};
         for (std::size_t index = 0; index < bosses.size(); ++index)
         {
-            const auto &boss = *bosses[index];
+            const auto &boss = bosses[index];
             add_ui(UiModel::Kind::Bar,
                    {560, 32.0f + static_cast<float>(index) * 46.0f}, {800, 38},
                    0xFFE04070u,
@@ -2320,20 +2224,20 @@ bool ProjectRenderSnapshot(const GameReadModel &model,
         add_ui(UiModel::Kind::Text, {550, 900}, {820, 50}, 0xFFFFFFFFu,
                "클릭: 메인 메뉴", 1.0f, 26);
     }
-    if (complete && scene_state)
-    {
-        RenderSceneDelta delta;
-        if (!scene_state->Build(snapshot.View().instances, model.session_id, delta))
-            complete = false;
-        else
-            snapshot.SetSceneDelta(std::move(delta));
-    }
-    if (!complete)
-    {
-        snapshot.ClearSceneDelta();
-        if (scene_state) scene_state->Abort();
-    }
     return complete;
+}
+
+bool ProjectRenderSnapshot(const GameReadModel &model,
+    const PresentationCatalog &presentation, const PresentationUiState &ui,
+    const SettingsData &settings, RenderSnapshotStorage &snapshot,
+    std::uint8_t pending_rebind_slot, const EnemyAnimationState *enemy_animations,
+    std::shared_ptr<const StaticRenderScene> environment_scene,
+    const GraphicsSettingsUiModel *graphics_ui)
+{
+    const auto view = development::BorrowOwnedReadModel(model);
+    if (!environment_scene) environment_scene = ProcessSceneView(BuildProcessSceneAtLaunch(view, {}));
+    return ProjectTick(view, presentation, ui, settings,
+        snapshot, std::move(environment_scene), pending_rebind_slot, enemy_animations, graphics_ui);
 }
 
 } // namespace hs

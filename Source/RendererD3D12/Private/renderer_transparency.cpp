@@ -1,11 +1,14 @@
 #include "renderer_transparency.hpp"
 #include "d3d12_resources.hpp"
+#include "renderer_pipeline_cache.hpp"
+#include "renderer_hero_work.hpp"
 
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
 
 #include <array>
 #include <cstring>
+#include <iterator>
 #include <string>
 #include <utility>
 
@@ -15,16 +18,21 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kConstantStride = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
-constexpr std::uint32_t kTailPhase = 8, kGuidePhase = 9, kCompositePhase = 10;
+constexpr std::uint32_t kTailPhase = 8, kCompositePhase = 10;
 constexpr std::uint32_t kUavOffset = 22;
 constexpr DXGI_FORMAT kColor = DXGI_FORMAT_R16G16B16A16_FLOAT;
 constexpr std::array<DXGI_FORMAT, 6> kGuideFormats{
     DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32G32_FLOAT,
     kColor, DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R16G16_FLOAT};
+static_assert(1 + kGuideFormats.size() <= D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT);
 constexpr std::array<std::string_view, 5> kPixelProducts{
     "render/shader/hero_peel_front_ps.dxil", "render/shader/hero_peel_exit_ps.dxil",
     "render/shader/hero_oit_tail_ps.dxil", "render/shader/hero_transparent_guide_ps.dxil",
     "render/shader/hero_layer_composite_ps.dxil"};
+constexpr std::array<std::string_view, 5> kWorkPixelProducts{
+    "render/shader/hero_peel_front_ps_hero_work.dxil", "render/shader/hero_peel_exit_ps_hero_work.dxil",
+    "render/shader/hero_oit_tail_ps_hero_work.dxil", "render/shader/hero_transparent_guide_ps_hero_work.dxil",
+    "render/shader/hero_layer_composite_ps_hero_work.dxil"};
 
 Result Failure(ErrorCode code, std::string message)
 {
@@ -92,6 +100,7 @@ struct HeroTransparencyTargets
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
     std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
+    std::unique_ptr<HeroWorkCapture> work;
     ComPtr<ID3D12DescriptorHeap> tables, rtv_heap, dsv_heap, exports;
     std::array<AllocationResource, 4> front, identity, exit;
     std::array<AllocationResource, 6> guides;
@@ -176,6 +185,8 @@ struct HeroTransparencyTargets
 struct HeroTransparencySystem::Impl
 {
     std::shared_ptr<HeroTransparencyTargets> targets;
+    std::vector<RendererHeroWorkSample> completed_work;
+    RendererHeroWorkStatus retired_work;
     struct Import { AllocationResource *allocation{}; ResourceHandle handle; };
     struct Pending
     {
@@ -187,6 +198,8 @@ struct HeroTransparencySystem::Impl
         std::vector<Import> imports;
         std::array<ResourceVersion, 4> front, identity, exit;
         std::array<ResourceVersion, 2> color;
+        std::array<ResourceVersion, 6> guides;
+        ResourceVersion overflow;
         bool composed{};
     } pending;
 };
@@ -198,7 +211,8 @@ std::uint64_t HeroTransparencySystem::AllocatedBytes() const noexcept { return i
 
 Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     ID3D12RootSignature *root, ViewExtent capacity, std::uint32_t layerCount, bool enabled,
-    std::uint32_t frameSlots, const ShaderReader &readShader, HeroTransparencyCandidate &candidate) const
+    std::uint32_t frameSlots, const ShaderReader &readShader, RendererPipelineCache &pipelineCache,
+    HeroTransparencyCandidate &candidate, bool captureHeroWork, HeroWorkDiagnosticMode mode) const
 {
     if (!device || !allocator || !root || !ValidExtent(capacity) || layerCount > 4 || (enabled && !layerCount) || !frameSlots ||
         frameSlots > D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 / kHeroTransparencyDescriptorsPerFrame ||
@@ -209,6 +223,11 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     next->capacity = capacity; next->enabled = enabled; next->layer_count = layerCount;
     next->frame_slot_count = frameSlots; next->slot_completion.resize(frameSlots);
     if (!enabled) { candidate.targets_ = std::move(next); return Result::Success(); }
+    if (captureHeroWork)
+    {
+        next->work = std::make_unique<HeroWorkCapture>();
+        if (auto prepared = next->work->Initialize(device, allocator, frameSlots, capacity, mode); !prepared) return prepared;
+    }
     if (auto checked = CheckFormat(device, DXGI_FORMAT_D32_FLOAT, true, false); !checked) return checked;
     if (auto checked = CheckFormat(device, DXGI_FORMAT_R32G32_UINT, false, false); !checked) return checked;
     if (auto checked = CheckFormat(device, DXGI_FORMAT_R32_UINT, false, true); !checked) return checked;
@@ -246,14 +265,17 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         {"MATERIAL", 0, DXGI_FORMAT_R16_UINT, 0, 72, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0}};
     for (std::uint32_t index = 0; index < kPixelProducts.size(); ++index)
     {
+        const auto product = captureHeroWork ? kWorkPixelProducts[index] : kPixelProducts[index];
         std::vector<std::byte> pixel;
-        if (auto read = readShader(kPixelProducts[index], pixel); !read) return read;
-        if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency pixel product is empty: " + std::string(kPixelProducts[index]));
+        if (auto read = readShader(product, pixel); !read) return read;
+        if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency pixel product is empty: " + std::string(product));
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
         pipeline.pRootSignature = root; pipeline.VS = {vertex.data(), vertex.size()}; pipeline.PS = {pixel.data(), pixel.size()};
         pipeline.SampleMask = UINT_MAX; pipeline.SampleDesc.Count = 1;
         pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        pipeline.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; pipeline.RasterizerState.DepthClipEnable = TRUE;
+        // Exit selects back faces; every other phase selects front faces.
+        pipeline.RasterizerState.CullMode = index == 1 ? D3D12_CULL_MODE_FRONT : D3D12_CULL_MODE_BACK;
+        pipeline.RasterizerState.DepthClipEnable = TRUE;
         pipeline.InputLayout = {layout, static_cast<UINT>(std::size(layout))};
         pipeline.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -276,6 +298,11 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         else if (index == 2)
         {
+            // Reverse-Z: exactly the tail's former z > opaque-depth predicate.
+            // Read-only depth allows early rejection before material/UAV work.
+            pipeline.DepthStencilState.DepthEnable = TRUE;
+            pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
+            pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
             pipeline.NumRenderTargets = 2; pipeline.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
             pipeline.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
             pipeline.BlendState.IndependentBlendEnable = TRUE;
@@ -291,17 +318,28 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         else if (index == 3)
         {
-            pipeline.NumRenderTargets = static_cast<UINT>(kGuideFormats.size());
+            // The nearest composite emits its original surface guides in the same draw.
+            pipeline.NumRenderTargets = 1 + static_cast<UINT>(kGuideFormats.size());
+            pipeline.RTVFormats[0] = kColor;
             for (std::uint32_t target = 0; target < kGuideFormats.size(); ++target)
             {
-                pipeline.RTVFormats[target] = kGuideFormats[target];
-                pipeline.BlendState.RenderTarget[target].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                pipeline.RTVFormats[1 + target] = kGuideFormats[target];
+                pipeline.BlendState.RenderTarget[1 + target].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             }
             pipeline.BlendState.IndependentBlendEnable = TRUE;
         }
         else { pipeline.NumRenderTargets = 1; pipeline.RTVFormats[0] = kColor; }
-        const auto native = device->CreateGraphicsPipelineState(&pipeline, IID_PPV_ARGS(&next->pipelines[index]));
-        if (FAILED(native)) return NativeFailure("Create hero transparency pipeline " + std::string(kPixelProducts[index]), native);
+        if (index >= 3)
+        {
+            // Same vertex shader/rasterization as the front peel. Keep the
+            // identity check in the PS to reject coincident other instances.
+            pipeline.DepthStencilState.DepthEnable = TRUE;
+            pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
+            pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        }
+        const auto native = pipelineCache.CreateGraphics(&pipeline, IID_PPV_ARGS(&next->pipelines[index]));
+        if (FAILED(native)) return NativeFailure("Create hero transparency pipeline " + std::string(product), native);
+        if (next->work) next->work->Pipeline(index, pipeline, vertex, pixel, product);
     }
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -316,7 +354,7 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->rtv_heap));
     if (FAILED(native)) return NativeFailure("Create hero transparency RTVs", native);
     next->rtv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
-    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap.NumDescriptors = 8;
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV; heap.NumDescriptors = 12;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->dsv_heap));
     if (FAILED(native)) return NativeFailure("Create hero transparency DSVs", native);
     next->dsv_stride = device->GetDescriptorHandleIncrementSize(heap.Type);
@@ -325,6 +363,9 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     {
         device->CreateDepthStencilView(next->front[layer].resource.Get(), &dsv, next->Dsv(layer));
         device->CreateDepthStencilView(next->exit[layer].resource.Get(), &dsv, next->Dsv(4 + layer));
+        auto read_only = dsv;
+        read_only.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+        device->CreateDepthStencilView(next->front[layer].resource.Get(), &read_only, next->Dsv(8 + layer));
         device->CreateRenderTargetView(next->identity[layer].resource.Get(), nullptr, next->Rtv(layer));
     }
     for (std::uint32_t index = 0; index < next->guides.size(); ++index)
@@ -362,6 +403,7 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     for (const auto &resource : next->exit) include(resource);
     for (const auto &resource : next->guides) include(resource);
     for (const auto &resource : next->color) include(resource);
+    if (next->work) next->bytes += next->work->Status().readback_bytes;
     candidate.targets_ = std::move(next);
     return Result::Success();
 }
@@ -372,6 +414,23 @@ Result HeroTransparencySystem::Commit(HeroTransparencyCandidate &&candidate, con
     if (!candidate.targets_) return Failure(ErrorCode::InvalidArgument, "Hero transparency candidate was not prepared.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState, "Old hero transparency targets are still in GPU use.");
+    if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
+    if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
+        return Failure(ErrorCode::InvalidState, "Old hero contributor queries are still in GPU use.");
+    if (impl_->targets && impl_->targets->work)
+    {
+        const auto previous = impl_->targets->work->Status();
+        impl_->retired_work.mesh_statistics_supported |= previous.mesh_statistics_supported;
+        impl_->retired_work.shader_counters_enabled |= previous.shader_counters_enabled;
+        impl_->retired_work.submitted_frames += previous.submitted_frames;
+        impl_->retired_work.completed_frames += previous.completed_frames;
+        impl_->retired_work.failed_frames += previous.failed_frames;
+        impl_->retired_work.samples += previous.samples;
+        impl_->retired_work.overflowed |= previous.overflowed;
+        impl_->retired_work.shader_invalid_samples += previous.shader_invalid_samples;
+        impl_->retired_work.shader_clear_commands += previous.shader_clear_commands;
+        impl_->retired_work.shader_copy_commands += previous.shader_copy_commands;
+    }
     impl_->targets = std::move(candidate.targets_);
     return Result::Success();
 }
@@ -391,7 +450,7 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
         !FitsDepth(inputs.opaque_depth, active) || !Fits(inputs.hdr, active, kColor) ||
         !Fits(inputs.accumulation, active, DXGI_FORMAT_R32G32B32A32_FLOAT) ||
         !Fits(inputs.revealage, active, DXGI_FORMAT_R16_FLOAT) ||
-        !inputs.accumulation_rtv.ptr || !inputs.revealage_rtv.ptr || !inputs.shader_heap ||
+        !inputs.accumulation_rtv.ptr || !inputs.revealage_rtv.ptr || !inputs.opaque_readonly_dsv.ptr || !inputs.shader_heap ||
         !inputs.table_cpu.ptr || !inputs.table_gpu.ptr || inputs.descriptor_stride != storage->srv_stride || !inputs.draw)
         return Failure(ErrorCode::InvalidArgument, "Hero transparency frame, guides, native table or draw callback is invalid.");
     const auto heap = inputs.shader_heap->GetDesc();
@@ -417,6 +476,11 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     Impl::Pending pending;
     pending.graph = &graph; pending.targets = storage; pending.inputs = inputs; pending.shader_heap = inputs.shader_heap;
     pending.scene_reads.assign(inputs.scene_reads.begin(), inputs.scene_reads.end());
+    if (storage->work)
+    {
+        if (auto collected = storage->work->Collect(inputs.completed, impl_->completed_work); !collected) return collected;
+        if (auto begun = storage->work->Begin(graph, inputs); !begun) return begun;
+    }
     auto import = [&](AllocationResource &resource, std::string_view name) {
         const auto handle = graph.ImportTexture({resource.resource.Get(), resource.graph_completion, resource.graph_queue}, resource.graph_access, name);
         pending.imports.push_back({&resource, handle}); return graph.Version(handle);
@@ -431,13 +495,12 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     }
     for (std::uint32_t index = 0; index < storage->color.size(); ++index)
         pending.color[index] = import(storage->color[index], "Hero.CompositeHDR");
-    std::array<ResourceVersion, 6> guides;
+    auto &guides = pending.guides;
     for (std::uint32_t index = 0; index < guides.size(); ++index) guides[index] = import(storage->guides[index], "Hero.NearestFrontGuide");
     auto overflow = import(storage->overflow, "Hero.LayerOverflow");
     storage->FillTable(inputs, kTailPhase, 0, HeroTransparencyPhase::Tail, inputs.hdr.resource);
-    storage->FillTable(inputs, kGuidePhase, 0, HeroTransparencyPhase::Guide, inputs.hdr.resource);
-    auto readScene = [&](PassBuilder &pass) {
-        pass.Read(inputs.opaque_depth.version, Access::ShaderRead);
+    auto readScene = [&](PassBuilder &pass, Access depthAccess = Access::ShaderRead) {
+        pass.Read(inputs.opaque_depth.version, depthAccess);
         for (const auto &read : pending.scene_reads) pass.Read(read.version, read.access);
     };
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
@@ -447,6 +510,7 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
         if (layer) front.Read(pending.front[layer - 1], Access::ShaderRead);
         pending.front[layer] = front.Write(pending.front[layer], Access::DepthWrite);
         pending.identity[layer] = front.Write(pending.identity[layer], Access::RenderTarget);
+        if (storage->work) storage->work->DeclarePhase(graph, front, inputs.frame_slot, layer);
         front.SetExecute([storage, inputs, layer](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             constexpr float clear[]{0, 0, 0, 0};
@@ -454,17 +518,20 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
             commands->ClearDepthStencilView(depth, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
             commands->ClearRenderTargetView(target, clear, 0, nullptr);
             commands->OMSetRenderTargets(1, &target, FALSE, &depth);
-            inputs.draw(commands, storage->pipelines[0].Get(), HeroTransparencyPhase::Front, layer, storage->Gpu(inputs, layer));
+            if (storage->work) storage->work->Record(commands, storage->pipelines[0].Get(), inputs, HeroTransparencyPhase::Front, layer, layer, storage->Gpu(inputs, layer));
+            else inputs.draw(commands, storage->pipelines[0].Get(), HeroTransparencyPhase::Front, layer, storage->Gpu(inputs, layer));
         });
         auto exit = graph.AddPass(91 + layer * 2, "HeroPeelExit", QueueHint::Direct);
         readScene(exit); exit.Read(pending.front[layer], Access::ShaderRead); exit.Read(pending.identity[layer], Access::ShaderRead);
         pending.exit[layer] = exit.Write(pending.exit[layer], Access::DepthWrite);
+        if (storage->work) storage->work->DeclarePhase(graph, exit, inputs.frame_slot, 4 + layer);
         exit.SetExecute([storage, inputs, layer](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto depth = storage->Dsv(4 + layer);
             commands->ClearDepthStencilView(depth, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
             commands->OMSetRenderTargets(0, nullptr, FALSE, &depth);
-            inputs.draw(commands, storage->pipelines[1].Get(), HeroTransparencyPhase::Exit, layer, storage->Gpu(inputs, 4 + layer));
+            if (storage->work) storage->work->Record(commands, storage->pipelines[1].Get(), inputs, HeroTransparencyPhase::Exit, layer, 4 + layer, storage->Gpu(inputs, 4 + layer));
+            else inputs.draw(commands, storage->pipelines[1].Get(), HeroTransparencyPhase::Exit, layer, storage->Gpu(inputs, 4 + layer));
         });
     }
     auto clear = graph.AddPass(98, "HeroClearOverflow", QueueHint::Direct);
@@ -477,7 +544,7 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
             storage->Cpu(inputs.frame_slot, kTailPhase, kUavOffset), storage->overflow.resource.Get(), zero, 0, nullptr);
     });
     auto tail = graph.AddPass(99, "HeroOitTail", QueueHint::Direct);
-    readScene(tail); tail.Read(inputs.hdr.version, Access::ShaderRead);
+    readScene(tail, Access::DepthShaderRead); tail.Read(inputs.hdr.version, Access::ShaderRead);
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
     {
         tail.Read(pending.front[layer], Access::ShaderRead); tail.Read(pending.identity[layer], Access::ShaderRead);
@@ -485,27 +552,15 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     overflow = tail.Write(overflow, Access::UnorderedWrite);
     outputs.accumulation = tail.ReadWrite(inputs.accumulation.version, Access::RenderTarget);
     outputs.revealage = tail.ReadWrite(inputs.revealage.version, Access::RenderTarget);
+    if (storage->work) storage->work->DeclarePhase(graph, tail, inputs.frame_slot, kTailPhase);
     tail.SetExecute([storage, inputs](RenderPassContext &context) {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         const D3D12_CPU_DESCRIPTOR_HANDLE targets[]{inputs.accumulation_rtv, inputs.revealage_rtv};
-        commands->OMSetRenderTargets(2, targets, FALSE, nullptr);
-        inputs.draw(commands, storage->pipelines[2].Get(), HeroTransparencyPhase::Tail, 0, storage->Gpu(inputs, kTailPhase));
+        commands->OMSetRenderTargets(2, targets, FALSE, &inputs.opaque_readonly_dsv);
+        if (storage->work) storage->work->Record(commands, storage->pipelines[2].Get(), inputs, HeroTransparencyPhase::Tail, 0, kTailPhase, storage->Gpu(inputs, kTailPhase));
+        else inputs.draw(commands, storage->pipelines[2].Get(), HeroTransparencyPhase::Tail, 0, storage->Gpu(inputs, kTailPhase));
     });
-    auto guide = graph.AddPass(100, "HeroNearestFrontGuides", QueueHint::Direct);
-    readScene(guide); guide.Read(pending.front[0], Access::ShaderRead); guide.Read(pending.identity[0], Access::ShaderRead);
-    guide.Read(overflow, Access::ShaderRead);
-    for (auto &version : guides) version = guide.Write(version, Access::RenderTarget);
-    guide.SetExecute([storage, inputs](RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 6> targets;
-        constexpr float zero[]{0, 0, 0, 0};
-        for (std::uint32_t index = 0; index < targets.size(); ++index)
-        {
-            targets[index] = storage->Rtv(4 + index); commands->ClearRenderTargetView(targets[index], zero, 0, nullptr);
-        }
-        commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, nullptr);
-        inputs.draw(commands, storage->pipelines[3].Get(), HeroTransparencyPhase::Guide, 0, storage->Gpu(inputs, kGuidePhase));
-    });
+    pending.overflow = overflow;
     outputs.depth = guides[0]; outputs.motion = guides[1]; outputs.history = guides[2];
     outputs.classification = guides[3]; outputs.metadata = guides[4]; outputs.transport = guides[5]; outputs.overflow = overflow;
     outputs.depth_resource = storage->guides[0].resource.Get(); outputs.motion_resource = storage->guides[1].resource.Get();
@@ -515,7 +570,6 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     outputs.depth_srv = storage->Export(0); outputs.motion_srv = storage->Export(1); outputs.history_srv = storage->Export(2);
     outputs.classification_srv = storage->Export(3); outputs.metadata_srv = storage->Export(4);
     outputs.transport_srv = storage->Export(5); outputs.overflow_srv = storage->Export(6);
-    outputs.guides_table_gpu = storage->Gpu(inputs, kGuidePhase);
     impl_->pending = std::move(pending);
     return Result::Success();
 }
@@ -551,16 +605,38 @@ Result HeroTransparencySystem::RegisterComposition(RenderGraphBuilder &graph, He
         });
         auto compose = graph.AddPass(102 + step * 2, "HeroLayerComposite", QueueHint::Direct);
         compose.Read(source, Access::ShaderRead); compose.Read(inputs.opaque_depth.version, Access::ShaderRead);
-        compose.Read(pending.front[layer], Access::ShaderRead); compose.Read(pending.identity[layer], Access::ShaderRead);
+        compose.Read(pending.front[layer], Access::DepthShaderRead); compose.Read(pending.identity[layer], Access::ShaderRead);
         compose.Read(pending.exit[layer], Access::ShaderRead);
         if (layer + 1 < storage->layer_count) compose.Read(pending.front[layer + 1], Access::ShaderRead);
         for (const auto &read : pending.scene_reads) compose.Read(read.version, read.access);
         pending.color[target] = compose.ReadWrite(pending.color[target], Access::RenderTarget);
+        if (layer == 0)
+        {
+            compose.Read(pending.overflow, Access::ShaderRead);
+            for (auto &version : pending.guides) version = compose.Write(version, Access::RenderTarget);
+            outputs.depth = pending.guides[0]; outputs.motion = pending.guides[1]; outputs.history = pending.guides[2];
+            outputs.classification = pending.guides[3]; outputs.metadata = pending.guides[4]; outputs.transport = pending.guides[5];
+        }
+        if (storage->work) storage->work->DeclarePhase(graph, compose, inputs.frame_slot, phase);
         compose.SetExecute([storage, inputs, layer, phase, target](RenderPassContext &context) {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto rtv = storage->Rtv(10 + target);
-            commands->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-            inputs.draw(commands, storage->pipelines[4].Get(), HeroTransparencyPhase::Composite, layer, storage->Gpu(inputs, phase));
+            const auto depth = storage->Dsv(8 + layer);
+            if (layer == 0)
+            {
+                std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 7> targets{rtv};
+                constexpr float zero[]{0, 0, 0, 0};
+                for (std::uint32_t index = 0; index < storage->guides.size(); ++index)
+                {
+                    targets[1 + index] = storage->Rtv(4 + index);
+                    commands->ClearRenderTargetView(targets[1 + index], zero, 0, nullptr);
+                }
+                commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, &depth);
+            }
+            else commands->OMSetRenderTargets(1, &rtv, FALSE, &depth);
+            auto *pipeline = storage->pipelines[layer == 0 ? 3 : 4].Get();
+            if (storage->work) storage->work->Record(commands, pipeline, inputs, HeroTransparencyPhase::Composite, layer, phase, storage->Gpu(inputs, phase));
+            else inputs.draw(commands, pipeline, HeroTransparencyPhase::Composite, layer, storage->Gpu(inputs, phase));
         });
         source = pending.color[target]; sourceResource = storage->color[target].resource.Get();
         outputs.corrected = source; outputs.corrected_resource = sourceResource; outputs.corrected_srv = storage->Export(7 + target);
@@ -592,6 +668,7 @@ Result HeroTransparencySystem::CompleteSubmission(const RenderGraphBuilder &grap
         }
     }
     if (!success) storage->usable = false;
+    if (storage->work) storage->work->Submitted(graph, pending.inputs.frame_slot, completion, success);
     pending = {};
     return Result::Success();
 }
@@ -600,6 +677,40 @@ Result HeroTransparencySystem::ResetAfterCompletion(const CompletionSet &complet
     if (impl_->pending.graph) return Failure(ErrorCode::InvalidState, "Complete pending hero transparency before reset.");
     if (impl_->targets && !impl_->targets->completion.IsSatisfiedBy(completed))
         return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed GPU uses.");
-    impl_->targets.reset(); return Result::Success();
+    if (auto collected = ConsumeCompletedWork(completed, impl_->completed_work); !collected) return collected;
+    if (impl_->targets && impl_->targets->work && impl_->targets->work->Status().pending_frames)
+        return Failure(ErrorCode::InvalidState, "Hero transparency reset requires completed native contributor queries.");
+    impl_->targets.reset(); impl_->retired_work = {}; return Result::Success();
+}
+Result HeroTransparencySystem::ConsumeCompletedWork(const CompletionSet &completed, std::vector<RendererHeroWorkSample> &output)
+{
+    if (impl_->targets && impl_->targets->work)
+        if (auto result = impl_->targets->work->Collect(completed, impl_->completed_work); !result) return result;
+    if (&output != &impl_->completed_work)
+    {
+        if (output.size() + impl_->completed_work.size() > 240 * 84)
+        {
+            impl_->retired_work.overflowed = true;
+            return Failure(ErrorCode::InvalidState, "Hero contributor output exceeded 20160 pending rows; preserved rows require capture drain.");
+        }
+        output.insert(output.end(), std::make_move_iterator(impl_->completed_work.begin()), std::make_move_iterator(impl_->completed_work.end()));
+        impl_->completed_work.clear();
+    }
+    return Result::Success();
+}
+RendererHeroWorkStatus HeroTransparencySystem::WorkStatus() const
+{
+    auto status = impl_->targets && impl_->targets->work ? impl_->targets->work->Status() : RendererHeroWorkStatus{};
+    status.submitted_frames += impl_->retired_work.submitted_frames;
+    status.completed_frames += impl_->retired_work.completed_frames;
+    status.failed_frames += impl_->retired_work.failed_frames;
+    status.samples += impl_->retired_work.samples;
+    status.mesh_statistics_supported |= impl_->retired_work.mesh_statistics_supported;
+    status.shader_counters_enabled |= impl_->retired_work.shader_counters_enabled;
+    status.overflowed |= impl_->retired_work.overflowed;
+    status.shader_invalid_samples += impl_->retired_work.shader_invalid_samples;
+    status.shader_clear_commands += impl_->retired_work.shader_clear_commands;
+    status.shader_copy_commands += impl_->retired_work.shader_copy_commands;
+    return status;
 }
 } // namespace hs

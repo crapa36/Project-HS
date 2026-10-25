@@ -1,3 +1,4 @@
+#include <hs/renderer/vfx_program_loader.hpp>
 #include "vfx_typed_mesh_commands.hpp"
 #include <bit>
 #include <iostream>

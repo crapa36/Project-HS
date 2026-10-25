@@ -4,7 +4,7 @@
 #include "light_list.hlsli"
 #include "probe_ibl.hlsli"
 #include "local_probe_sampling.hlsli"
-Texture2D<float2> EnvironmentBrdfLut : register(t4, space2);
+Texture2D<float4> EnvironmentBrdfLut : register(t4, space2);
 Texture2DArray<float4> RockBase : register(t5, space2);
 Texture2DArray<float4> RockSurface : register(t6, space2);
 Texture2DArray<float4> RockNormal : register(t7, space2);
@@ -184,12 +184,12 @@ float3 EnvironmentSkyRadiance(float3 direction)
         lerp(float3(0.055,0.065,0.045),float3(0.24,0.31,0.42),saturate(direction.y*0.5+0.5));
 }
 
-float3 HsSceneProbeRadiance(float3 world,float3 direction)
+float3 HsSceneProbeRadiance(float3 world,float3 direction,uint count,HsLocalProbeBlend blend)
 {
 #ifdef HS_LOCAL_PROBE_CAPTURE
     return HsProbeRadiance(direction);
 #else
-    return HsLocalProbeRadiance(world,direction);
+    return HsLocalProbeRadiance(world,direction,count,blend);
 #endif
 }
 float3 HsSceneProbeIrradiance(float3 world,float3 normal)
@@ -208,10 +208,15 @@ float3 HsSceneProbePrefiltered(float3 world,float3 direction,float roughness)
     return HsLocalProbePrefiltered(world,direction,roughness);
 #endif
 }
-void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure, float3 world, float3 view_direction,
+void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float3 view_direction,
     float base_fresnel_override, bool indirect_diffuse_enabled, bool indirect_specular_enabled,
     out float3 ambient_diffuse, out float3 ambient_specular)
 {
+#ifdef HS_CAPTURE_HERO_WORK
+    HsHeroWorkAdd(19u);
+    if(IndirectArguments.Load(28u)!=0u)
+    { HsHeroWorkAdd(26u); ambient_diffuse=0.0; ambient_specular=0.0; return; }
+#endif
     float3 v=normalize(view_direction);
     closure=HsBsdfOrientThinSurface(closure,v);
     float3 n=normalize(closure.normal),base=closure.base_color;
@@ -220,44 +225,114 @@ void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure, float3 worl
     float3 F0=HsBsdfF0(closure);
     ambient_diffuse=0.0;
     ambient_specular=0.0;
+    [branch] if(HsBsdfCanUseCoatedIbl(closure,nv))
+    {
+#ifdef HS_CAPTURE_HERO_WORK
+        HsHeroWorkAdd(28u);
+#endif
+        const float roughness=saturate(closure.roughness),coat_roughness=saturate(closure.coat_roughness);
+        const float4 base_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,roughness),0);
+        const float2 coat_dfg=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,coat_roughness),0).xy;
+        float3 diffuse_factor,base_specular_factor; float coat_specular_factor;
+        HsBsdfCoatedIblFactors(closure,nv,base_dfg,coat_dfg,base_fresnel_override,
+            diffuse_factor,base_specular_factor,coat_specular_factor);
+        const float3 kernel=diffuse_consumed?HsBsdfCoatedDiffuseKernel(closure.coat_weight):0.0;
+        const float3 sky_bottom=float3(.055,.065,.045),sky_top=float3(.24,.31,.42);
+        const float3 reflected=reflect(-v,n);
+        float3 base_sky,coat_sky,irradiance;
+        if(ProbeOptions.w>0.0)
+        {
+#ifdef HS_LOCAL_PROBE_CAPTURE
+            base_sky=HsProbePrefiltered(reflected,roughness);
+            coat_sky=HsProbePrefiltered(reflected,coat_roughness);
+            irradiance=0.0;
+            if(diffuse_consumed)irradiance=HsProbeIrradiance(n,kernel);
+#else
+            HsLocalProbeEvaluateIbl(world,n,reflected,float2(roughness,coat_roughness),
+                coat_specular_factor>0.0,diffuse_consumed,indirect_specular_enabled,indirect_diffuse_enabled,kernel,
+                base_sky,coat_sky,irradiance);
+#endif
+            irradiance*=HsBsdfInvPi;
+        }
+        else
+        {
+            const float sky_t=saturate(reflected.y*.5+.5);
+            base_sky=lerp(sky_bottom,sky_top,lerp(sky_t,.5,roughness*roughness));
+            coat_sky=lerp(sky_bottom,sky_top,lerp(sky_t,.5,coat_roughness*coat_roughness));
+            irradiance=(sky_bottom+sky_top)*(.5*kernel.x)+(sky_top-sky_bottom)*(n.y*kernel.y/3.0);
+        }
+        if(diffuse_consumed)ambient_diffuse=diffuse_factor*irradiance*saturate(closure.ao);
+        ambient_specular=(base_specular_factor*base_sky+coat_specular_factor*coat_sky)*saturate(closure.ao);
+        return;
+    }
     if(closure.coat_weight>0.0 || closure.anisotropy!=0.0 ||
        (closure.sheen_weight>0.0 && any(closure.sheen_color>0.0)))
     {
         // Use the existing matched mixture and its exact sample sequence;
         // component separation changes neither PDFs nor null-sample accounting.
+#ifdef HS_CAPTURE_HERO_WORK
+        HsHeroWorkAdd(20u);
+        uint valid_work_samples=0u;
+#endif
         const uint sample_count=32u;
+#ifdef HS_LOCAL_PROBE_CAPTURE
+        const uint local_probe_count=0u;
+        const HsLocalProbeBlend local_probe_blend=(HsLocalProbeBlend)0;
+#else
+        const uint local_probe_count=ProbeOptions.w>0.0 && ((diffuse_consumed && indirect_diffuse_enabled) || indirect_specular_enabled)
+            ? HsLocalProbeCount() : 0u;
+        const HsLocalProbeBlend local_probe_blend=HsLocalProbePrepareBlend(
+            HsLocalProbeWeights(world,local_probe_count),local_probe_count);
+#endif
+        const HsBsdfSamplingContext bsdf_sampling=HsBsdfPrepareSampling(closure,v);
         [loop] for(uint index=0u;index<sample_count;++index)
         {
             float u_lobe=frac((float(index)+0.5)*0.6180339887498948482);
             float2 u_dir=float2((float(index)+0.5)/float(sample_count),
                 float(HsBsdfReverseBits(index))*2.3283064365386962890625e-10);
-            HsBsdfSampleResult sample=HsBsdfSample(closure,v,u_lobe,u_dir);
+            HsBsdfSampleResult sample=HsBsdfSamplePrepared(closure,v,bsdf_sampling,u_lobe,u_dir);
             if(!sample.valid || sample.pdf<=0.0) continue;
+#ifdef HS_CAPTURE_HERO_WORK
+            ++valid_work_samples;
+#endif
             float3 sample_diffuse,sample_specular;
             HsBsdfEvaluateComponentsOptical(closure,v,sample.wi,base_fresnel_override,sample_diffuse,sample_specular);
             float3 baseline_sky=EnvironmentSkyRadiance(sample.wi);
-            float3 diffuse_sky=ProbeOptions.w>0.0 && indirect_diffuse_enabled ?
-                HsSceneProbeRadiance(world,sample.wi) : baseline_sky;
-            float3 specular_sky=ProbeOptions.w>0.0 && indirect_specular_enabled ?
-                HsSceneProbeRadiance(world,sample.wi) : baseline_sky;
+            const bool local_diffuse=ProbeOptions.w>0.0 && diffuse_consumed && indirect_diffuse_enabled;
+            const bool local_specular=ProbeOptions.w>0.0 && indirect_specular_enabled;
+            const float3 local_sky=local_diffuse || local_specular ?
+                HsSceneProbeRadiance(world,sample.wi,local_probe_count,local_probe_blend) : 0.0;
+            float3 diffuse_sky=local_diffuse ? local_sky : baseline_sky;
+            float3 specular_sky=local_specular ? local_sky : baseline_sky;
             float3 weight=abs(dot(n,sample.wi))/sample.pdf;
-            ambient_diffuse+=sample_diffuse*diffuse_sky*weight;
+            if(diffuse_consumed)ambient_diffuse+=sample_diffuse*diffuse_sky*weight;
             ambient_specular+=sample_specular*specular_sky*weight;
         }
+#ifdef HS_CAPTURE_HERO_WORK
+        // Publish per-invocation totals instead of serializing every sample on global atomics.
+        HsHeroWorkAdd(21u,sample_count);
+        HsHeroWorkAdd(22u,valid_work_samples);
+        HsHeroWorkAdd(23u,sample_count-valid_work_samples);
+#endif
         float normalization=saturate(closure.ao)/float(sample_count);
         ambient_diffuse*=normalization;
         ambient_specular*=normalization;
         return;
     }
+#ifdef HS_CAPTURE_HERO_WORK
+    HsHeroWorkAdd(24u);
+#endif
     float thinWeight=HsBsdfThinTransmissionWeight(closure);
-    float3 irradiance=ProbeOptions.w>0.0 ?
-        (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,n) : HsProbeIrradiance(n))*HsBsdfInvPi :
-        lerp(float3(0.07,0.08,0.055),float3(0.22,0.28,0.36),n.y*0.5+0.5);
-    // Cosine-weighted Schlick transmission averages to (1-F0)*20/21.
-    // Match the entry/exit substrate attenuation in HsBsdfEvaluate.
-    float3 diffuseAlbedo=base*(1-HsBsdfSchlickFresnel(F0,nv))*(1-F0)*(20.0/21.0)*dielectric;
-    ambient_diffuse=diffuseAlbedo*irradiance*saturate(closure.ao);
-    if(thinWeight>0.0)
+    if(diffuse_consumed)
+    {
+        const float3 irradiance=ProbeOptions.w>0.0 ?
+            (indirect_diffuse_enabled ? HsSceneProbeIrradiance(world,n) : HsProbeIrradiance(n))*HsBsdfInvPi :
+            lerp(float3(0.07,0.08,0.055),float3(0.22,0.28,0.36),n.y*0.5+0.5);
+        // Entry/exit Schlick transmission, with cosine exit average20/21.
+        const float3 albedo=base*(1-HsBsdfSchlickFresnel(F0,nv))*(1-F0)*(20.0/21.0)*dielectric;
+        ambient_diffuse=albedo*irradiance*saturate(closure.ao);
+    }
+    if(diffuse_consumed && thinWeight>0.0)
     {
         // A linear hemispherical sky integrates exactly over a cosine sheet
         // lobe: E[wi.y] = -2*n.y/3. Dense vegetation needs no sample loop.
@@ -269,7 +344,7 @@ void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure, float3 worl
             thinWeight*backSky*saturate(closure.ao);
     }
     // The basic lobe uses the same sampled DFG as the authored GGX cube mips.
-    float2 AB=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,saturate(closure.roughness)),0);
+    float2 AB=EnvironmentBrdfLut.SampleLevel(LinearClamp,float2(nv,saturate(closure.roughness)),0).xy;
     float3 reflected=reflect(-v,n);float skyT=lerp(saturate(reflected.y*0.5+0.5),0.5,closure.roughness*closure.roughness);
     float3 sky=ProbeOptions.w>0.0 ?
         (indirect_specular_enabled ? HsSceneProbePrefiltered(world,reflected,saturate(closure.roughness)) :
@@ -281,18 +356,37 @@ void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure, float3 worl
     ambient_specular=sky*integrated_fresnel*saturate(closure.ao)*(1.0-thinWeight);
 }
 
-void EnvironmentLightingComponents(HsSurfaceClosure closure, float3 world, float visibility,
+void EnvironmentIndirectLightingComponents(HsSurfaceClosure closure,float3 world,float3 view_direction,
+    float base_fresnel_override,bool indirect_diffuse_enabled,bool indirect_specular_enabled,
+    out float3 ambient_diffuse,out float3 ambient_specular)
+{
+    EnvironmentIndirectLightingComponents(true,closure,world,view_direction,base_fresnel_override,
+        indirect_diffuse_enabled,indirect_specular_enabled,ambient_diffuse,ambient_specular);
+}
+
+void EnvironmentLightingComponents(bool diffuse_consumed,HsSurfaceClosure closure, float3 world, float visibility,
     float base_fresnel_override, out float3 diffuse, out float3 specular, out float3 ambient_specular,
     out float3 ambient_diffuse)
 {
+#ifdef HS_CAPTURE_HERO_WORK
+    HsHeroWorkAdd(25u);
+#endif
     const float3 v=normalize(CameraTime.xyz-world);
     closure=HsBsdfOrientThinSurface(closure,v);
     HsLightListEvaluateComponentsOptical(closure,world,CameraTime.xyz,visibility,
         HsLightDirectionalMask,false,base_fresnel_override,diffuse,specular);
-    EnvironmentIndirectLightingComponents(closure,world,v,base_fresnel_override,
+    EnvironmentIndirectLightingComponents(diffuse_consumed,closure,world,v,base_fresnel_override,
         LightingOptions.z>0.0,LightingOptions.w>0.0,ambient_diffuse,ambient_specular);
     diffuse+=ambient_diffuse;
     specular+=ambient_specular;
+}
+
+void EnvironmentLightingComponents(HsSurfaceClosure closure,float3 world,float visibility,
+    float base_fresnel_override,out float3 diffuse,out float3 specular,out float3 ambient_specular,
+    out float3 ambient_diffuse)
+{
+    EnvironmentLightingComponents(true,closure,world,visibility,base_fresnel_override,
+        diffuse,specular,ambient_specular,ambient_diffuse);
 }
 
 void EnvironmentLightingComponents(HsSurfaceClosure closure, float3 world, float visibility,

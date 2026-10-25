@@ -74,3 +74,5 @@ Do not repeat a broader gate when an unchanged valid result still covers the rel
 ## Development state records
 
 `DEV_STATE.md` is AI implementation continuity only. Record current technical state, contracts, verified checks, unresolved technical issues, and next implementation steps. Do not add user/manual acceptance, playtest, listening, visual inspection, or target-hardware checklists. Replace stale entries; do not accumulate history.
+
+불필요한 생성물들 주기적으로 정리.

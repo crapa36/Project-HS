@@ -379,14 +379,13 @@ rd::MaterialContextInput ParseContext(const Json &value)
     Require(false, "unknown material context input"); return {};
 }
 
-void LowerLegacyMaterialSamples(MaterialDefinition &definition)
+rd::MaterialGraph LowerLegacyMaterialSamples(rd::MaterialGraph old, const rd::RockMaterial &material)
 {
-    const auto old = std::move(definition.graph);
     rd::MaterialGraph graph;
     graph.kind = old.kind;
     graph.parameters = old.parameters;
     graph.textures = old.textures;
-    graph.samplers.push_back({"legacy_sampler", definition.material.alpha_mask
+    graph.samplers.push_back({"legacy_sampler", material.alpha_mask
         ? rd::MaterialSamplerProfile::FoliageAnisotropicClamp
         : rd::MaterialSamplerProfile::EnvironmentAnisotropicWrap});
     std::unordered_set<std::string> ids;
@@ -471,15 +470,13 @@ void LowerLegacyMaterialSamples(MaterialDefinition &definition)
     graph.base_color_output = offset + old.base_color_output;
     graph.roughness_output = offset + old.roughness_output;
     if (graph.kind == rd::MaterialGraphKind::Masked) graph.opacity_output = offset + old.opacity_output;
-    rd::ValidateEnvironmentMaterialGraph(graph);
-    definition.graph = std::move(graph);
+    return graph;
 }
 } // namespace
 
-rd::MaterialGraph ParseMaterialGraph(std::string_view name, std::string_view json_text,
-                                     rd::MaterialGraphKind kind)
+static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Json &root,
+                                               rd::MaterialGraphKind kind, bool validate)
 {
-    const auto root = Json::parse(json_text);
     const bool hero = IsHeroMaterialName(name);
     const bool decal = kind == rd::MaterialGraphKind::Decal;
     const bool transparent = kind == rd::MaterialGraphKind::Translucent || kind == rd::MaterialGraphKind::HeroRefractive;
@@ -1009,21 +1006,30 @@ rd::MaterialGraph ParseMaterialGraph(std::string_view name, std::string_view jso
         Require(graph.nodes.size() <= rd::kMaxMaterialGraphNodes,
                 "legacy closure lowering exceeded the graph node bound");
     }
-    if (kind == rd::MaterialGraphKind::Rock0) rd::ValidateRock0MaterialGraph(graph);
-    else if (kind == rd::MaterialGraphKind::Leaf0) rd::ValidateLeaf0MaterialGraph(graph);
-    else if (kind == rd::MaterialGraphKind::Terrain)
+    if (kind == rd::MaterialGraphKind::Terrain)
     {
         const auto aggregate = std::ranges::find_if(graph.nodes, [](const rd::MaterialNode &node) {
             return node.op == rd::MaterialOp::TerrainStochastic;
         });
         Require(aggregate != graph.nodes.end(), "terrain graph has no stochastic aggregate");
         graph.terrain_output = static_cast<std::size_t>(aggregate - graph.nodes.begin());
-        rd::ValidateTerrainMaterialGraph(graph);
     }
-    else if (decal) rd::ValidateDecalMaterialGraph(graph);
-    else if (hero) rd::ValidateHeroMaterialGraph(graph);
-    else rd::ValidateEnvironmentMaterialGraph(graph);
+    if (validate)
+    {
+        if (kind == rd::MaterialGraphKind::Rock0) rd::ValidateRock0MaterialGraph(graph);
+        else if (kind == rd::MaterialGraphKind::Leaf0) rd::ValidateLeaf0MaterialGraph(graph);
+        else if (kind == rd::MaterialGraphKind::Terrain) rd::ValidateTerrainMaterialGraph(graph);
+        else if (decal) rd::ValidateDecalMaterialGraph(graph);
+        else if (hero) rd::ValidateHeroMaterialGraph(graph);
+        else rd::ValidateEnvironmentMaterialGraph(graph);
+    }
     return graph;
+}
+
+rd::MaterialGraph ParseMaterialGraph(std::string_view name, std::string_view json_text,
+                                   rd::MaterialGraphKind kind)
+{
+    return ParseMaterialGraphRoot(name, Json::parse(json_text), kind, true);
 }
 
 bool IsEnvironmentMaterialName(std::string_view name)
@@ -1056,21 +1062,32 @@ rd::MaterialGraph ParseDecalMaterialGraph(std::string_view name, std::string_vie
     return ParseMaterialGraph(name, json_text, rd::MaterialGraphKind::Decal);
 }
 
+rd::PreparedMaterial ParsePreparedDecalMaterial(std::string_view name, std::string_view json_text)
+{
+    Require(IsDecalMaterialName(name), "unknown decal material name");
+    return rd::PrepareMaterial(ParseMaterialGraphRoot(name, Json::parse(json_text),
+        rd::MaterialGraphKind::Decal, false), rd::MaterialPreparationDomain::Decal);
+}
+
 bool IsMaskedEnvironmentMaterial(std::string_view name)
 {
     return name.starts_with("leaf_") || name.starts_with("grass_");
 }
 
-rd::MaterialGraph ParseEnvironmentMaterialGraph(std::string_view name,
-                                                 std::string_view json_text)
+static rd::MaterialGraphKind AuthoredMaterialKind(std::string_view name)
 {
     Require(IsAuthoredMaterialName(name), "unknown material name");
-    const auto kind = name == "slime_body" ? rd::MaterialGraphKind::Translucent :
+    return name == "slime_body" ? rd::MaterialGraphKind::Translucent :
         IsHeroMaterialName(name) && name != "monster_pbr" ? rd::MaterialGraphKind::Masked :
         name == "terrain" ? rd::MaterialGraphKind::Terrain :
         IsMaskedEnvironmentMaterial(name) ? rd::MaterialGraphKind::Masked
         : rd::MaterialGraphKind::Opaque;
-    return ParseMaterialGraph(name, json_text, kind);
+}
+
+rd::MaterialGraph ParseEnvironmentMaterialGraph(std::string_view name,
+                                              std::string_view json_text)
+{
+    return ParseMaterialGraph(name, json_text, AuthoredMaterialKind(name));
 }
 
 rd::MaterialGraph ParseRock0MaterialGraph(std::string_view json_text)
@@ -1091,28 +1108,41 @@ rd::MaterialGraph ParseTerrainMaterialGraph(std::string_view json_text)
 MaterialDefinition ParseMaterialDefinition(std::string_view name, std::string_view json_text)
 {
     const auto root = Json::parse(json_text);
-    MaterialDefinition result;
-    result.graph = ParseEnvironmentMaterialGraph(name, json_text);
-    if (IsHeroMaterialName(name)) return result;
-    if (root.at("version") == 2) result.graph.textures = ParseTextures(root);
-    for (std::size_t slot = 0; slot < result.graph.textures.size(); ++slot)
-        result.material.textures[slot] = result.graph.textures[slot].product_id;
-    const auto find_parameter = [&](std::string_view id) -> const rd::MaterialParameterDefinition & {
-        const auto found = std::ranges::find(result.graph.parameters, id,
-            &rd::MaterialParameterDefinition::id);
-        Require(found != result.graph.parameters.end(), "required material parameter is missing");
-        Require(found->type == rd::MaterialParameterType::Float,
-                "required material parameter must be float");
-        return *found;
+    const auto kind = AuthoredMaterialKind(name);
+    const bool legacy = root.at("version") == 2;
+    auto graph = ParseMaterialGraphRoot(name, root, kind, legacy);
+    const auto material_from_graph = [&](const rd::MaterialGraph &source) {
+        rd::RockMaterial material;
+        for (std::size_t slot = 0; slot < source.textures.size(); ++slot)
+            material.textures[slot] = source.textures[slot].product_id;
+        const auto find_parameter = [&](std::string_view id) -> const rd::MaterialParameterDefinition & {
+            const auto found = std::ranges::find(source.parameters, id,
+                &rd::MaterialParameterDefinition::id);
+            Require(found != source.parameters.end(), "required material parameter is missing");
+            Require(found->type == rd::MaterialParameterType::Float,
+                    "required material parameter must be float");
+            return *found;
+        };
+        material.metallic = std::bit_cast<float>(find_parameter("metallic").default_words[0]);
+        material.roughness_scale = std::bit_cast<float>(find_parameter("roughness_scale").default_words[0]);
+        const auto &flags = root.at("render_flags");
+        Require(flags.at("two_sided").is_boolean(), "invalid two-sided flag type");
+        material.two_sided = flags.at("two_sided").get<bool>();
+        material.alpha_mask = flags.at("alpha_mode") == "mask";
+        rd::ValidateRockMaterial(material);
+        return material;
     };
-    result.material.metallic = std::bit_cast<float>(find_parameter("metallic").default_words[0]);
-    result.material.roughness_scale = std::bit_cast<float>(find_parameter("roughness_scale").default_words[0]);
-    const auto &flags = root.at("render_flags");
-    Require(flags.at("two_sided").is_boolean(), "invalid two-sided flag type");
-    result.material.two_sided = flags.at("two_sided").get<bool>();
-    result.material.alpha_mask = flags.at("alpha_mode") == "mask";
-    rd::ValidateRockMaterial(result.material);
-    if (root.at("version") == 2) LowerLegacyMaterialSamples(result);
-    return result;
+    if (legacy)
+    {
+        graph.textures = ParseTextures(root);
+        auto material = material_from_graph(graph);
+        return {material, rd::PrepareMaterial(LowerLegacyMaterialSamples(std::move(graph), material),
+            rd::MaterialPreparationDomain::Environment)};
+    }
+    auto prepared = rd::PrepareMaterial(std::move(graph), IsHeroMaterialName(name)
+        ? rd::MaterialPreparationDomain::Hero : rd::MaterialPreparationDomain::Environment);
+    if (IsHeroMaterialName(name)) return {{}, std::move(prepared)};
+    auto material = material_from_graph(prepared.Graph());
+    return {material, std::move(prepared)};
 }
 } // namespace hs::material_content

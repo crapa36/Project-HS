@@ -118,9 +118,9 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
 {
     const auto document = Read(manifest, 32 * 1024 * 1024);
     ImportedCharacter output;
-    output.source = Json::parse(reinterpret_cast<const char *>(document.data()),
+    output.runtime.source_metadata = Json::parse(reinterpret_cast<const char *>(document.data()),
                                reinterpret_cast<const char *>(document.data() + document.size()));
-    const auto &j = output.source;
+    const auto &j = output.runtime.source_metadata;
     Require(Integer(j.at("schema_version")) == 1, "unsupported schema version");
     Require(j.at("id") == "character.archer.elin", "unexpected character identity");
     Require(j.at("coordinate_system") == "left_handed_y_up_z_forward_meters", "unsupported coordinate system");
@@ -158,7 +158,7 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
     }
     Require(end == bytes.size(), "trailing binary payload");
     auto &runtime = output.runtime;
-    auto &named = output.animation_extension;
+    auto &named = runtime.animation_extension;
     named.character_asset_id = MakeAssetId("render/character/archer.rpkg");
     // schema v1 declares durations and samples but has no nominal sample rate.
     named.sample_rate_hz = 0;
@@ -173,6 +173,7 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
     {
         Require(bone_ids.emplace(Id(bones[i].at("id")), i).second, "duplicate bone");
         named.bone_names.push_back(Id(bones[i].at("id")));
+        runtime.bone_names.push_back(named.bone_names.back());
         const auto parent = U32(parents, i * 2, 2);
         Require(parent == Integer(bones[i].at("parent")) &&
                 (parent == UINT16_MAX || parent < i), "invalid parent or missing ancestor");
@@ -206,14 +207,24 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
             "invalid material count");
     std::map<std::string, std::size_t> material_ids;
     for (std::size_t i = 0; i < materials.size(); ++i)
+    {
         Require(material_ids.emplace(Id(materials[i].at("id")), i).second, "duplicate material");
+        runtime.materials.push_back({{}, {}, Id(materials[i].at("id"))});
+    }
     runtime.material_count = static_cast<std::uint32_t>(materials.size());
     for (const auto &v : render_data::DecodeExpandedVertices(vertices))
         runtime.vertices.push_back({v.position, v.normal, v.bone_indices, v.bone_weights,
                                     v.uv, v.tangent, v.material_index, v.reserved});
     Require(runtime.vertices.size() % 3 == 0, "nontriangular vertex count");
+    for (const auto &vertex : runtime.vertices)
+        for (std::size_t lane = 0; lane < 3; ++lane)
+        {
+            runtime.bounds_min[lane] = std::min(runtime.bounds_min[lane], vertex.position[lane]);
+            runtime.bounds_max[lane] = std::max(runtime.bounds_max[lane], vertex.position[lane]);
+        }
     const auto &meshes = j.at("meshes");
     Require(meshes.is_array() && !meshes.empty(), "no mesh sections");
+    runtime.mesh_count = static_cast<std::uint32_t>(meshes.size());
     std::size_t next_vertex{};
     std::set<std::string> mesh_ids;
     for (const auto &mesh : meshes)
@@ -318,8 +329,8 @@ ImportedCharacter Load(const std::filesystem::path &manifest)
         "curves and markers are validated and retained in source metadata; runtime playback does not consume them",
         "morphs, corrective shapes, LODs, eight influences, pose search, IK and secondary simulation unsupported",
         "materials contain identities only; texture cooking and game build integration are separate"};
-    const auto package=render_data::BuildEmbeddedCharacterPackage(MakeAssetId("render/character/archer.rpkg"),{},runtime);
-    (void)render_data::DecodeEmbeddedCharacterPackage(package,MakeAssetId("render/character/archer.rpkg"));
+    render_data::ValidateCharacterSource(runtime);
+    render_data::ValidateCharacterAnimationBinding(named, runtime, named.character_asset_id);
     return output;
 }
 }

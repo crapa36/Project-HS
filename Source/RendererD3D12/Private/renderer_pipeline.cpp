@@ -228,7 +228,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         visibility_srv_range, visibility_uav_range, material_parameter_range,
         view_range, exposure_srv_range, exposure_uav_range, exposure_cbv_range, monster_skin_range, ambient_range, hero_binding_range, probe_range, light_range,
         scene_geometry_ranges[0], scene_geometry_ranges[1], scene_geometry_ranges[2], scene_geometry_ranges[3],
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 21,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kVirtualShadowDescriptorCount, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 23,

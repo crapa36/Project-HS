@@ -23,6 +23,15 @@ struct VfxProgramData
     std::vector<std::byte> strings;
     std::vector<VfxUpgradeBindingRecord> upgrade_bindings;
     std::vector<std::uint32_t> upgrade_sequences;
+    // Rebuild spans after fixture mutation; never cache a view across vector growth.
+    VfxProgramView View() const && = delete;
+    [[nodiscard]] VfxProgramView View() const & noexcept
+    {
+        return {effects, sources, outputs, parameters, texture_bindings, slice_indices, curves, curve_keys, effect_lookup, texture_resources, strings, upgrade_bindings, upgrade_sequences};
+    }
+    operator VfxProgramView() const & noexcept { return View(); }
+    operator VfxProgramView() const && = delete;
+
 };
 
 bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, std::string& error);

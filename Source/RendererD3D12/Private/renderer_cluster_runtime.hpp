@@ -65,7 +65,6 @@ struct ClusterPageStream
     ResidencyTicket decoded_residency, read_residency, upload_residency;
     std::unique_ptr<renderer_detail::GeometryPageGpu> page;
     AllocationResource upload;
-    std::array<std::uint64_t, 4> upload_offsets{};
     CompletionSet upload_completion{}, last_use{}, retirement{};
 };
 struct ClusterCatalogRange
@@ -86,6 +85,7 @@ struct ClusterCutBuffers
     ResidencyTicket residency, staging_residency;
     CompletionSet completion{}, readback_completion{};
     std::uint32_t candidate_capacity{}, output_capacity{}, candidate_count{};
+    std::uint32_t allocated_output_capacity{}; // Physical scratch capacity; output_capacity is this frame's logical range.
     std::uint32_t geometry_draw_base{}, generation{}, required_capacity{};
     std::uint32_t geometry_frontend_flags{};
     std::uint32_t history_instance_capacity{}, history_words_per_instance{};

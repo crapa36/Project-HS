@@ -1,6 +1,8 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <cstddef>
+#include <span>
 
 namespace hs
 {
@@ -70,4 +72,21 @@ struct VfxEffectLookupRecord { std::uint64_t effect_id{}; std::uint32_t handle{}
 struct VfxTextureResourceRecord { std::uint32_t slot{}; VfxRange asset_path_bytes{}; };
 struct VfxUpgradeBindingRecord { std::uint64_t skill_id{}; std::uint32_t ordinal{}; VfxRange sequence{}; };
 struct VfxCurveKey { float time{}, value{}; };
+// Borrowed tables. The backing arrays must outlive every use of this view.
+struct VfxProgramView
+{
+    std::span<const VfxEffectRecord> effects;
+    std::span<const VfxSourceRecord> sources;
+    std::span<const VfxOutputRecord> outputs;
+    std::span<const VfxParameterRecord> parameters;
+    std::span<const VfxTextureBindingRecord> texture_bindings;
+    std::span<const std::uint32_t> slice_indices;
+    std::span<const VfxCurveRecord> curves;
+    std::span<const VfxCurveKey> curve_keys;
+    std::span<const VfxEffectLookupRecord> effect_lookup;
+    std::span<const VfxTextureResourceRecord> texture_resources;
+    std::span<const std::byte> strings;
+    std::span<const VfxUpgradeBindingRecord> upgrade_bindings;
+    std::span<const std::uint32_t> upgrade_sequences;
+};
 }

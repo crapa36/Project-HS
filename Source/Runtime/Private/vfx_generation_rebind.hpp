@@ -3,7 +3,7 @@
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/renderer/vfx_frame_input.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/renderer/vfx_program.hpp>
 
 #include <algorithm>
 #include <cstdint>
@@ -102,7 +102,7 @@ inline bool SameCapturedAssetClosure(const SelectedGeneration &previous,
 // Numeric handles belong to one cooked table. Only its stable effect identity
 // and matching input contract can transfer an existing authoritative payload.
 inline VfxGenerationRebindOutcome RebindVfxGenerationHandle(
-    const VfxProgramData &previous, const VfxProgramData &next,
+    const VfxProgramView &previous, const VfxProgramView &next,
     VfxEffectHandle &handle, std::uint32_t input_mode) noexcept
 {
     const auto identity = std::find_if(previous.effect_lookup.begin(), previous.effect_lookup.end(),
@@ -124,8 +124,8 @@ inline VfxGenerationRebindOutcome RebindVfxGenerationHandle(
     return VfxGenerationRebindOutcome::Retained;
 }
 
-inline void RebindVfxGenerationEvents(const VfxProgramData &previous,
-    const VfxProgramData &next, std::vector<VfxEventInput> &events,
+inline void RebindVfxGenerationEvents(const VfxProgramView &previous,
+    const VfxProgramView &next, std::vector<VfxEventInput> &events,
     VfxGenerationRebindCounts &counts)
 {
     std::erase_if(events, [&](auto &event) {

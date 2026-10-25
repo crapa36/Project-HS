@@ -49,6 +49,11 @@ class RendererDiagnosticsRecorder
         RenderQueue queue{};
         std::uint64_t nanoseconds{}, begin_ticks{}, end_ticks{}, timestamp_frequency{};
         std::uint64_t begin_qpc{}, end_qpc{}, qpc_frequency{};
+        std::uint64_t cpu_qpc_frequency{};
+        std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
+        std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
+        std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
+        bool cpu_record_valid{}, cpu_callback_valid{}, cpu_provider_submit_valid{};
         bool measured{}, clock_calibrated{}, name_truncated{};
     };
     std::array<RendererDiagnosticsFrame, kRendererDiagnosticsFrameCapacity> frames_{};

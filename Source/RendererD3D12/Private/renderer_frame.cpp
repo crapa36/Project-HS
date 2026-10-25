@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include <hs/render_data/static_shadow.hpp>
 #include "renderer_quality.hpp"
 #include "renderer_instance_order.hpp"
 #include "renderer_grass_benders.hpp"
@@ -16,6 +17,7 @@
 #include <cfloat>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 
 #include <numbers>
@@ -197,16 +199,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     frame.timestamps_recorded = false;
     struct PendingScenePreparation
     {
-        RenderSceneExtractor &extractor;
         PersistentGpuSceneSlots &slots;
         SkinCache &skin;
         ~PendingScenePreparation()
         {
-            extractor.Abort();
             slots.Abort();
             skin.Abort();
         }
-    } pending_scene{impl_->dynamic_scene_extractor, impl_->dynamic_scene_slots,
+    } pending_scene{impl_->dynamic_scene_slots,
                     impl_->skin_cache};
     if (!impl_->static_scene_fence_unreliable)
     {
@@ -249,7 +249,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (pose.instance_index < snapshot.instances.size())
         {
             const auto stable_id = snapshot.instances[pose.instance_index].stable_id;
-            if (stable_id != 0) pose_by_id.emplace(stable_id, &pose);
+            if (stable_id != 0) pose_by_id.insert_or_assign(stable_id, &pose);
         }
     const auto now = impl_->render_package_time;
     if (scene_new_session || snapshot.header.tick != impl_->observed_snapshot_tick)
@@ -265,6 +265,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             : 1.0f;
     std::vector<RenderInstance> render_instances(snapshot.instances.begin(),
                                                   snapshot.instances.end());
+    const auto retained_vfx_start = capture_clock();
     for (const auto &command : typed_entity_surfaces)
     {
         if (!command.has_retained_instance || std::ranges::any_of(render_instances,
@@ -292,6 +293,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         (impl_->material_surface_layouts[kAuthoredMaterialNames.size() + 6].varying_mask & 16u) == 0)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Boss surface effects require the actual monster emission sidecar.");
+    cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
     for (auto &instance : render_instances)
     {
         if (instance.animation_clip_id.value != 0)
@@ -307,15 +309,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 instance.animation_time_seconds = std::lerp(
                     previous->animation_time_seconds, instance.animation_time_seconds,
                     static_cast<double>(interpolation));
-        }
-        PopulateRenderInstanceRevisions(instance);
-        if (instance.stable_id == 0 || instance.animation_clip_id.value != 0) continue;
-        if (const auto pose = pose_by_id.find(instance.stable_id);
-            pose != pose_by_id.end())
-        {
-            instance.revisions.pose = pose->second->revision != 0
-                ? pose->second->revision
-                : DeriveAnimationPoseRevision(*pose->second);
         }
     }
     // Replace the compatibility area body only when its authored fill is
@@ -501,6 +494,20 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     DirectX::XMFLOAT3 lod_eye{};
     DirectX::XMStoreFloat3(&lod_eye, eye);
+    const auto ribbon_prepare_start = capture_clock();
+    const auto ribbon_thread_cpu = [](std::uint64_t &ticks) noexcept {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        const auto previous_error = GetLastError();
+        const bool available = GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user) != FALSE;
+        SetLastError(previous_error);
+        if (!available) return false;
+        ticks = (static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
+                (static_cast<std::uint64_t>(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+        return true;
+    };
+    std::uint64_t ribbon_cpu_begin{};
+    const bool ribbon_cpu_available = impl_->config.capture_timing_stream && ribbon_thread_cpu(ribbon_cpu_begin);
+    const auto ribbon_state_start = capture_clock();
     const Float3 ribbon_eye{lod_eye.x, lod_eye.y, lod_eye.z};
     if (scene_new_session || impl_->rendered_submission_count == 0) impl_->previous_ribbon_eye = ribbon_eye;
     const auto ribbon_sources = impl_->config.slime_family_preview_count == 0
@@ -508,7 +515,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const std::array<std::uint64_t, 3> ribbon_buffer_widths{
         impl_->ribbon_history.resource ? impl_->ribbon_history.resource->GetDesc().Width : 0,
         impl_->ribbon_previous.resource ? impl_->ribbon_previous.resource->GetDesc().Width : 0,
-        impl_->ribbon_arguments.resource ? impl_->ribbon_arguments.resource->GetDesc().Width : 0};
+        frame.ribbon_arguments.resource ? frame.ribbon_arguments.resource->GetDesc().Width : 0};
     const auto expected_history_bytes = static_cast<std::uint64_t>(
         impl_->config.ribbon_history_points / kRibbonHistorySamples) * kRibbonHistoryStride;
     // Failed allocation must not consume a slot's pending GPU history reset.
@@ -535,24 +542,47 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (const auto &visual : snapshot.persistent_vfx)
         if (visual.kind == PersistentVfxKind::ProjectileHead && ribbon_head_ids.contains(visual.stable_id))
             ribbon_projectile_ids.insert(visual.projectile_owner_id);
+    cpu_timings.ribbon_state_us = capture_elapsed(ribbon_state_start);
     const auto ribbon_history_bytes = static_cast<UINT64>(impl_->ribbon_state.Capacity()) * kRibbonHistoryStride;
-    const auto ribbon_args_bytes = std::max<std::size_t>(ribbon_outputs.size(), 1) * kRibbonArgumentStride;
+    const auto ribbon_args_bytes = RibbonArgumentBufferBytes(ribbon_buffer_widths[2],
+        std::max<std::size_t>(ribbon_outputs.size(), 1) * kRibbonArgumentStride);
     const auto ribbon_replacements = RibbonBufferReplacements(ribbon_buffer_widths, ribbon_history_bytes, ribbon_args_bytes);
     if (std::ranges::any_of(ribbon_replacements, [](bool replace) { return replace; }))
     {
-        if (auto waited = impl_->WaitForGpu(); !waited) return reject_ribbon_update(waited);
+        // Arguments are scratch for this already-completed frame slot; only shared history needs all readers.
+        if (ribbon_replacements[0] || ribbon_replacements[1])
+        {
+            const auto ribbon_wait_start = capture_clock();
+            const auto waited = impl_->WaitForGpu();
+            cpu_timings.ribbon_wait_us = capture_elapsed(ribbon_wait_start);
+            if (!waited) return reject_ribbon_update(waited);
+        }
+        const auto ribbon_allocation_start = capture_clock();
         D3D12MA::ALLOCATION_DESC allocation{};
         allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
         const auto allocate = [&](AllocationResource &resource, UINT64 bytes) {
+            if (impl_->config.capture_timing_stream)
+            {
+                ++cpu_timings.ribbon_replacement_count;
+                cpu_timings.ribbon_allocation_bytes += bytes;
+            }
             return impl_->CreateAllocation(resource, allocation,
                 BufferDescription(bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         };
         if (auto allocated = ReplaceRibbonBuffers(
-                std::array{&impl_->ribbon_history, &impl_->ribbon_previous, &impl_->ribbon_arguments},
+                std::array{&impl_->ribbon_history, &impl_->ribbon_previous, &frame.ribbon_arguments},
                 ribbon_replacements, ribbon_history_bytes, ribbon_args_bytes, allocate); !allocated)
             return reject_ribbon_update(allocated);
+        cpu_timings.ribbon_allocation_us = capture_elapsed(ribbon_allocation_start);
     }
     ribbon_checkpoint.reset();
+    std::uint64_t ribbon_cpu_end{};
+    if (ribbon_cpu_available && ribbon_thread_cpu(ribbon_cpu_end) && ribbon_cpu_end >= ribbon_cpu_begin)
+    {
+        cpu_timings.ribbon_prepare_thread_cpu_us = (ribbon_cpu_end - ribbon_cpu_begin) / 10;
+        cpu_timings.ribbon_prepare_thread_cpu_valid = true;
+    }
+    cpu_timings.ribbon_prepare_us = capture_elapsed(ribbon_prepare_start);
     const auto is_environment_mesh = [](RenderMesh mesh) {
         return render_data::IsEnvironmentMesh(mesh);
     };
@@ -563,67 +593,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     // expansion produce draw references to those objects, including anonymous
     // fallback identities based on this canonical source index.
     auto canonical_instances = std::move(render_instances);
-    for (auto &source : canonical_instances) PopulateRenderInstanceRevisions(source);
-    RenderSceneDelta fallback_scene_delta;
-    RenderSceneDeltaView scene_delta;
-    std::uint64_t scene_generation_after_submit{};
-    const auto key_for_source = [](const RenderInstance &source, std::size_t index) {
-        return RenderSceneInstanceKey{
-            source.stable_id,
-            source.stable_id == 0 ? static_cast<std::uint32_t>(index + 1) : 0u};
-    };
-    bool published_delta_matches_scene =
-        snapshot.scene_delta.published &&
-        snapshot.scene_delta.generation != 0 &&
-        snapshot.scene_delta.instances.size() == canonical_instances.size() &&
-        canonical_instances.size() == snapshot.instances.size() &&
-        snapshot.scene_delta.created + snapshot.scene_delta.updated +
-                snapshot.scene_delta.unchanged ==
-            snapshot.scene_delta.instances.size();
-    if (published_delta_matches_scene)
-    {
-        for (std::size_t index = 0; index < canonical_instances.size(); ++index)
-        {
-            const auto &item = snapshot.scene_delta.instances[index];
-            const auto expected_key = key_for_source(canonical_instances[index], index);
-            if (item.source_index != index || item.key != expected_key ||
-                item.revisions != canonical_instances[index].revisions)
-            {
-                published_delta_matches_scene = false;
-                break;
-            }
-        }
-    }
-    const bool published_delta_contiguous =
-        published_delta_matches_scene &&
-        (scene_new_session ? snapshot.scene_delta.base_generation == 0
-                     : snapshot.scene_delta.base_generation ==
-                           impl_->dynamic_scene_generation);
-    if (published_delta_contiguous)
-    {
-        // The caller retains the snapshot read lease through this Render call.
-        scene_delta = snapshot.scene_delta;
-        if (!impl_->dynamic_scene_extractor.Adopt(canonical_instances, scene_new_session))
-            return Result::Failure(
-                ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Presentation scene delta contained invalid dynamic scene identities.");
-    }
-    else
-    {
-        if (!impl_->dynamic_scene_extractor.Build(
-                canonical_instances, fallback_scene_delta, scene_new_session))
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Dynamic render scene delta extraction failed.");
-        scene_delta = {fallback_scene_delta.instances, fallback_scene_delta.destroyed,
-                       fallback_scene_delta.base_generation, fallback_scene_delta.generation,
-                       fallback_scene_delta.created, fallback_scene_delta.updated,
-                       fallback_scene_delta.unchanged, false};
-    }
-    // A skipped Presentation generation is repaired by the full-snapshot
-    // fallback above. Once this exact canonical scene has been submitted the
-    // renderer can resume consuming incremental Presentation deltas.
-    if (published_delta_matches_scene)
-        scene_generation_after_submit = snapshot.scene_delta.generation;
+    for (auto &source : canonical_instances) PopulateRenderInstanceIdentity(source);
     struct EnvironmentLod { float threshold{1.0f}; bool complement{}; };
     std::vector<RenderInstance> ordered_instances;
     std::vector<std::uint32_t> ordered_source_indices;
@@ -642,18 +612,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     constexpr std::size_t kEnvironmentVisibilityBucketCount = kEnvironmentMaterialNames.size() * render_data::kEnvironmentGeometryLodCount;
     constexpr std::size_t kArcherVisibilityBucket = kEnvironmentVisibilityBucketCount;
     constexpr std::size_t kMonsterVisibilityBucketBegin = kArcherVisibilityBucket + 1;
-    constexpr std::size_t kGpuVisibilityBucketCount =
-        kMonsterVisibilityBucketBegin + 6;
     std::array<std::pair<std::size_t, std::size_t>,
                kEnvironmentVisibilityBucketCount> environment_ranges{};
     const auto static_scene = impl_->config.slime_family_preview_count == 0 &&
                               impl_->config.monster_preview_asset >= 6 &&
                               !impl_->config.environment_preview
         ? snapshot.static_scene : nullptr;
-    std::array<std::vector<GpuStaticDrawRef>, kEnvironmentVisibilityBucketCount>
-        static_environment_buckets;
-    std::vector<GpuStaticDrawRef> static_ground_bucket;
-    std::vector<RenderInstance> hlod_static_instances;
+    std::span<const RenderInstance> hlod_static_instances;
     if (auto prepared = impl_->PrepareHlodStaticScene(static_scene, hlod_static_instances); !prepared) return prepared;
     const bool view_scene_changed = impl_->frame_number != 0 &&
         impl_->owned_views.at(impl_->active_view_id.value)->scene_lease != static_scene;
@@ -673,21 +638,44 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (static_scene->instances.size() > std::numeric_limits<std::uint32_t>::max())
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "Static scene instance index overflow.");
-        for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
+        const bool rebuild_draws = replace_static_scene || !impl_->static_gpu_scene->draws.valid ||
+            impl_->static_gpu_scene->draws.foliage_density != foliage_density;
+        std::optional<Impl::StaticDrawData> rebuilt_draws;
+        if (rebuild_draws)
         {
-            const auto &source = static_scene->instances[index];
-            const auto instance_index = static_cast<std::uint32_t>(index);
-            if (is_environment_mesh(source.mesh))
+            auto &next_draws = rebuilt_draws.emplace();
+            std::array<std::vector<GpuStaticDrawRef>, kEnvironmentVisibilityBucketCount>
+                static_environment_buckets;
+            std::vector<GpuStaticDrawRef> static_ground_bucket;
+            for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
             {
-                if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
-                const auto base = environment_mesh_index(source) * 3;
-                static_environment_buckets[base].push_back({instance_index, 0, 1.0f, static_generation});
+                const auto &source = static_scene->instances[index];
+                const auto instance_index = static_cast<std::uint32_t>(index);
+                if (is_environment_mesh(source.mesh))
+                {
+                    if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
+                    const auto base = environment_mesh_index(source) * 3;
+                    static_environment_buckets[base].push_back({instance_index, 0, 1.0f, static_generation});
+                }
+                else if (source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch)
+                    static_ground_bucket.push_back({instance_index, 0, 1.0f, static_generation});
+                else
+                    return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                           "Unsupported mesh in static scene.");
             }
-            else if (source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch)
-                static_ground_bucket.push_back({instance_index, 0, 1.0f, static_generation});
-            else
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                       "Unsupported mesh in static scene.");
+            for (std::size_t asset = 0; asset < static_environment_buckets.size(); asset += 3)
+            {
+                const auto &bucket = static_environment_buckets[asset];
+                const auto begin = next_draws.refs.size();
+                next_draws.refs.insert(next_draws.refs.end(), bucket.begin(), bucket.end());
+                for (std::size_t lod = 0; lod < 3; ++lod)
+                    next_draws.ranges[asset + lod] = {begin, bucket.size()};
+            }
+            next_draws.ground_range = {next_draws.refs.size(), static_ground_bucket.size()};
+            next_draws.refs.insert(next_draws.refs.end(), static_ground_bucket.begin(), static_ground_bucket.end());
+            next_draws.leaf_count = next_draws.refs.size();
+            next_draws.foliage_density = foliage_density;
+            next_draws.valid = true;
         }
         if (!impl_->static_gpu_scene || impl_->static_gpu_scene->source != static_scene)
         {
@@ -777,49 +765,57 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 impl_->retired_static_gpu_scenes.push_back(std::move(impl_->static_gpu_scene));
             impl_->static_gpu_scene = std::move(next);
         }
+        if (rebuild_draws) impl_->static_gpu_scene->draws = std::move(*rebuilt_draws);
     }
     if (static_scene && impl_->static_gpu_scene)
         if (auto prepared = impl_->PrepareLodStateBuffer(impl_->static_gpu_scene->lod_states,
                 impl_->static_gpu_scene->layout.header.capacity); !prepared) return prepared;
-    std::vector<GpuStaticDrawRef> static_draw_refs;
-    std::array<std::vector<GpuClusterCandidate>, kEnvironmentMaterialNames.size()> cluster_candidates;
+    std::optional<Impl::StaticDrawData> empty_static_draws;
+    auto &static_draws = static_scene ? impl_->static_gpu_scene->draws : empty_static_draws.emplace();
+    auto &static_draw_refs = static_draws.refs;
+    // Discard the preceding frame's HLOD tail, including any partially prepared failed frame.
+    auto &cluster_candidates = static_draws.candidates;
     std::array<ClusterCutInput, kEnvironmentMaterialNames.size()> cluster_inputs{};
     std::array<bool, kEnvironmentMaterialNames.size()> cluster_active{};
-    std::array<std::pair<std::size_t, std::size_t>, kEnvironmentVisibilityBucketCount> static_environment_ranges{};
+    const auto &static_environment_ranges = static_draws.ranges;
     std::array<std::uint32_t, kGpuVisibilityBucketCount> static_output_begins{};
     std::size_t static_output_count{};
-    for (std::size_t asset = 0; asset < static_environment_buckets.size(); asset += 3)
+    for (std::size_t asset = 0; asset < static_environment_ranges.size(); asset += 3)
     {
-        const auto begin = static_draw_refs.size();
-        const auto &bucket = static_environment_buckets[asset];
+        const auto [begin, count] = static_environment_ranges[asset];
         const auto ordinal = asset / 3;
         cluster_active[ordinal] = ordinal < render_data::kMeadowGeometryBegin && impl_->ClusterHierarchyReady(static_cast<std::uint32_t>(ordinal));
         if (cluster_active[ordinal])
         {
             const auto &catalog = impl_->cluster_runtime->catalogs[ordinal];
+            const std::array<std::uint32_t, 3> catalog_key{catalog.group_base, catalog.group_count, catalog.first_root};
             auto &candidates = cluster_candidates[ordinal];
-            candidates.reserve(bucket.size());
-            const auto mesh = static_cast<std::uint32_t>(render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(ordinal)));
-            for (const auto &reference : bucket)
-                candidates.push_back({reference.instance_index, reference.instance_generation,
-                    static_cast<std::uint32_t>(ordinal), 15u, catalog.group_base, catalog.group_count,
-                    mesh, 0u, 0.0f, reference.mesh_flags, catalog.first_root, 0u});
+            if (!static_draws.candidates_valid[ordinal] || static_draws.candidate_catalogs[ordinal] != catalog_key)
+            {
+                candidates.clear();
+                candidates.reserve(count);
+                const auto mesh = static_cast<std::uint32_t>(render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(ordinal)));
+                for (std::size_t index = begin; index < begin + count; ++index)
+                {
+                    const auto &reference = static_draw_refs[index];
+                    candidates.push_back({reference.instance_index, reference.instance_generation,
+                        static_cast<std::uint32_t>(ordinal), 15u, catalog.group_base, catalog.group_count,
+                        mesh, 0u, 0.0f, reference.mesh_flags, catalog.first_root, 0u});
+                }
+                static_draws.candidate_catalogs[ordinal] = catalog_key;
+                static_draws.candidates_valid[ordinal] = true;
+            }
             cluster_inputs[ordinal].candidates = candidates;
             cluster_inputs[ordinal].max_instance_count = static_cast<std::uint32_t>(candidates.size());
             cluster_inputs[ordinal].constants.raster_record_base = UINT32_MAX;
         }
-        static_draw_refs.insert(static_draw_refs.end(), bucket.begin(), bucket.end());
         for (std::size_t lod = 0; lod < 3; ++lod)
         {
-            static_environment_ranges[asset + lod] = {begin, bucket.size()};
             static_output_begins[asset + lod] = static_cast<std::uint32_t>(static_output_count);
-            static_output_count += bucket.size();
+            static_output_count += count;
         }
     }
-    const std::pair<std::size_t, std::size_t> static_ground_range{
-        static_draw_refs.size(), static_ground_bucket.size()};
-    static_draw_refs.insert(static_draw_refs.end(), static_ground_bucket.begin(),
-                            static_ground_bucket.end());
+    const auto &static_ground_range = static_draws.ground_range;
     constexpr std::size_t kGpuVisibilityViewCount = 4; // Camera and three light cascades.
     if (static_draw_refs.size() > std::numeric_limits<std::uint32_t>::max())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
@@ -979,10 +975,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         bucket_pages[bucket] = page;
         auto *pipeline = bucket < kEnvironmentVisibilityBucketCount ? environment_pipeline(bucket, false)
             : (use_visibility ? impl_->hero_visibility_pipeline.Get() : impl_->hero_scene_pipeline.Get());
-        // Native depth peeling uses the indexed SceneVS. Use the same canonical
-        // page/record for every slime pass when that pipeline is active.
+        // Depth peeling uses indexed SceneVS for both slime and water layers.
         if (impl_->hero_transparency.AllocatedBytes() != 0 &&
-            bucket >= kMonsterVisibilityBucketBegin && bucket < kMonsterVisibilityBucketBegin + 3)
+            ((bucket >= kMonsterVisibilityBucketBegin && bucket < kMonsterVisibilityBucketBegin + 3) ||
+             (bucket < kEnvironmentVisibilityBucketCount &&
+              bucket / 3 == render_data::kMeadowWaterGeometry)))
             pipeline = nullptr;
         const auto mesh_id = bucket < kEnvironmentVisibilityBucketCount
             ? static_cast<std::uint32_t>(render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(bucket / 3)))
@@ -1081,7 +1078,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             false, true, dynamic_terrain_geometry_passes); !result) return result;
     if (auto result = prepare_builtin(procedural_first, procedural_count,
             false, false, procedural_geometry_passes); !result) return result;
-    const auto static_leaf_ref_count = static_draw_refs.size();
+    const auto static_leaf_ref_count = static_draws.leaf_count;
     if (auto prepared = impl_->PrepareHlodFrame(back_buffer_index, static_draw_refs); !prepared) return prepared;
     if (use_visibility)
     {
@@ -1138,6 +1135,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (auto result = EnsureVisibilityBuffers(impl_->device.Get(), impl_->allocator,
                 visibility_frame); !result) return result;
     }
+    const auto particle_spawn_prepare_start = capture_clock();
     std::vector<ParticleSpawnCommand> frame_particle_spawns;
     frame_particle_spawns.reserve(particle_spawns.size());
     if (impl_->config.slime_family_preview_count == 0)
@@ -1625,6 +1623,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         command.seed = static_cast<std::uint32_t>(line.sequence);
         frame_particle_spawns.push_back(command);
     }
+    cpu_timings.particle_spawn_prepare_us = capture_elapsed(particle_spawn_prepare_start);
     if (render_instances.size() >
         (std::numeric_limits<std::size_t>::max() -
          kInstanceDataOffset - sizeof(GpuSceneTableHeader) - 255u - entity_surface_frame.Bytes().size()) /
@@ -2042,6 +2041,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         reinterpret_cast<GpuParticleSpawnCommand *>(frame.mapped + particle_spawn_data_offset);
     auto *gpu_particle_owners =
         reinterpret_cast<std::uint32_t *>(frame.mapped + particle_owner_data_offset);
+    const auto typed_vfx_upload_start = capture_clock();
     auto *gpu_ground_rings = reinterpret_cast<GpuParticleSpawnCommand *>(
         frame.mapped + ground_ring_data_offset);
     auto *gpu_flashes = reinterpret_cast<GpuParticleSpawnCommand *>(
@@ -2569,6 +2569,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         });
     const auto ground_quad_count = static_cast<std::uint32_t>(ground_quad_end - gpu_ground_rings);
     constexpr auto particle_capacity = kParticleCount;
+    cpu_timings.typed_vfx_upload_prepare_us = capture_elapsed(typed_vfx_upload_start);
+    const auto particle_upload_start = capture_clock();
     std::uint32_t gpu_particle_spawn_count{};
     std::uint32_t total_particles_to_spawn{};
     for (const auto &source : frame_particle_spawns)
@@ -2653,6 +2655,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     gpu_particle_spawn_count - 1);
         total_particles_to_spawn += count;
     }
+    cpu_timings.particle_upload_prepare_us = capture_elapsed(particle_upload_start);
     const auto particle_delta_ticks =
         impl_->particles_initialized && snapshot.header.tick > impl_->last_particle_tick
             ? snapshot.header.tick - impl_->last_particle_tick
@@ -2938,6 +2941,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                                           camera_forward.z, 0.35f};
     // Numeric VFX budgets use the current four-tier graphics intent. Individual
     // output min-quality admission remains in the typed command adapters.
+    const auto local_vfx_prepare_start = capture_clock();
     const auto vfx_graphics_quality = impl_->last_applied_graphics_request_available
         ? impl_->last_applied_graphics_request.particle_quality : impl_->config.requested_graphics
             ? impl_->config.requested_graphics->particle_quality : impl_->config.vfx_quality == VfxQuality::Low
@@ -3114,6 +3118,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         gpu.slab={source.position.y-2.0f,source.position.y+.35f,0,0};
         gpu.metadata={source.gradient_row,source.texture_slice,static_cast<std::uint32_t>(source.kind),source.stable_seed};
     }
+    cpu_timings.local_vfx_prepare_us = capture_elapsed(local_vfx_prepare_start);
     const auto &cascade_extent = cascade_extents;
     const auto base_shadow = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
     constants->shadow_atlas_texel_size = {1.0f / float(base_shadow * 2u), 1.0f / float(base_shadow * 2u), float(base_shadow * 2u), float(impl_->QualityProfileFor(impl_->config.shadow_quality).shadow_filter_samples)};
@@ -3155,10 +3160,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         source != snapshot.instances.end())
     {
         const auto source_index = static_cast<std::uint32_t>(source - snapshot.instances.begin());
-        if (const auto selected = std::ranges::find(snapshot.poses, source_index,
-                                                   &AnimationPoseRef::instance_index);
-            selected != snapshot.poses.end())
-            pose = *selected;
+        if (const auto *selected = FindLastRenderPose(snapshot.poses, source_index)) pose = *selected;
     }
     bool preview_pose_override = false;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -3234,8 +3236,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     return *found->second;
             const auto ordered = static_cast<std::size_t>(&instance - render_instances.data());
             if (ordered < ordered_source_indices.size())
-                for (const auto &candidate : snapshot.poses)
-                    if (candidate.instance_index == ordered_source_indices[ordered]) return candidate;
+                if (const auto *candidate = FindLastRenderPose(snapshot.poses, ordered_source_indices[ordered]))
+                    return *candidate;
         }
         return pose;
     };
@@ -3322,6 +3324,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
         return Result::Success();
     };
+    const auto palette_prepare_start = capture_clock();
     // Keep the legacy frame constant populated for compatibility with the existing
     // shader ABI. Cached Archer draws use their per-instance upload below.
     for (const auto &instance : render_instances)
@@ -3332,11 +3335,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 return sampled;
             break;
         }
-    struct ArcherPaletteKey
-    {
-        std::array<std::uint64_t, 16> values{};
-        bool operator==(const ArcherPaletteKey &) const noexcept = default;
-    };
+    using ArcherPaletteKey = RenderPoseKey;
     std::vector<ArcherPaletteKey> palette_keys;
     std::vector<std::uint32_t> archer_palette_slots(instance_count,
                                                      std::numeric_limits<std::uint32_t>::max());
@@ -3347,25 +3346,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto &instance = render_instances[index];
         if (instance.mesh != RenderMesh::Archer) continue;
         const auto &instance_pose = pose_for_archer(instance);
-        ArcherPaletteKey key;
-        key.values[0] = instance.asset_id.value;
-        key.values[1] = instance.animation_clip_id.value;
-        key.values[2] = std::bit_cast<std::uint64_t>(instance.animation_time_seconds);
-        key.values[3] = std::bit_cast<std::uint32_t>(instance.animation_playback_rate);
-        key.values[4] = instance.revisions.pose != 0
-            ? instance.revisions.pose
-            : DeriveAnimationPoseRevision(instance_pose);
-        key.values[5] = static_cast<std::uint8_t>(instance_pose.clip);
-        key.values[6] = std::bit_cast<std::uint32_t>(instance_pose.normalized_time);
-        key.values[7] = std::bit_cast<std::uint32_t>(instance_pose.playback_rate);
-        key.values[8] = static_cast<std::uint8_t>(instance_pose.secondary_clip);
-        key.values[9] = std::bit_cast<std::uint32_t>(instance_pose.secondary_normalized_time);
-        key.values[10] = std::bit_cast<std::uint32_t>(instance_pose.secondary_playback_rate);
-        key.values[11] = std::bit_cast<std::uint32_t>(instance_pose.secondary_weight);
-        key.values[12] = static_cast<std::uint8_t>(instance_pose.upper_body_clip);
-        key.values[13] = std::bit_cast<std::uint32_t>(instance_pose.upper_body_normalized_time);
-        key.values[14] = std::bit_cast<std::uint32_t>(instance_pose.upper_body_playback_rate);
-        key.values[15] = std::bit_cast<std::uint32_t>(instance_pose.upper_body_weight);
+        const auto key = MakeRenderPoseKey(instance, &instance_pose);
         const auto found = std::ranges::find(palette_keys, key);
         if (found != palette_keys.end())
         {
@@ -3392,6 +3373,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         palette_keys.push_back(key);
         archer_palette_slots[index] = static_cast<std::uint32_t>(slot);
     }
+    cpu_timings.palette_prepare_us = capture_elapsed(palette_prepare_start);
     // Non-Archer entries intentionally carry the sentinel; only actual Archer
     // instances must have a palette prepared for the cache pass.
     for (std::size_t index = 0; index < render_instances.size(); ++index)
@@ -3408,7 +3390,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
                                    total_particles_to_spawn,
                                    impl_->archer_material_count};
-    const bool meadow_collision = !static_environment_buckets[render_data::kMeadowGeometryBegin * 3u].empty() ||
+    const bool meadow_collision = static_environment_ranges[render_data::kMeadowGeometryBegin * 3u].second != 0 ||
         std::ranges::any_of(render_instances, [](const RenderInstance &instance) {
             return instance.mesh == RenderMesh::MeadowSurface && (instance.environment_variant % 2u) == 0u;
         });
@@ -3673,23 +3655,23 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         kTextureFeedbackDescriptorOffset) * impl_->srv_stride;
     if (auto result = impl_->texture_feedback.WriteDescriptors(back_buffer_index, impl_->srv_heap.Get(),
             feedback_cpu, feedback_gpu, impl_->srv_stride); !result) return result;
+    const auto skin_prepare_start = capture_clock();
     impl_->skin_cache.BeginFrame(new_session);
-    std::size_t skin_slot_stride = impl_->archer_geometry.vertex_count;
-    for (const auto &asset : impl_->monster_assets)
-        skin_slot_stride = std::max<std::size_t>(skin_slot_stride, asset.vertex_count);
-    if (skin_slot_stride >= (1u << 20u))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "Skin cache vertex count exceeds packed dispatch ABI.");
-    constants->skin_cache_options = {
-        static_cast<std::uint32_t>(skin_slot_stride), 0u, 0u, 0u};
+    static_assert(sizeof(Vertex) == 76 && SkinVertexRanges::kVertexBytes == 36);
+    constants->skin_cache_options = {};
+    SkinVertexRanges skin_vertex_ranges;
+    std::vector<std::uint32_t> dynamic_skin_offsets(instance_count);
+    std::vector<std::uint32_t> dynamic_previous_skin_offsets(instance_count);
+    std::vector<std::uint32_t> dynamic_skin_vertex_counts(instance_count);
+    std::vector<std::uint64_t> dynamic_skin_geometry_ids(instance_count);
     auto *previous_skin_frame = !new_session && !view_input.camera_cut
         ? impl_->previous_skin_deformation.get() : nullptr;
     const bool previous_skin_frame_valid = previous_skin_frame && previous_skin_frame->skin_cache_valid &&
-        previous_skin_frame->skin_cache_vertices.resource &&
-        previous_skin_frame->skin_cache_slot_stride == skin_slot_stride;
+        previous_skin_frame->skin_cache_vertices.resource;
     std::vector<std::uint32_t> dynamic_pose_flags(instance_count);
     std::vector<float> dynamic_pose_times(instance_count, 1.0f);
     std::vector<std::uint8_t> dynamic_skin_history(instance_count);
+    std::vector<GpuSceneCanonicalInputs> dynamic_canonical_inputs(instance_count);
     std::vector<std::uint32_t> dynamic_skin_slots(
         instance_count, std::numeric_limits<std::uint32_t>::max());
     for (std::size_t index = 0; index < instance_count; ++index)
@@ -3734,8 +3716,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 resolved_skin_pose.clip = static_cast<CharacterAnimationClip>(
                     std::min(impl_->config.monster_preview_clip, 4u));
                 resolved_skin_pose.normalized_time = impl_->config.monster_preview_time;
-                resolved_skin_pose.revision =
-                    DeriveAnimationPoseRevision(resolved_skin_pose);
                 skin_pose = &resolved_skin_pose;
             }
             else if (const auto pose_it = pose_by_id.find(source.stable_id);
@@ -3760,8 +3740,28 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 key, source, skin_pose,
                 source.mesh == RenderMesh::Archer ? 1.75f : 1.5f);
             conservative_radius = skin.conservative_radius;
-            dynamic_skin_history[index] =
-                skin.history_valid && previous_skin_frame_valid ? 1u : 0u;
+            const GeometryPageGpu *skin_geometry = source.mesh == RenderMesh::Archer
+                ? &impl_->archer_geometry
+                : &impl_->monster_assets[static_cast<std::uint32_t>(source.mesh) -
+                    static_cast<std::uint32_t>(RenderMesh::MonsterMelee)];
+            const auto vertex_count = skin_geometry->vertex_count;
+            const auto geometry_identity = (std::uint64_t(skin_geometry->generation) << 32u) | skin_geometry->page_slot;
+            SkinVertexRange range;
+            if (vertex_count >= (1u << 20u) || !skin_vertex_ranges.Resolve(key, vertex_count, range, geometry_identity))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                    "Skin cache vertex range exceeds shader addressing or conflicts with its instance.");
+            dynamic_skin_offsets[index] = range.offset;
+            dynamic_skin_vertex_counts[index] = range.count;
+            dynamic_skin_geometry_ids[index] = geometry_identity;
+            const auto *previous_range = previous_skin_frame_valid
+                ? previous_skin_frame->vertex_ranges.Find(key) : nullptr;
+            dynamic_skin_history[index] = skin.history_valid && previous_range &&
+                previous_range->count == vertex_count &&
+                previous_range->geometry_identity == geometry_identity &&
+                SkinVertexRangeFits(previous_range->offset, vertex_count, previous_skin_frame->vertex_stride,
+                    previous_skin_frame->skin_cache_vertices.resource->GetDesc().Width) ? 1u : 0u;
+            if (dynamic_skin_history[index])
+                dynamic_previous_skin_offsets[index] = previous_range->offset;
             if (is_monster(source.mesh))
             {
                 dynamic_pose_flags[index] =
@@ -3776,12 +3776,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                             mesh,
                             yaw_value,
                             animation_time};
+        dynamic_canonical_inputs[index] = {
+            MakeRenderPoseKey(source, skin_pose), MakeRenderContentKey(source),
+            dynamic_skin_geometry_ids[index], source.revisions.transform,
+            source.revisions.material, source.status_visual_mask};
     }
     impl_->skin_cache.EndFrame();
+    cpu_timings.skin_prepare_us = capture_elapsed(skin_prepare_start);
 
     // Keep transform/material/deformation payloads in stable GPU slots. Draw order,
     // LOD fade and environment complement state live in a compact per-frame
     // indirection stream instead of forcing the instance table to be reordered.
+    const auto scene_reconcile_start = capture_clock();
     impl_->dynamic_scene_slots.BeginFrame(scene_new_session);
     std::vector<GpuStaticDrawRef> dynamic_draw_refs(instance_count);
     frame.static_input_ref_offset = static_ref_data_offset;
@@ -3791,7 +3797,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (std::size_t index = 0; index < instance_count; ++index)
     {
         const auto &source = render_instances[index];
-        const auto &delta = scene_delta.instances[ordered_source_indices[index]];
         const auto environment = is_environment_mesh(source.mesh);
         const auto monster = is_monster(source.mesh);
         const auto skinned = source.mesh == RenderMesh::Archer || monster;
@@ -3801,9 +3806,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             std::numeric_limits<std::uint32_t>::max(),
             skinned ? kCachedSkinFlag : 0u,
             0u,
-            entity_surface_frame.InstancePayload(source.stable_id)};
+            entity_surface_frame.InstancePayload(source.stable_id),
+            dynamic_skin_offsets[index], dynamic_previous_skin_offsets[index],
+            SkinVertexRanges::kVertexBytes,
+            previous_skin_frame_valid ? previous_skin_frame->vertex_stride : SkinVertexRanges::kVertexBytes};
         const auto slot = impl_->dynamic_scene_slots.Upsert(
-            delta.key, next_draw_instances[index], delta.revisions, scene_metadata);
+            MakeRenderSceneInstanceKey(source.stable_id, ordered_source_indices[index]),
+            next_draw_instances[index], scene_metadata, dynamic_canonical_inputs[index]);
         if (slot.conflict)
             return Result::Failure(
                 ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -3822,9 +3831,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (skinned && dynamic_skin_history[index] &&
             slot.index < previous_gpu_instances.size() && previous_instance_snapshot &&
             slot.index < previous_instance_snapshot->generations.size() &&
-            previous_instance_snapshot->generations[slot.index] == slot.generation &&
-            (static_cast<std::size_t>(slot.index) + 1) * skin_slot_stride <=
-                previous_skin_frame->skin_cache_vertex_capacity)
+            previous_instance_snapshot->generations[slot.index] == slot.generation)
             draw_flags |= kCachedSkinHistoryFlag;
         dynamic_draw_refs[index] = {
             slot.index,
@@ -3834,7 +3841,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             slot.generation};
     }
     impl_->dynamic_scene_slots.EndFrame();
+    const auto scene_changes = impl_->dynamic_scene_slots.Changes();
+    cpu_timings.scene_reconcile_us = capture_elapsed(scene_reconcile_start);
 
+    const auto scene_gpu_prepare_start = capture_clock();
     const auto required_slots = impl_->dynamic_scene_slots.SlotCount();
     constexpr std::size_t kSkinBoundStride = sizeof(float) * 4;
     const bool have_skinned_instances = std::ranges::any_of(
@@ -3842,9 +3852,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return slot != std::numeric_limits<std::uint32_t>::max();
         });
     std::uint64_t skin_signature = 1469598103934665603ull;
+    std::vector<std::byte> skin_identity;
     const auto skin_hash = [&](const void *data, std::size_t bytes) {
         const auto *input = static_cast<const unsigned char *>(data);
         for (std::size_t i = 0; i < bytes; ++i) { skin_signature ^= input[i]; skin_signature *= 1099511628211ull; }
+        const auto *begin = static_cast<const std::byte *>(data);
+        if (bytes) skin_identity.insert(skin_identity.end(), begin, begin + bytes);
     };
     // Camera-dependent static/environment LOD expansion is not deformation.
     // Hash only canonical skinned slots and their current pose; each view uses
@@ -3855,6 +3868,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             skin_hash(&dynamic_skin_slots[index], sizeof(dynamic_skin_slots[index]));
             skin_hash(&dynamic_pose_flags[index], sizeof(dynamic_pose_flags[index]));
             skin_hash(&dynamic_pose_times[index], sizeof(dynamic_pose_times[index]));
+            skin_hash(&dynamic_skin_offsets[index], sizeof(dynamic_skin_offsets[index]));
+            skin_hash(&dynamic_skin_vertex_counts[index], sizeof(dynamic_skin_vertex_counts[index]));
+            skin_hash(&dynamic_skin_geometry_ids[index], sizeof(dynamic_skin_geometry_ids[index]));
+            skin_hash(&render_instances[index].mesh, sizeof(render_instances[index].mesh));
         }
     skin_hash(palette_keys.data(), palette_keys.size() * sizeof(ArcherPaletteKey));
     skin_hash(constants->archer_bones, sizeof(constants->archer_bones));
@@ -3862,7 +3879,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     const bool reuse_canonical_skin = have_skinned_instances && impl_->canonical_skin_current &&
         impl_->canonical_skin_current->package_id == impl_->active_render_package_id &&
         impl_->canonical_skin_current->signature == skin_signature &&
-        impl_->canonical_skin_current->skin_cache_slot_stride == skin_slot_stride;
+        impl_->canonical_skin_current->identity == skin_identity;
     const auto completed_skin = impl_->graph_queue_executor.Completed();
     std::erase_if(impl_->canonical_skin_frames, [&](const auto &lease) {
         return lease.use_count() == 1 && lease->skin_cache_use_completion.IsSatisfiedBy(completed_skin);
@@ -3874,7 +3891,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         frame.skin_cache_bounds = Impl::RetainViewAllocation(canonical.skin_cache_bounds);
         frame.skin_cache_vertex_capacity = canonical.skin_cache_vertex_capacity;
         frame.skin_cache_bound_capacity = canonical.skin_cache_bound_capacity;
-        frame.skin_cache_slot_stride = canonical.skin_cache_slot_stride;
         frame.skin_cache_vertex_read = frame.skin_cache_bounds_read = true;
     }
     // The pool retains immutable scene deformation snapshots referenced by a
@@ -3886,22 +3902,19 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         });
     if (have_skinned_instances)
     {
-        if (required_slots > std::numeric_limits<std::size_t>::max() / skin_slot_stride ||
-            required_slots * skin_slot_stride >
-                std::numeric_limits<std::size_t>::max() / sizeof(Vertex))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                   "Skin cache buffer size overflow.");
-        const auto required_skin_vertices = required_slots * skin_slot_stride;
+        const auto required_skin_vertices = skin_vertex_ranges.VertexCount();
         if (leased_skin_slot || !frame.skin_cache_vertices.resource ||
-            frame.skin_cache_vertex_capacity < required_skin_vertices ||
-            frame.skin_cache_slot_stride != skin_slot_stride)
+            frame.skin_cache_vertex_capacity < required_skin_vertices)
         {
+            // Grow only compact live geometry; each new enemy must not reallocate the whole buffer.
+            const auto capacity = std::min<std::size_t>(SkinVertexRanges::kMaxVertices,
+                required_skin_vertices + std::max<std::size_t>(required_skin_vertices / 4, 256));
             AllocationResource next_skin_buffer;
             D3D12MA::ALLOCATION_DESC allocation{};
             allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
             if (auto created = impl_->CreateAllocation(
                     next_skin_buffer, allocation,
-                    BufferDescription(required_skin_vertices * sizeof(Vertex),
+                    BufferDescription(capacity * SkinVertexRanges::kVertexBytes,
                                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 !created)
@@ -3909,26 +3922,26 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             // WaitForFrame covered this allocation's producer and last reader.
             // The replacement starts in UAV state with no submitted history.
             frame.skin_cache_vertices = std::move(next_skin_buffer);
-            frame.skin_cache_vertex_capacity = required_skin_vertices;
-            frame.skin_cache_slot_stride = skin_slot_stride;
+            frame.skin_cache_vertex_capacity = capacity;
             frame.skin_cache_vertex_read = false;
             frame.skin_cache_valid = false;
         }
         if (leased_skin_slot || !frame.skin_cache_bounds.resource ||
             frame.skin_cache_bound_capacity < required_slots)
         {
+            const auto capacity = std::max<std::size_t>(required_slots + required_slots / 4, 256);
             AllocationResource next_skin_bounds;
             D3D12MA::ALLOCATION_DESC allocation{};
             allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
             if (auto created = impl_->CreateAllocation(
                     next_skin_bounds, allocation,
-                    BufferDescription(required_slots * kSkinBoundStride,
+                    BufferDescription(capacity * kSkinBoundStride,
                                       D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                 !created)
                 return created;
             frame.skin_cache_bounds = std::move(next_skin_bounds);
-            frame.skin_cache_bound_capacity = required_slots;
+            frame.skin_cache_bound_capacity = capacity;
             frame.skin_cache_bounds_read = false;
             frame.skin_cache_valid = false;
         }
@@ -4065,6 +4078,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::memcpy(frame.mapped + dynamic_ref_data_offset, dynamic_draw_refs.data(),
                     dynamic_draw_refs.size() * sizeof(GpuStaticDrawRef));
 
+    cpu_timings.scene_gpu_prepare_us = capture_elapsed(scene_gpu_prepare_start);
     const bool upload_static_scene = static_scene && impl_->static_gpu_scene &&
                                       !impl_->static_gpu_scene->submitted;
     const bool upload_dynamic_scene =
@@ -4404,8 +4418,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     struct GeometryStreamUploadGraph
     {
         Impl::EnvironmentGeometryStream *stream{};
-        std::array<BufferHandle, kGeometryBuffersPerPage> buffers{};
-        std::array<ResourceVersion, kGeometryBuffersPerPage> versions{};
+        BufferHandle buffer{};
+        ResourceVersion version{};
     };
     std::vector<GeometryStreamUploadGraph> environment_geometry_uploads;
     for (auto &stream : impl_->environment_geometry_streams)
@@ -4413,22 +4427,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (!stream.upload_pending) continue;
         GeometryStreamUploadGraph upload{&stream};
         auto &candidate = stream.candidate;
-        const std::array resources{&candidate.vertices, &candidate.indices,
-            &candidate.meshlets, &candidate.auxiliary};
-        constexpr std::array names{"GeometryStreamVertices", "GeometryStreamIndices",
-            "GeometryStreamMeshlets", "GeometryStreamAuxiliary"};
-        for (std::size_t i = 0; i < resources.size(); ++i)
-        {
-            upload.buffers[i] = import_buffer(*resources[i], Access::CopyDest, names[i]);
-            upload.versions[i] = impl_->graph.Version(upload.buffers[i]);
-        }
+        upload.buffer = import_buffer(candidate.storage, Access::CopyDest, "GeometryStreamPage");
+        upload.version = impl_->graph.Version(upload.buffer);
         environment_geometry_uploads.push_back(upload);
     }
     const auto distortion_vectors = impl_->graph.CreateTexture(
         {impl_->render_width,impl_->render_height,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET}, "VFX Distortion Vectors");
     const auto ribbon_history = import_buffer(impl_->ribbon_history, Access::UnorderedWrite, "RibbonHistory");
     const auto ribbon_previous = import_buffer(impl_->ribbon_previous, Access::UnorderedWrite, "RibbonPrevious");
-    const auto ribbon_arguments = import_buffer(impl_->ribbon_arguments, Access::UnorderedWrite, "RibbonArguments");
+    const auto ribbon_arguments = import_buffer(frame.ribbon_arguments, Access::UnorderedWrite, "RibbonArguments");
     const auto draw_ribbons = [&](ID3D12GraphicsCommandList *list, bool oit) {
         list->SetPipelineState(oit ? impl_->ribbon_oit_pipeline.Get() : impl_->ribbon_add_pipeline.Get());
         list->SetGraphicsRootShaderResourceView(18, frame.upload.resource->GetGPUVirtualAddress() + ribbon_output_offset);
@@ -4441,7 +4448,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto count = oit ? ribbon_outputs.size() - first : static_cast<std::size_t>(split - ribbon_outputs.begin());
         if (count != 0)
             list->ExecuteIndirect(impl_->ribbon_draw_signature.Get(), static_cast<UINT>(count),
-                impl_->ribbon_arguments.resource.Get(), first * kRibbonArgumentStride, nullptr, 0);
+                frame.ribbon_arguments.resource.Get(), first * kRibbonArgumentStride, nullptr, 0);
         list->SetGraphicsRoot32BitConstant(6, 0, 0);
     };
     const auto particles = import_buffer(impl_->particles, Access::UnorderedWrite, "Particles");
@@ -4458,7 +4465,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     struct GeometryPageGraph
     {
         const GeometryPageGpu *page{};
-        std::array<ResourceVersion, kGeometryBuffersPerPage> versions{};
+        ResourceVersion version{};
     };
     std::vector<GeometryPageGraph> geometry_pages;
     for (const auto &record : frame.geometry_draw_records_cpu)
@@ -4472,13 +4479,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Geometry graph has no page for a prepared draw record.");
         GeometryPageGraph entry{page};
-        const std::array resources{&page->vertices, &page->indices, &page->meshlets, &page->auxiliary};
-        constexpr std::array access{Access::VertexBuffer, Access::IndexBuffer,
-                                    Access::ComputeRead, Access::ComputeRead};
-        constexpr std::array names{"GeometryVertices", "GeometryIndices", "GeometryMeshlets", "GeometryAuxiliary"};
-        for (std::size_t i = 0; i < resources.size(); ++i)
-            entry.versions[i] = impl_->graph.Version(import_buffer(
-                const_cast<AllocationResource &>(*resources[i]), access[i], names[i]));
+        entry.version = impl_->graph.Version(import_buffer(
+            const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "GeometryPage"));
         geometry_pages.push_back(entry);
     }
     const auto read_geometry_pages = [&](auto &pass, bool skin_only = false) {
@@ -4488,17 +4490,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             {
                 if (entry.page->page_slot >= kArcherGeometryPage &&
                     entry.page->page_slot < kProjectileGeometryPage)
-                    pass.Read(entry.versions[0], Access::ComputeRead);
+                    pass.Read(entry.version, Access::ComputeRead);
                 continue;
             }
-            pass.Read(entry.versions[0], impl_->mesh_shader_enabled
-                ? Access::VertexShaderRead : Access::VertexBuffer);
-            pass.Read(entry.versions[1], Access::IndexBuffer);
-            if (impl_->mesh_shader_enabled)
-            {
-                pass.Read(entry.versions[2], Access::ShaderRead);
-                pass.Read(entry.versions[3], Access::ShaderRead);
-            }
+            pass.Read(entry.version, Access::VertexShaderRead);
         }
     };
     BufferHandle skin_cache_buffer{};
@@ -4530,8 +4525,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->transient_textures_common ? Access::Common : Access::DepthWrite;
     const auto initial_color_access =
         impl_->transient_textures_common ? Access::Common : Access::ShaderRead;
-    const auto shadow =
-        import_texture(impl_->shadow, initial_depth_access, "Shadow");
+    TextureHandle shadow{};
     const auto depth =
         import_texture(impl_->depth, initial_depth_access, "Depth");
     const auto gbuffer_base = import_texture(impl_->gbuffer_base, initial_color_access, "GBufferBase");
@@ -4643,7 +4637,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     auto ribbon_history_version = impl_->graph.Version(ribbon_history);
     auto ribbon_previous_version = impl_->graph.Version(ribbon_previous);
     auto ribbon_arguments_version = impl_->graph.Version(ribbon_arguments);
-    auto shadow_version = impl_->graph.Version(shadow);
+    ResourceVersion shadow_version{};
     auto depth_version = impl_->graph.Version(depth);
     auto gbuffer_base_version = impl_->graph.Version(gbuffer_base);
     auto gbuffer_normal_version = impl_->graph.Version(gbuffer_normal);
@@ -4778,8 +4772,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 upload_pass.Write(environment_stream_version, Access::CopyDest);
         if (upload_environment_geometry)
             for (auto &upload : environment_geometry_uploads)
-                for (auto &version : upload.versions)
-                    version = upload_pass.Write(version, Access::CopyDest);
+                upload.version = upload_pass.Write(upload.version, Access::CopyDest);
         upload_pass.SetExecute([&](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             const auto initialize_lod = [&](GpuLodStateBuffer &state) {
@@ -4833,11 +4826,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 for (const auto &upload : environment_geometry_uploads)
                 {
                     const auto &stream = *upload.stream;
-                    impl_->RecordGeometryPageUpload(list, stream.candidate, stream.upload, stream.upload_offsets);
+                    impl_->RecordGeometryPageUpload(list, stream.candidate, stream.upload);
                 }
         });
     }
-
     auto particle_pass = impl_->graph.AddPass(1, kRenderPassNames[1], QueueHint::Compute);
     particles_version = particle_pass.ReadWrite(particles_version, Access::UnorderedWrite);
     particle_alive_input_version = particle_pass.ReadWrite(particle_alive_input_version, Access::UnorderedWrite);
@@ -4906,7 +4898,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         list->SetComputeRootShaderResourceView(18, frame.upload.resource->GetGPUVirtualAddress() + ribbon_output_offset);
         list->SetComputeRootUnorderedAccessView(21, impl_->ribbon_history.resource->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(22, impl_->ribbon_previous.resource->GetGPUVirtualAddress());
-        list->SetComputeRootUnorderedAccessView(23, impl_->ribbon_arguments.resource->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(23, frame.ribbon_arguments.resource->GetGPUVirtualAddress());
         if (!ribbon_updates.empty())
         {
             list->SetPipelineState(impl_->ribbon_update_pipeline.Get());
@@ -4947,7 +4939,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 std::uint32_t vertex_count{};
                 if (mesh == RenderMesh::Archer)
                 {
-                    source = impl_->archer_geometry.vertices.resource.Get();
+                    source = impl_->archer_geometry.storage.resource.Get();
                     vertex_count = impl_->archer_geometry.vertex_count;
                 }
                 else
@@ -4956,7 +4948,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                         static_cast<std::uint32_t>(mesh) -
                         static_cast<std::uint32_t>(RenderMesh::MonsterMelee));
                     if (asset >= impl_->monster_assets.size()) continue;
-                    source = impl_->monster_assets[asset].vertices.resource.Get();
+                    source = impl_->monster_assets[asset].storage.resource.Get();
                     vertex_count = impl_->monster_assets[asset].vertex_count;
                 }
                 if (!source || vertex_count == 0) continue;
@@ -4967,7 +4959,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                         static_cast<UINT>(vertex_count << 12u),
                     std::bit_cast<UINT>(dynamic_pose_times[index])};
                 const auto output_offset =
-                    static_cast<UINT64>(slot) * skin_slot_stride * sizeof(Vertex);
+                    static_cast<UINT64>(dynamic_skin_offsets[index]) * SkinVertexRanges::kVertexBytes;
                 list->SetComputeRootShaderResourceView(
                     16, source->GetGPUVirtualAddress());
                 if (mesh == RenderMesh::Archer)
@@ -5016,7 +5008,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                         static_cast<UINT>(vertex_count << 12u),
                     std::bit_cast<UINT>(dynamic_pose_times[index])};
                 const auto output_offset =
-                    static_cast<UINT64>(slot) * skin_slot_stride * sizeof(Vertex);
+                    static_cast<UINT64>(dynamic_skin_offsets[index]) * SkinVertexRanges::kVertexBytes;
                 const auto bounds_offset =
                     static_cast<UINT64>(slot) * kSkinBoundStride;
                 list->SetComputeRootUnorderedAccessView(
@@ -5042,7 +5034,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const bool cached_skin = cached_skin_enabled && have_skinned_instances;
         const auto current_vertices_base = cached_skin
             ? frame.skin_cache_vertices.resource->GetGPUVirtualAddress()
-            : impl_->archer_geometry.vertices.resource->GetGPUVirtualAddress();
+            : impl_->archer_geometry.storage.resource->GetGPUVirtualAddress();
         const auto previous_vertices_base = cached_skin && previous_skin_frame_valid
             ? previous_skin_frame->skin_cache_vertices.resource->GetGPUVirtualAddress()
             : current_vertices_base;
@@ -5299,26 +5291,61 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         ao_csm_adaptive_status.usable && impl_->ambient_occlusion.AdaptiveComputeApplied() &&
         !(impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized()) &&
         !impl_->sdk_presentation.IsEnabled() && impl_->sdk_presentation.LatencyOwner() == SdkLatencyOwner::None;
-    // Overlap reads post-Retest versions; all CSM draws and sampling declarations stay intact.
+    // Preserve the original fallback input versions while delaying its declaration
+    // until the CPU virtual-shadow plan can prove that CSM is unnecessary.
+    std::vector<VirtualShadowNativeRead> csm_reads;
+    csm_reads.reserve(32 + cluster_graph.geometry.size() + kClusterRuntimeCatalogs*2);
+    const auto csm_read = [&](ResourceVersion version, Access access) { csm_reads.push_back({version, access}); };
+    const auto collect_csm_reads = [&] {
+        csm_reads.clear();
+        if (cluster_graph.prepared)
+        {
+            if (cluster_graph.draws) csm_read(cluster_graph.refs.version, Access::ShaderRead);
+            csm_read(cluster_graph.pages.version, Access::ComputeRead);
+            for (const auto &page : cluster_graph.geometry)
+                if (page.resident) csm_read(page.buffer.version, Access::VertexShaderRead);
+            for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
+            {
+                const auto &cut = cluster_graph.cuts[ordinal];
+                if (!cut.active) continue;
+                const bool mesh = impl_->cluster_runtime->frames[cluster_graph.frame_slot].cuts[ordinal].geometry_frontend_flags == kGeometryMeshEligible;
+                csm_read(mesh ? cut.mesh_commands.version : cut.draw_commands.version, Access::IndirectArgs);
+                csm_read(cut.command_counts.version, Access::IndirectArgs);
+            }
+        }
+        if (hlod_graph.registered)
+        {
+            csm_read(hlod_graph.outputs.leaf_masks, Access::ShaderRead);
+            csm_read(hlod_graph.outputs.proxy_selection, Access::ShaderRead);
+            csm_read(hlod_graph.outputs.indexed_commands, Access::IndirectArgs);
+            csm_read(hlod_graph.outputs.mesh_commands, Access::IndirectArgs);
+            csm_read(hlod_graph.outputs.command_counts, Access::IndirectArgs);
+            csm_read(impl_->graph.Version(hlod_graph.refs), Access::ShaderRead);
+        }
+        csm_read(geometry_records_version, Access::ShaderRead);
+        csm_read(material_parameter_version, Access::ShaderRead);
+        csm_read(hero_binding_version, Access::ShaderRead);
+        csm_read(dynamic_instances_version, Access::ShaderRead);
+        if (have_skinned_instances) csm_read(skin_cache_version, Access::ShaderRead);
+        if (have_skinned_instances && previous_skin_frame_valid) csm_read(previous_skin_cache_version, Access::ShaderRead);
+        if (static_instances_buffer) csm_read(static_instances_version, Access::ShaderRead);
+        csm_read(static_visible_refs_version, Access::ShaderRead);
+        csm_read(static_draw_args_version, Access::IndirectArgs);
+        csm_read(dynamic_visible_refs_version, Access::ShaderRead);
+        csm_read(dynamic_draw_args_version, Access::IndirectArgs);
+    };
+    bool csm_required = true, csm_registered = false;
     const auto register_cascaded_shadow = [&] {
+        collect_csm_reads();
+        const auto shadow_initial = impl_->enhanced && impl_->shadow.graph_access == Access::Undefined
+            ? Access::Common : initial_depth_access;
+        shadow = import_texture(impl_->shadow, shadow_initial, "Shadow");
+        shadow_version = impl_->graph.Version(shadow);
+        csm_registered = true;
         auto shadow_pass = impl_->graph.AddPass(2, kRenderPassNames[2], QueueHint::Direct);
         read_material_sampling(shadow_pass, has_masked_material_draw);
-        impl_->ReadClusterFrame(shadow_pass, cluster_graph, true);
-        impl_->ReadHlodFrame(shadow_pass, hlod_graph, true);
-        shadow_pass.Read(geometry_records_version, Access::ShaderRead);
-        shadow_pass.Read(material_parameter_version, Access::ShaderRead);
-        shadow_pass.Read(hero_binding_version, Access::ShaderRead);
         read_geometry_pages(shadow_pass);
-        shadow_pass.Read(dynamic_instances_version, Access::ShaderRead);
-        if (have_skinned_instances)
-            shadow_pass.Read(skin_cache_version, Access::ShaderRead);
-        if (have_skinned_instances && previous_skin_frame_valid)
-            shadow_pass.Read(previous_skin_cache_version, Access::ShaderRead);
-        if (static_instances_buffer) shadow_pass.Read(static_instances_version, Access::ShaderRead);
-        shadow_pass.Read(static_visible_refs_version, Access::ShaderRead);
-        shadow_pass.Read(static_draw_args_version, Access::IndirectArgs);
-        shadow_pass.Read(dynamic_visible_refs_version, Access::ShaderRead);
-        shadow_pass.Read(dynamic_draw_args_version, Access::IndirectArgs);
+        for (const auto &read : csm_reads) shadow_pass.Read(read.version, read.access);
         shadow_version = shadow_pass.Write(shadow_version, Access::DepthWrite);
         shadow_pass.SetExecuteChecked([&](RenderPassContext &context) -> Result {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -5347,7 +5374,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 list->RSSetViewports(1, &tile_view );
                 list->RSSetScissorRects(1, &tile_rect);
                 list->SetGraphicsRoot32BitConstant(6, cascade, 0);
-                draw_character_instances(list, true, cascade);
+                draw_character_instances(list,true,cascade);
                 if (auto drawn = impl_->DrawClusterGeometry(list, back_buffer_index, cascade + 1); !drawn)
                     return drawn;
                 if (auto drawn = impl_->DrawHlodGeometry(list, back_buffer_index, cascade + 1); !drawn) return drawn;
@@ -5358,7 +5385,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             return Result::Success();
         });
     };
-    if (!overlap_ao_csm) register_cascaded_shadow();
 
     if (use_visibility)
     {
@@ -5635,7 +5661,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     });
 
     // Retest19/53 only changed main-view records/counts.
-    if (overlap_ao_csm) register_cascaded_shadow();
     auto final_depth_pyramid_pass =
         impl_->graph.AddPass(21, kRenderPassNames[21], QueueHint::Compute);
     final_depth_pyramid_pass.Read(depth_version, Access::ComputeRead);
@@ -5668,8 +5693,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         count.Read(hero_binding_version, Access::ComputeRead);
         for (const auto &page : geometry_pages)
         {
-            count.Read(page.versions[0], Access::ComputeRead);
-            count.Read(page.versions[1], Access::ComputeRead);
+            count.Read(page.version, Access::ComputeRead);
         }
         count.Read(visibility_ids_version, Access::ComputeRead);
         count.Read(raster_records_version, Access::ComputeRead);
@@ -5694,8 +5718,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         scatter.Read(hero_binding_version, Access::ComputeRead);
         for (const auto &page : geometry_pages)
         {
-            scatter.Read(page.versions[0], Access::ComputeRead);
-            scatter.Read(page.versions[1], Access::ComputeRead);
+            scatter.Read(page.version, Access::ComputeRead);
         }
         scatter.Read(visibility_ids_version, Access::ComputeRead);
         scatter.Read(raster_records_version, Access::ComputeRead);
@@ -5731,8 +5754,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             resolve.Read(previous_skin_cache_version, Access::ComputeRead);
         for (const auto &page : geometry_pages)
         {
-            resolve.Read(page.versions[0], Access::ComputeRead);
-            resolve.Read(page.versions[1], Access::ComputeRead);
+            resolve.Read(page.version, Access::ComputeRead);
         }
         gbuffer_base_version = resolve.ReadWrite(gbuffer_base_version, Access::UnorderedWrite);
         gbuffer_normal_version = resolve.ReadWrite(gbuffer_normal_version, Access::UnorderedWrite);
@@ -5906,26 +5928,17 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         decal_surface_outputs.active ? decal_surface_outputs.emission.resource : nullptr,
         DXGI_FORMAT_R16G16B16A16_FLOAT);
     VirtualShadowOutputs virtual_shadow_outputs;
+    impl_->virtual_shadows.BeginFramePolicy();
     LocalShadowOutputs local_shadow_outputs;
     decltype(impl_->previous_shadow_casters) current_shadow_casters;
-    Impl::ShadowCasterNodes current_shadow_caster_nodes, prepared_previous_shadow_caster_nodes;
-    bool previous_shadow_caster_nodes_warm{};
+    std::shared_ptr<Impl::StaticShadowCasterBatch> static_shadow_batch;
     if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
     {
         auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
-        // Each attempt owns scratch nodes; a failed attempt leaves submitted history intact.
         const auto caster_preparation_epoch = BeginShadowCasterPreparation(
-            shadow_owner.scratch_shadow_casters, shadow_owner.shadow_caster_preparation_epoch,
-            shadow_owner.scratch_shadow_caster_nodes, current_shadow_caster_nodes);
+            shadow_owner.scratch_shadow_casters, shadow_owner.shadow_caster_preparation_epoch);
         current_shadow_casters = std::move(shadow_owner.scratch_shadow_casters);
-        const auto static_caster_refs = std::span{static_draw_refs.data(), static_leaf_ref_count};
         const auto static_caster_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0u;
-        previous_shadow_caster_nodes_warm = impl_->previous_shadow_caster_nodes.Matches(
-            static_scene, static_caster_generation, static_caster_refs);
-        if (!previous_shadow_caster_nodes_warm)
-            prepared_previous_shadow_caster_nodes.Prepare(static_scene, static_caster_generation, static_caster_refs);
-        if (!current_shadow_caster_nodes.Matches(static_scene, static_caster_generation, static_caster_refs))
-            current_shadow_caster_nodes.Prepare(static_scene, static_caster_generation, static_caster_refs);
         struct ShadowBinding
         {
             const GeometryPageGpu *page{};
@@ -5935,20 +5948,25 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         };
         std::vector<ShadowBinding> bindings;
         std::vector<VirtualShadowDrawGroup> groups;
-        // Binding inputs are fixed for this preparation; never retain across frames.
+        // Static groups occupy the retained prefix; dynamic bindings are resolved per frame.
         std::array<std::array<UINT, kGpuVisibilityBucketCount + 2>, 2> shadow_group_indices;
         for (auto &indices : shadow_group_indices) indices.fill(UINT32_MAX);
         std::vector<VirtualShadowCaster> casters;
+        std::vector<std::size_t> removed_static_indices;
         std::size_t matched_previous_casters{};
         std::size_t prepared_casters{};
 #ifndef NDEBUG
         auto &caster_key_oracle = shadow_owner.shadow_caster_key_oracle;
-        BeginShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch,
-            shadow_owner.shadow_caster_key_oracle_prepared);
+        if (impl_->config.validation || impl_->config.gpu_validation)
+            BeginShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch,
+                shadow_owner.shadow_caster_key_oracle_prepared);
 #endif
-        current_shadow_casters.reserve(dynamic_draw_refs.size() + static_leaf_ref_count);
-        casters.reserve(dynamic_draw_refs.size() + static_leaf_ref_count);
+        current_shadow_casters.reserve(dynamic_draw_refs.size());
+        casters.reserve(dynamic_draw_refs.size());
         std::vector<VirtualShadowReceiver> receivers;
+        std::uint32_t froxel_receiver_index = UINT32_MAX;
+        std::vector<ShadowSurfaceReceiver> dynamic_surface_receivers;
+        bool camera_receiver_domain_closed=true;
         std::optional<VirtualShadowReceiver> water_receiver, gel_receiver;
         const auto merge_receiver = [](std::optional<VirtualShadowReceiver> &target,
             DirectX::XMFLOAT4 center, double radius) -> Result {
@@ -6006,6 +6024,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                         minimum.x = std::min(minimum.x, corner.x); minimum.y = std::min(minimum.y, corner.y); minimum.z = std::min(minimum.z, corner.z);
                         maximum.x = std::max(maximum.x, corner.x); maximum.y = std::max(maximum.y, corner.y); maximum.z = std::max(maximum.z, corner.z);
                     }
+            froxel_receiver_index = static_cast<std::uint32_t>(receivers.size());
             receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
             for (const auto &volume : impl_->volumetric_media)
             {
@@ -6022,8 +6041,164 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
             }
         }
+        const auto previous_static_batch=shadow_owner.static_shadow_casters;
+        Impl::StaticShadowCasterBatch signature;
+        signature.source=static_scene; signature.generation=static_caster_generation;
+        signature.leaf_count=static_leaf_ref_count;
+        signature.receiver_proxy_count=hlod_static_instances.size();
+        signature.density=static_draws.foliage_density; signature.wind_radius=grass_visibility_radius;
+        signature.material_revision=impl_->material_parameter_revision; signature.pipeline_revision=impl_->pipeline_revision;
+        signature.mesh_shader=impl_->mesh_shader_enabled;
+        for(std::size_t bucket=0;bucket<kGpuVisibilityBucketCount;++bucket)
+        {
+            const auto *page=bucket_pages[bucket];
+            signature.geometry[bucket]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
+            signature.passes[bucket]=static_geometry_passes[bucket][1];
+        }
+        signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
+        signature.passes.back()=ground_geometry_passes[1];
+        const bool static_warm=!new_session && previous_static_batch &&
+            previous_static_batch->source==signature.source && previous_static_batch->generation==signature.generation &&
+            previous_static_batch->leaf_count==signature.leaf_count && previous_static_batch->density==signature.density &&
+            previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count &&
+            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->material_revision==signature.material_revision &&
+            previous_static_batch->pipeline_revision==signature.pipeline_revision && previous_static_batch->mesh_shader==signature.mesh_shader &&
+            previous_static_batch->geometry==signature.geometry && previous_static_batch->passes==signature.passes;
+        std::unordered_map<Impl::ShadowCasterMap::key_type,std::size_t,Impl::ShadowCasterKeyHash> old_static_indices,static_indices;
+        if(static_warm) static_shadow_batch=previous_static_batch;
+        else
+        {
+            static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(std::move(signature));
+            if(shadow_owner.static_shadow_caster_revision>UINT64_MAX-2) throw std::runtime_error("Static shadow caster revision exhausted");
+            static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
+            static_indices.reserve(static_leaf_ref_count);
+            if(!new_session && previous_static_batch)
+                for(std::size_t i=0;i<previous_static_batch->keys.size();++i) old_static_indices.emplace(previous_static_batch->keys[i],i);
+        }
+        // Camera shadow queries originate at raster surfaces, independently of
+        // shadow-caster eligibility. Retain all static draw bounds once in the
+        // existing immutable batch, including shadow-off surfaces and HLOD proxies.
+        const auto append_surface=[&](const RenderInstance &source,const GpuInstance *draw,
+            std::size_t dynamic_index,std::vector<ShadowSurfaceReceiver> &destination,
+            const render_data::GeometryBounds *proxy_bounds=nullptr) -> Result {
+            const bool environment=is_environment_mesh(source.mesh);
+            const auto scale=draw?draw->scale:DirectX::XMFLOAT4{source.scale.x,source.scale.y,source.scale.z,1};
+            const auto center=draw?draw->position:DirectX::XMFLOAT4{source.position.x,
+                source.position.y+(environment?0.0f:source.scale.y*0.5f),source.position.z,0};
+            const double yaw=draw?draw->yaw:source.yaw;
+            if(!std::isfinite(center.x)||!std::isfinite(center.y)||!std::isfinite(center.z)||
+               !std::isfinite(scale.x)||!std::isfinite(scale.y)||!std::isfinite(scale.z)||!std::isfinite(yaw))
+                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver transform is nonfinite.");
+            std::array<double,3> lo{INFINITY,INFINITY,INFINITY},hi{-INFINITY,-INFINITY,-INFINITY};
+            const auto merge_local=[&](const auto &bounds) {
+                for(unsigned axis=0;axis<3;++axis)
+                { lo[axis]=std::min(lo[axis],double(bounds.minimum[axis]));hi[axis]=std::max(hi[axis],double(bounds.maximum[axis])); }
+            };
+            if(proxy_bounds) merge_local(*proxy_bounds); // HLOD pages contain baked world-space vertices.
+            else if(environment)
+            {
+                const auto ordinal=environment_mesh_index(source);
+                for(unsigned lod=0;lod<3;++lod) merge_local(impl_->environment_meshes[ordinal*3+lod].metadata.bounds);
+            }
+            else if(source.mesh==RenderMesh::Archer)
+            {
+                // The exact prepared palette is the SkinCache input. Every
+                // nonnegative weighted matrix result is inside this bone/AABB
+                // envelope; the source codec admits weight sums 1 +/- .001.
+                if(dynamic_index>=archer_palette_slots.size()||archer_palette_slots[dynamic_index]==UINT32_MAX)
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto &bounds=impl_->archer_geometry.metadata.bounds;
+                const auto offset=archer_palette_data_offset+std::size_t(archer_palette_slots[dynamic_index])*archer_palette_stride;
+                lo={0,0,0};hi={0,0,0};std::array<double,3> magnitude{};
+                double source_l1{};
+                for(unsigned bone=0;bone<impl_->archer_bone_count;++bone)
+                {
+                    DirectX::XMFLOAT4X4 matrix;
+                    std::memcpy(&matrix,frame.mapped+offset+bone*sizeof(matrix),sizeof(matrix));
+                    for(unsigned corner=0;corner<8;++corner)
+                    {
+                        const std::array<double,4> p{bounds.minimum[0],bounds.minimum[1],bounds.minimum[2],1};
+                        auto q=p;
+                        for(unsigned axis=0;axis<3;++axis) if(corner&(1u<<axis)) q[axis]=bounds.maximum[axis];
+                        source_l1=std::max(source_l1,std::abs(q[0])+std::abs(q[1])+std::abs(q[2]));
+                        for(unsigned axis=0;axis<3;++axis)
+                        {
+                            double value{},absolute{};
+                            for(unsigned column=0;column<4;++column)
+                            { const double term=double(matrix.m[axis][column])*q[column];value+=term;absolute+=std::abs(term); }
+                            lo[axis]=std::min(lo[axis],value);hi[axis]=std::max(hi[axis],value);
+                            magnitude[axis]=std::max(magnitude[axis],absolute);
+                        }
+                    }
+                }
+                constexpr double gamma64=(64*0x1p-24)/(1-64*0x1p-24);
+                for(unsigned axis=0;axis<3;++axis)
+                {
+                    const double pad=gamma64*magnitude[axis]*1.0011+64*double(FLT_MIN)*(1+source_l1);
+                    lo[axis]=lo[axis]*1.0011-pad;hi[axis]=hi[axis]*1.0011+pad;
+                }
+            }
+            else if(is_monster(source.mesh))
+            {
+                const auto &asset=impl_->monster_assets[static_cast<UINT>(source.mesh)-static_cast<UINT>(RenderMesh::MonsterMelee)];
+                if(!(asset.deformation_flags&render_data::kMonsterBoundsPositionEnclosure)||
+                   dynamic_index>=dynamic_pose_times.size())
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto clip=std::min((dynamic_pose_flags[dynamic_index]>>8u)&0xfu,4u);
+                const auto meta=asset.clip_meta[clip];
+                if(!meta.y||!asset.bone_count) { camera_receiver_domain_closed=false;return Result::Success(); }
+                if(!std::isfinite(dynamic_pose_times[dynamic_index]))
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera skin receiver time is nonfinite.");
+                const float frame_position=std::clamp(dynamic_pose_times[dynamic_index],0.0f,1.0f)*float(meta.y-1u);
+                const auto frame0=std::min(static_cast<UINT>(std::floor(frame_position)),meta.y-1u);
+                const auto row=std::size_t(meta.x/asset.bone_count)+frame0;
+                if(row>=asset.interval_bounds.size()) { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto &bounds=asset.interval_bounds[row];
+                if(bounds.lod!=0||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                for(unsigned axis=0;axis<3;++axis) { lo[axis]=bounds.minimum[axis];hi[axis]=bounds.maximum[axis]; }
+            }
+            else
+            {
+                merge_local(source.mesh==RenderMesh::EnemyProjectile?impl_->gel_projectile_geometry.metadata.bounds:
+                    impl_->procedural_geometry.metadata.bounds);
+                if(source.mesh==RenderMesh::Area||source.mesh==RenderMesh::Ground) { lo[1]*=.1;hi[1]*=.1; }
+                else if(source.mesh==RenderMesh::DirtPatch) { lo[1]*=.035;hi[1]*=.035; }
+                else if(source.mesh==RenderMesh::PlayerProjectile) { lo[1]*=.55;hi[1]*=.55; }
+                else if(source.mesh==RenderMesh::Pickup)
+                {
+                    const double extent=std::max(std::abs(lo[0]),std::abs(hi[0]))+std::max(std::abs(lo[1]),std::abs(hi[1]));
+                    lo[0]=lo[1]=-extent;hi[0]=hi[1]=extent;
+                }
+                // Other placeholder operations only shrink the source box.
+            }
+            const double sine=std::sin(yaw),cosine=std::cos(yaw);
+            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
+            for(unsigned corner=0;corner<8;++corner)
+            {
+                const double x=(corner&1?hi[0]:lo[0])*scale.x,y=(corner&2?hi[1]:lo[1])*scale.y,z=(corner&4?hi[2]:lo[2])*scale.z;
+                const std::array<double,3> p{center.x+cosine*x+sine*z,center.y+y,center.z-sine*x+cosine*z};
+                const std::array<double,3> absolute{std::abs(double(center.x))+std::abs(x)+std::abs(z),std::abs(double(center.y))+std::abs(y),
+                    std::abs(double(center.z))+std::abs(x)+std::abs(z)};
+                for(unsigned axis=0;axis<3;++axis)
+                { low[axis]=std::min(low[axis],p[axis]);high[axis]=std::max(high[axis],p[axis]);magnitude[axis]=std::max(magnitude[axis],absolute[axis]); }
+            }
+            const double wind=HasEnvironmentWind(source.mesh,source.environment_variant)?grass_visibility_radius:0;
+            std::array<float,3> minimum{},maximum{};
+            for(unsigned axis=0;axis<3;++axis)
+            {
+                const double pad=wind+magnitude[axis]*0x1p-18+1.e-5;
+                if(!std::isfinite(low[axis])||!std::isfinite(high[axis])||low[axis]-pad<=-FLT_MAX||high[axis]+pad>=FLT_MAX)
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver bounds are unbounded.");
+                minimum[axis]=std::nextafter(float(low[axis]-pad),-FLT_MAX);
+                maximum[axis]=std::nextafter(float(high[axis]+pad),FLT_MAX);
+            }
+            const ShadowSurfaceReceiver receiver{{minimum[0],minimum[1],minimum[2],0},{maximum[0],maximum[1],maximum[2],1}};
+            destination.push_back(receiver);return Result::Success();
+        };
         const auto append_caster = [&](const RenderInstance &source, const GpuStaticDrawRef &reference,
-                std::uint32_t ref_index, bool immutable, const GpuInstance *instance) -> Result {
+                std::uint32_t ref_index, bool immutable, const GpuInstance *instance,
+                const ShadowSurfaceReceiver *qualified_surface=nullptr) -> Result {
             const bool environment = is_environment_mesh(source.mesh);
             const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
             const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
@@ -6037,8 +6212,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 : immutable ? ground_geometry_passes[1] : terrain ? dynamic_terrain_geometry_passes[1] : procedural_geometry_passes[1];
             if (!page || pass == 0) return Result::Failure(ErrorCode::InvalidState,
                 "hs_renderer_d3d12", "Virtual caster has no complete geometry record.");
-            auto *pipeline = environment ? environment_pipeline(bucket, true)
-                : hero ? impl_->hero_shadow_pipeline.Get() : impl_->shadow_pipeline.Get();
             const UINT ordinal = environment ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3) : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
             const UINT material = ordinal < kAuthoredMaterialNames.size()
                 ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
@@ -6047,6 +6220,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 : kGpuVisibilityBucketCount + (terrain ? 0u : 1u);
             const auto draw_group = ResolveShadowCasterGroup(
                 shadow_group_indices[immutable ? 1u : 0u][binding_slot], groups, binding_key, [&] {
+                    // The pipeline belongs to the draw group, not each static instance.
+                    auto *pipeline = environment ? environment_pipeline(bucket, true)
+                        : hero ? impl_->hero_shadow_pipeline.Get() : impl_->shadow_pipeline.Get();
                     groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
                         ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
                     bindings.push_back({page, pipeline, material, immutable});
@@ -6054,11 +6230,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             VirtualShadowCaster caster;
             const auto key = std::tuple{immutable, source.stable_id,
                 source.stable_id == 0 ? reference.instance_index + 1u : 0u};
-            auto *previous_nodes = immutable
-                ? (previous_shadow_caster_nodes_warm ? &impl_->previous_shadow_caster_nodes
-                    : &prepared_previous_shadow_caster_nodes) : nullptr;
-            const auto *previous = FindPreviousShadowCasterNode(impl_->previous_shadow_casters,
-                key, previous_nodes, ref_index, previous_shadow_caster_nodes_warm);
+            Impl::ShadowCasterRecord previous_static_record;
+            const Impl::ShadowCasterRecord *previous{};
+            if(immutable)
+            {
+                if(const auto found=old_static_indices.find(key);found!=old_static_indices.end())
+                { previous_static_record.caster=previous_static_batch->records[found->second]; previous=&previous_static_record; }
+            }
+            else if(const auto found=impl_->previous_shadow_casters.find(key);found!=impl_->previous_shadow_casters.end()) previous=&found->second;
             const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
             const auto instance_index = reference.instance_index | (immutable ? 0x80000000u : 0u);
             const auto &sphere = page->metadata.bounds.sphere;
@@ -6097,6 +6276,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     std::sqrt(sx*sx + sy*sy + sz*sz) + sphere[3] * maximum_scale)};
             }
             if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
+            if(qualified_surface && hero)
+            {
+                // Share the qualified actual-pose enclosure with page overlap,
+                // command admission and invalidation, not only receiver proof.
+                const auto sphere=ShadowSurfaceCasterSphere(*qualified_surface);
+                if(!sphere)
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Qualified skin shadow radius is unbounded.");
+                caster.current_bounds={sphere->x,sphere->y,sphere->z,sphere->w};
+            }
             if (environment && environment_mesh_index(source) == render_data::kMeadowWaterGeometry)
             {
                 const auto scale = instance ? instance->scale : DirectX::XMFLOAT4{source.scale.x, source.scale.y, source.scale.z, 1};
@@ -6107,7 +6295,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     std::max({std::abs(double(scale.x)), std::abs(double(scale.y)), std::abs(double(scale.z))});
                 if (auto merged = merge_receiver(water_receiver, center, radius); !merged) return merged;
             }
-            caster.current_revisions = source.revisions;
+            caster.current_revisions = immutable ? source.revisions
+                : impl_->dynamic_scene_slots.Revisions(reference.instance_index);
             caster.current_revisions.material ^= impl_->material_parameter_revision;
             caster.current_cut_revision = cut_revision;
             caster.instance_index = instance_index;
@@ -6118,17 +6307,27 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             caster.index_count = page->index_count;
             caster.meshlet_count = page->meshlet_count;
             caster.immutable_source = immutable;
-            auto *current_nodes = immutable ? &current_shadow_caster_nodes : nullptr;
-            auto *current = FindCurrentShadowCasterNode(current_shadow_casters, key, current_nodes, ref_index);
-            const bool inserted = MarkShadowCasterPrepared(current->prepared_epoch, caster_preparation_epoch);
+            caster.baked_source = immutable && render_data::IsStaticShadowCaster(source);
+            Impl::ShadowCasterRecord *current{};
+            if(immutable)
+            {
+                if(!static_indices.emplace(key,static_shadow_batch->records.size()).second) return Result::Success();
+                static_shadow_batch->keys.push_back(key);
+            }
+            else
+            {
+                current=&current_shadow_casters.try_emplace(key).first->second;
+                const bool inserted=MarkShadowCasterPrepared(current->prepared_epoch,caster_preparation_epoch);
 #ifndef NDEBUG
-            assert(inserted == MarkShadowCasterKeyOracle(caster_key_oracle, key, caster_preparation_epoch));
+                if(impl_->config.validation || impl_->config.gpu_validation)
+                    assert(inserted==MarkShadowCasterKeyOracle(caster_key_oracle,key,caster_preparation_epoch));
 #endif
-            if (!inserted) return Result::Success();
-            ++prepared_casters;
+                if(!inserted) return Result::Success();
+                ++prepared_casters;
+            }
             if (!new_session && previous)
             {
-                ++matched_previous_casters;
+                if(!immutable) ++matched_previous_casters;
                 const auto &old = previous->caster;
                 caster.previous_bounds = old.current_bounds;
                 caster.previous_revisions = old.current_revisions;
@@ -6140,17 +6339,67 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 caster.previous_wind = old.wind;
                 caster.previous_animated_alpha = old.animated_alpha;
             }
-            current->caster = caster;
-            casters.push_back(caster);
+            if(immutable) static_shadow_batch->records.push_back(caster);
+            else { current->caster=caster; casters.push_back(caster); }
             if (is_monster(source.mesh) && static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee) < 3)
             {
                 const auto &b = caster.current_bounds;
-                receivers.push_back({{b.x-b.w,b.y-b.w,b.z-b.w,0}, {b.x+b.w,b.y+b.w,b.z+b.w,0}});
+                receivers.push_back({{b.x-b.w,b.y-b.w,b.z-b.w,0}, {b.x+b.w,b.y+b.w,b.z+b.w,1}});
             }
             return Result::Success();
         };
+        // Static groups form a stable prefix; fluctuating enemy families cannot renumber them.
+        if(static_warm)
+        {
+            for(const auto &binding:static_shadow_batch->bindings)
+            { groups.push_back({binding.key,binding.frontend}); bindings.push_back({binding.page,binding.pipeline,binding.material,true}); }
+            water_receiver=static_shadow_batch->water;
+            receivers.insert(receivers.end(),static_shadow_batch->receivers.begin(),static_shadow_batch->receivers.end());
+        }
+        else
+        {
+            const auto receiver_begin=receivers.size();
+            if(static_scene && impl_->static_gpu_scene)
+                for(std::size_t index=0;index<static_leaf_ref_count;++index)
+                {
+                    if(auto added=append_surface(static_scene->instances[static_draw_refs[index].instance_index],nullptr,
+                        SIZE_MAX,static_shadow_batch->surface_receivers);!added)return added;
+                    if(auto added=append_caster(static_scene->instances[static_draw_refs[index].instance_index],
+                        static_draw_refs[index],static_cast<UINT>(index),true,nullptr);!added) return added;
+                }
+            for(std::size_t index=0;index<hlod_static_instances.size();++index)
+                if(auto added=append_surface(hlod_static_instances[index],nullptr,SIZE_MAX,static_shadow_batch->surface_receivers,
+                    &impl_->hlod_runtime->scene.proxies.at(index).bounds);!added)return added;
+            for(const auto &surface:static_shadow_batch->surface_receivers)
+            {
+                auto &aggregate=static_shadow_batch->surface_aggregate;
+                if(!aggregate) aggregate=surface;
+                else
+                {
+                    aggregate->minimum.x=std::min(aggregate->minimum.x,surface.minimum.x);
+                    aggregate->minimum.y=std::min(aggregate->minimum.y,surface.minimum.y);
+                    aggregate->minimum.z=std::min(aggregate->minimum.z,surface.minimum.z);
+                    aggregate->maximum.x=std::max(aggregate->maximum.x,surface.maximum.x);
+                    aggregate->maximum.y=std::max(aggregate->maximum.y,surface.maximum.y);
+                    aggregate->maximum.z=std::max(aggregate->maximum.z,surface.maximum.z);
+                }
+            }
+            static_shadow_batch->water=water_receiver;
+            static_shadow_batch->receivers.assign(receivers.begin()+receiver_begin,receivers.end());
+            for(std::size_t i=0;i<bindings.size();++i)
+                static_shadow_batch->bindings.push_back({bindings[i].page,bindings[i].pipeline,bindings[i].material,
+                    groups[i].frontend,groups[i].binding_key});
+            if(!new_session && previous_static_batch)
+                for(std::size_t i=0;i<previous_static_batch->keys.size();++i)
+                    if(!static_indices.contains(previous_static_batch->keys[i])) removed_static_indices.push_back(i);
+
+        }
         for (std::size_t index = 0; index < dynamic_draw_refs.size(); ++index)
         {
+            const auto surface_begin=dynamic_surface_receivers.size();
+            if(auto added=append_surface(render_instances[index],&persistent_instances[dynamic_draw_refs[index].instance_index],
+                index,dynamic_surface_receivers);!added)return added;
+            const auto *qualified_surface=dynamic_surface_receivers.size()>surface_begin?&dynamic_surface_receivers.back():nullptr;
             // Gel is a receiver even though it has no opaque shadow representation.
             if (render_instances[index].mesh == RenderMesh::EnemyProjectile)
             {
@@ -6168,28 +6417,21 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 continue;
             }
             if (auto added = append_caster(render_instances[index], dynamic_draw_refs[index], static_cast<UINT>(index),
-                    false, &persistent_instances[dynamic_draw_refs[index].instance_index]); !added) return added;
+                    false, &persistent_instances[dynamic_draw_refs[index].instance_index],qualified_surface); !added) return added;
         }
-        if (static_scene && impl_->static_gpu_scene)
-            for (std::size_t index = 0; index < static_leaf_ref_count; ++index)
-                if (auto added = append_caster(static_scene->instances[static_draw_refs[index].instance_index],
-                        static_draw_refs[index], static_cast<UINT>(index), true, nullptr); !added) return added;
         // At most two additional entries, independent of water/projectile instance counts.
-        if (water_receiver) receivers.push_back(*water_receiver);
-        if (gel_receiver) receivers.push_back(*gel_receiver);
+        if (water_receiver) { water_receiver->maximum.w=1;receivers.push_back(*water_receiver); }
+        if (gel_receiver) { gel_receiver->maximum.w=1;receivers.push_back(*gel_receiver); }
         PruneShadowCasterStorage(current_shadow_casters, caster_preparation_epoch, prepared_casters);
 #ifndef NDEBUG
-        PruneShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch, prepared_casters,
-            shadow_owner.shadow_caster_key_oracle_prepared);
-        assert(caster_key_oracle.size() == prepared_casters);
+        if (impl_->config.validation || impl_->config.gpu_validation)
+        {
+            PruneShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch, prepared_casters,
+                shadow_owner.shadow_caster_key_oracle_prepared);
+            assert(caster_key_oracle.size() == prepared_casters);
+        }
 #endif
         assert(current_shadow_casters.size() == prepared_casters);
-        // Every cached static node was stamped above; prune can only erase
-        // unrelated keys. Duplicate named sources intentionally alias nodes.
-        for ([[maybe_unused]] const auto &entry : current_shadow_caster_nodes.entries)
-            assert(entry.node && entry.node->prepared_epoch == caster_preparation_epoch);
-        current_shadow_caster_nodes.valid = true;
-        prepared_previous_shadow_caster_nodes.valid = !previous_shadow_caster_nodes_warm;
         // Unique current keys matching every previous key prove that no caster was removed.
         if (!new_session && matched_previous_casters != impl_->previous_shadow_casters.size())
         {
@@ -6215,6 +6457,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 casters.push_back(removed);
             }
         }
+        std::ranges::sort(removed_static_indices,{},[&](std::size_t index) { return previous_static_batch->keys[index]; });
+        for(const auto index:removed_static_indices)
+        {
+            auto removed=previous_static_batch->records[index];
+            AdvanceShadowCasterHistory(removed); removed.present=false;
+            casters.push_back(removed);
+        }
         reads.push_back({geometry_records_version, Access::ShaderRead});
         reads.push_back({dynamic_instances_version, Access::ShaderRead});
         reads.push_back({material_parameter_version, Access::ShaderRead});
@@ -6225,18 +6474,36 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (have_skinned_instances && previous_skin_frame_valid) reads.push_back({previous_skin_cache_version, Access::ShaderRead});
         for (const auto &entry : geometry_pages)
         {
-            reads.push_back({entry.versions[0], impl_->mesh_shader_enabled ? Access::VertexShaderRead : Access::VertexBuffer});
-            reads.push_back({entry.versions[1], Access::IndexBuffer});
-            if (impl_->mesh_shader_enabled)
-                for (UINT i = 2; i < 4; ++i) reads.push_back({entry.versions[i], Access::ShaderRead});
+            reads.push_back({entry.version, Access::VertexShaderRead});
         }
         VirtualShadowInputs inputs;
+        inputs.frustum_receiver_index = froxel_receiver_index;
+        for(std::size_t cascade=0;cascade<3;++cascade)
+            for(std::size_t row=0;row<4;++row)for(std::size_t column=0;column<4;++column)
+                inputs.main_csm_view_projection[cascade][row*4+column]=
+                    constants->shadow_view_projection[cascade].m[column][row];
+        inputs.main_csm_view_projection_valid=true;
+        inputs.view_id = impl_->active_view_id;
+        inputs.required_receiver_domains=ShadowReceiverCamera;
+        inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;
+        // These actual world/froxel enclosures are deliberately not clipped to
+        // raster surfaces. Software GI has no bounded CPU world-query contract.
+        if(!typed_volumes.empty()||impl_->volumetrics.AllocatedBytes()!=0)
+        { inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld; }
+        if(active_features.software_gi_enabled) inputs.required_receiver_domains|=ShadowReceiverSoftwareGi;
+        DirectX::XMStoreFloat4x4(&inputs.receiver_view_projection,clip_matrix);
+        inputs.surface_receivers={static_shadow_batch->surface_receivers,dynamic_surface_receivers,
+            static_shadow_batch->surface_aggregate?std::span<const ShadowSurfaceReceiver>(&*static_shadow_batch->surface_aggregate,1):
+                std::span<const ShadowSurfaceReceiver>{}};
         inputs.declare_material_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, has_masked_material_draw); };
         if (primary_sun) inputs.light = *primary_sun;
         DirectX::XMStoreFloat3(&inputs.clipmap_center, target);
         inputs.view_origin = lod_eye;
         inputs.inverse_view_projection = camera_relative_inverse_view_projection;
         for (UINT i = 0; i < 3; ++i) inputs.coverage_extents[i] = cascade_extents[i] * 0.5f;
+        inputs.baked_static=primary_sun && impl_->material_parameter_revision==impl_->baked_generation_material_revision &&
+            impl_->pipeline_revision==impl_->baked_generation_pipeline_revision &&
+            impl_->virtual_shadows.MatchesBake(static_scene,*primary_sun,inputs.coverage_extents);
         inputs.depth_span = shadow_distance * 2;
         inputs.render_active = impl_->view_state.render_active;
         inputs.frame_slot = back_buffer_index;
@@ -6244,13 +6511,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.completed = impl_->graph_queue_executor.Completed();
         inputs.depth = depth_version; inputs.normal = gbuffer_normal_version;
         inputs.depth_resource = impl_->depth.resource.Get(); inputs.normal_resource = surface_normal_resource;
-        inputs.casters = casters; inputs.receivers = receivers; inputs.draw_groups = groups; inputs.native_reads = reads;
+        inputs.casters = ShadowCasterRange{static_shadow_batch->records,casters};
+        inputs.stable_caster_revision=static_shadow_batch->revision;
+        inputs.receivers = receivers; inputs.draw_groups = groups; inputs.native_reads = reads;
         const auto draw_shadows = [&, bindings](RenderPassContext &context, const auto &outputs,
                 std::span<const VirtualShadowDrawBatch> batches) -> Result {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             bind_graphics(list);
-            const D3D12_VIEWPORT bank_view{0,0,float(outputs.bank_extent.width),float(outputs.bank_extent.height),0,1};
-            const D3D12_RECT bank_rect{0,0,LONG(outputs.bank_extent.width),LONG(outputs.bank_extent.height)};
+            auto extent=outputs.bank_extent;
+            if constexpr(requires { outputs.root_extent; })
+                if(!batches.empty()&&batches.front().layer==2)extent=outputs.root_extent;
+            const D3D12_VIEWPORT bank_view{0,0,float(extent.width),float(extent.height),0,1};
+            const D3D12_RECT bank_rect{0,0,LONG(extent.width),LONG(extent.height)};
             list->RSSetViewports(1, &bank_view); list->RSSetScissorRects(1, &bank_rect);
             bind_scene_deformation_roots(list, true);
             for (const auto &batch : batches)
@@ -6281,8 +6553,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.draw = draw_shadows;
         if (primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0)
         {
+            VirtualShadowFramePlan shadow_plan;
+            if (auto prepared = impl_->virtual_shadows.PrepareFrame(inputs, shadow_plan); !prepared) return prepared;
+            csm_required = shadow_plan.guarantee.csm_required;
+            if (csm_required) register_cascaded_shadow();
             pending_effects.shadows = true;
-            if (auto registered = impl_->virtual_shadows.Register(impl_->graph, inputs, virtual_shadow_outputs); !registered)
+            if (auto registered = impl_->virtual_shadows.Register(impl_->graph, inputs, shadow_plan, virtual_shadow_outputs); !registered)
                 return registered;
             auto destination = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             destination.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount + kVirtualShadowDescriptorOffset) * impl_->srv_stride;
@@ -6299,7 +6575,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             local.lights = frame_lights; local.camera_position = lod_eye;
             local.rendered_frame_id = impl_->frame_number; local.frame_slot = back_buffer_index;
             local.completed = inputs.completed; local.reset_cache = new_session;
-            local.casters = casters; local.draw_groups = groups; local.native_reads = reads;
+            local.casters = ShadowCasterRange{static_shadow_batch->records,casters}; local.draw_groups = groups; local.native_reads = reads;
             local.draw = draw_shadows;
             pending_effects.local_shadows = true;
             if (auto registered = impl_->local_shadows.Register(impl_->graph, local, local_shadow_outputs); !registered)
@@ -6313,6 +6589,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
     }
+    if (csm_required && !csm_registered) register_cascaded_shadow();
+    // t5 is post-table slot3. Bind a typed null when there is no current CSM;
+    // even speculative shader sampling cannot touch a stale/unwritten atlas.
+    for (const auto offset : {0u,kToneMapInputDescriptorOffset,kFxaaInputDescriptorOffset})
+        surface_descriptor(offset+3u, csm_required ? impl_->shadow.resource.Get() : nullptr, DXGI_FORMAT_R32_FLOAT);
     LightingProbeOutputs probe_outputs;
     if (auto registered = impl_->lighting_probe.Register(impl_->graph,
             impl_->graph_queue_executor.Completed(), probe_outputs); !registered) return registered;
@@ -6409,14 +6690,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {
             const auto &page = material == kEnvironmentMaterialNames.size() ? impl_->procedural_geometry : *bucket_pages[material * 3];
             auto &capture = capture_pages[material];
-            capture.vertices = page.vertices.resource; capture.indices = page.indices.resource;
-            capture.vertex_allocation = page.vertices.allocation; capture.index_allocation = page.indices.allocation;
-            capture.vertex_version = impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page.vertices), Access::VertexBuffer, "ProbeCompleteVertices"));
-            capture.index_version = impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page.indices), Access::IndexBuffer, "ProbeCompleteIndices"));
+            capture.vertices = page.storage.resource; capture.indices = page.storage.resource;
+            capture.vertex_allocation = page.storage.allocation; capture.index_allocation = page.storage.allocation;
+            capture.vertex_version = impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page.storage), Access::VertexShaderRead, "ProbeCompleteGeometry"));
+            capture.index_version = capture.vertex_version;
             capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
             capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
             capture.bounds = page.metadata.bounds;
-            capture.complete = page.vertices.resource && page.indices.resource && page.index_count != 0;
+            capture.complete = page.storage.resource && page.index_count != 0;
         }
         capture_read(frame.upload, false, "ProbeMainBindings");
         capture_read(impl_->material_parameters, false, "ProbeMaterialParameters");
@@ -6429,6 +6710,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
                     virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
                 capture_reads.push_back({version, Access::AllShaderRead});
+        if(virtual_shadow_outputs.root_static.resource)
+            capture_reads.push_back({virtual_shadow_outputs.root_static,Access::AllShaderRead});
+        if(virtual_shadow_outputs.root_dynamic.resource)
+            capture_reads.push_back({virtual_shadow_outputs.root_dynamic,Access::AllShaderRead});
         if (local_shadow_outputs.resources[0])
             for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
                     local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
@@ -6464,6 +6749,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
                     virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
                 pass.Read(version, Access::ShaderRead);
+        if(virtual_shadow_outputs.root_static.resource)pass.Read(virtual_shadow_outputs.root_static,Access::ShaderRead);
+        if(virtual_shadow_outputs.root_dynamic.resource)pass.Read(virtual_shadow_outputs.root_dynamic,Access::ShaderRead);
         pass.Read(probe_outputs.radiance, Access::ShaderRead);
         pass.Read(probe_outputs.prefiltered, Access::ShaderRead);
         pass.Read(probe_outputs.irradiance, Access::ShaderRead);
@@ -6585,7 +6872,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::vector<SceneDrawInstance> draws;
         std::vector<const GeometryPageGpu *> scene_pages;
         std::vector<const RenderInstance *> scene_sources;
-        std::vector<std::array<ResourceVersion, 2>> scene_page_versions;
+        std::vector<ResourceVersion> scene_page_versions;
         const auto append_scene = [&](const RenderInstance &source, const GpuInstance &draw,
                 std::uint32_t stable_slot, std::uint32_t generation, std::uint32_t skin_slot) -> Result {
             const bool environment = is_environment_mesh(source.mesh);
@@ -6628,16 +6915,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     return AddBrixelizerExcludedCount(count, page->submeshes.size());
                 }
             }
-            std::array<ResourceVersion, 2> versions{
-                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->vertices), Access::VertexBuffer, "SceneCanonicalVertices")),
-                impl_->graph.Version(import_buffer(const_cast<AllocationResource &>(page->indices), Access::IndexBuffer, "SceneCanonicalIndices"))};
-            add_read(versions[0], page->vertices.resource.Get());
-            add_read(versions[1], page->indices.resource.Get());
+            const auto version = impl_->graph.Version(import_buffer(
+                const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "SceneCanonicalGeometry"));
+            add_read(version, page->storage.resource.Get());
             jobs.push_back(job);
             draws.push_back(instance);
             scene_pages.push_back(page);
             scene_sources.push_back(&source);
-            scene_page_versions.push_back(versions);
+            scene_page_versions.push_back(version);
             return Result::Success();
         };
         std::vector<bool> included(persistent_instances.size());
@@ -6682,13 +6967,17 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 const bool deformed = (job.flags & SceneGeometryDeformed) != 0;
                 const bool skin = (job.flags & SceneGeometryCachedSkin) != 0;
                 const std::uint64_t vertex_offset = deformed ? job.position_byte_offset : skin ?
-                    std::uint64_t(job.skin_slot) * skin_slot_stride * sizeof(Vertex) : 0;
-                if (skin && vertex_offset + std::uint64_t(page.vertex_count) * sizeof(Vertex) > UINT32_MAX)
+                    std::uint64_t(persistent_metadata[job.skin_slot].skin_vertex_offset) *
+                        persistent_metadata[job.skin_slot].skin_vertex_stride : 0;
+                if (skin && !SkinVertexRangeFits(persistent_metadata[job.skin_slot].skin_vertex_offset,
+                    page.vertex_count, persistent_metadata[job.skin_slot].skin_vertex_stride,
+                    frame.skin_cache_vertices.resource->GetDesc().Width))
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Software scene SkinCache range exceeds shader addressing.");
                 geometries.push_back({std::uint64_t(page.page_slot) + 1, page.generation, impl_->frame_number + 1,
-                    deformed ? scene_geometry_outputs.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.vertices.resource.Get(),
-                    page.indices.resource.Get(), deformed ? scene_geometry_outputs.positions : skin ? skin_cache_version : scene_page_versions[index][0],
-                    scene_page_versions[index][1], vertex_offset, 0, deformed ? 12u : static_cast<std::uint32_t>(sizeof(Vertex)),
+                    deformed ? scene_geometry_outputs.position_resource : skin ? frame.skin_cache_vertices.resource.Get() : page.storage.resource.Get(),
+                    page.storage.resource.Get(), deformed ? scene_geometry_outputs.positions : skin ? skin_cache_version : scene_page_versions[index],
+                    scene_page_versions[index], vertex_offset, page.offsets[1], deformed ? 12u :
+                        skin ? persistent_metadata[job.skin_slot].skin_vertex_stride : static_cast<std::uint32_t>(sizeof(Vertex)),
                     page.vertex_count, page.index_count, DXGI_FORMAT_R32_UINT, false, deformed || skin, new_session});
                 // Immutable shared pages retain their revision through frames.
                 if (!deformed && !skin) geometries.back().current_revision = page.generation;
@@ -6710,7 +6999,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                             const_cast<D3D12MA::Allocation *>(static_cast<const D3D12MA::Allocation *>(value))->Release();
                         });
                     };
-                    retain_allocation(page.vertices); retain_allocation(page.indices);
+                    retain_allocation(page.storage);
                     if (skin) retain_allocation(frame.skin_cache_vertices);
                     const auto &source = *scene_sources[index];
                     const auto &sphere = page.metadata.bounds.sphere;
@@ -6739,7 +7028,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                             (job.flags & SceneGeometryTransmissive) != 0,
                             {center.x-radius,center.y-radius,center.z-radius},
                             {center.x+radius,center.y+radius,center.z+radius},
-                            source.revisions.material ^ impl_->material_parameter_revision,
+                            ((job.stable_gpu_scene_slot & 0x80000000u) ? source.revisions.material
+                                : impl_->dynamic_scene_slots.Revisions(job.stable_gpu_scene_slot).material) ^
+                                impl_->material_parameter_revision,
                             brixelizer_geometry_lookup,brixelizer_geometries,brixelizer_instances); !appended) return appended;
                 }
             }
@@ -6802,7 +7093,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (auto registered = impl_->adaptive_shading.Register(impl_->graph, adaptive_inputs, adaptive_outputs);
                 !registered) return registered;
         // A deferred CSM must have its actual density producer.
-        if (overlap_ao_csm)
+        if (overlap_ao_csm && csm_required)
         {
             if (!adaptive_outputs.compute_ready || !adaptive_outputs.density.version.resource)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -6861,7 +7152,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     lighting_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
     lighting_pass.Read(gbuffer_material_version, Access::ShaderRead);
     lighting_pass.Read(depth_version, Access::ShaderRead);
-    lighting_pass.Read(shadow_version, Access::ShaderRead);
+    if (shadow_version.resource) lighting_pass.Read(shadow_version, Access::ShaderRead);
     lighting_pass.Read(impl_->graph.Version(environment_brdf_lut), Access::ShaderRead);
     lighting_pass.Read(material_parameter_version, Access::ShaderRead);
     for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
@@ -6938,6 +7229,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
                     virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
                 append(version, Access::ShaderRead);
+        if(virtual_shadow_outputs.root_static.resource)
+            append(virtual_shadow_outputs.root_static,Access::ShaderRead);
+        if(virtual_shadow_outputs.root_dynamic.resource)
+            append(virtual_shadow_outputs.root_dynamic,Access::ShaderRead);
         for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
                 light_outputs.lights, light_outputs.ranges, light_outputs.inline_indices, light_outputs.spill_indices,
                 ltc_outputs.matrix, ltc_outputs.amplitude}) append(version, Access::ShaderRead);
@@ -7116,13 +7411,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.render_active = impl_->view_state.render_active; inputs.frame_slot = back_buffer_index; inputs.frame_index = impl_->frame_number;
         inputs.completed = impl_->graph_queue_executor.Completed(); inputs.reset_history = !previous_view_valid || new_session;
         inputs.revisions.scene = pending_effects.probe_revisions.static_layout;
+        inputs.revisions.dynamic_scene = impl_->dynamic_scene_slots.ContentRevision();
         inputs.revisions.light = pending_effects.probe_revisions.light;
         const auto mix_revision = [](std::uint64_t &hash, std::uint64_t value) { hash = (hash ^ value) * 1099511628211ull; };
-        for (const auto &source : canonical_instances)
-        {
-            mix_revision(inputs.revisions.scene, source.stable_id); mix_revision(inputs.revisions.scene, source.asset_id.value);
-            mix_revision(inputs.revisions.scene, source.revisions.content); mix_revision(inputs.revisions.scene, source.revisions.material);
-        }
         for (const auto &source : frame_lights)
         {
             mix_revision(inputs.revisions.light, source.stable_id); mix_revision(inputs.revisions.light, source.generation);
@@ -7136,7 +7427,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             mix_revision(inputs.revisions.light, source.shadow_flags);
         }
         inputs.revisions.volume = impl_->volumetric_revision;
-        if (primary_sun)
+        if (primary_sun && csm_required)
         {
             inputs.compact_shadow.atlas = {shadow_version, impl_->shadow.resource.Get()};
             inputs.compact_shadow.identity = {static_cast<UINT>(primary_sun->stable_id), static_cast<UINT>(primary_sun->stable_id >> 32), primary_sun->generation, 1};
@@ -7191,7 +7482,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         }
     }
-
     auto distortion_pass = impl_->graph.AddPass(6, kRenderPassNames[6], QueueHint::Direct);
     distortion_pass.Read(gbuffer_metadata_version, Access::ShaderRead);
     distortion_pass.Read(gbuffer_normal_version, Access::ShaderRead);
@@ -7235,7 +7525,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (have_skinned_instances && previous_skin_frame_valid)
         transparent_pass.Read(previous_skin_cache_version, Access::ShaderRead);
     transparent_pass.Read(depth_version, Access::DepthShaderRead);
-    transparent_pass.Read(shadow_version, Access::ShaderRead);
+    if (shadow_version.resource) transparent_pass.Read(shadow_version, Access::ShaderRead);
     transparent_pass.Read(particles_version, Access::ShaderRead);
     transparent_pass.Read(particle_alive_output_version, Access::ShaderRead);
     transparent_pass.Read(indirect_arguments_version, Access::IndirectArgs);
@@ -7383,12 +7673,13 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {geometry_records_version, Access::ShaderRead}, {material_parameter_version, Access::ShaderRead},
         {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::ShaderRead},
         {dynamic_visible_refs_version, Access::ShaderRead}, {dynamic_draw_args_version, Access::IndirectArgs},
-        {shadow_version, Access::ShaderRead}, {impl_->graph.Version(environment_brdf_lut), Access::ShaderRead},
+        {impl_->graph.Version(environment_brdf_lut), Access::ShaderRead},
         {probe_outputs.radiance, Access::ShaderRead}, {probe_outputs.prefiltered, Access::ShaderRead},
         {probe_outputs.irradiance, Access::ShaderRead}, {light_outputs.lights, Access::ShaderRead},
         {light_outputs.ranges, Access::ShaderRead}, {light_outputs.inline_indices, Access::ShaderRead},
         {light_outputs.spill_indices, Access::ShaderRead}, {ltc_outputs.matrix, Access::ShaderRead},
         {ltc_outputs.amplitude, Access::ShaderRead}};
+    if (shadow_version.resource) hero_scene_reads.push_back({shadow_version, Access::ShaderRead});
     if (static_instances_buffer) hero_scene_reads.push_back({static_instances_version, Access::ShaderRead});
     hero_scene_reads.push_back({static_visible_refs_version, Access::ShaderRead});
     hero_scene_reads.push_back({static_draw_args_version, Access::IndirectArgs});
@@ -7405,6 +7696,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
                 virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
             hero_scene_reads.push_back({version, Access::ShaderRead});
+    if(virtual_shadow_outputs.root_static.resource)
+        hero_scene_reads.push_back({virtual_shadow_outputs.root_static,Access::ShaderRead});
+    if(virtual_shadow_outputs.root_dynamic.resource)
+        hero_scene_reads.push_back({virtual_shadow_outputs.root_dynamic,Access::ShaderRead});
     if (local_shadow_outputs.resources[0])
         for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
                 local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
@@ -7415,8 +7710,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (ambient_outputs.contact.resource) hero_scene_reads.push_back({ambient_outputs.contact, Access::ShaderRead});
     for (const auto &page : geometry_pages)
     {
-        hero_scene_reads.push_back({page.versions[0], Access::VertexBuffer});
-        hero_scene_reads.push_back({page.versions[1], Access::IndexBuffer});
+        hero_scene_reads.push_back({page.version, Access::VertexShaderRead});
     }
     HeroTransparencyInputs hero_inputs;
     hero_inputs.opaque_depth = {depth_version, impl_->depth.resource.Get()};
@@ -7425,6 +7719,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     hero_inputs.revealage = {oit_revealage_version, impl_->oit_revealage.resource.Get()};
     hero_inputs.accumulation_rtv = oit_accumulation_rtv;
     hero_inputs.revealage_rtv = oit_revealage_rtv;
+    hero_inputs.opaque_readonly_dsv = readonly_dsv;
     hero_inputs.render_active = impl_->view_state.render_active;
     hero_inputs.frame_slot = back_buffer_index;
     hero_inputs.completed = impl_->graph_queue_executor.Completed();
@@ -7468,6 +7763,94 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             }
         }
     };
+    struct HeroWorkBinding { std::size_t bucket{}; bool immutable{}; };
+    std::vector<HeroWorkContributorInput> hero_work_contributors;
+    std::vector<HeroWorkBinding> hero_work_bindings;
+    if (impl_->config.capture_hero_work)
+    {
+        static_assert(kGeometryArgumentStride == 24);
+        if (impl_->rendered_submission_count == UINT64_MAX)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
+        hero_work_contributors.reserve(6);
+        hero_work_bindings.reserve(6);
+        const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
+            const auto &page = *bucket_pages[bucket];
+            HeroWorkContributorInput contributor;
+            contributor.source.asset_id = page.source_asset.value;
+            contributor.source.product = page.source_product;
+            contributor.source.label = std::move(label);
+            contributor.source.lod = page.metadata.lod;
+            contributor.source.material = UINT32_MAX;
+            if (!page.submeshes.empty())
+            {
+                const auto material = page.submeshes.front().material_index;
+                if (std::ranges::all_of(page.submeshes, [&](const auto &part) { return part.material_index == material; }))
+                    contributor.source.material = material;
+            }
+            contributor.source.candidate_instances = candidates;
+            contributor.source.geometry_indices = page.index_count;
+            if (!immutable)
+            {
+                if (impl_->monster_basecolor.resource)
+                {
+                    const auto desc = impl_->monster_basecolor.resource->GetDesc();
+                    contributor.source.color_format = desc.Format;
+                    contributor.source.color_mips = desc.MipLevels;
+                }
+                if (impl_->monster_ram.resource)
+                {
+                    const auto desc = impl_->monster_ram.resource->GetDesc();
+                    contributor.source.data_format = desc.Format;
+                    contributor.source.data_mips = desc.MipLevels;
+                }
+            }
+            // Water's analytic closure has no corresponding character color/data pair.
+            contributor.arguments = immutable ? static_draw_args_version : dynamic_draw_args_version;
+            contributor.argument_resource = immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
+            contributor.argument_offset = bucket*kGeometryArgumentStride;
+            hero_work_contributors.push_back(std::move(contributor));
+            hero_work_bindings.push_back({bucket,immutable});
+        };
+        for (std::size_t asset=0;asset<3;++asset)
+            if (monster_ranges[asset].second)
+                append_work(kMonsterVisibilityBucketBegin+asset,false,static_cast<std::uint32_t>(monster_ranges[asset].second),
+                            "monster"+std::to_string(asset));
+        if (impl_->static_gpu_scene)
+            for (std::size_t lod=0;lod<3;++lod)
+            {
+                const auto bucket = render_data::kMeadowWaterGeometry*3+lod;
+                if (static_environment_ranges[bucket].second)
+                    append_work(bucket,true,static_cast<std::uint32_t>(static_environment_ranges[bucket].second),"water");
+            }
+        hero_inputs.work_contributors = hero_work_contributors;
+        hero_inputs.submitted_frame = impl_->rendered_submission_count+1;
+        hero_inputs.tick = snapshot.header.tick;
+        hero_inputs.view_id = impl_->active_view_id.value;
+        hero_inputs.direct_queue = impl_->graph_queue_executor.NativeQueue(QueueHint::Direct);
+        hero_inputs.direct_timestamp_frequency = impl_->graph_queue_executor.TimestampFrequency(QueueHint::Direct);
+        hero_inputs.work_draw = [&, bindings=hero_work_bindings](ID3D12GraphicsCommandList *list,
+            ID3D12PipelineState *pipeline, HeroTransparencyPhase, std::uint32_t,
+            D3D12_GPU_DESCRIPTOR_HANDLE table, std::uint32_t contributor, std::uint64_t diagnostic_uav) -> HeroWorkDrawCalls {
+            const auto binding = bindings.at(contributor);
+            bind_graphics(list);
+            bind_scene_roots(list);
+            list->SetGraphicsRootUnorderedAccessView(4,diagnostic_uav); // Separate T01 UAV; never particle arguments.
+            list->SetGraphicsRootDescriptorTable(36,table);
+            list->SetGraphicsRoot32BitConstant(6,kDefaultSceneDrawMaterial|1u,1);
+            list->SetGraphicsRootShaderResourceView(34,binding.immutable
+                ? impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress() : dynamic_instance_base);
+            list->SetGraphicsRootShaderResourceView(35,binding.immutable
+                ? frame.static_visible_refs.resource->GetGPUVirtualAddress() : frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
+            const auto pass = binding.immutable ? static_geometry_passes[binding.bucket][0] : dynamic_geometry_passes[binding.bucket][0];
+            if ((frame.geometry_draw_records_cpu.at(pass >> 2).flags & kGeometryMeshEligible) != 0)
+                throw std::runtime_error("Hero work capture requires the 24-byte indexed geometry command path.");
+            auto *arguments = binding.immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
+            if (auto drawn = impl_->DrawGeometry(list,back_buffer_index,pipeline,*bucket_pages[binding.bucket],
+                    pass,arguments,binding.bucket*kGeometryArgumentStride); !drawn)
+                throw std::runtime_error(std::string(drawn.Message()));
+            return {1,0,0}; // Hero/water records explicitly use the indexed SceneVS path.
+        };
+    }
     HeroTransparencyOutputs hero_outputs;
     if (auto registered = impl_->hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs); !registered)
         return registered;
@@ -7695,6 +8078,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             tone_map_input = alternate_texture_table(kToneMapInputDescriptorOffset,
                 reconstruction_outputs.pre_exposed_resource);
     }
+    const bool fxaa_identity = constants->temporal_options.x > 0.5f ||
+        (constants->lod_clock.w & 2u) != 0;
+    const auto tone_map_output_rtv = fxaa_identity && !impl_->config.outline
+        ? display_linear_rtv : post_a_rtv;
+    const auto outline_output_rtv = fxaa_identity ? display_linear_rtv : post_b_rtv;
     PostPassCallbacks post_callbacks;
     post_callbacks[0] = [&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -7765,9 +8153,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (!impl_->view_targets_initialized)
         {
             constexpr float clear[]{0, 0, 0, 0};
-            list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
+            list->ClearRenderTargetView(tone_map_output_rtv, clear, 0, nullptr);
+            if (fxaa_identity && !impl_->config.outline)
+                list->ClearRenderTargetView(post_a_rtv, clear, 0, nullptr);
         }
-        draw_fullscreen_with_table(list, impl_->tone_map_pipeline.Get(), post_a_rtv,
+        draw_fullscreen_with_table(list, impl_->tone_map_pipeline.Get(), tone_map_output_rtv,
                                    impl_->config.bloom && !impl_->config.color_grading ? texture_table : tone_map_input);
     };
 
@@ -7776,12 +8166,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         bind_graphics(list);
         list->RSSetViewports(1, &output_viewport);
         list->RSSetScissorRects(1, &output_scissor);
-        if (!impl_->config.bloom)
+        if (fxaa_identity ? !impl_->view_targets_initialized : !impl_->config.bloom)
         {
             constexpr float clear[] = {0, 0, 0, 0};
-            list->ClearRenderTargetView(post_b_rtv, clear, 0, nullptr);
+            list->ClearRenderTargetView(outline_output_rtv, clear, 0, nullptr);
         }
-        draw_fullscreen(list, impl_->outline_pipeline.Get(), post_b_rtv);
+        draw_fullscreen(list, impl_->outline_pipeline.Get(), outline_output_rtv);
     };
 
     post_callbacks[7] = [&](RenderPassContext &context) {
@@ -7789,13 +8179,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         bind_graphics(list);
         list->RSSetViewports(1, &output_viewport);
         list->RSSetScissorRects(1, &output_scissor);
-        if (!impl_->view_targets_initialized)
+        if (!fxaa_identity)
         {
-            constexpr float clear[]{0, 0, 0, 0};
-            list->ClearRenderTargetView(display_linear_rtv, clear, 0, nullptr);
+            if (!impl_->view_targets_initialized)
+            {
+                constexpr float clear[]{0, 0, 0, 0};
+                list->ClearRenderTargetView(display_linear_rtv, clear, 0, nullptr);
+            }
+            draw_fullscreen_with_table(list, impl_->fxaa_pipeline.Get(), display_linear_rtv,
+                                       impl_->config.outline ? texture_table : fxaa_input);
         }
-        draw_fullscreen_with_table(list, impl_->fxaa_pipeline.Get(), display_linear_rtv,
-                                   impl_->config.outline ? texture_table : fxaa_input);
         if (screen_overlay_outputs.active)
             impl_->screen_overlay.Draw(list, back_buffer_index, display_linear_rtv);
 
@@ -7826,6 +8219,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {hero_outputs.depth, hero_outputs.motion, hero_outputs.history,
          hero_outputs.classification, hero_outputs.metadata, hero_outputs.overflow, hero_outputs.transport}};
     post_inputs.reactive_composite_hdr = composite_hdr_version;
+    post_inputs.fxaa_identity = fxaa_identity;
+    post_inputs.initialize_post_targets = !impl_->view_targets_initialized;
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (imgui_draw_data && !impl_->sdk_presentation.IsEnabled())
         post_inputs.devtools_ui = [&](RenderGraphBuilder &graph, ResourceVersion previous, ResourceVersion &encoded) {
@@ -8001,7 +8396,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->graph.SetFinalAccess(static_lod_version, Access::UnorderedWrite);
     impl_->graph.SetFinalAccess(previous_hzb_version, Access::ComputeRead);
     impl_->graph.SetFinalAccess(current_hzb_version, Access::ComputeRead);
-    impl_->graph.SetFinalAccess(shadow_version, Access::DepthWrite);
+    if (shadow_version.resource) impl_->graph.SetFinalAccess(shadow_version, Access::DepthWrite);
     impl_->graph.SetFinalAccess(depth_version, Access::DepthWrite);
     impl_->graph.SetFinalAccess(gbuffer_base_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(gbuffer_normal_version, Access::ShaderRead);
@@ -8034,11 +8429,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->graph.SetFinalAccess(environment_stream_version, Access::AllShaderRead);
     if (upload_environment_geometry)
         for (const auto &upload : environment_geometry_uploads)
-            for (const auto version : upload.versions)
-                impl_->graph.SetFinalAccess(version, Access::Common);
+            impl_->graph.SetFinalAccess(upload.version, Access::Common);
     impl_->graph.SetFinalAccess(ui_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(back_buffer_version, Access::Present);
-
     auto critical_path_begin = impl_->graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
     critical_path_begin.SetExecute([](RenderPassContext &) {});
     auto critical_path_end = impl_->graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
@@ -8050,7 +8443,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->graph.AddOrderingDependency(37, id);
         impl_->graph.AddOrderingDependency(id, 38);
     }
-
     cpu_timings.graph_build_us = measure_stage();
     GraphExecutionStats prepare_cpu;
     if (auto prepared = impl_->graph.Prepare(transient_pool,
@@ -8258,11 +8650,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
     {
         auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
-        CommitShadowCasterStorage(impl_->previous_shadow_casters,
-            shadow_owner.scratch_shadow_casters, current_shadow_casters,
-            impl_->previous_shadow_caster_nodes, shadow_owner.scratch_shadow_caster_nodes,
-            current_shadow_caster_nodes, prepared_previous_shadow_caster_nodes,
-            previous_shadow_caster_nodes_warm);
+        CommitShadowCasterStorage(impl_->previous_shadow_casters,shadow_owner.scratch_shadow_casters,current_shadow_casters);
+        if(static_shadow_batch && !static_shadow_batch->settled)
+        {
+            for(auto &caster:static_shadow_batch->records) AdvanceShadowCasterHistory(caster);
+            static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
+            static_shadow_batch->settled=true;
+        }
+        shadow_owner.static_shadow_casters=std::move(static_shadow_batch);
     }
 
     impl_->render_submission_time = cpu_recording_start;
@@ -8353,10 +8748,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (const auto &upload : environment_geometry_uploads)
     {
         auto &stream = *upload.stream;
-        stream.upload_completion = {};
-        for (const auto buffer : upload.buffers)
-            stream.upload_completion.Merge(
-                impl_->graph.ResourceCompletion(buffer));
+        stream.upload_completion = impl_->graph.ResourceCompletion(upload.buffer);
         if (!impl_->streaming.SubmitUpload(
                 stream.request,
                 impl_->resource_generation_id,
@@ -8390,8 +8782,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (have_skinned_instances) frame.skin_cache_vertex_read = true;
     if (have_skinned_instances) frame.skin_cache_bounds_read = true;
     frame.skin_cache_valid = have_skinned_instances;
-    impl_->dynamic_scene_extractor.Commit();
-    impl_->dynamic_scene_generation = scene_generation_after_submit;
     impl_->dynamic_scene_slots.Commit();
     std::shared_ptr<Impl::CanonicalSkinFrame> current_skin_deformation;
     if (have_skinned_instances)
@@ -8405,9 +8795,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             canonical.skin_cache_bounds = Impl::RetainViewAllocation(frame.skin_cache_bounds);
             canonical.skin_cache_vertex_capacity = frame.skin_cache_vertex_capacity;
             canonical.skin_cache_bound_capacity = frame.skin_cache_bound_capacity;
-            canonical.skin_cache_slot_stride = frame.skin_cache_slot_stride;
+            canonical.vertex_stride = SkinVertexRanges::kVertexBytes;
+            canonical.vertex_ranges = std::move(skin_vertex_ranges);
             canonical.skin_cache_valid = true;
             canonical.package_id = impl_->active_render_package_id; canonical.signature = skin_signature;
+            canonical.identity = std::move(skin_identity);
             impl_->canonical_skin_frames.push_back(current_skin_deformation);
         }
         current_skin_deformation->skin_cache_use_completion.Merge(frame.skin_cache_use_completion);
@@ -8449,8 +8841,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             << impl_->dynamic_scene_slots.ActiveCount() << ','
             << impl_->dynamic_scene_slots.SlotCount() << ','
             << impl_->dynamic_scene_slots.AnonymousCount() << ','
-            << scene_delta.created << ',' << scene_delta.updated << ','
-            << scene_delta.destroyed.size() << ','
+            << scene_changes.created << ',' << scene_changes.updated << ','
+            << scene_changes.destroyed << ','
             << impl_->skin_cache.ActiveCount() << ','
             << impl_->skin_cache.HistoryValidCount() << ','
             << skin_gpu_dispatches << ',' << skin_gpu_history_reads << ','

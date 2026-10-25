@@ -169,7 +169,8 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"virtual_shadow_cull_cs.dxil", L"CullCS", L"cs_6_0"},
         ProgramOutput{"virtual_shadow_publish_cs.dxil", L"PublishCS", L"cs_6_0"},
         ProgramOutput{"virtual_shadow_clear_vs.dxil", L"ClearVS", L"vs_6_0"},
-        ProgramOutput{"virtual_shadow_clear_ps.dxil", L"ClearPS", L"ps_6_0"}};
+        ProgramOutput{"virtual_shadow_clear_ps.dxil", L"ClearPS", L"ps_6_0"},
+        ProgramOutput{"virtual_shadow_seed_ps.dxil", L"SeedPS", L"ps_6_0"}};
     static constexpr std::array volumetric_programs{
         ProgramOutput{"volumetric_density_cs.dxil", L"VolumetricDensityCS", L"cs_6_0"},
         ProgramOutput{"volumetric_hero_density_cs.dxil", L"VolumetricHeroDensityCS", L"cs_6_0"},

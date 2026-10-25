@@ -20,6 +20,8 @@ StructuredBuffer<HsShadowPageEntry> HsShadowPageTable : register(t1, space21);
 Texture2D<float> HsShadowStaticBank : register(t2, space21);
 Texture2D<float> HsShadowDynamicBank : register(t3, space21);
 StructuredBuffer<HsShadowDrawRecord> HsShadowDrawRecords : register(t4, space21);
+Texture2D<float> HsShadowRootStatic : register(t5, space21);
+Texture2D<float> HsShadowRootDynamic : register(t6, space21);
 
 bool HsVirtualShadowIsDraw(uint pass) { return (pass & 0x80000000u) != 0u; }
 HsShadowDrawRecord HsVirtualShadowLoadDraw(uint pass)
@@ -38,6 +40,12 @@ float4 HsVirtualShadowClipDistance(float3 world, uint pass)
 {
     if (!HsVirtualShadowIsDraw(pass)) return 1.0;
     const HsShadowPageEntry page = HsShadowPageTable[HsVirtualShadowLoadDraw(pass).page_entry];
+    if(page.level==3u)
+    {
+        const float4 bounds=HsShadowFloat4(368u);
+        const float2 local=HsShadowLightPosition(world).xy-bounds.xy;
+        return float4(local,bounds.zw-HsShadowLightPosition(world).xy);
+    }
     const float4 clipmap = HsShadowClipmap(page.level);
     const float2 local = HsShadowLightPosition(world).xy - float2(page.x, page.y) * clipmap.x;
     const float guard = 2.0 * clipmap.y;
@@ -46,6 +54,16 @@ float4 HsVirtualShadowClipDistance(float3 world, uint pass)
 float4 HsVirtualShadowProject(float3 world, uint pass)
 {
     const HsShadowPageEntry page = HsShadowPageTable[HsVirtualShadowLoadDraw(pass).page_entry];
+    if(page.level==3u)
+    {
+        const float4 bounds=HsShadowFloat4(368u);
+        const float4 extent=HsShadowFloat4(384u);
+        const float4 depth=HsShadowFloat4(400u);
+        const float3 light=HsShadowLightPosition(world);
+        const float2 pixel=float2((light.x-bounds.x)/extent.z,(bounds.w-light.y)/extent.z);
+        return float4(pixel/extent.xy*float2(2.0,-2.0)+float2(-1.0,1.0),
+            1.0-(light.z-depth.x)*depth.y,1.0);
+    }
     const float4 bank = HsShadowFloat4(112u);
     const float4 depth = HsShadowFloat4(128u);
     const float3 light = HsShadowLightPosition(world);
@@ -62,6 +80,12 @@ void HsVirtualShadowRasterClip(float2 pixel, uint pass)
 {
     if (!HsVirtualShadowIsDraw(pass)) return;
     const HsShadowPageEntry page = HsShadowPageTable[HsVirtualShadowLoadDraw(pass).page_entry];
+    if(page.level==3u)
+    {
+        const float2 extent=HsShadowFloat4(384u).xy;
+        clip(float4(pixel,extent-pixel));
+        return;
+    }
     const uint columns = uint(HsShadowFloat4(112u).z);
     const float2 origin = float2(page.physical % columns, page.physical / columns) * 132.0;
     clip(float4(pixel - origin, origin + 132.0 - pixel));
@@ -107,6 +131,36 @@ bool HsVirtualShadowLookupLevel(float3 light, uint level, out float visibility)
     visibility = sum / float(samples);
     return true;
 }
+bool HsVirtualShadowLookupRoot(float3 light, out float visibility)
+{
+    visibility=1.0;
+    const uint4 root=HsShadowMetadata.Load4(416u);
+    if(root.x==0u || root.y==0u || root.z==0u || root.w==0u) return false;
+    const float4 bounds=HsShadowFloat4(368u);
+    const float4 extent=HsShadowFloat4(384u);
+    const float4 depth=HsShadowFloat4(400u);
+    const float2 position=float2((light.x-bounds.x)/extent.z,(bounds.w-light.y)/extent.z);
+    const int2 center=int2(floor(position));
+    const int2 dimensions=int2(extent.xy);
+    if(any(center+int2(-2,-2)<0) || any(center+int2(2,2)>=dimensions)) return false;
+    const float receiver=1.0-(light.z-depth.x)*depth.y;
+    const float receiver_bias=max(HsShadowFloat4(128u).z,extent.z*0.35*depth.y);
+    const uint samples=HsShadowMetadata.Load(332u);
+    float sum=0.0;
+    [loop] for(uint sample_index=0;sample_index<samples;++sample_index)
+    {
+        const int2 pixel=center+HsShadowFilterOffsets[sample_index];
+        const float static_caster=HsShadowRootStatic.Load(int3(pixel,0));
+#if defined(HS_LOCAL_PROBE_CAPTURE)
+        const float caster=static_caster;
+#else
+        const float caster=max(static_caster,HsShadowRootDynamic.Load(int3(pixel,0)));
+#endif
+        sum+=caster==0.0 || receiver+receiver_bias>=caster ? 1.0 : 0.0;
+    }
+    visibility=sum/float(samples);
+    return true;
+}
 bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out float visibility)
 {
     visibility = 1.0;
@@ -122,7 +176,12 @@ bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out f
         const int2 local = key - window.xy;
         if (any(local < 0) || any(local >= window.z)) continue;
         float value;
-        if (!HsVirtualShadowLookupLevel(light, level, value)) return false;
+        if (!HsVirtualShadowLookupLevel(light, level, value))
+        {
+            const uint4 root=HsShadowMetadata.Load4(416u);
+            if(HsShadowMetadata.Load(344u)==0u && root.w==0u) return false;
+            continue; // Baked mode reserves current coarse depth before fine.
+        }
         const float2 cell = light.xy / side - float2(window.xy);
         const float edge = min(min(cell.x, cell.y), min(window.z - cell.x, window.z - cell.y));
         if (level < 2u && edge < 1.0)
@@ -134,7 +193,7 @@ bool HsVirtualShadowLookup(float3 world, uint2 stable_id, uint generation, out f
         visibility = value;
         return true;
     }
-    return false;
+    return HsVirtualShadowLookupRoot(light,visibility);
 }
 bool HsVirtualShadowLookup(float3 world, out float visibility)
 {

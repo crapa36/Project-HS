@@ -245,24 +245,17 @@ std::vector<std::byte> Bake(rd::LtcLutDescription source)
     }
     return rd::BuildLtcLutPackage(hs::MakeAssetId(kProduct),{},source,matrices,amplitudes);
 }
-void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path &executable)
+void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
 {
     Require(sourceRoot.is_absolute() && buildRoot.is_absolute(),"roots must be absolute");
     ap::RequireDirectory(sourceRoot); ap::MakeDirectory(buildRoot);
     ap::ActionSpec spec; spec.action_id="render.lighting.default_ltc";
     spec.recipe_id="project-hs.render.ltc-lut"; spec.recipe_version=1; spec.namespace_path=kNamespace;
-    spec.inputs.push_back(ap::HashInput("tool/hs_ltc_lut",executable));
     const auto sourcePath=sourceRoot/"ContentSource/Lighting/default_ltc.json";
     const auto sourceBytes=ap::ReadBytes(sourcePath);
     spec.inputs.push_back({"ContentSource/Lighting/default_ltc.json",sourcePath,
         ap::Sha256Bytes(std::as_bytes(std::span(sourceBytes.data(),sourceBytes.size())))});
-    for(const auto *relative:{"Schemas/ltc_lut.schema.json","Source/Apps/LtcLut/main.cpp",
-        "Source/Apps/AssetPipeline/action.hpp","Source/Apps/AssetPipeline/action.cpp",
-        "Source/RenderData/Public/hs/render_data/ltc_lut.hpp","Source/RenderData/Private/ltc_lut.cpp",
-        "Source/RenderData/Public/hs/render_data/render_asset_format.hpp","Source/RenderData/Private/render_asset_format.cpp",
-        "Source/RenderData/Public/hs/render_data/texture_package.hpp","Content/Shaders/bsdf_metallic_roughness.hlsli",
-        "Source/Core/Public/hs/core/cooked_format.hpp","Source/Core/Private/cooked_format.cpp",
-        "Source/Core/Public/hs/core/sha256.hpp","Source/Core/Private/sha256.cpp"})
+    for(const auto *relative:{"Schemas/ltc_lut.schema.json","Content/Shaders/bsdf_metallic_roughness.hlsli"})
         spec.inputs.push_back(ap::HashInput(relative,sourceRoot/relative));
     std::ranges::sort(spec.inputs,{},&ap::Input::logical_id); const auto source=ParseSource(sourceBytes);
     const auto resultPath=buildRoot/"Actions"/kNamespace/"result.json";
@@ -311,7 +304,7 @@ int main(int argc,char **argv)
         }
         Require(produce && !sourceRoot.empty() && !buildRoot.empty(),
             "usage: hs_ltc_lut --produce --source-root <absolute> --build-root <absolute>");
-        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal(),fs::absolute(fs::path(argv[0])).lexically_normal()); return 0;
+        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal()); return 0;
     }
     catch(const std::exception &error)
     {

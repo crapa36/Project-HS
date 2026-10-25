@@ -5,7 +5,7 @@
 #include <hs/core/render_snapshot.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/domain_signal.hpp>
-#include <hs/game_domain/game_read_model.hpp>
+#include <hs/game_domain/tick_read_view.hpp>
 #include <hs/presentation/presentation_catalog.hpp>
 
 #include <array>
@@ -87,58 +87,6 @@ inline constexpr std::size_t kCharacterUpgradesPerPage = 4, kCharacterRelicsPerP
 [[nodiscard]] std::optional<std::string> NextGraphicsSettingToken(
     const GraphicsSettings &, SettingId, int direction, const GraphicsSettingsUiModel *);
 
-// Simulation-thread-owned cache. It compares the complete copied arena layout
-// before reusing an immutable scene; snapshots retain their own scene lease.
-class StaticEnvironmentSceneCache
-{
-  public:
-    explicit StaticEnvironmentSceneCache(std::string content_generation_id);
-    [[nodiscard]] std::shared_ptr<const StaticRenderScene> Resolve(
-        const GameReadModel &model);
-
-  private:
-    struct Layout
-    {
-        std::uint64_t session_id{};
-        std::uint64_t seed{};
-        float arena_half_extent{};
-        ArenaBoundary boundary{};
-        std::vector<ArenaObstacle2D> obstacles;
-    };
-    [[nodiscard]] static bool SameLayout(const Layout &layout,
-                                         const GameReadModel &model) noexcept;
-
-    std::string content_generation_id_;
-    std::optional<Layout> layout_;
-    std::shared_ptr<const StaticRenderScene> scene_;
-};
-
-// Simulation-thread-owned incremental scene publisher. Build is transactional:
-// the next delta becomes the comparison base only after Commit, matching the
-// snapshot exchange's publish/abandon boundary.
-class RenderSceneProjectionState
-{
-  public:
-    [[nodiscard]] bool Build(std::span<const RenderInstance> instances,
-                             std::uint64_t session_id,
-                             RenderSceneDelta &delta);
-    void Commit() noexcept;
-    void Abort() noexcept;
-    void Clear() noexcept;
-
-  private:
-    using KeyHash = RenderSceneInstanceKeyHash;
-
-    std::unordered_map<RenderSceneInstanceKey, RenderInstance::Revisions, KeyHash> previous_;
-    std::unordered_map<RenderSceneInstanceKey, RenderInstance::Revisions, KeyHash> pending_;
-    std::uint64_t committed_session_id_{};
-    std::uint64_t pending_session_id_{};
-    std::uint64_t generation_{};
-    std::uint64_t pending_generation_{};
-    bool initialized_{};
-    bool pending_valid_{};
-};
-
 // Updated once per simulation tick, independently of snapshot availability.
 class EnemyAnimationState
 {
@@ -151,7 +99,9 @@ class EnemyAnimationState
         Float3 direction{};
         Tick started{};
     };
-    void Update(const GameReadModel &model, std::span<const DomainSignal> signals);
+    void Update(const TickReadView &model, std::span<const DomainSignal> signals);
+    void Update(const GameReadModel &model, std::span<const DomainSignal> signals)
+    { Update(development::BorrowOwnedReadModel(model), signals); }
     [[nodiscard]] std::optional<Tick> RecoilStart(std::uint64_t id) const;
     [[nodiscard]] bool IsAttackRecoil(std::uint64_t id) const;
     [[nodiscard]] std::optional<Tick> ReleaseTick(std::uint64_t id) const;
@@ -177,6 +127,17 @@ class EnemyAnimationState
                                                  const SettingsData &settings,
                                                  Float2 cursor_normalized,
                                                  const GraphicsSettingsUiModel *graphics_ui = nullptr);
+[[nodiscard]] bool ProjectTick(const TickReadView &model,
+                                         const PresentationCatalog &presentation,
+                                         const PresentationUiState &ui,
+                                         const SettingsData &settings,
+                                         RenderSnapshotStorage &snapshot,
+                                         std::shared_ptr<const StaticRenderScene> environment_scene,
+                                         std::uint8_t pending_rebind_slot = 0xFF,
+                                         const EnemyAnimationState *enemy_animations = nullptr,
+                                         const GraphicsSettingsUiModel *graphics_ui = nullptr);
+
+// Owned-format development fixture adapter; Runtime projects a scoped TickReadView.
 [[nodiscard]] bool ProjectRenderSnapshot(const GameReadModel &model,
                                          const PresentationCatalog &presentation,
                                          const PresentationUiState &ui,
@@ -184,8 +145,7 @@ class EnemyAnimationState
                                          RenderSnapshotStorage &snapshot,
                                          std::uint8_t pending_rebind_slot = 0xFF,
                                          const EnemyAnimationState *enemy_animations = nullptr,
-                                         StaticEnvironmentSceneCache *environment_cache = nullptr,
-                                         RenderSceneProjectionState *scene_state = nullptr,
+                                         std::shared_ptr<const StaticRenderScene> environment_scene = {},
                                          const GraphicsSettingsUiModel *graphics_ui = nullptr);
 
 } // namespace hs

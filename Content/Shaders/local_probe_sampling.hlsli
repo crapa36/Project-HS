@@ -68,7 +68,7 @@ float3 HsLocalProbeProjectedDirection(HsLocalProbeRecord p,float3 worldPosition,
             exit=min(exit,((d[axis]>0?p.projection_max_capture_distance[axis]:p.projection_min_visibility_fade[axis])-worldPosition[axis])/d[axis]);
     return normalize(worldPosition+d*max(exit,0)-p.position_weight.xyz);
 }
-float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal)
+float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal,float3 kernel)
 {
     const float3 n=normalize(worldNormal);
     const float basis[9]={0.28209479177387814,
@@ -78,18 +78,26 @@ float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal)
         0.5462742152960396*(n.x*n.x-n.y*n.y)};
     float3 irradiance=0;
     [unroll] for(uint coefficient=0;coefficient<9;++coefficient)
-        irradiance+=HsLocalProbeCosineSh[probe*9+coefficient].rgb*basis[coefficient];
+        irradiance+=HsLocalProbeCosineSh[probe*9+coefficient].rgb*basis[coefficient]*kernel[coefficient==0?0:coefficient<4?1:2];
     return max(irradiance,0);
 }
-float3 HsLocalProbeIrradiance(float3 worldPosition,float3 worldNormal)
+float3 HsLocalProbeShIrradiance(uint probe,float3 worldNormal)
+{
+    return HsLocalProbeShIrradiance(probe,worldNormal,1.0.xxx);
+}
+float3 HsLocalProbeIrradiance(float3 worldPosition,float3 worldNormal,float3 kernel)
 {
     const uint count=HsLocalProbeCount(); float total=0; float3 local=0;
     for(uint i=0;i<count;++i)
-    { const HsLocalProbeRecord p=HsLocalProbeRecords[i]; const float w=HsLocalProbeWeight(p,worldPosition); if(w>0) { total+=w; local+=w*HsLocalProbeShIrradiance((uint)p.parameters.y,worldNormal); } }
+    { const HsLocalProbeRecord p=HsLocalProbeRecords[i]; const float w=HsLocalProbeWeight(p,worldPosition); if(w>0) { total+=w; local+=w*HsLocalProbeShIrradiance((uint)p.parameters.y,worldNormal,kernel); } }
     const float cover=saturate(total);
     // A local capture already includes baseline environment. Local weights sum
     // to cover, and the one global contribution is weighted by 1-cover.
-    return HsProbeIrradiance(worldNormal)*(1-cover)+(total>0?local*(cover/total):0);
+    return HsProbeIrradiance(worldNormal,kernel)*(1-cover)+(total>0?local*(cover/total):0);
+}
+float3 HsLocalProbeIrradiance(float3 worldPosition,float3 worldNormal)
+{
+    return HsLocalProbeIrradiance(worldPosition,worldNormal,1.0.xxx);
 }
 float3 HsLocalProbePrefiltered(float3 worldPosition,float3 worldDirection,float perceptualRoughness)
 {
@@ -103,12 +111,94 @@ float3 HsLocalProbePrefiltered(float3 worldPosition,float3 worldDirection,float 
     const float cover=saturate(total);
     return HsProbePrefiltered(worldDirection,perceptualRoughness)*(1-cover)+(total>0?local*(cover/total):0);
 }
-float3 HsLocalProbeRadiance(float3 worldPosition,float3 worldDirection)
+void HsLocalProbeEvaluateIbl(float3 world,float3 normal,float3 reflected,float2 roughness,
+    bool need_coat,bool need_diffuse,bool local_specular,bool local_diffuse,float3 diffuse_kernel,
+    out float3 base,out float3 coat,out float3 diffuse)
 {
-    const uint count=HsLocalProbeCount(); float total=0; float3 local=0;
+    float3 base_sum=0.0,coat_sum=0.0,diffuse_sum=0.0;
+    float total=0.0;
+    if(local_specular || (need_diffuse && local_diffuse))
+    {
+        const uint count=HsLocalProbeCount();
+        [loop] for(uint i=0u;i<count;++i)
+        {
+            const HsLocalProbeRecord p=HsLocalProbeRecords[i];
+            const float weight=HsLocalProbeWeight(p,world);
+            if(weight<=0.0)continue;
+            total+=weight;
+            if(local_specular)
+            {
+                const float3 direction=HsLocalProbeProjectedDirection(p,world,reflected);
+                base_sum+=weight*HsLocalProbeGgxCube.SampleLevel(LinearClamp,
+                    float4(direction,p.parameters.y),roughness.x*p.parameters.x).rgb;
+                if(need_coat)
+                    coat_sum+=weight*HsLocalProbeGgxCube.SampleLevel(LinearClamp,
+                        float4(direction,p.parameters.y),roughness.y*p.parameters.x).rgb;
+            }
+            if(need_diffuse && local_diffuse)
+                diffuse_sum+=weight*HsLocalProbeShIrradiance((uint)p.parameters.y,normal,diffuse_kernel);
+        }
+    }
+    const float cover=saturate(total),scale=total>0.0?cover/total:0.0;
+    const float specular_global=local_specular?1.0-cover:1.0;
+    const float diffuse_global=local_diffuse?1.0-cover:1.0;
+    base=local_specular?base_sum*scale:0.0;
+    coat=need_coat && local_specular?coat_sum*scale:0.0;
+    diffuse=need_diffuse && local_diffuse?diffuse_sum*scale:0.0;
+    if(specular_global>0.0)
+    {
+        base+=HsProbePrefiltered(reflected,roughness.x)*specular_global;
+        if(need_coat)coat+=HsProbePrefiltered(reflected,roughness.y)*specular_global;
+    }
+    if(need_diffuse && diffuse_global>0.0)
+        diffuse+=HsProbeIrradiance(normal,diffuse_kernel)*diffuse_global;
+}
+
+float4 HsLocalProbeWeights(float3 worldPosition,uint count)
+{
+    float4 weights=0;
+    // Cache the common small set without reserving registers for all 64 probes.
+    [unroll] for(uint i=0u;i<4u;++i)
+        if(i<count) weights[i]=HsLocalProbeWeight(HsLocalProbeRecords[i],worldPosition);
+    return weights;
+}
+struct HsLocalProbeBlend
+{
+    float4 weights;
+    float2 normalization; // Global remainder, local scale after raw accumulation.
+};
+HsLocalProbeBlend HsLocalProbePrepareBlend(float4 weights,uint count)
+{
+    HsLocalProbeBlend blend=(HsLocalProbeBlend)0;
+    blend.weights=weights;
+    if(count>4u) return blend;
+    float total=0;
+    [unroll] for(uint i=0u;i<4u;++i)
+        if(i<count && weights[i]>0) total+=weights[i];
+    const float cover=saturate(total);
+    blend.normalization=float2(1-cover,total>0?cover/total:0);
+    return blend;
+}
+float3 HsLocalProbeRadiance(float3 worldPosition,float3 worldDirection,uint count,HsLocalProbeBlend blend)
+{
+    [branch] if(count<=4u)
+    {
+        float3 local=0;
+        [unroll] for(uint i=0u;i<4u;++i)
+            [branch] if(i<count && blend.weights[i]>0)
+            {
+                const HsLocalProbeRecord p=HsLocalProbeRecords[i];
+                local+=blend.weights[i]*HsLocalProbeRawCube.SampleLevel(LinearClamp,
+                    float4(HsLocalProbeProjectedDirection(p,worldPosition,worldDirection),p.parameters.y),0).rgb;
+            }
+        return HsProbeRadiance(worldDirection)*blend.normalization.x+local*blend.normalization.y;
+    }
+    float total=0; float3 local=0;
     for(uint i=0;i<count;++i)
     {
-        const HsLocalProbeRecord p=HsLocalProbeRecords[i]; const float w=HsLocalProbeWeight(p,worldPosition);
+        const HsLocalProbeRecord p=HsLocalProbeRecords[i]; float w;
+        [branch] if(i<4u) w=blend.weights[i];
+        else w=HsLocalProbeWeight(p,worldPosition);
         if(w>0) { total+=w; local+=w*HsLocalProbeRawCube.SampleLevel(LinearClamp,
             float4(HsLocalProbeProjectedDirection(p,worldPosition,worldDirection),p.parameters.y),0).rgb; }
     }

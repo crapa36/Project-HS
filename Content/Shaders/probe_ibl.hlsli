@@ -23,7 +23,7 @@ float3 HsProbePrefiltered(float3 worldDirection,float perceptualRoughness)
     return HsProbeGgxCube.SampleLevel(LinearClamp,HsProbeLocalDirection(worldDirection),
         saturate(perceptualRoughness)*ProbeOptions.z).rgb;
 }
-float3 HsProbeIrradiance(float3 worldNormal)
+float3 HsProbeIrradiance(float3 worldNormal, float3 kernel)
 {
     const float3 n=HsProbeLocalDirection(worldNormal);
     const float basis[9]={0.28209479177387814,
@@ -32,9 +32,14 @@ float3 HsProbeIrradiance(float3 worldNormal)
         0.31539156525252005*(3*n.z*n.z-1),1.0925484305920792*n.x*n.z,
         0.5462742152960396*(n.x*n.x-n.y*n.y)};
     float3 irradiance=0;
-    [unroll] for(uint i=0;i<9;++i) irradiance+=HsProbeCosineSh[i].rgb*basis[i];
+    [unroll] for(uint i=0;i<9;++i)
+        irradiance+=HsProbeCosineSh[i].rgb*basis[i]*kernel[i==0?0:i<4?1:2];
     // SH truncation can produce a small negative reconstruction. Irradiance is
     // nonnegative; the baker stores signed coefficients without clamping them.
     return max(irradiance,0.0);
+}
+float3 HsProbeIrradiance(float3 worldNormal)
+{
+    return HsProbeIrradiance(worldNormal,1.0.xxx);
 }
 #endif

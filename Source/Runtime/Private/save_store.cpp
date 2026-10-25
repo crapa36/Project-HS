@@ -37,10 +37,10 @@ enum class ReadStatus
     Future,
 };
 
-[[nodiscard]] Result FutureSettingsFailure()
+[[nodiscard]] Result FutureSaveFailure()
 {
     return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                           "A newer settings schema is present; settings files were left untouched.");
+                           "A newer save schema is present; save files were left untouched.");
 }
 
 class UniqueHandle
@@ -321,9 +321,7 @@ template <typename Integer>
 
 [[nodiscard]] bool ValidProfile(const ProfileData &profile) noexcept
 {
-    return profile.schema_version == ProfileData::kSchemaVersion &&
-           profile.best_level >= 1 && (profile.unlocked_skills_mask & ~0xFFull) == 0 &&
-           (profile.unlocked_relics_mask & ~0xFFFull) == 0;
+    return profile.schema_version == ProfileData::kSchemaVersion && profile.best_level >= 1;
 }
 
 template <typename T>
@@ -543,9 +541,7 @@ template <typename T>
     return {{"schema_version", profile.schema_version},
             {"best_level", profile.best_level},
             {"total_wins", profile.total_wins},
-            {"total_kills", profile.total_kills},
-            {"unlocked_skills_mask", profile.unlocked_skills_mask},
-            {"unlocked_relics_mask", profile.unlocked_relics_mask}};
+            {"total_kills", profile.total_kills}};
 }
 
 [[nodiscard]] bool FromJson(const Json &json, SettingsData &settings)
@@ -644,21 +640,28 @@ template <typename T>
 
 [[nodiscard]] bool FromJson(const Json &json, ProfileData &profile)
 {
-    if (!json.is_object() || json.size() != 6)
+    std::uint32_t schema{};
+    if (!json.is_object() || !ReadUnsigned(json, "schema_version", schema) ||
+        (schema != 1 && schema != ProfileData::kSchemaVersion) ||
+        json.size() != (schema == 1 ? 6u : 4u))
     {
         return false;
     }
 
     ProfileData parsed;
-    if (!ReadUnsigned(json, "schema_version", parsed.schema_version) ||
-        !ReadUnsigned(json, "best_level", parsed.best_level) ||
+    if (!ReadUnsigned(json, "best_level", parsed.best_level) ||
         !ReadUnsigned(json, "total_wins", parsed.total_wins) ||
         !ReadUnsigned(json, "total_kills", parsed.total_kills) ||
-        !ReadUnsigned(json, "unlocked_skills_mask", parsed.unlocked_skills_mask) ||
-        !ReadUnsigned(json, "unlocked_relics_mask", parsed.unlocked_relics_mask) ||
         !ValidProfile(parsed))
     {
         return false;
+    }
+    if (schema == 1)
+    {
+        std::uint64_t skills{}, relics{};
+        if (!ReadUnsigned(json, "unlocked_skills_mask", skills) || (skills & ~0xFFull) != 0 ||
+            !ReadUnsigned(json, "unlocked_relics_mask", relics) || (relics & ~0xFFFull) != 0)
+            return false;
     }
     profile = parsed;
     return true;
@@ -712,7 +715,7 @@ template <typename Data>
         Json json;
         const bool no_duplicates = ParseJsonNoDuplicates(text, json);
         if constexpr (std::is_same_v<Data, SettingsData> ||
-                      std::is_same_v<Data, SettingsDocument>)
+                      std::is_same_v<Data, SettingsDocument> || std::is_same_v<Data, ProfileData>)
         {
             // A future document is read-only even when it uses a field layout
             // that this version's strict parser would reject.
@@ -732,7 +735,7 @@ template <typename Data>
         if (no_duplicates)
         {
             if constexpr (std::is_same_v<Data, SettingsData> ||
-                          std::is_same_v<Data, SettingsDocument>)
+                          std::is_same_v<Data, SettingsDocument> || std::is_same_v<Data, ProfileData>)
             {
                 std::uint64_t schema{};
                 if (json.is_object() && ReadUnsigned(json, "schema_version", schema))
@@ -920,7 +923,7 @@ template <typename Data>
     {
         return read;
     }
-    if (primary_status == ReadStatus::Future) return FutureSettingsFailure();
+    if (primary_status == ReadStatus::Future) return FutureSaveFailure();
     if (primary_status == ReadStatus::Valid)
     {
         data = primary;
@@ -935,7 +938,7 @@ template <typename Data>
     {
         return read;
     }
-    if (backup_status == ReadStatus::Future) return FutureSettingsFailure();
+    if (backup_status == ReadStatus::Future) return FutureSaveFailure();
     if (backup_status == ReadStatus::Valid)
     {
         if (primary_status == ReadStatus::Corrupt)
@@ -997,14 +1000,14 @@ template <typename Data>
     {
         return read;
     }
-    if (status == ReadStatus::Future) return FutureSettingsFailure();
+    if (status == ReadStatus::Future) return FutureSaveFailure();
     Data existing_backup;
     ReadStatus backup_status{};
     if (auto read = ReadDocument(BackupPath(path), existing_backup, backup_status); !read)
     {
         return read;
     }
-    if (backup_status == ReadStatus::Future) return FutureSettingsFailure();
+    if (backup_status == ReadStatus::Future) return FutureSaveFailure();
     Data to_write = data;
     if constexpr (std::is_same_v<Data, SettingsDocument>)
     {

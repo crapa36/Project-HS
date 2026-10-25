@@ -12,6 +12,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <vector>
+void TestReleaseVfxCodegen();
 
 namespace
 {
@@ -147,7 +148,34 @@ int main()
         };
         reject_wire_edit(table(2),0xffffffffu,"out-of-range output owner accepted");
         reject_wire_edit(table(2)+80,0xffffffffu,"invalid motion opcode accepted");
-        reject_wire_edit(table(8)+12,word(table(8)),"duplicate effect identity accepted");
+        const auto check_identity_edit = [&](bool upgrade, bool duplicate) {
+            auto changed = binary;
+            const auto put = [&](std::size_t at, std::uint32_t value) {
+                for (unsigned i = 0; i < 4; ++i)
+                    changed.at(at + i) = static_cast<char>((value >> (8 * i)) & 255);
+            };
+            const auto first = table(upgrade ? 11 : 8);
+            const auto second = first + (upgrade ? 20 : 12);
+            // Same low word, distinct full identities; lookup order is handle order, not ID order.
+            put(first, 0x12345678u); put(first + 4, 0xfedcba98u);
+            put(second, 0x12345678u); put(second + 4, duplicate ? 0xfedcba98u : 0xabcdef01u);
+            if (upgrade) put(second + 8, word(first + 8));
+            std::uint32_t checksum = 2166136261u;
+            for (std::size_t i = 32; i < changed.size(); ++i) {
+                checksum ^= static_cast<unsigned char>(changed[i]); checksum *= 16777619u;
+            }
+            put(28, checksum);
+            const auto accepted = hs::LoadVfxProgram(std::as_bytes(std::span(changed)), loaded, load_error);
+            Check(accepted != duplicate, duplicate ? "full 64-bit duplicate accepted" :
+                "distinct 64-bit identities with equal low words rejected");
+            Check(loaded.effects.size() == original_effect_count, "identity test changed effect count");
+        };
+        check_identity_edit(false, false);
+        check_identity_edit(false, true);
+        check_identity_edit(true, false);
+        check_identity_edit(true, true);
+        Check(hs::LoadVfxProgram(std::as_bytes(std::span(binary)), loaded, load_error),
+            "original VFX program failed after identity regression");
         reject_wire_edit(table(9)+8,0xffffffffu,"out-of-range texture path accepted");
         reject_wire_edit(table(12),0xffffffffu,"invalid upgrade target accepted");
         for(unsigned i=0;i<196;++i) if(word(table(0)+i*68+13*4)==0) {
@@ -199,6 +227,7 @@ int main()
         Reject([&] { hs::content::ValidateVfxTextures(spec, fixture); }, "sRGB data texture accepted");
         Write(target, valid);
         hs::content::ValidateVfxTextures(spec, fixture);
+        TestReleaseVfxCodegen();
         std::cout << "vfx authoring contracts passed: references, scope, authority, DDS, deterministic 68-row LUT\n";
         return 0;
     }

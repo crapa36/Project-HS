@@ -4,6 +4,7 @@
 
 #include "../AssetPipeline/action.hpp"
 #include "../AssetPipeline/render_shader_binding_inputs.hpp"
+#include "coated_dfg_cooker.hpp"
 #include "material_graph_parser.hpp"
 #include <hs/core/cooked_format.hpp>
 
@@ -18,6 +19,7 @@
 #include <array>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -71,16 +73,6 @@ void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_r
             spec.inputs.push_back(ap::HashInput(relative,source_root/relative));
 }
 
-bool SameMaterialParameters(std::span<const rd::MaterialParameterDefinition> left,
-                            std::span<const rd::MaterialParameterDefinition> right)
-{
-    if (left.size() != right.size()) return false;
-    return std::ranges::equal(left, right, [](const auto &a, const auto &b) {
-        return a.id == b.id && a.type == b.type && a.default_words == b.default_words &&
-               a.uint_min == b.uint_min && a.uint_max == b.uint_max;
-    });
-}
-
 std::size_t MaterialOrdinal(std::string_view name)
 {
     const auto found = std::ranges::find(rd::kAuthoredMaterialNames, name);
@@ -95,7 +87,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
             const fs::path &source, std::wstring_view entry,
             std::wstring_view profile, std::wstring_view define,
             std::uint32_t sidecar_planes = 0, bool generated_deferred = false,
-            bool feedback = false)
+            bool feedback = false, bool hero_work = false)
 {
     auto diagnostics = output;
     diagnostics += ".diagnostics.txt";
@@ -111,6 +103,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     if (!define.empty()) args.emplace_back(define);
     if (generated_deferred) args.emplace_back(L"-DHS_GENERATED_DEFERRED_MATERIALS=1");
     if (feedback) args.emplace_back(L"-DHS_SAMPLER_FEEDBACK=1");
+    if (hero_work) args.emplace_back(L"-DHS_CAPTURE_HERO_WORK=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
@@ -138,7 +131,7 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
 }
 
 void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
-                           const fs::path &dxc, bool with_brixelizer)
+                           const fs::path &dxc, bool with_brixelizer, bool hero_work = false)
 {
     Require(source_root.is_absolute() && build_root.is_absolute() && dxc.is_absolute(),
             "all paths must be absolute");
@@ -148,17 +141,32 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     ap::ActionSpec spec;
     spec.action_id = "render.shader.bsdf-preintegrate";
     spec.recipe_id = "project-hs.render.bsdf-preintegrate";
-    spec.recipe_version = 10;
+    spec.recipe_version = 11;
     spec.namespace_path = "render/shader/bsdf-preintegrate";
+    if (hero_work)
+    {
+        spec.action_id = "render.shader.hero-work";
+        spec.recipe_id = "project-hs.render.hero-work-ps";
+        spec.recipe_version = 1;
+        spec.namespace_path = "render/shader/hero-work";
+    }
+    else
+    {
+        spec.inputs.push_back(ap::HashInput("Source/Apps/RenderMaterialShader/coated_dfg_cooker.cpp",
+            source_root / "Source/Apps/RenderMaterialShader/coated_dfg_cooker.cpp"));
+        spec.inputs.push_back(ap::HashInput("Source/Apps/RenderMaterialShader/coated_dfg_cooker.hpp",
+            source_root / "Source/Apps/RenderMaterialShader/coated_dfg_cooker.hpp"));
+    }
     if (with_brixelizer)
         for (const auto *relative : {"Content/Shaders/brixelizer_common.hlsli", "Content/Shaders/brixelizer_guides.hlsl",
                                    "Content/Shaders/brixelizer_gi_resolve.hlsl",
                                    "Content/Shaders/brixelizer_gi_compose.hlsl",
                                    "Content/Shaders/brixelizer_cache_export.hlsl"})
             spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
-    const auto generated = DeferredContextInclude(spec, source_root);
-    const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root));
-    const auto hero_context = HeroContextInclude(spec, source_root);
+    PreparedMaterialInputs materials(source_root);
+    const auto generated = DeferredContextInclude(spec, source_root, materials);
+    const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
+    const auto hero_context = HeroContextInclude(spec, source_root, materials);
     spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json",
                                       source_root / "Schemas/material_graph.schema.json"));
     for (const auto *relative : {"Content/Shaders/bsdf_preintegrate.hlsl",
@@ -243,6 +251,18 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/project_hs.hlsl", L"HeroTransparentGuidePS", L"ps_6_0"},
         ProgramOutput{"render/shader/hero_layer_composite_ps.dxil", "hero_layer_composite_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"HeroLayerCompositePS", L"ps_6_0"}};
+    if (hero_work)
+    {
+        std::erase_if(outputs, [](const auto &program) {
+            return !program.id.starts_with("render/shader/hero_") || !program.profile.starts_with(L"ps_");
+        });
+        Require(outputs.size() == 5, "hero work recipe must contain exactly the five existing Hero PS entries");
+        for (auto &program : outputs)
+        {
+            program.id.insert(program.id.size() - 5, "_hero_work");
+            program.filename.insert(program.filename.size() - 5, "_hero_work");
+        }
+    }
     if (with_brixelizer)
     {
         outputs.push_back({"render/shader/brixelizer_guides_cs.dxil", "brixelizer_guides_cs.dxil", "Content/Shaders/brixelizer_guides.hlsl", L"BrixelizerGuidesCS", L"cs_6_6"});
@@ -261,7 +281,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             fs::path path;
             if (result.at("action_key") == ap::ActionKey(spec) &&
                 result.at("action_id") == spec.action_id &&
-                result.at("products").size() == outputs.size())
+                result.at("products").size() == outputs.size() + static_cast<std::size_t>(!hero_work))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
@@ -269,6 +289,12 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                     (void)ap::ReadActionResult(build_root, spec.namespace_path, output.id,
                                                ignored, path);
                     valid &= ValidDxil(path);
+                }
+                if (!hero_work)
+                {
+                    (void)ap::ReadActionResult(build_root, spec.namespace_path,
+                        "render/lighting/coated_ggx_dfg.dds", ignored, path);
+                    valid &= fs::file_size(path) == 148u + 128u * 128u * 8u;
                 }
                 if (valid)
                 {
@@ -296,9 +322,17 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                 ? std::wstring_view{L"-DHS_GENERATED_HERO_MATERIAL=1"}
                 : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
             RunDxc(dxc, source_root, stage, output, source_root / program.source_relative,
-                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides);
+                   program.entry, program.profile, define, sidecar_layout.plane_count, brixelizer_guides, false, hero_work);
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
+        }
+        if (!hero_work)
+        {
+            const auto dfg = hs::material_content::CookCoatedDfgDds();
+            const auto output = stage / "coated_ggx_dfg.dds";
+            ap::WriteBytes(output, std::span<const std::byte>(dfg.data(), dfg.size()));
+            products.push_back(ap::HashProduct("render/lighting/coated_ggx_dfg.dds",
+                output.filename().string(), output));
         }
         fs::remove(include_path);
         fs::remove(hero_include_path);
@@ -330,8 +364,10 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     const auto schema_path = source_root / schema_relative;
     ap::RequireRegularFile(material_path);
     ap::RequireRegularFile(schema_path);
-    const auto graph = decal ? hs::material_content::ParseDecalMaterialGraph(name, ap::ReadBytes(material_path)) :
-        hs::material_content::ParseMaterialDefinition(name, ap::ReadBytes(material_path)).graph;
+    const auto material_text = ap::ReadBytes(material_path);
+    const auto prepared = decal ? hs::material_content::ParsePreparedDecalMaterial(name, material_text) :
+        hs::material_content::ParseMaterialDefinition(name, material_text).prepared;
+    const auto &graph = prepared.Graph();
     const std::span<const rd::MaterialParameterDefinition> parameters =
         graph.parameters;
     rd::ValidateMaterialParameters(parameters);
@@ -343,7 +379,8 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     spec.recipe_id = "project-hs.render.material-parameters";
     spec.recipe_version = 1;
     spec.namespace_path = "render/material/" + std::string(name) + "/parameters";
-    spec.inputs.push_back(ap::HashInput(material_relative, material_path));
+    spec.inputs.push_back({material_relative, material_path,
+        ap::Sha256Bytes(std::as_bytes(std::span(material_text.data(), material_text.size())))});
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
     if (decal) spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json", source_root / "Schemas/material_graph.schema.json"));
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
@@ -370,7 +407,7 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
                 rd::ValidateMaterialParameters(decoded);
                 if (rd::MaterialParameterLayoutHash(decoded) ==
                         rd::MaterialParameterLayoutHash(parameters) &&
-                    SameMaterialParameters(decoded, parameters))
+                    std::ranges::equal(decoded, parameters))
                 {
                     ap::TouchActionResult(result_path);
                     std::cout << spec.action_id << " current\n";
@@ -393,7 +430,7 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
         rd::ValidateMaterialParameters(decoded);
         Require(rd::MaterialParameterLayoutHash(decoded) ==
                     rd::MaterialParameterLayoutHash(parameters) &&
-                    SameMaterialParameters(decoded, parameters),
+                    std::ranges::equal(decoded, parameters),
                 "material parameter package layout mismatch");
         std::vector<ap::Product> products;
         products.push_back(ap::HashProduct(product_id, output.filename().string(), output));
@@ -424,10 +461,11 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
     {
         const std::string name(rd::kDecalMaterialNames[ordinal]);
         const auto path = source_root / ("ContentSource/Materials/" + name + ".json");
-        auto graph = hs::material_content::ParseDecalMaterialGraph(name, ap::ReadBytes(path));
+        const auto prepared = hs::material_content::ParsePreparedDecalMaterial(name, ap::ReadBytes(path));
+        const auto &graph = prepared.Graph();
         const std::array layer_counts{ordinal == 0 ? 4u : 8u};
-        rd::ValidateMaterialSampleLayers(graph, layer_counts, layer_counts.front() - 1u);
-        auto function = rd::EmitDecalMaterialContextHlsl(graph, "HsDecalEvaluate_" + std::to_string(ordinal),
+        rd::ValidateMaterialSampleLayers(prepared, layer_counts, layer_counts.front() - 1u);
+        auto function = rd::EmitDecalMaterialContextHlsl(prepared, "HsDecalEvaluate_" + std::to_string(ordinal),
             8u + static_cast<std::uint32_t>(ordinal));
         const std::string texture_name = "HsDecalTexture_" + std::to_string(ordinal);
         std::size_t position{};
@@ -521,9 +559,10 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
     ap::RequireRegularFile(dxc);
-    const auto graph = hs::material_content::ParseMaterialDefinition(name,
-        ap::ReadBytes(source_root / ("ContentSource/Materials/" + std::string(name) + ".json"))).graph;
-    const auto reflection = rd::AnalyzeClosure(graph);
+    PreparedMaterialInputs materials(source_root);
+    const auto &prepared = materials.Get(name).prepared;
+    const auto &graph = prepared.Graph();
+    const auto reflection = rd::AnalyzeClosure(prepared);
     const auto namespace_path = "render/shader/" + std::string(name);
     const auto material_id = "render/material/" + std::string(name) + "/material.rpkg";
     std::vector<ProgramOutput> outputs;
@@ -549,8 +588,8 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     spec.recipe_id = "project-hs.render.material-shader";
     spec.recipe_version = 10;
     spec.namespace_path = namespace_path;
-    const auto generated = HeroContextInclude(spec, source_root);
-    const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root));
+    const auto generated = HeroContextInclude(spec, source_root, materials);
+    const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
     const auto layout_bytes = rd::EncodeMaterialParameterLayout(graph.parameters);
     spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/parameter-layout",
         source_root / ("ContentSource/Materials/" + std::string(name) + ".json"), layout_bytes));
@@ -650,14 +689,14 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::RequireRegularFile(dxc);
     const auto material_relative = "ContentSource/Materials/" + std::string(name) + ".json";
     const auto material_path = source_root / material_relative;
-    const auto material_text = ap::ReadBytes(material_path);
     const bool terrain = name == "terrain";
     const bool masked = !terrain && hs::material_content::IsMaskedEnvironmentMaterial(name);
-    const auto definition = hs::material_content::ParseMaterialDefinition(name, material_text);
-    const auto reflection = rd::AnalyzeClosure(definition.graph);
+    PreparedMaterialInputs materials(source_root);
+    const auto &definition = materials.Get(name);
+    const auto reflection = rd::AnalyzeClosure(definition.prepared);
     (void)rd::EncodeMaterialSurfaceLayout({reflection.capability_mask, reflection.varying_mask});
     const auto ordinal = MaterialOrdinal(name);
-    const auto generated = rd::EmitEnvironmentMaterialContextHlsl(definition.graph, ordinal);
+    const auto generated = rd::EmitEnvironmentMaterialContextHlsl(definition.prepared, ordinal);
     const auto namespace_path = "render/shader/" + std::string(name);
     constexpr std::string_view include_name = "environment_material.generated.hlsli";
     const std::string stem(name);
@@ -719,7 +758,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     spec.inputs.push_back(SemanticInput(
         "material/" + std::string(name) + "/shader-ir", material_path,
         std::as_bytes(std::span<const char>(generated.data(), generated.size()))));
-    const auto sidecar_mask = AddSurfaceReflectionInputs(spec, source_root);
+    const auto sidecar_mask = AddSurfaceReflectionInputs(spec, source_root, materials);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(sidecar_mask);
     for (const auto *relative : {"Schemas/material_graph.schema.json",
                                  "Content/Shaders/project_hs.hlsl",
@@ -827,6 +866,7 @@ int wmain(int argc, wchar_t **argv)
     std::string name;
     ap::Json action_id = nullptr;
     bool preintegrate = false;
+    bool hero_work = false;
     bool parameters = false;
     bool with_brixelizer = false;
     bool decal_surface = false;
@@ -843,6 +883,8 @@ int wmain(int argc, wchar_t **argv)
                 dxc = argv[i];
             else if (arg == L"--bsdf-preintegrate" && !preintegrate)
                 preintegrate = true;
+            else if (arg == L"--hero-work" && !hero_work)
+                hero_work = true;
             else if (arg == L"--decal-surface" && !decal_surface)
                 decal_surface = true;
             else if (arg == L"--parameters" && !parameters)
@@ -863,13 +905,14 @@ int wmain(int argc, wchar_t **argv)
                 throw std::runtime_error("hs_render_material_shader: invalid command line");
         }
         const bool valid_mode =
-            (parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
-            (preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
-            (decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
-            (!preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty());
+            (!hero_work && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
+            (!hero_work && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
+            (!hero_work && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
+            (!hero_work && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
+            (hero_work && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
         Require(valid_mode && (!with_brixelizer || preintegrate) &&
                 !source_root.empty() && !build_root.empty(),
-                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
+                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --hero-work | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
         if (parameters)
         {
             if (hs::material_content::IsAuthoredMaterialName(name) ||
@@ -882,6 +925,12 @@ int wmain(int argc, wchar_t **argv)
         {
             action_id = "render.shader.decal-surface";
             ProduceDecalSurface(source_root.lexically_normal(), build_root.lexically_normal(), dxc.lexically_normal());
+        }
+        else if (hero_work)
+        {
+            action_id = "render.shader.hero-work";
+            ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
+                                  dxc.lexically_normal(), false, true);
         }
         else if (preintegrate)
         {
@@ -902,7 +951,7 @@ int wmain(int argc, wchar_t **argv)
     {
         ap::ReportFailure("hs_render_material_shader", error.what(),
                           {{"action_id", action_id}, {"name", name},
-                           {"bsdf_preintegrate", preintegrate},
+                           {"bsdf_preintegrate", preintegrate}, {"hero_work", hero_work},
                            {"parameters", parameters}, {"decal_surface", decal_surface},
                            {"with_brixelizer", with_brixelizer},
                            {"source_root", ap::DiagnosticPath(source_root)},

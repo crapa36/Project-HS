@@ -1,4 +1,6 @@
 #include "../Source/Apps/CharacterInterchange/character_interchange.hpp"
+#include "../Source/Apps/Content/character_products.hpp"
+#include <hs/render_data/texture_package.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -153,7 +155,7 @@ void TestAnimationExtension(const hs::character_interchange::ImportedCharacter &
 {
     namespace rd = hs::render_data;
     const auto asset_id = hs::MakeAssetId("render/animation/archer.rpkg");
-    const auto &named = imported.animation_extension;
+    const auto &named = imported.runtime.animation_extension;
     Check(named.sample_rate_hz == 0 && named.bone_names == std::vector<std::string>{"root", "chest"} &&
           named.clips.size() == 21 && named.transforms.size() == 84 && named.sockets.size() == 5,
           "validated named clip or skeleton data lost");
@@ -214,6 +216,150 @@ void TestAnimationExtension(const hs::character_interchange::ImportedCharacter &
     reject([&] { (void)rd::DecodeCharacterAnimationExtension(malformed, asset_id); },
            "invalid named clip flag accepted");
 }
+
+void TestDirectCharacterProducts(const hs::character_interchange::ImportedCharacter &imported)
+{
+    namespace rd = hs::render_data;
+    namespace cc = hs::content;
+    auto ir = imported.runtime;
+    ir.vertices[0].position[0] = -0.0f;
+    ir.vertices[1].tangent[3] = -1.0f;
+    const auto first_triangle = ir.vertices;
+    ir.vertices.insert(ir.vertices.end(), first_triangle.begin(), first_triangle.end());
+    Json authoring{{"version", 1}, {"characters", Json::object()}};
+    authoring["characters"]["archer"] = Json::array({
+        Json{{"name", "body"}, {"opaque", "archer_skin"}}});
+    const auto selections = cc::PrepareCharacterMaterialSelections(ir, "archer", authoring);
+    const auto products = cc::BuildCharacterProducts(ir, "archer", selections);
+    const auto again = cc::BuildCharacterProducts(ir, "archer", selections);
+    Check(products.size() == 3 && again.size() == products.size(), "direct product set has a legacy exchange or fabricated LOD");
+    for (std::size_t i = 0; i < products.size(); ++i)
+        Check(products[i].logical_id == again[i].logical_id && products[i].bytes == again[i].bytes &&
+            products[i].dependencies == again[i].dependencies, "direct products are not deterministic");
+    const auto find = [](const auto &values, std::string_view id) -> const cc::CharacterProduct & {
+        const auto found = std::ranges::find(values, id, &cc::CharacterProduct::logical_id);
+        Check(found != values.end(), "direct product absent");
+        return *found;
+    };
+    const auto &metadata_product = find(products, "render/character/archer.rpkg");
+    const auto prepared = cc::PrepareCharacterBinding(metadata_product.logical_id, metadata_product.bytes);
+    Check(prepared.package.dependencies == metadata_product.dependencies,
+        "prepared binding lost the original package dependency view");
+    Check(std::ranges::none_of(prepared.package.dependencies, [](const auto &id) {
+        return id.ends_with(".meshbin") || id.ends_with("_materials.json");
+    }), "normal direct metadata still depends on an exchange");
+    const auto &page_product = find(products, "render/geometry/character/archer.rpage");
+    Check(page_product.dependencies.empty() && rd::ReadPackage(page_product.bytes,
+        hs::MakeAssetId(page_product.logical_id)).dependencies.empty(), "direct page retains a legacy source dependency");
+    const auto geometry = rd::DecodeGeometryPage(page_product.bytes,
+        hs::MakeAssetId(page_product.logical_id), prepared.character.geometry);
+    rd::ValidateCharacterGeometry(prepared.character, geometry);
+    Check(geometry.indices.size() == 6 && geometry.canonical_primitive_remap.size() == 2,
+        "duplicate oriented primitive occurrence was discarded");
+    auto occurrences = geometry.canonical_primitive_remap;
+    std::ranges::sort(occurrences);
+    Check(occurrences == std::vector<std::uint32_t>{0, 1}, "duplicate primitive occurrence identity changed");
+    std::vector<rd::ExpandedVertex> expanded, expected;
+    for (const auto index : geometry.indices) expanded.push_back(geometry.vertices[index]);
+    for (const auto &v : ir.vertices)
+        expected.push_back({v.position, v.normal, v.bone_indices, v.bone_weights, v.uv, v.tangent, v.material_index, v.reserved});
+    Check(rd::EncodeExpandedVertices(expanded) == rd::EncodeExpandedVertices(expected),
+        "direct import changed a 76-byte scalar, signed zero, tangent handedness or primitive order");
+    const auto &animation_product = find(products, "render/animation/archer.rpkg");
+    const auto animation = rd::DecodeCharacterAnimationExtension(animation_product.bytes,
+        hs::MakeAssetId(animation_product.logical_id));
+    Check(animation_product.dependencies.empty() && animation.sample_rate_hz == 0 && animation.clips.size() == 21 &&
+        animation.sockets.size() == 5 && animation.clips.back().name == "victory",
+        "common IR lost undeclared source rate, named clips or sockets");
+    Check(ir.source_metadata == imported.runtime.source_metadata &&
+        ir.source_metadata["clips"][0]["curves"]["bow_draw"] == Json::array({0.0, 1.0}),
+        "direct preparation changed source markers, curves or unsupported metadata");
+
+    const auto reject = [](const auto &operation, const char *reason) {
+        try { operation(); } catch (const std::exception &) { return; }
+        throw std::runtime_error(reason);
+    };
+    auto invalid = ir;
+    invalid.vertices[0].bone_indices[3] = static_cast<std::uint16_t>(invalid.bone_count);
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections); }, "zero-weight invalid bone lane reached final products");
+    invalid = ir; invalid.vertices[0].reserved = 1;
+    invalid.vertices[0].position[0] = std::numeric_limits<float>::quiet_NaN();
+    try { (void)cc::BuildCharacterProducts(invalid, "archer", selections); Check(false, "invalid reserved reached final products"); }
+    catch (const std::exception &error) {
+        Check(std::string_view(error.what()).find("material/reserved") != std::string_view::npos,
+            "source reserved/finite diagnostic order changed");
+    }
+    invalid = ir; invalid.vertices[0].bone_weights[0] = 0.995f;
+    reject([&] { (void)cc::BuildCharacterProducts(invalid, "archer", selections); }, "generic weight tolerance substituted for strict character binding");
+    auto ambiguous = authoring;
+    ambiguous["characters"]["archer"].push_back(ambiguous["characters"]["archer"][0]);
+    reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", ambiguous); }, "ambiguous material selection accepted");
+    auto unknown = authoring; unknown["characters"]["archer"][0]["name"] = "absent";
+    reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", unknown); }, "unknown material selection accepted");
+    auto jelly = authoring; jelly["characters"]["archer"][0]["opaque"] = "slime_features";
+    reject([&] { (void)cc::PrepareCharacterMaterialSelections(ir, "archer", jelly); }, "missing transparent jelly pair accepted");
+
+    // A current native Archer product has 11 authored clips; the schema1 import
+    // above retains 21/rate0. Exercise the actual image-link cross-binding gate
+    // with an independently prepared native-profile fixture.
+    auto native = ir;
+    native.animation_extension.sample_rate_hz = 60;
+    native.animation_extension.clips.resize(11);
+    native.animation_extension.transforms.resize(44);
+    native.animation_extension.sockets.clear();
+    auto linked = cc::BuildCharacterProducts(native, "archer", selections);
+    // Opaque hero packages require the complete native four-program contract,
+    // even when this fixture exercises only character dependency bindings.
+    const std::array programs{
+        rd::MaterialProgramSource{"render/shader/archer_skin_scene.dxil", rd::MaterialProgramKind::HeroScenePS},
+        rd::MaterialProgramSource{"render/shader/archer_skin_visibility.dxil", rd::MaterialProgramKind::HeroVisibilityPS},
+        rd::MaterialProgramSource{"render/shader/archer_skin_resolve.dxil", rd::MaterialProgramKind::HeroSurfaceResolveCS},
+        rd::MaterialProgramSource{"render/shader/archer_skin_shadow.dxil", rd::MaterialProgramKind::HeroShadowPS}};
+    linked.push_back({"render/material/archer_skin/material.rpkg", "material.rpkg", {},
+        rd::BuildHeroMaterialPackage("archer_skin", {}, {1, 0}, programs)});
+    for (const auto *semantic : {"diffuse", "normal"})
+    {
+        const auto name = "archer_" + std::string(semantic) + "_0";
+        const auto id = "render/texture/" + name + ".rpkg";
+        const std::array dependencies{"character/" + name + ".dds"};
+        const std::array<std::byte, 16> payload{};
+        const auto format = std::string_view(semantic) == "normal" ? rd::kTextureFormatBc7 : rd::kTextureFormatBc7Srgb;
+        linked.push_back({id, name + ".rpkg", {}, rd::BuildTexturePackage(
+            hs::MakeAssetId(id), dependencies, {1, 1, 1, 1, format}, payload)});
+    }
+    const auto native_prepared = cc::PrepareCharacterBinding("render/character/archer.rpkg",
+        find(linked, "render/character/archer.rpkg").bytes);
+    const auto validate = [&] {
+        std::vector<cc::CharacterDependencyProduct> views;
+        for (const auto &product : linked) views.push_back({product.logical_id, product.bytes});
+        cc::ValidateCharacterProductBindings(native_prepared, views);
+    };
+    validate();
+    auto &texture = *std::ranges::find(linked, "render/texture/archer_normal_0.rpkg", &cc::CharacterProduct::logical_id);
+    const auto good_texture = texture.bytes;
+    const std::array wrong_source{std::string("character/another_normal_0.dds")};
+    const std::array<std::byte, 16> payload{};
+    texture.bytes = rd::BuildTexturePackage(hs::MakeAssetId(texture.logical_id), wrong_source,
+        {1, 1, 1, 1, rd::kTextureFormatBc7}, payload);
+    reject(validate, "image binding accepted a texture belonging to another slot");
+    texture.bytes = good_texture;
+    const std::array expected_source{std::string("character/archer_normal_0.dds")};
+    const std::array<std::byte, 4> rgba{};
+    texture.bytes = rd::BuildTexturePackage(hs::MakeAssetId(texture.logical_id), expected_source,
+        {1, 1, 1, 1, rd::kTextureFormatRgba8}, rgba);
+    reject(validate, "final character binding accepted legacy RGBA8 storage");
+    texture.bytes = rd::BuildTexturePackage(hs::MakeAssetId(texture.logical_id), expected_source,
+        {1, 1, 1, 1, rd::kTextureFormatBc7Srgb}, payload);
+    reject(validate, "normal/roughness data accepted an sRGB texture");
+    texture.bytes = good_texture;
+    auto &page = *std::ranges::find(linked, "render/geometry/character/archer.rpage", &cc::CharacterProduct::logical_id);
+    const auto good_page = page.bytes;
+    const std::array legacy_dependency{std::string("character/archer.meshbin")};
+    page.bytes = rd::BuildGeometryPage(hs::MakeAssetId(page.logical_id), legacy_dependency, geometry);
+    reject(validate, "image binding accepted a legacy intermediate dependency");
+    page.bytes = good_page;
+    validate();
+}
 }
 int main()
 {
@@ -222,10 +368,11 @@ int main()
         TestHandedness();
         Fixture f; f.Save();auto result=f.Load();
         TestAnimationExtension(result);
-        Check(result.runtime.clips.size()==5 && result.source["clips"].size()==21,"source clips lost");
-        Check(result.source["morphs"]==f.source["morphs"] && result.limitations.size()>=3,"unsupported metadata concealed");
-        Check(result.source["sockets"][0]["translation"][0].get<double>()<0 &&
-              result.source["sockets"][3]["translation"][0].get<double>()>0,
+        TestDirectCharacterProducts(result);
+        Check(result.runtime.clips.size()==5 && result.runtime.source_metadata["clips"].size()==21,"source clips lost");
+        Check(result.runtime.source_metadata["morphs"]==f.source["morphs"] && result.limitations.size()>=3,"unsupported metadata concealed");
+        Check(result.runtime.source_metadata["sockets"][0]["translation"][0].get<double>()<0 &&
+              result.runtime.source_metadata["sockets"][3]["translation"][0].get<double>()>0,
               "labeled asymmetric socket metadata changed");
         Check(result.runtime.vertices[1].position==std::array{0.0f,1.0f,3.0f} && result.runtime.vertices[2].position[0]==-2.0f,"asymmetric axis fixture changed");
         Check(result.runtime.transforms[4].translation[2]==2.0f && result.runtime.transforms[8].translation[2]==12.0f,"runtime alias projection incorrect");

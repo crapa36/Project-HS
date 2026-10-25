@@ -174,6 +174,24 @@ int main()
 {
     CheckMovementEquivalence();
     CheckFlowEquivalence();
+    {
+        NavigationGrid lazy;
+        // Force nearest-clear selection to depend on the saved sub-cell position.
+        lazy.blocked[lazy.Index(60, 60)] = 1;
+        const Float2 requested{0.3f, 0.0f};
+        const Float2 later{-0.3f, 0.0f};
+        assert(lazy.Cell(requested) == lazy.Cell(later));
+        assert(HeapFlow(lazy, requested) != HeapFlow(lazy, later));
+        lazy.distance.fill(123);
+        lazy.RequestFlow(requested);
+        assert(lazy.flow_dirty && lazy.distance[0] == 123);
+        (void)lazy.NextWaypoint({-10, 0}, later);
+        assert(!lazy.flow_dirty && lazy.distance == HeapFlow(lazy, requested));
+        lazy.RequestFlow({10, 10});
+        lazy.RequestFlow({-10, -10});
+        (void)lazy.NextWaypoint({30, 30}, later);
+        assert(lazy.distance == HeapFlow(lazy, {-10, -10}));
+    }
     using namespace hs;
     using namespace hs::gameplay_detail;
     ArenaBoundary boundary{};

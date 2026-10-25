@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <iterator>
@@ -21,6 +22,28 @@ namespace hs
 {
 namespace
 {
+using CacheClock = std::chrono::steady_clock;
+CacheClock::time_point CacheStart(bool enabled) noexcept
+{ return enabled ? CacheClock::now() : CacheClock::time_point{}; }
+void RecordCacheDuration(CacheClock::time_point start, std::uint64_t &total,
+                         std::uint64_t *maximum = nullptr) noexcept
+{
+    if (start == CacheClock::time_point{}) return;
+    const auto ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(CacheClock::now() - start).count());
+    total += ns;
+    if (maximum) *maximum = std::max(*maximum, ns);
+}
+struct CacheDuration
+{
+    CacheClock::time_point start;
+    std::uint64_t &total;
+    std::uint64_t *maximum;
+    CacheDuration(bool enabled, std::uint64_t &sum, std::uint64_t *peak = nullptr) noexcept
+        : start(CacheStart(enabled)), total(sum), maximum(peak) {}
+    ~CacheDuration() { RecordCacheDuration(start, total, maximum); }
+};
+
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSchema=1;
 constexpr std::uint64_t kMaximumFileBytes=256ull*1024*1024;
@@ -223,6 +246,7 @@ bool Unsupported(HRESULT native) { return native==DXGI_ERROR_UNSUPPORTED || nati
 struct RendererPipelineCache::Impl
 {
     mutable std::mutex mutex;
+    std::atomic_bool timing_enabled{};
     ComPtr<ID3D12Device> device;
     // Declaration/destruction order preserves the borrowed input blob until both
     // library references release. Flush serialization never modifies this vector.
@@ -236,7 +260,7 @@ struct RendererPipelineCache::Impl
     void Clear(bool clear_stats) noexcept
     {
         library1.Reset(); library.Reset(); loaded_blob.clear(); device.Reset(); file.clear();
-        identity={}; dirty=false;
+        identity={}; dirty=false; timing_enabled.store(false, std::memory_order_relaxed);
         if(clear_stats) stats={};
         else
         {
@@ -283,6 +307,7 @@ struct RendererPipelineCache::Impl
     }
     void Store(const std::wstring &name,IUnknown *created) noexcept
     {
+        CacheDuration timing(stats.capture_timings, stats.library_store_ns, &stats.library_store_max_ns);
         ComPtr<ID3D12PipelineState> pipeline;
         auto native=created->QueryInterface(IID_PPV_ARGS(pipeline.ReleaseAndGetAddressOf()));
         if(SUCCEEDED(native)) native=library->StorePipeline(name.c_str(),pipeline.Get());
@@ -295,9 +320,11 @@ RendererPipelineCache::~RendererPipelineCache()=default;
 void RendererPipelineCache::Reset() noexcept { std::lock_guard lock(impl_->mutex); impl_->Clear(false); }
 RendererPipelineCacheStats RendererPipelineCache::Stats() const { std::lock_guard lock(impl_->mutex); return impl_->stats; }
 
-Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adapter,std::filesystem::path directory)
+Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adapter,std::filesystem::path directory,bool capture_timings)
 {
     std::lock_guard lock(impl_->mutex); impl_->Clear(true);
+    impl_->stats.capture_timings=capture_timings;
+    impl_->timing_enabled.store(capture_timings, std::memory_order_relaxed);
     if(!device || !adapter) return Failure(ErrorCode::InvalidArgument,"Pipeline cache requires a device and adapter.");
     impl_->device=device;
     try
@@ -380,22 +407,33 @@ Result RendererPipelineCache::RegisterRootSignature(ID3D12RootSignature *root,st
 }
 HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
+    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
     std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
     std::array<std::byte,32> root; auto native=RootDigest(description->pRootSignature,root);
     if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
     try
     {
+        const auto key_start=CacheStart(impl_->stats.capture_timings);
         const auto name=impl_->library && output?GraphicsName(*description,root,false):std::wstring{};
+        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         if(impl_->library && output)
         {
-            native=impl_->library->LoadGraphicsPipeline(name.c_str(),description,iid,output);
+            {
+                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
+                native=impl_->library->LoadGraphicsPipeline(name.c_str(),description,iid,output);
+            }
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
         }
-        ++impl_->stats.native_creates; native=impl_->device->CreateGraphicsPipelineState(description,iid,output);
+        ++impl_->stats.native_creates;
+        {
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            native=impl_->device->CreateGraphicsPipelineState(description,iid,output);
+        }
         if(SUCCEEDED(native) && output && *output && impl_->library) impl_->Store(name,static_cast<IUnknown *>(*output));
         return native;
     }
@@ -405,22 +443,33 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
 }
 HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
+    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
     std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
     std::array<std::byte,32> root; auto native=RootDigest(description->pRootSignature,root);
     if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
     try
     {
+        const auto key_start=CacheStart(impl_->stats.capture_timings);
         const auto name=impl_->library && output?ComputeName(*description,root):std::wstring{};
+        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         if(impl_->library && output)
         {
-            native=impl_->library->LoadComputePipeline(name.c_str(),description,iid,output);
+            {
+                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
+                native=impl_->library->LoadComputePipeline(name.c_str(),description,iid,output);
+            }
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
         }
-        ++impl_->stats.native_creates; native=impl_->device->CreateComputePipelineState(description,iid,output);
+        ++impl_->stats.native_creates;
+        {
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            native=impl_->device->CreateComputePipelineState(description,iid,output);
+        }
         if(SUCCEEDED(native) && output && *output && impl_->library) impl_->Store(name,static_cast<IUnknown *>(*output));
         return native;
     }
@@ -431,7 +480,9 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
 HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAPHICS_PIPELINE_STATE_DESC &graphics,
     D3D12_SHADER_BYTECODE mesh_shader,ID3D12PipelineState **output)
 {
+    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
     std::lock_guard lock(impl_->mutex); if(output) *output=nullptr;
+    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return E_UNEXPECTED;
     if(!device) return E_INVALIDARG;
     // The explicit Device2 argument must be the device owning this library.
@@ -446,18 +497,27 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
     if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
     try
     {
+        const auto key_start=CacheStart(impl_->stats.capture_timings);
         const auto name=impl_->library1 && output?GraphicsName(graphics,root,true,mesh_shader):std::wstring{};
+        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         MeshStream stream(graphics,mesh_shader);
         const D3D12_PIPELINE_STATE_STREAM_DESC description{sizeof(stream),&stream};
         if(impl_->library1 && output)
         {
-            native=impl_->library1->LoadPipeline(name.c_str(),&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+            {
+                CacheDuration timing(impl_->stats.capture_timings, impl_->stats.library_load_ns, &impl_->stats.library_load_max_ns);
+                native=impl_->library1->LoadPipeline(name.c_str(),&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+            }
             if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
             if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
             ++impl_->stats.misses;
         }
         else ++impl_->stats.uncached_mesh_creates;
-        ++impl_->stats.native_creates; native=device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+        ++impl_->stats.native_creates;
+        {
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            native=device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
+        }
         if(SUCCEEDED(native) && output && *output && impl_->library1) impl_->Store(name,*output);
         return native;
     }
@@ -467,7 +527,9 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
 }
 Result RendererPipelineCache::Flush()
 {
+    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
     std::lock_guard lock(impl_->mutex);
+    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
     if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before flushing.");
     if(!impl_->library || !impl_->stats.persistence_enabled || !impl_->dirty) return Result::Success();
     try
@@ -478,12 +540,17 @@ Result RendererPipelineCache::Flush()
             impl_->IoFailure(ERROR_FILE_TOO_LARGE); return Failure(ErrorCode::TaskFailed,"Pipeline library exceeds the 256 MiB cache-file bound.");
         }
         std::vector<std::byte> bytes(kHeaderBytes+size);
-        const auto native=impl_->library->Serialize(bytes.data()+kHeaderBytes,size);
+        HRESULT native;
+        {
+            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.serialize_ns);
+            native=impl_->library->Serialize(bytes.data()+kHeaderBytes,size);
+        }
         if(FAILED(native)) { impl_->stats.last_cache_hresult=std::int32_t(native); return NativeFailure("Serialize pipeline library",native); }
         impl_->stats.serialized_bytes=size;
         std::copy(kMagic.begin(),kMagic.end(),bytes.begin()); Put(bytes,8,kSchema,4); Put(bytes,12,kHeaderBytes,4);
         std::copy(impl_->identity.begin(),impl_->identity.end(),bytes.begin()+16); Put(bytes,48,size,8);
         const auto digest=Sha256(std::span(bytes).subspan(kHeaderBytes)); std::copy(digest.begin(),digest.end(),bytes.begin()+56);
+        CacheDuration write_timing(impl_->stats.capture_timings, impl_->stats.cache_write_ns);
         std::error_code error; std::filesystem::create_directories(impl_->file.parent_path(),error);
         if(error) { impl_->IoFailure(DWORD(error.value())); return Failure(ErrorCode::TaskFailed,"Create pipeline cache directory: "+error.message()); }
         static std::atomic<std::uint64_t> sequence{};

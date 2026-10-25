@@ -1,3 +1,4 @@
+#include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/fixed_step_clock.hpp>
@@ -652,6 +653,7 @@ int main(int argc, char **argv)
     hs::ApplicationConfig config;
     config.smoke = true;
     config.visible = spec.mode == hs::ExperimentMode::PresentPerformance;
+    config.capture_diagnostics = config.visible;
     config.vsync = false;
     config.frame_cap = 0;
     config.validation = true;

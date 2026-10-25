@@ -4,12 +4,14 @@
 #include <hs/core/frame_identity.hpp>
 #include <hs/core/graphics_settings_request.hpp>
 #include <hs/renderer/capture_request.hpp>
+#include <hs/renderer/hero_work.hpp>
 #include <hs/renderer/vfx_light_input.hpp>
 #include <hs/renderer/vfx_distortion_input.hpp>
 #include <hs/renderer/vfx_decal_input.hpp>
 #include <hs/renderer/vfx_owned_mesh.hpp>
 #include <hs/renderer/vfx_fresnel_input.hpp>
 #include <hs/renderer/vfx_ribbon_input.hpp>
+#include <hs/renderer/vfx_spawn_command.hpp>
 
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/graphics_settings.hpp>
@@ -36,6 +38,7 @@
 
 namespace hs
 {
+namespace render_data { struct StaticShadowArchiveDescription; }
 struct RenderFrameInput;
 struct ViewId;
 
@@ -56,13 +59,6 @@ struct RendererDisplayOutput
 // Native output IDs match the display query: dxgi:<adapter LUID high/low as
 // 16 hex digits>:<UTF-8 DXGI DeviceName>. No OS display/HDR mode is changed.
 [[nodiscard]] Result EnumerateRendererDisplays(std::vector<RendererDisplayOutput> &outputs);
-
-struct ParticleSpriteBinding
-{
-    ParticleSprite sprite{};
-    std::uint8_t frame_columns{1};
-    std::uint8_t frame_rows{1};
-};
 
 struct VfxGroundSpawnInput
 {
@@ -182,6 +178,14 @@ struct RendererLightingStatus
     {
         std::uint64_t requested_bytes{}, admitted_bytes{};
         std::uint32_t physical_pages{};
+        bool baked_active{};
+        std::uint32_t baked_pages{};
+        std::uint64_t baked_staging_bytes{};
+        // Current CPU preparation policy, not a GPU-completed coverage receipt.
+        bool cpu_plan_prepared{}, csm_required{true};
+        std::uint32_t guarantee_reason_bits{}, required_coarse_pages{}, maximum_coarse_commands{};
+        std::uint64_t coarse_command_total{};
+        std::uint32_t command_capacity{};
     } shadow_cache;
 };
 
@@ -209,16 +213,93 @@ struct RendererPsoCacheStats
     std::uint64_t root_registrations{}, key_failures{}, loaded_bytes{}, serialized_bytes{};
     bool initialized{}, library_supported{}, mesh_library_supported{}, persistence_enabled{};
     std::int32_t last_cache_hresult{}, last_io_error{};
+    std::uint64_t key_build_ns{}, key_build_max_ns{}, library_load_ns{}, library_load_max_ns{},
+        native_create_ns{}, native_create_max_ns{}, library_store_ns{}, library_store_max_ns{},
+        serialize_ns{}, cache_write_ns{}, mutex_wait_ns{}, mutex_wait_max_ns{};
+    bool capture_timings{};
 };
 
-struct RendererVfxSpriteBindings
+// Capture-only Initialize wall intervals. Steps are sequential call boundaries;
+// operations are nested subsets, including overlaps. Neither measures driver/GPU busy time.
+enum class RendererStartupStep : std::uint8_t
 {
-    ParticleSpriteBinding bleed_status_sprite, burn_status_sprite, slow_status_sprite,
-        mark_status_sprite, trap_sprite, fire_area_sprite;
+    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, HeroTransparency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, SceneGeometry, BrixelizerGi, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
+};
+inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupStep::Count)> kRendererStartupStepNames{
+    "quality_profiles",
+    "configuration",
+    "device",
+    "material_surface_profile",
+    "adaptive_material_policies",
+    "transient_pools",
+    "swapchain_targets",
+    "depth_shadow",
+    "ui_texture",
+    "post_process_targets",
+    "main_pipeline",
+    "character_geometry_animation",
+    "character_textures",
+    "environment_textures",
+    "environment_brdf_lut",
+    "environment_brdf_descriptors",
+    "material_parameters",
+    "environment_meshes",
+    "hardware_texture_streaming",
+    "presentation_guides",
+    "cluster_resources",
+    "virtual_shadows",
+    "additional_shadows",
+    "adaptive_shading",
+    "ambient_occlusion",
+    "surface_lighting",
+    "hero_transparency",
+    "lighting_probe",
+    "ltc_lut",
+    "screen_overlay",
+    "hdr_post",
+    "scene_geometry",
+    "brixelizer_gi",
+    "light_list",
+    "volumetrics",
+    "local_probes",
+    "reconstruction_guides",
+    "devtools",
+    "initial_graphics_settings"
+};
+enum class RendererStartupOperation : std::uint8_t
+{
+    CheckedBinaryRead, Sha256, PackageDecodeValidate, GeometryPrepare, AnimationPrepare, NativeResourceAllocation, DescriptorWrite, UploadSubmit, GpuCompletionAdmission, GpuFenceWait, HostUploadPack, Count
+};
+inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupOperation::Count)> kRendererStartupOperationNames{
+    "checked_binary_read",
+    "sha256",
+    "package_decode_validate",
+    "geometry_prepare",
+    "animation_prepare",
+    "native_resource_allocation",
+    "descriptor_write",
+    "upload_submit",
+    "gpu_completion_admission",
+    "gpu_fence_wait",
+    "host_upload_pack"
+};
+struct RendererStartupSample
+{
+    std::uint64_t nanoseconds{}, calls{};
+};
+struct RendererStartupTimings
+{
+    bool captured{}, completed{};
+    std::uint64_t begin_qpc{}, end_qpc{}, qpc_frequency{}, total_ns{};
+    std::array<RendererStartupSample, kRendererStartupStepNames.size()> steps{};
+    std::array<RendererStartupSample, kRendererStartupOperationNames.size()> operations{};
 };
 
 struct RendererConfig
 {
+    // Initialize borrows bytes only until DirectWrite has copied them.
+    std::span<const std::byte> font_bytes;
+
     void *window{};
     std::uint32_t width{1280};
     std::uint32_t height{720};
@@ -227,6 +308,9 @@ struct RendererConfig
     bool gpu_validation{};
     // Capture-only completed timing stream; ordinary rendering retains only the latest sample.
     bool capture_timing_stream{};
+    // Intrusive per-contributor native queries/readbacks. Keep false for normal A/B.
+    bool capture_hero_work{};
+    HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
     bool vsync{true};
     bool bloom{true};
     bool outline{true};
@@ -347,6 +431,15 @@ struct RendererCpuTimings
     // Do not add these values to the outer stage totals.
     std::uint64_t graph_prepare_validation_us{}, graph_prepare_info_key_us{};
     std::uint64_t graph_prepare_compile_us{}, graph_prepare_transient_us{};
+    // Capture-only nested wall intervals; do not add to the outer stage totals.
+    // The first three belong to scene_prepare_us; the rest to constants_upload_us.
+    std::uint64_t retained_vfx_us{}, ribbon_prepare_us{}, particle_spawn_prepare_us{};
+    std::uint64_t typed_vfx_upload_prepare_us{}, particle_upload_prepare_us{}, local_vfx_prepare_us{};
+    std::uint64_t palette_prepare_us{}, skin_prepare_us{}, scene_reconcile_us{}, scene_gpu_prepare_us{};
+    // Capture-only ribbon children; thread CPU is kernel+user, not scheduler-ready time.
+    std::uint64_t ribbon_state_us{}, ribbon_wait_us{}, ribbon_allocation_us{};
+    std::uint64_t ribbon_replacement_count{}, ribbon_allocation_bytes{}, ribbon_prepare_thread_cpu_us{};
+    bool ribbon_prepare_thread_cpu_valid{};
 };
 
 struct RendererFrameResult
@@ -418,6 +511,8 @@ struct GpuPassTiming
     std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
     std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
     bool cpu_record_valid{}, cpu_provider_submit_valid{};
+    std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
+    bool cpu_callback_valid{};
 };
 
 struct GpuPassTimings
@@ -522,6 +617,11 @@ struct RendererDiagnosticsPass
     RenderQueue queue{};
     bool measured{}, clock_calibrated{}, name_truncated{};
     std::uint64_t nanoseconds{}, begin_ticks{}, end_ticks{}, timestamp_frequency{};
+    std::uint64_t cpu_qpc_frequency{};
+    std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
+    std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
+    std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
+    bool cpu_record_valid{}, cpu_callback_valid{}, cpu_provider_submit_valid{};
     // Aligned passes use CPU QPC and a shared origin. Otherwise offsets are
     // relative to the first timestamp in this queue, with no cross-queue claim.
     double begin_ms{}, end_ms{};
@@ -608,6 +708,14 @@ class D3D12Renderer
     [[nodiscard]] RenderViewInput MainViewInput(const CameraView &) const;
     [[nodiscard]] Result Render(const RenderFrameInput &, RendererFrameResult &);
     [[nodiscard]] Result Capture(const CaptureRequest &);
+    // Offline and synchronous; Initialize is sufficient without a Render call.
+    // First publication policy: describe all three levels, bake only coarse level 2.
+    // Bounded GPU chunks; top-down guarded tiles arrive synchronously after completion.
+    // Use coordinates, not emission order, to index tiles; each span lasts only for its callback.
+    [[nodiscard]] Result BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
+        const LightView &light,
+        const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
+        const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
     [[nodiscard]] Result ReleaseView(ViewId);
 
     [[nodiscard]] Result Shutdown();
@@ -624,6 +732,9 @@ class D3D12Renderer
     // Both replace output, sort by completed frame/view, and explicitly fail on bounded-stream overflow.
     [[nodiscard]] Result ConsumeCompletedGpuPassTimings(std::vector<GpuPassTimings> &output);
     [[nodiscard]] Result DrainGpuPassTimings(std::vector<GpuPassTimings> &output);
+    [[nodiscard]] Result ConsumeCompletedHeroWork(std::vector<RendererHeroWorkSample> &output);
+    [[nodiscard]] Result DrainHeroWork(std::vector<RendererHeroWorkSample> &output);
+    [[nodiscard]] RendererHeroWorkStatus HeroWorkStatus() const;
     // Cached latest rendered view; reference remains valid until the next renderer mutation.
     [[nodiscard]] const RendererDiagnosticsFrame &LastRenderedFrameDiagnostics() const noexcept;
     [[nodiscard]] RendererQueueStats LastQueueStats() const noexcept;
@@ -643,6 +754,7 @@ class D3D12Renderer
     [[nodiscard]] RendererTextureProductStatus GetTextureStreamingStatus(std::string_view logical_id) const noexcept;
     [[nodiscard]] std::vector<RendererCharacterAnimationClip> GetCharacterAnimationClips() const;
     [[nodiscard]] RendererPsoCacheStats GetPipelineCacheStats() const;
+    [[nodiscard]] RendererStartupTimings GetStartupTimings() const noexcept;
     // Call on the renderer owner thread; the returned bounded value owns its data.
     [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics() const;
 

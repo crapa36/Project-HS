@@ -1,7 +1,10 @@
 #include <hs/runtime/audio_engine.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
-#include <hs/core/process_info.hpp>
+#include <hs/core/shipped_content_owner.hpp>
+#include "audio_catalog.hpp"
+#include "audio_native.hpp"
+#include "runtime_diagnostics.hpp"
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -13,21 +16,26 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <limits>
-#include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
-#include <nlohmann/json.hpp>
+
 
 namespace hs
 {
+using namespace audio_detail;
 namespace
 {
+
+std::uint64_t AudioQpc() noexcept
+{
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return static_cast<std::uint64_t>(value.QuadPart);
+}
 
 [[nodiscard]] float ClampVolume(float value) noexcept
 {
@@ -61,189 +69,6 @@ namespace
     return bus == AudioBus::Bgm || bus == AudioBus::Sfx;
 }
 
-[[nodiscard]] bool IsArrowImpact(std::string_view id) noexcept
-{
-    return id.starts_with("audio.common.arrow_impact") ||
-           id == "audio.skill.basic.impact" ||
-           id == "audio.skill.piercing.pierce" ||
-           id == "audio.skill.charged.hit" ||
-           id == "audio.skill.ricochet.hit" ||
-           id == "audio.skill.arrow_rain.impact";
-}
-
-using Json = nlohmann::json;
-
-struct AudioSample
-{
-    std::filesystem::path path;
-    std::vector<std::byte> bytes;
-    WAVEFORMATEX format{};
-    std::uint64_t data_offset{};
-    std::uint64_t data_size{};
-    bool payload_loaded{};
-};
-
-struct AudioCue
-{
-    AssetId id{};
-    std::vector<std::shared_ptr<AudioSample>> files;
-    AudioBus bus{AudioBus::Sfx};
-    AudioPriority priority{AudioPriority::Other};
-    bool spatial{};
-    bool preload{};
-    bool arrow_impact_family{};
-    bool loop{};
-    std::uint32_t max_simultaneous{1};
-    std::uint32_t retrigger_ms{};
-};
-
-[[nodiscard]] std::uint16_t U16(const std::vector<std::byte> &b, std::size_t p) noexcept
-{
-    return static_cast<std::uint16_t>(std::to_integer<unsigned>(b[p]) |
-                                      (std::to_integer<unsigned>(b[p + 1]) << 8));
-}
-[[nodiscard]] std::uint32_t U32(const std::vector<std::byte> &b, std::size_t p) noexcept
-{
-    return static_cast<std::uint32_t>(std::to_integer<unsigned>(b[p]) |
-                                      (std::to_integer<unsigned>(b[p + 1]) << 8) |
-                                      (std::to_integer<unsigned>(b[p + 2]) << 16) |
-                                      (std::to_integer<unsigned>(b[p + 3]) << 24));
-}
-
-[[nodiscard]] std::uint16_t ReadU16(const std::byte *bytes) noexcept
-{
-    return static_cast<std::uint16_t>(std::to_integer<unsigned>(bytes[0]) |
-                                      (std::to_integer<unsigned>(bytes[1]) << 8));
-}
-
-[[nodiscard]] std::uint32_t ReadU32(const std::byte *bytes) noexcept
-{
-    return static_cast<std::uint32_t>(std::to_integer<unsigned>(bytes[0]) |
-                                      (std::to_integer<unsigned>(bytes[1]) << 8) |
-                                      (std::to_integer<unsigned>(bytes[2]) << 16) |
-                                      (std::to_integer<unsigned>(bytes[3]) << 24));
-}
-
-[[nodiscard]] Result LoadWaveHeader(const std::filesystem::path &path,
-                                     std::shared_ptr<AudioSample> &out)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input) return Result::Failure(ErrorCode::TaskFailed, "audio", "WAV open failed");
-    input.seekg(0, std::ios::end);
-    const auto length = input.tellg();
-    if (length < 12 || static_cast<std::uint64_t>(length) > std::numeric_limits<std::uint32_t>::max() + 8ull)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV size invalid");
-    const auto file_size = static_cast<std::uint64_t>(length);
-    std::array<std::byte, 12> riff{};
-    input.seekg(0);
-    input.read(reinterpret_cast<char *>(riff.data()), static_cast<std::streamsize>(riff.size()));
-    if (!input || std::memcmp(riff.data(), "RIFF", 4) != 0 ||
-        std::memcmp(riff.data() + 8, "WAVE", 4) != 0)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV RIFF header invalid");
-    if (ReadU32(riff.data() + 4) != file_size - 8)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV RIFF size invalid");
-
-    std::uint64_t cursor = 12;
-    std::vector<std::byte> fmt;
-    std::uint64_t data_offset{};
-    std::uint64_t data_size{};
-    while (cursor + 8 <= file_size)
-    {
-        input.seekg(static_cast<std::streamoff>(cursor));
-        std::array<std::byte, 8> chunk_header{};
-        input.read(reinterpret_cast<char *>(chunk_header.data()),
-                   static_cast<std::streamsize>(chunk_header.size()));
-        if (!input)
-            return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV chunk header truncated");
-        const auto chunk_size = static_cast<std::uint64_t>(ReadU32(chunk_header.data() + 4));
-        const auto begin = cursor + 8;
-        if (chunk_size > file_size - begin)
-            return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV chunk exceeds file");
-        if (std::memcmp(chunk_header.data(), "fmt ", 4) == 0)
-        {
-            if (chunk_size > 4096)
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV fmt chunk too large");
-            fmt.resize(static_cast<std::size_t>(chunk_size));
-            input.read(reinterpret_cast<char *>(fmt.data()),
-                       static_cast<std::streamsize>(fmt.size()));
-        }
-        else if (std::memcmp(chunk_header.data(), "data", 4) == 0 && data_size == 0)
-        {
-            data_offset = begin;
-            data_size = chunk_size;
-        }
-        const auto padded_end = begin + chunk_size + (chunk_size & 1u);
-        if (padded_end > file_size)
-            return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV chunk padding exceeds file");
-        cursor = padded_end;
-    }
-    if (cursor != file_size)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV chunk table truncated");
-    if (fmt.size() < 16 || data_size == 0)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV fmt/data missing");
-    const auto channels = U16(fmt, 2);
-    const auto sample_rate = U32(fmt, 4);
-    const auto block_align = U16(fmt, 12);
-    const auto bits = U16(fmt, 14);
-    if (U16(fmt, 0) != WAVE_FORMAT_PCM || (channels != 1 && channels != 2) ||
-        sample_rate != 48000 || bits != 24 || block_align != channels * 3 ||
-        U32(fmt, 8) != sample_rate * block_align || data_size % block_align != 0)
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV must be PCM 48kHz 24-bit mono/stereo");
-    out = std::make_shared<AudioSample>();
-    out->path = path;
-    out->data_offset = data_offset;
-    out->data_size = data_size;
-    out->format = {WAVE_FORMAT_PCM, channels, sample_rate, sample_rate * block_align,
-                   block_align, bits, 0};
-    return Result::Success();
-}
-
-[[nodiscard]] Result LoadWavePayload(AudioSample &sample)
-{
-    if (sample.payload_loaded) return Result::Success();
-    if (sample.data_size > std::numeric_limits<std::size_t>::max() ||
-        sample.data_size > std::numeric_limits<UINT32>::max())
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", "WAV payload too large");
-    std::ifstream input(sample.path, std::ios::binary);
-    if (!input) return Result::Failure(ErrorCode::TaskFailed, "audio", "WAV open failed");
-    input.seekg(static_cast<std::streamoff>(sample.data_offset));
-    sample.bytes.resize(static_cast<std::size_t>(sample.data_size));
-    input.read(reinterpret_cast<char *>(sample.bytes.data()),
-               static_cast<std::streamsize>(sample.bytes.size()));
-    if (!input)
-    {
-        sample.bytes.clear();
-        return Result::Failure(ErrorCode::TaskFailed, "audio", "WAV payload read failed");
-    }
-    sample.payload_loaded = true;
-    return Result::Success();
-}
-
-[[nodiscard]] AudioBus ParseBus(const std::string &value) noexcept
-{
-    if (value == "BGM") return AudioBus::Bgm;
-    if (value == "UI") return AudioBus::Ui;
-    return AudioBus::Sfx;
-}
-[[nodiscard]] AudioPriority ParsePriority(const std::string &value) noexcept
-{
-    if (value == "UI") return AudioPriority::Ui;
-    if (value == "BossTelegraph") return AudioPriority::BossWarning;
-    if (value == "Player") return AudioPriority::Player;
-    if (value == "Enemy") return AudioPriority::Enemy;
-    return AudioPriority::Other;
-}
-
-[[nodiscard]] bool IsKnownBus(const std::string &value) noexcept
-{
-    return value == "BGM" || value == "SFX" || value == "UI";
-}
-[[nodiscard]] bool IsKnownPriority(const std::string &value) noexcept
-{
-    return value == "Other" || value == "Enemy" || value == "Player" ||
-           value == "BossTelegraph" || value == "UI";
-}
-
 // Gameplay positions use meters. The default X3DAudio curve has no attenuation
 // through CurveDistanceScaler, then falls off as scaler / distance.
 [[nodiscard]] float DistanceScaler(AudioPriority priority) noexcept
@@ -273,13 +98,18 @@ struct AudioCue
 struct AudioEngine::Impl
 {
     SelectedGeneration selected_generation;
+    struct CuePlayback
+    {
+        std::uint64_t last_play_ms{};
+        bool has_played{}, prepared{}, read_failure_reported{};
+    };
     struct ActiveVoice
     {
         IXAudio2SourceVoice *voice{};
         AssetId cue{};
         AudioBus bus{AudioBus::Sfx};
         AudioPriority priority{AudioPriority::Other};
-        std::shared_ptr<AudioSample> sample;
+        AudioSample *sample{};
         Float3 position{};
         bool spatial{};
         bool arrow_impact_family{};
@@ -287,7 +117,9 @@ struct AudioEngine::Impl
         std::uint32_t aggregation_count{1};
         std::uint64_t started_ms{};
         std::uint64_t serial{};
-        bool queued{};
+        bool queued{}, releasing{};
+        std::uint64_t session_id{};
+        AudioBufferCompletion *completion{};
     };
 
     Microsoft::WRL::ComPtr<IXAudio2> engine;
@@ -306,9 +138,162 @@ struct AudioEngine::Impl
     float ui_volume{1.0f};
     bool owns_com{};
     std::uint32_t device_channels{2};
-    std::uint64_t voice_serial{};
-    std::unordered_map<std::uint64_t, AudioCue> cues;
-    std::unordered_map<std::uint64_t, std::uint64_t> last_play_ms;
+    std::uint64_t voice_serial{}, device_epoch{}, buffer_sequence{};
+    std::array<std::uint64_t, AudioEngine::kMaximumSourceVoices> voice_generations{};
+    std::array<std::array<AudioBufferCompletion, 2>, AudioEngine::kMaximumSourceVoices> completions{};
+    std::span<const AudioCueRow> cues;
+    std::vector<AudioCueRow> developer_cues;
+    std::vector<std::uint32_t> transition_cues;
+    std::unique_ptr<CuePlayback[]> playback;
+    std::unique_ptr<AudioSample[]> samples;
+    std::vector<std::byte> resident_pcm;
+    std::size_t sample_count{};
+    const ShippedContentOwner *content{};
+    std::mutex read_mutex;
+    std::condition_variable read_ready;
+    std::deque<AudioSample *> reads;
+    std::thread reader;
+    bool stopping{};
+    std::array<float, XAUDIO2_MAX_AUDIO_CHANNELS> spatial_matrix{};
+    bool capture_timings{}; // Configured before the reader is started.
+    void (*wake_main)(void *) noexcept{};
+    void *wake_context{};
+    std::array<runtime_detail::DiagnosticSample, kAudioWorkNames.size()> work{};
+    std::atomic<std::uint64_t> reader_jobs{}, reader_failures{}, reader_bytes{};
+    std::atomic<std::uint64_t> reader_read_ticks{}, reader_queue_ticks{}, reader_request_ready_ticks{};
+    AudioWorkTimings native_timings{};
+    runtime_detail::DiagnosticClock Clock() const noexcept { return capture_timings ? AudioQpc : nullptr; }
+    auto &Work(AudioWorkId id) noexcept { return work[static_cast<std::size_t>(id)]; }
+
+    void Failure(NativeAudioResult result, bool cleanup = false) noexcept
+    {
+        if (result.Succeeded()) return;
+        if (cleanup)
+        {
+            if (status.native_cleanup_operation == AudioNativeOperation::None)
+            {
+                status.native_cleanup_error = static_cast<std::uint32_t>(result.error);
+                status.native_cleanup_operation = result.operation;
+            }
+        }
+        else if (status.native_operation == AudioNativeOperation::None)
+        {
+            status.native_error = static_cast<std::uint32_t>(result.error);
+            status.native_operation = result.operation;
+        }
+    }
+    NativeAudioResult Retire(ActiveVoice &active) noexcept
+    {
+        const auto *completion = active.completion;
+        DestroyOwnedVoice(active.voice, active.completion);
+        const NativeAudioResult result{AudioNativeOperation::Callback,
+            completion ? completion->native_error.load(std::memory_order_acquire) : S_OK};
+        Failure(result);
+        active = {};
+        return result;
+    }
+    bool Observe(ActiveVoice &active) noexcept
+    {
+        if (!active.voice) return false;
+        if (active.completion)
+        {
+            const auto error = active.completion->native_error.load(std::memory_order_acquire);
+            if (FAILED(error))
+            {
+                Failure({AudioNativeOperation::Callback, error}); Retire(active); return false;
+            }
+        }
+        XAUDIO2_VOICE_STATE state{};
+        active.voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
+        active.queued = state.BuffersQueued != 0;
+        if (!active.queued) active.releasing = false;
+        return active.queued;
+    }
+
+    const AudioCueRow *Find(AssetId id) const noexcept
+    {
+        const auto it = std::lower_bound(cues.begin(), cues.end(), id.value,
+            [](const AudioCueRow &cue, std::uint64_t key) { return cue.id.value < key; });
+        return it != cues.end() && it->id.value == id.value ? &*it : nullptr;
+    }
+    CuePlayback &State(const AudioCueRow &cue) noexcept
+    {
+        return playback[static_cast<std::size_t>(&cue - cues.data())];
+    }
+    Result Read(AudioSample &sample)
+    {
+        if (sample.read_developer) return sample.read_developer(sample);
+        sample.pcm = {};
+        sample.bytes.resize(static_cast<std::size_t>(sample.data_size));
+        auto result = content->ReadVerified(sample.data_offset, sample.bytes, sample.chunk->digest);
+        if (result) sample.pcm = sample.bytes;
+        return result;
+    }
+    void RunReader() noexcept
+    {
+        for (;;)
+        {
+            AudioSample *sample{};
+            {
+                std::unique_lock lock(read_mutex);
+                read_ready.wait(lock, [&] { return stopping || !reads.empty(); });
+                if (stopping) return;
+                sample = reads.front(); reads.pop_front();
+            }
+            const auto begin = capture_timings ? AudioQpc() : 0;
+            bool success = false;
+            try { success = Read(*sample).Succeeded(); } catch (...) {}
+            if (!success) sample->bytes.clear();
+            if (capture_timings)
+            {
+                const auto end = AudioQpc();
+                reader_read_ticks.fetch_add(end - begin, std::memory_order_relaxed);
+                reader_queue_ticks.fetch_add(begin - sample->requested_qpc, std::memory_order_relaxed);
+                reader_request_ready_ticks.fetch_add(end - sample->requested_qpc, std::memory_order_relaxed);
+                reader_bytes.fetch_add(success ? sample->data_size : 0, std::memory_order_relaxed);
+                reader_failures.fetch_add(!success, std::memory_order_relaxed);
+                reader_jobs.fetch_add(1, std::memory_order_release);
+            }
+            sample->state.store(success ? SampleState::Ready : SampleState::Failed, std::memory_order_release);
+            if (wake_main) wake_main(wake_context);
+        }
+    }
+    void EvictStopped() noexcept
+    {
+        runtime_detail::DiagnosticScope scope(Work(AudioWorkId::Evict), Clock());
+        for (const auto index : transition_cues)
+        {
+            const auto &cue = cues[index];
+            auto &playing = State(cue);
+            if (playing.prepared) continue;
+            bool owned = false, pinned = false;
+            for (std::size_t i = 0; i < cue.sample_count; ++i)
+            {
+                const auto &sample = samples[cue.first_sample + i];
+                const auto state = sample.state.load(std::memory_order_acquire);
+                owned |= state == SampleState::Ready || state == SampleState::Failed;
+                pinned |= sample.native_pins.load(std::memory_order_acquire) != 0;
+            }
+            if (!owned || pinned) continue;
+            // Native completion was observed by Reclaim. Destroy idle voices
+            // before releasing the bytes they previously borrowed.
+            for (auto &voice : active_voices)
+                if (voice.voice && voice.cue.value == cue.id.value)
+                { Retire(voice); }
+            for (std::size_t i = 0; i < cue.sample_count; ++i)
+            {
+                auto *sample = &samples[cue.first_sample + i];
+                const auto state = sample->state.load(std::memory_order_acquire);
+                if (state == SampleState::Ready || state == SampleState::Failed)
+                {
+                    sample->pcm = {};
+                    std::vector<std::byte>().swap(sample->bytes);
+                    sample->state.store(SampleState::Empty, std::memory_order_release);
+                }
+            }
+            playing.read_failure_reported = false;
+        }
+    }
 
     void ReleaseNative() noexcept
     {
@@ -316,8 +301,7 @@ struct AudioEngine::Impl
         {
             if (active.voice)
             {
-                active.voice->DestroyVoice();
-                active = {};
+                Retire(active);
             }
         }
         if (ui_bus)
@@ -356,14 +340,11 @@ struct AudioEngine::Impl
 
     void Reclaim() noexcept
     {
+        runtime_detail::DiagnosticScope scope(Work(AudioWorkId::Reclaim), Clock());
         status.active_source_voices = 0;
         for (auto &active : active_voices)
         {
-            if (!active.voice) continue;
-            XAUDIO2_VOICE_STATE state{};
-            active.voice->GetState(&state, XAUDIO2_VOICE_NOSAMPLESPLAYED);
-            active.queued = state.BuffersQueued != 0;
-            status.active_source_voices += active.queued;
+            status.active_source_voices += Observe(active);
         }
     }
 
@@ -377,22 +358,16 @@ struct AudioEngine::Impl
     void ApplyVolumes() noexcept
     {
         status.effective_master_volume = status.background_muted ? 0.0f : master_volume;
-        if (master_bus)
-        {
-            (void)master_bus->SetVolume(status.effective_master_volume);
-        }
-        if (bgm_bus)
-        {
-            (void)bgm_bus->SetVolume(status.combat_paused ? 0.0f : bgm_volume);
-        }
-        if (sfx_bus)
-        {
-            (void)sfx_bus->SetVolume(status.combat_paused ? 0.0f : sfx_volume);
-        }
-        if (ui_bus)
-        {
-            (void)ui_bus->SetVolume(ui_volume);
-        }
+        const auto apply = [&](IXAudio2SubmixVoice *bus, float volume) {
+            if (!bus) return true;
+            const auto result = bus->SetVolume(volume);
+            if (SUCCEEDED(result)) return true;
+            Failure({AudioNativeOperation::Volume, result}); EnterSilent(result); return false;
+        };
+        if (!apply(master_bus, status.effective_master_volume)) return;
+        if (!apply(bgm_bus, status.combat_paused ? 0.0f : bgm_volume)) return;
+        if (!apply(sfx_bus, status.combat_paused ? 0.0f : sfx_volume)) return;
+        (void)apply(ui_bus, ui_volume);
     }
 };
 
@@ -405,131 +380,154 @@ AudioEngine::~AudioEngine()
     Shutdown();
 }
 
-Result AudioEngine::Initialize(const SettingsData &settings)
+void AudioEngine::RetainGeneration(SelectedGeneration &&generation)
 {
-    SelectedGeneration generation;
-    if (auto loaded = LoadSelectedGeneration(
-            CurrentExecutableDirectory() / "GenerationState/runtime-full.json",
-            generation); !loaded)
-        return loaded;
-    const auto initialized = Initialize(settings, generation.product_paths);
-    if (initialized)
-        impl_->selected_generation = std::move(generation);
-    return initialized;
+    impl_->selected_generation = std::move(generation);
 }
 
-Result AudioEngine::Initialize(const SettingsData &settings,
-                               const std::filesystem::path &audio_directory)
+Result AudioEngine::InitializePlayback(const SettingsData &settings)
 {
-    return InitializeResolved(settings, [&](std::string_view logical_id,
-                                            std::filesystem::path &path) {
-        path = audio_directory / std::string(logical_id.substr(6));
-        return Result::Success();
-    });
-}
-
-Result AudioEngine::Initialize(
-    const SettingsData &settings,
-    const std::unordered_map<std::string, std::filesystem::path> &product_paths)
-{
-    return InitializeResolved(settings, [&](std::string_view logical_id,
-                                            std::filesystem::path &path) {
-        const auto found = product_paths.find(std::string(logical_id));
-        if (found == product_paths.end())
-            return Result::Failure(ErrorCode::TaskFailed, "audio",
-                                   "audio product missing: " + std::string(logical_id));
-        if (!found->second.is_absolute())
-            return Result::Failure(ErrorCode::InvalidArgument, "audio",
-                                   "audio product path is not absolute: " + std::string(logical_id));
-        path = found->second;
-        return Result::Success();
-    });
-}
-
-Result AudioEngine::InitializeResolved(const SettingsData &settings,
-                                       const ResolveAudioPath &resolve_path)
-{
-    Shutdown();
-
+    impl_->status.loaded_cues = static_cast<std::uint32_t>(impl_->cues.size());
+    for (const auto &cue : impl_->cues)
+        for (std::size_t i = 0; i < cue.sample_count; ++i)
+            impl_->samples[cue.first_sample + i].preload = cue.preload;
     try
     {
-        std::filesystem::path catalog_path;
-        if (auto resolved = resolve_path("audio/audio_cues.json", catalog_path); !resolved)
-            return resolved;
-        std::ifstream catalog_file(catalog_path);
-        if (!catalog_file)
-            return Result::Failure(ErrorCode::TaskFailed, "audio", "audio catalog open failed");
-        const auto catalog = Json::parse(catalog_file);
-        if (!catalog.is_object() || !catalog.contains("entries") || !catalog.at("entries").is_array())
-            return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio catalog entries invalid");
-        std::unordered_set<std::string> cue_names;
-        std::unordered_set<std::uint64_t> cue_hashes;
-        std::unordered_set<std::string> file_names;
-        for (const auto &item : catalog.at("entries"))
-        {
-            const auto id = item.at("id").get<std::string>();
-            const auto asset_name = item.at("asset_id").get<std::string>();
-            if (!cue_names.insert(id).second ||
-                (asset_name != id && !cue_names.insert(asset_name).second))
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "duplicate audio cue name");
-            const auto hash = MakeAssetId(asset_name).value;
-            if (hash == 0 || !cue_hashes.insert(hash).second)
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "duplicate or empty audio cue id");
-            AudioCue cue;
-            cue.id = {hash};
-            const auto submix = item.at("submix").get<std::string>();
-            const auto priority_name = item.at("priority").get<std::string>();
-            if (!IsKnownBus(submix) || !IsKnownPriority(priority_name) ||
-                item.at("encoding").get<std::string>() != "PCM" ||
-                item.at("streaming").get<bool>())
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "unsupported audio catalog value");
-            cue.bus = ParseBus(submix);
-            cue.priority = ParsePriority(priority_name);
-            cue.spatial = item.at("spatial").get<bool>();
-            cue.preload = item.at("preload").get<bool>();
-            cue.arrow_impact_family = IsArrowImpact(asset_name);
-            cue.loop = item.at("loop").get<bool>();
-            cue.max_simultaneous = std::max(1u, item.at("max_simultaneous").get<std::uint32_t>());
-            cue.retrigger_ms = item.at("minimum_retrigger_ms").get<std::uint32_t>();
-            const auto &files = item.at("files");
-            if (!files.is_array() || files.empty())
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio cue has no files");
-            for (const auto &file : files)
-            {
-                const auto name = file.get<std::string>();
-                const std::filesystem::path relative{name};
-                if (name.empty() || relative.is_absolute() || relative.has_parent_path() ||
-                    relative.filename().string() != name || relative.extension() != ".wav")
-                    return Result::Failure(ErrorCode::InvalidArgument, "audio", "unsafe audio filename");
-                if (!file_names.insert(name).second)
-                    return Result::Failure(ErrorCode::InvalidArgument, "audio", "duplicate audio filename");
-                std::filesystem::path wave_path;
-                if (auto resolved = resolve_path("audio/" + name, wave_path); !resolved)
-                    return resolved;
-                std::shared_ptr<AudioSample> sample;
-                if (auto loaded = LoadWaveHeader(wave_path, sample); !loaded)
-                    return loaded;
-                if (cue.spatial && sample->format.nChannels != 1)
-                    return Result::Failure(ErrorCode::InvalidArgument, "audio", "spatial audio must be mono");
-                if (cue.preload)
-                {
-                    if (auto loaded = LoadWavePayload(*sample); !loaded)
-                        return loaded;
-                    ++impl_->status.loaded_files;
-                }
-                cue.files.push_back(std::move(sample));
-            }
-            impl_->cues.emplace(hash, std::move(cue));
-            ++impl_->status.loaded_cues;
-        }
+        impl_->playback = std::make_unique<Impl::CuePlayback[]>(impl_->cues.size());
+        impl_->transition_cues.clear();
+        for (std::uint32_t i = 0; i < impl_->cues.size(); ++i)
+            if (!impl_->cues[i].preload) impl_->transition_cues.push_back(i);
+        impl_->reader = std::thread([this] { impl_->RunReader(); });
     }
     catch (const std::exception &error)
-    {
-        impl_->cues.clear();
-        impl_->status = {};
-        return Result::Failure(ErrorCode::InvalidArgument, "audio", error.what());
-    }
+    { Shutdown(); return Result::Failure(ErrorCode::TaskFailed, "audio", error.what()); }
+    return InitializeDevice(settings);
+}
 
+Result AudioEngine::InitializePrepared(const SettingsData &settings, DeveloperAudioCatalog catalog)
+{
+    impl_->developer_cues = std::move(catalog.cues);
+    std::ranges::sort(impl_->developer_cues, {}, [](const AudioCueRow &cue) { return cue.id.value; });
+    impl_->cues = impl_->developer_cues;
+    impl_->samples = std::move(catalog.samples);
+    impl_->sample_count = catalog.sample_count;
+    return InitializePlayback(settings);
+}
+
+Result AudioEngine::Initialize(const SettingsData &settings, const AudioImage &image, const ShippedContentOwner &owner)
+{
+    Shutdown();
+    impl_->content = &owner;
+    try
+    {
+        // Shipping rows remain in generated order and storage. Only PCM and
+        // mutable playback state belong to the engine.
+        impl_->cues = image.cues;
+        impl_->sample_count = image.samples.size();
+        impl_->samples = std::make_unique<AudioSample[]>(impl_->sample_count);
+        for (std::size_t i = 0; i < image.samples.size(); ++i)
+        {
+            const auto &range = image.samples[i];
+            auto &sample = impl_->samples[i];
+            sample.data_offset = range.offset; sample.data_size = range.bytes;
+            const auto align = static_cast<WORD>(range.channels * (range.bits_per_sample / 8));
+            sample.format = {WAVE_FORMAT_PCM, range.channels, range.sample_rate,
+                              range.sample_rate * align, align, range.bits_per_sample, 0};
+        }
+        std::size_t resident_bytes{};
+        for (const auto &chunk : image.chunks)
+            if (chunk.preload) resident_bytes += static_cast<std::size_t>(chunk.bytes);
+        impl_->resident_pcm.resize(resident_bytes);
+        // Generated chunks retain contiguous preload reads and separate transition owners.
+        std::size_t resident_offset{};
+        for (const auto &chunk : image.chunks)
+        {
+            for (std::size_t i = 0; i < chunk.sample_count; ++i)
+                impl_->samples[chunk.first_sample + i].chunk = &chunk;
+            if (!chunk.preload) continue;
+            auto pcm = std::span(impl_->resident_pcm).subspan(resident_offset, static_cast<std::size_t>(chunk.bytes));
+            if (auto loaded = owner.ReadVerified(chunk.offset, pcm, chunk.digest); !loaded)
+            { Shutdown(); return loaded; }
+            std::size_t sample_offset{};
+            for (std::size_t i = 0; i < chunk.sample_count; ++i)
+            {
+                auto &sample = impl_->samples[chunk.first_sample + i];
+                sample.pcm = pcm.subspan(sample_offset, static_cast<std::size_t>(sample.data_size));
+                sample_offset += static_cast<std::size_t>(sample.data_size);
+                sample.state.store(SampleState::Ready, std::memory_order_release);
+            }
+            resident_offset += static_cast<std::size_t>(chunk.bytes);
+        }
+        return InitializePlayback(settings);
+    }
+    catch (const std::exception &error)
+    { Shutdown(); return Result::Failure(ErrorCode::TaskFailed, "audio", error.what()); }
+}
+
+bool AudioEngine::PrepareCue(AssetId id) noexcept
+{
+    return RequestCue(id) == AudioCueReadiness::Ready;
+}
+
+AudioCueReadiness AudioEngine::RequestCue(AssetId id) noexcept
+{
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::PrepareCue), impl_->Clock());
+    auto *cue = impl_->Find(id);
+    if (!cue) return AudioCueReadiness::Missing;
+    auto &playing = impl_->State(*cue);
+    playing.prepared = true;
+    bool ready = true, failed = false;
+    try
+    {
+        for (std::size_t i = 0; i < cue->sample_count; ++i)
+        {
+            auto *sample = &impl_->samples[cue->first_sample + i];
+            auto state = sample->state.load(std::memory_order_acquire);
+            failed |= state == SampleState::Failed;
+            if (state == SampleState::Failed && !playing.read_failure_reported)
+            {
+                ++impl_->status.skipped_load_failures;
+                playing.read_failure_reported = true;
+            }
+            if (state == SampleState::Empty)
+            {
+                std::lock_guard lock(impl_->read_mutex);
+                sample->requested_qpc = impl_->capture_timings ? AudioQpc() : 0;
+                impl_->reads.push_back(sample);
+                sample->state.store(SampleState::Queued, std::memory_order_release);
+                impl_->read_ready.notify_one();
+            }
+            ready &= state == SampleState::Ready;
+        }
+    }
+    catch (...) { ++impl_->status.skipped_load_failures; return AudioCueReadiness::Failed; }
+    return failed ? AudioCueReadiness::Failed : ready ? AudioCueReadiness::Ready : AudioCueReadiness::Pending;
+}
+
+AudioCueReadiness AudioEngine::CueReadiness(AssetId id) const noexcept
+{
+    const auto *cue = impl_->Find(id);
+    if (!cue) return AudioCueReadiness::Missing;
+    bool pending = false;
+    for (std::size_t i = 0; i < cue->sample_count; ++i)
+    {
+        const auto state = impl_->samples[cue->first_sample + i].state.load(std::memory_order_acquire);
+        if (state == SampleState::Failed) return AudioCueReadiness::Failed;
+        pending |= state != SampleState::Ready;
+    }
+    return pending ? AudioCueReadiness::Pending : AudioCueReadiness::Ready;
+}
+
+bool AudioEngine::IsTransitionTrack(AssetId id) const noexcept
+{
+    const auto *cue = impl_->Find(id);
+    return cue && cue->bus == AudioBus::Bgm && !cue->preload;
+}
+
+Result AudioEngine::InitializeDevice(const SettingsData &settings)
+{
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::InitializeDevice), impl_->Clock());
+    ++impl_->device_epoch;
     const auto com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(com_result))
     {
@@ -560,6 +558,12 @@ Result AudioEngine::InitializeResolved(const SettingsData &settings,
 
     XAUDIO2_VOICE_DETAILS device_details{};
     impl_->device_voice->GetVoiceDetails(&device_details);
+    if (device_details.InputChannels == 0 || device_details.InputChannels > impl_->spatial_matrix.size())
+    {
+        impl_->EnterSilent(E_INVALIDARG);
+        ApplySettings(settings);
+        return Result::Success();
+    }
     DWORD channel_mask{};
     result = impl_->device_voice->GetChannelMask(&channel_mask);
     if (FAILED(result))
@@ -608,6 +612,7 @@ Result AudioEngine::InitializeResolved(const SettingsData &settings,
     impl_->listener.OrientFront = {0.0f, 0.0f, 1.0f};
     impl_->listener.OrientTop = {0.0f, 1.0f, 0.0f};
     impl_->device_channels = device_details.InputChannels;
+    impl_->native_timings.output_sample_rate = device_details.InputSampleRate;
     impl_->status.device_state = AudioDeviceState::Ready;
     impl_->status.native_error = 0;
     ApplySettings(settings);
@@ -616,9 +621,25 @@ Result AudioEngine::InitializeResolved(const SettingsData &settings,
 
 void AudioEngine::Shutdown() noexcept
 {
+    {
+        std::lock_guard lock(impl_->read_mutex);
+        impl_->stopping = true;
+    }
+    impl_->read_ready.notify_one();
+    // DestroyVoice joins callbacks/native PCM reads while every sample owner is
+    // still alive. An in-flight disk read joins next, before any backing clears.
     impl_->ReleaseNative();
-    impl_->cues.clear();
-    impl_->last_play_ms.clear();
+    if (impl_->reader.joinable()) impl_->reader.join();
+    impl_->reads.clear();
+    impl_->cues = {};
+    impl_->developer_cues.clear();
+    impl_->transition_cues.clear();
+    impl_->playback.reset();
+    impl_->samples.reset();
+    std::vector<std::byte>().swap(impl_->resident_pcm);
+    impl_->sample_count = 0;
+    impl_->content = nullptr;
+    impl_->stopping = false;
     impl_->selected_generation = {};
     impl_->status = {};
 }
@@ -640,201 +661,276 @@ void AudioEngine::SetBackgroundMuted(bool muted) noexcept
     impl_->ApplyVolumes();
 }
 
-void AudioEngine::Play(const PresentationEvent &event) noexcept
+AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t dequeued_qpc) noexcept
 {
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Play), impl_->Clock());
+    runtime_detail::DiagnosticScope admission(impl_->Work(AudioWorkId::Admission), impl_->Clock());
     try
     {
-    if (event.kind != PresentationKind::Audio || event.asset.value == 0)
+    if (event.kind != PresentationKind::Audio || event.asset.value == 0) return AudioPlayResult::Ignored;
+    const auto *cue_ptr = impl_->Find(event.asset);
+    if (!cue_ptr)
     {
-        return;
+        impl_->Reclaim(); ++impl_->status.skipped_missing_cues; return AudioPlayResult::MissingCue;
     }
-    impl_->Reclaim();
-    const auto cue_it = impl_->cues.find(event.asset.value);
-    if (cue_it == impl_->cues.end())
-    {
-        ++impl_->status.skipped_missing_cues;
-        return;
-    }
-    const auto &cue = cue_it->second;
-    const auto now = GetTickCount64();
-    if (const auto previous = impl_->last_play_ms.find(event.asset.value);
-        previous != impl_->last_play_ms.end() && now - previous->second < cue.retrigger_ms)
-    {
-        if (event.asset.value == MakeAssetId("audio.pickup.xp_collect").value)
-            if (const auto active = std::find_if(impl_->active_voices.begin(), impl_->active_voices.end(),
-                                                 [&](const auto &voice) {
-                                                      return voice.voice && voice.queued &&
-                                                             voice.cue.value == event.asset.value;
-                                                 });
-                active != impl_->active_voices.end())
-            {
-                ++active->aggregation_count;
-                (void)active->voice->SetFrequencyRatio(
-                    std::min(1.0f + 0.03f * static_cast<float>(active->aggregation_count - 1), 1.5f));
-            }
-        return;
-    }
-    std::uint32_t same_cue{};
-    for (const auto &active : impl_->active_voices)
-        if (active.voice && active.queued && active.cue.value == event.asset.value) ++same_cue;
-    if (same_cue >= cue.max_simultaneous) return;
-    std::uint32_t same_priority{};
+    const auto &cue = *cue_ptr;
+    auto &playing = impl_->State(cue);
+    Impl::ActiveVoice *free_slot{}, *victim{}, *first_same_cue{};
+    std::uint32_t same_cue{}, same_priority{}, recent_arrow_impacts{};
     std::array<Sequence, 6> recent_arrow_sequences{};
-    std::uint32_t recent_arrow_impacts{};
-    for (const auto &active : impl_->active_voices)
+    struct ArrowCandidate { std::uint64_t started_ms; Sequence sequence; };
+    std::array<ArrowCandidate, kMaximumSourceVoices> arrows;
+    std::size_t arrow_count{};
+    impl_->status.active_source_voices = 0;
+    // Observe native completion and decide admission in the same slot pass.
+    // The shared retrigger/arrow clock is still read after native observations.
+    for (auto &active : impl_->active_voices)
     {
-        if (!active.voice || !active.queued) continue;
+        impl_->status.active_source_voices += impl_->Observe(active);
+        if (active.releasing) continue;
+        if (!active.voice || !active.queued)
+        {
+            if (!free_slot) free_slot = &active;
+            continue;
+        }
+        if (!victim || active.priority < victim->priority ||
+            (active.priority == victim->priority && active.serial < victim->serial))
+            victim = &active;
+        if (active.cue.value == event.asset.value)
+        {
+            ++same_cue;
+            if (!first_same_cue) first_same_cue = &active;
+        }
         if (active.priority == cue.priority) ++same_priority;
-        if (cue.arrow_impact_family && active.arrow_impact_family &&
-            now - active.started_ms < 30 &&
+        if (cue.arrow_impact_family && active.arrow_impact_family)
+            arrows[arrow_count++] = {active.started_ms, active.event_sequence};
+    }
+    const auto now = GetTickCount64();
+    for (std::size_t i = 0; i < arrow_count; ++i)
+    {
+        const auto &arrow = arrows[i];
+        if (now - arrow.started_ms < 30 &&
             recent_arrow_impacts < recent_arrow_sequences.size() &&
             std::find(recent_arrow_sequences.begin(),
                       recent_arrow_sequences.begin() + recent_arrow_impacts,
-                      active.event_sequence) == recent_arrow_sequences.begin() + recent_arrow_impacts)
-        {
-            recent_arrow_sequences[recent_arrow_impacts] = active.event_sequence;
-            ++recent_arrow_impacts;
-        }
+                      arrow.sequence) == recent_arrow_sequences.begin() + recent_arrow_impacts)
+            recent_arrow_sequences[recent_arrow_impacts++] = arrow.sequence;
     }
+    if (playing.has_played && now - playing.last_play_ms < cue.retrigger_ms)
+    {
+        if (event.asset.value == MakeAssetId("audio.pickup.xp_collect").value && first_same_cue)
+        {
+            ++first_same_cue->aggregation_count;
+            const auto pitch = first_same_cue->voice->SetFrequencyRatio(
+                std::min(1.0f + 0.03f * static_cast<float>(first_same_cue->aggregation_count - 1), 1.5f));
+            if (FAILED(pitch))
+            {
+                impl_->Failure({AudioNativeOperation::Frequency, pitch});
+                impl_->Retire(*first_same_cue); --impl_->status.active_source_voices;
+                return AudioPlayResult::NativeFailure;
+            }
+        }
+        return AudioPlayResult::Retriggered;
+    }
+    if (same_cue >= cue.max_simultaneous) return AudioPlayResult::Limited;
     if (same_priority >= PrioritySoftCap(cue.priority) || recent_arrow_impacts >= 6)
     {
         ++impl_->status.skipped_voice_limits;
-        return;
+        return AudioPlayResult::Limited;
     }
-    const auto index = cue.files.empty() ? 0u : static_cast<std::size_t>(event.sequence % cue.files.size());
-    const auto &sample = cue.files[index];
-    if (!sample->payload_loaded)
-    {
-        if (auto loaded = LoadWavePayload(*sample); !loaded)
-        {
-            ++impl_->status.skipped_load_failures;
-            return;
-        }
-        ++impl_->status.loaded_files;
-    }
-    if (!impl_->engine || !impl_->device_voice) return;
-    const auto slot = std::find_if(impl_->active_voices.begin(), impl_->active_voices.end(),
-                                   [](const auto &voice) { return voice.voice == nullptr || !voice.queued; });
-    auto selected = slot;
-    if (selected == impl_->active_voices.end())
-    {
-        selected = std::min_element(impl_->active_voices.begin(), impl_->active_voices.end(),
-                                    [](const auto &a, const auto &b) {
-                                        if (a.priority != b.priority)
-                                            return static_cast<unsigned>(a.priority) < static_cast<unsigned>(b.priority);
-                                        return a.serial < b.serial;
-                                    });
-        if (selected->voice && static_cast<unsigned>(selected->priority) >= static_cast<unsigned>(cue.priority)) return;
-        if (selected->voice)
-        {
-            selected->queued = false;
-            if (impl_->status.active_source_voices > 0) --impl_->status.active_source_voices;
-        }
-    }
-    IXAudio2SourceVoice *source = selected->voice;
-    if (source && (!selected->sample || !SameWaveFormat(selected->sample->format, sample->format)))
-    {
-        source->DestroyVoice();
-        source = nullptr;
-        selected->voice = nullptr;
-        selected->sample.reset();
-    }
-    const bool created = source == nullptr;
-    if (created && FAILED(impl_->engine->CreateSourceVoice(&source, &sample->format, 0, 2.0f, nullptr, nullptr, nullptr))) return;
-    (void)source->Stop();
-    (void)source->FlushSourceBuffers();
-    (void)source->SetFrequencyRatio(1.0f);
-    const auto target_bus = cue.bus == AudioBus::Sfx ? impl_->sfx_bus : cue.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
-    XAUDIO2_SEND_DESCRIPTOR send{0, target_bus ? target_bus : impl_->master_bus};
-    XAUDIO2_VOICE_SENDS sends{1, &send};
-    (void)source->SetOutputVoices(&sends);
-    XAUDIO2_BUFFER buffer{};
-    buffer.AudioBytes = static_cast<UINT32>(sample->bytes.size());
-    buffer.pAudioData = reinterpret_cast<const BYTE *>(sample->bytes.data());
-    buffer.Flags = XAUDIO2_END_OF_STREAM;
-    if (cue.loop) buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
-    if (FAILED(source->SubmitSourceBuffer(&buffer)) || FAILED(source->Start()))
-    {
-        (void)source->Stop();
-        (void)source->FlushSourceBuffers();
-        selected->queued = false;
-        if (created)
-        {
-            source->DestroyVoice();
-            source = nullptr;
-        }
-        return;
-    }
-    if (cue.spatial && sample->format.nChannels == 1)
-    {
-        X3DAUDIO_EMITTER emitter{};
-        emitter.Position = {event.position.x, event.position.y, event.position.z};
-        emitter.OrientFront = {0.0f, 0.0f, 1.0f};
-        emitter.OrientTop = {0.0f, 1.0f, 0.0f};
-        emitter.ChannelCount = 1;
-        emitter.CurveDistanceScaler = DistanceScaler(cue.priority);
-        std::vector<float> matrix(impl_->device_channels);
-        X3DAUDIO_DSP_SETTINGS dsp{};
-        dsp.SrcChannelCount = 1;
-        dsp.DstChannelCount = impl_->device_channels;
-        dsp.pMatrixCoefficients = matrix.data();
-        X3DAudioCalculate(impl_->x3d, &impl_->listener, &emitter,
-                          X3DAUDIO_CALCULATE_MATRIX,
-                          &dsp);
-        (void)source->SetOutputMatrix(target_bus ? target_bus : impl_->master_bus,
-                                      1, dsp.DstChannelCount, matrix.data());
-    }
-    selected->voice = source;
-    selected->cue = cue.id;
-    selected->bus = cue.bus;
-    selected->priority = cue.priority;
-    selected->sample = sample;
-    selected->position = event.position;
-    selected->spatial = cue.spatial;
-    selected->arrow_impact_family = cue.arrow_impact_family;
-    selected->event_sequence = event.sequence;
-    selected->aggregation_count = 1;
-    selected->started_ms = now;
-    selected->serial = ++impl_->voice_serial;
-    selected->queued = true;
-    impl_->last_play_ms[event.asset.value] = now;
-    ++impl_->status.played_count;
-    ++impl_->status.active_source_voices;
-    }
-    catch (...)
+    const auto index = static_cast<std::size_t>(event.sequence % cue.sample_count);
+    auto *sample = &impl_->samples[cue.first_sample + index];
+    if (sample->state.load(std::memory_order_acquire) != SampleState::Ready)
     {
         ++impl_->status.skipped_load_failures;
+        return AudioPlayResult::NotReady;
     }
+    if (!impl_->engine || !impl_->device_voice) return AudioPlayResult::Silent;
+    admission.Stop();
+    auto *selected = free_slot ? free_slot : victim;
+    if (!free_slot && (!selected || selected->priority >= cue.priority)) return AudioPlayResult::Limited;
+    const bool spatial_matrix = cue.spatial && sample->format.nChannels == 1;
+    if (spatial_matrix)
+    {
+        runtime_detail::DiagnosticScope spatial(impl_->Work(AudioWorkId::Spatial), impl_->Clock());
+        std::fill_n(impl_->spatial_matrix.data(), impl_->device_channels, 0.0f);
+        X3DAUDIO_EMITTER emitter{};
+        emitter.Position = {event.position.x, event.position.y, event.position.z};
+        emitter.OrientFront = {0.0f, 0.0f, 1.0f}; emitter.OrientTop = {0.0f, 1.0f, 0.0f};
+        emitter.ChannelCount = 1; emitter.CurveDistanceScaler = DistanceScaler(cue.priority);
+        X3DAUDIO_DSP_SETTINGS dsp{};
+        dsp.SrcChannelCount = 1; dsp.DstChannelCount = impl_->device_channels;
+        dsp.pMatrixCoefficients = impl_->spatial_matrix.data();
+        X3DAudioCalculate(impl_->x3d, &impl_->listener, &emitter, X3DAUDIO_CALCULATE_MATRIX, &dsp);
+    }
+    auto *target_bus = cue.bus == AudioBus::Sfx ? impl_->sfx_bus : cue.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
+    auto *destination = target_bus ? target_bus : impl_->master_bus;
+    XAUDIO2_SEND_DESCRIPTOR send{0, destination}; XAUDIO2_VOICE_SENDS sends{1, &send};
+    XAUDIO2_BUFFER buffer{};
+    buffer.AudioBytes = static_cast<UINT32>(sample->pcm.size());
+    buffer.pAudioData = reinterpret_cast<const BYTE *>(sample->pcm.data());
+    buffer.Flags = XAUDIO2_END_OF_STREAM;
+    if (cue.loop) buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+
+    runtime_detail::DiagnosticScope native(impl_->Work(AudioWorkId::NativeVoice), impl_->Clock());
+    const bool reuse = selected->voice && sample->preload && !selected->completion && selected->sample &&
+                       SameWaveFormat(selected->sample->format, sample->format);
+    struct Candidate
+    {
+        IXAudio2SourceVoice *voice{}; AudioBufferCompletion *completion{};
+        ~Candidate() { DestroyOwnedVoice(voice, completion); }
+    } candidate;
+    if (!reuse)
+    {
+        if (!sample->preload)
+        {
+            const auto slot = static_cast<std::size_t>(selected - impl_->active_voices.data());
+            for (auto &record : impl_->completions[slot])
+                if (!record.claimed) { candidate.completion = &record; break; }
+            if (!candidate.completion) { ++impl_->status.skipped_voice_limits; return AudioPlayResult::Limited; }
+            candidate.completion->wake_main = impl_->wake_main;
+            candidate.completion->wake_context = impl_->wake_context;
+            candidate.completion->Begin(sample->native_pins,
+                {impl_->device_epoch, ++impl_->voice_generations[slot], ++impl_->buffer_sequence});
+            buffer.pContext = candidate.completion;
+        }
+        const auto created = impl_->engine->CreateSourceVoice(&candidate.voice, &sample->format, 0, 2.0f,
+            candidate.completion, nullptr, nullptr);
+        if (FAILED(created))
+        {
+            impl_->Failure({AudioNativeOperation::CreateVoice, created});
+            return AudioPlayResult::NativeFailure; // Old playback is still untouched.
+        }
+    }
+    const bool old_queued = selected->queued;
+    if (old_queued) --impl_->status.active_source_voices;
+    selected->queued = false;
+    if (!reuse && selected->voice)
+    {
+        const auto stopped = StopFlushVoice(*selected->voice);
+        impl_->Failure(stopped);
+        const auto retired = impl_->Retire(*selected); // Joins callbacks before their record can be reused.
+        if (!stopped.Succeeded() || !retired.Succeeded())
+            return AudioPlayResult::NativeFailure;
+    }
+    auto *source = reuse ? selected->voice : candidate.voice;
+    std::uint64_t submit_qpc{};
+    const bool start = !impl_->status.combat_paused || !IsCombatBus(cue.bus);
+    const auto submitted = SubmitPreparedVoice(*source, sends, destination, impl_->device_channels,
+        spatial_matrix ? std::span<const float>(impl_->spatial_matrix.data(), impl_->device_channels) : std::span<const float>{}, buffer,
+        dequeued_qpc ? impl_->Clock() : nullptr, &submit_qpc, start);
+    if (!submitted.Succeeded())
+    {
+        impl_->Failure(submitted);
+        const auto cleanup = StopFlushVoice(*source);
+        impl_->Failure(cleanup, true);
+        if (reuse && cleanup.Succeeded())
+        {
+            // Flush success alone is not completion. This resident owner is retained
+            // and excluded from admission until the next native observation proves idle.
+            selected->sample = sample;
+            selected->queued = impl_->Observe(*selected);
+            selected->releasing = selected->queued;
+            impl_->status.active_source_voices += selected->queued;
+        }
+        else if (reuse) impl_->Retire(*selected);
+        return AudioPlayResult::NativeFailure; // New candidate guard destroys before releasing its PCM pin.
+    }
+    selected->voice = source;
+    if (!reuse)
+    {
+        selected->completion = candidate.completion;
+        candidate.voice = nullptr; candidate.completion = nullptr;
+    }
+    selected->cue = cue.id; selected->bus = cue.bus; selected->priority = cue.priority;
+    selected->sample = sample; selected->position = event.position; selected->spatial = cue.spatial;
+    selected->arrow_impact_family = cue.arrow_impact_family; selected->event_sequence = event.sequence;
+    selected->aggregation_count = 1; selected->started_ms = now; selected->serial = ++impl_->voice_serial;
+    selected->queued = true; selected->releasing = false; selected->session_id = event.session_id;
+    playing.last_play_ms = now; playing.has_played = true;
+    ++impl_->status.played_count; ++impl_->status.active_source_voices;
+    if (submit_qpc && submit_qpc >= dequeued_qpc)
+    {
+        const auto elapsed = submit_qpc - dequeued_qpc;
+        impl_->native_timings.drain_submit_ticks += elapsed;
+        impl_->native_timings.drain_submit_max_ticks = std::max(impl_->native_timings.drain_submit_max_ticks, elapsed);
+        ++impl_->native_timings.drain_submit_calls;
+    }
+    return start ? AudioPlayResult::Started : AudioPlayResult::QueuedPaused;
+    }
+    catch (...) { ++impl_->status.skipped_load_failures; return AudioPlayResult::NativeFailure; }
 }
 
 void AudioEngine::Stop(AssetId cue) noexcept
 {
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Stop), impl_->Clock());
+    if (const auto *row = impl_->Find(cue)) impl_->State(*row).prepared = false;
+    impl_->status.active_source_voices = 0;
     for (auto &active : impl_->active_voices)
+    {
         if (active.voice && active.cue.value == cue.value)
         {
-            (void)active.voice->Stop();
-            (void)active.voice->FlushSourceBuffers();
+            const auto result = StopFlushVoice(*active.voice);
+            if (!result.Succeeded()) { impl_->Failure(result); impl_->Retire(active); }
+            else active.releasing = true;
         }
-    impl_->Reclaim();
+        impl_->status.active_source_voices += impl_->Observe(active);
+    }
 }
 
 void AudioEngine::StopBus(AudioBus bus) noexcept
 {
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Stop), impl_->Clock());
+    for (const auto &cue : impl_->cues)
+        if (cue.bus == bus) impl_->State(cue).prepared = false;
+    impl_->status.active_source_voices = 0;
     for (auto &active : impl_->active_voices)
+    {
         if (active.voice && active.bus == bus)
         {
-            (void)active.voice->Stop();
-            (void)active.voice->FlushSourceBuffers();
+            const auto result = StopFlushVoice(*active.voice);
+            if (!result.Succeeded()) { impl_->Failure(result); impl_->Retire(active); }
+            else active.releasing = true;
         }
-    impl_->Reclaim();
+        impl_->status.active_source_voices += impl_->Observe(active);
+    }
+}
+
+void AudioEngine::BeginSession(std::uint64_t session_id) noexcept
+{
+    impl_->status.active_source_voices = 0;
+    for (auto &active : impl_->active_voices)
+    {
+        if (active.voice && active.bus != AudioBus::Bgm && active.session_id != 0 && active.session_id != session_id)
+        {
+            impl_->Failure(StopFlushVoice(*active.voice));
+            impl_->Retire(active); // Session close joins native reads before any transition eviction.
+        }
+        impl_->status.active_source_voices += impl_->Observe(active);
+    }
+    // Reset once at the queue boundary, before its first event. Within the
+    // session all producers still share the original per-cue retrigger clock.
+    for (const auto &cue : impl_->cues) impl_->State(cue).has_played = false;
 }
 
 void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noexcept
 {
+    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Listener), impl_->Clock());
     impl_->Reclaim();
-    impl_->listener.Position = {position.x, position.y, position.z};
-    impl_->listener.OrientFront = Normalize(forward, {0.0f, 0.0f, 1.0f});
-    impl_->listener.OrientTop = Normalize(up, {0.0f, 1.0f, 0.0f});
+    impl_->EvictStopped();
+    const X3DAUDIO_VECTOR next_position{position.x, position.y, position.z};
+    const auto next_front = Normalize(forward, {0.0f, 0.0f, 1.0f});
+    const auto next_top = Normalize(up, {0.0f, 1.0f, 0.0f});
+    const auto equal = [](const X3DAUDIO_VECTOR &a, const X3DAUDIO_VECTOR &b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    };
+    if (equal(impl_->listener.Position, next_position) &&
+        equal(impl_->listener.OrientFront, next_front) &&
+        equal(impl_->listener.OrientTop, next_top)) return;
+    impl_->listener.Position = next_position;
+    impl_->listener.OrientFront = next_front;
+    impl_->listener.OrientTop = next_top;
+    runtime_detail::DiagnosticScope spatial(impl_->Work(AudioWorkId::Spatial), impl_->Clock());
     for (auto &active : impl_->active_voices)
     {
         if (!active.voice || !active.queued || !active.spatial || !active.sample ||
@@ -846,18 +942,23 @@ void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noe
         emitter.OrientTop = {0.0f, 1.0f, 0.0f};
         emitter.ChannelCount = 1;
         emitter.CurveDistanceScaler = DistanceScaler(active.priority);
-        std::vector<float> matrix(impl_->device_channels);
         X3DAUDIO_DSP_SETTINGS dsp{};
         dsp.SrcChannelCount = 1;
         dsp.DstChannelCount = impl_->device_channels;
-        dsp.pMatrixCoefficients = matrix.data();
+        dsp.pMatrixCoefficients = impl_->spatial_matrix.data();
         X3DAudioCalculate(impl_->x3d, &impl_->listener, &emitter,
                           X3DAUDIO_CALCULATE_MATRIX,
                           &dsp);
         const auto target_bus = active.bus == AudioBus::Sfx ? impl_->sfx_bus :
                                 active.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
-        (void)active.voice->SetOutputMatrix(target_bus ? target_bus : impl_->master_bus,
-                                            1, dsp.DstChannelCount, matrix.data());
+        const auto result = active.voice->SetOutputMatrix(target_bus ? target_bus : impl_->master_bus,
+                                                          1, dsp.DstChannelCount, impl_->spatial_matrix.data());
+        if (FAILED(result))
+        {
+            impl_->Failure({AudioNativeOperation::Matrix, result});
+            impl_->Retire(active);
+            --impl_->status.active_source_voices;
+        }
     }
 }
 
@@ -872,7 +973,12 @@ void AudioEngine::PauseCombat() noexcept
     {
         if (active.voice && active.queued && IsCombatBus(active.bus))
         {
-            (void)active.voice->Stop();
+            const auto result = active.voice->Stop();
+            if (FAILED(result))
+            {
+                impl_->Failure({AudioNativeOperation::Stop, result});
+                impl_->Retire(active); --impl_->status.active_source_voices;
+            }
         }
     }
     impl_->ApplyVolumes();
@@ -889,7 +995,12 @@ void AudioEngine::ResumeCombat() noexcept
     {
         if (active.voice && active.queued && IsCombatBus(active.bus))
         {
-            (void)active.voice->Start();
+            const auto result = active.voice->Start();
+            if (FAILED(result))
+            {
+                impl_->Failure({AudioNativeOperation::Start, result});
+                impl_->Retire(active); --impl_->status.active_source_voices;
+            }
         }
     }
     impl_->ApplyVolumes();
@@ -897,7 +1008,67 @@ void AudioEngine::ResumeCombat() noexcept
 
 AudioStatus AudioEngine::Status() const noexcept
 {
-    return impl_->status;
+    auto status = impl_->status;
+    status.loaded_files = 0;
+    for (std::size_t i = 0; i < impl_->sample_count; ++i)
+        status.loaded_files += impl_->samples[i].state.load(std::memory_order_acquire) == SampleState::Ready;
+    return status;
+}
+
+AudioNativeOperation AudioEngine::FailedNativeOperation() const noexcept
+{
+    return impl_->status.native_operation;
+}
+
+void AudioEngine::SetCaptureTimings(bool enabled) noexcept
+{
+    // Changing capture while the reader runs would change its counter ownership.
+    if (impl_->reader.joinable()) return;
+    impl_->capture_timings = enabled;
+    LARGE_INTEGER frequency{};
+    if (enabled) QueryPerformanceFrequency(&frequency);
+    impl_->native_timings.qpc_frequency = static_cast<std::uint64_t>(frequency.QuadPart);
+}
+
+void AudioEngine::SetWakeCallback(void (*notify)(void *) noexcept, void *context) noexcept
+{
+    if (impl_->reader.joinable()) return;
+    impl_->wake_main = notify; impl_->wake_context = context;
+}
+
+AudioWorkTimings AudioEngine::CaptureTimings() noexcept
+{
+    if (!impl_->capture_timings) return {};
+    const auto now = AudioQpc();
+    auto &native = impl_->native_timings;
+    native.native_available = static_cast<bool>(impl_->engine);
+    if (impl_->engine && (native.native_samples == 0 || now - native.native_sample_qpc >= native.qpc_frequency))
+    {
+        XAUDIO2_PERFORMANCE_DATA data{};
+        impl_->engine->GetPerformanceData(&data);
+        native.native_available = true;
+        native.native_sample_qpc = now;
+        ++native.native_samples;
+        native.audio_cycles = data.AudioCyclesSinceLastQuery;
+        native.total_cycles = data.TotalCyclesSinceLastQuery;
+        native.minimum_cycles_per_quantum = data.MinimumCyclesPerQuantum;
+        native.maximum_cycles_per_quantum = data.MaximumCyclesPerQuantum;
+        native.native_active_voices = data.ActiveSourceVoiceCount;
+        native.native_total_voices = data.TotalSourceVoiceCount;
+        native.glitches = data.GlitchesSinceEngineStarted;
+        native.latency_samples = data.CurrentLatencyInSamples;
+    }
+    auto result = native;
+    result.captured = true;
+    for (std::size_t i = 0; i < impl_->work.size(); ++i)
+        result.scopes[i] = {impl_->work[i].ticks, impl_->work[i].calls};
+    result.reader_jobs = impl_->reader_jobs.load(std::memory_order_acquire);
+    result.reader_failures = impl_->reader_failures.load(std::memory_order_relaxed);
+    result.reader_bytes = impl_->reader_bytes.load(std::memory_order_relaxed);
+    result.reader_read_ticks = impl_->reader_read_ticks.load(std::memory_order_relaxed);
+    result.reader_queue_ticks = impl_->reader_queue_ticks.load(std::memory_order_relaxed);
+    result.reader_request_ready_ticks = impl_->reader_request_ready_ticks.load(std::memory_order_relaxed);
+    return result;
 }
 
 } // namespace hs

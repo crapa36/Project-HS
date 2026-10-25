@@ -64,7 +64,10 @@ def sources(root):
             (audio / name).write_bytes(wave())
             names.append(name)
             index += 1
-        entries.append(dict(id=f'audio.test.{cue}', encoding='PCM', streaming=False, files=names))
+        entries.append(dict(id=f'audio.test.{cue}', asset_id=f'audio.test.{cue}', submix='SFX',
+                            priority='Other', spatial=False, preload=False, loop=False,
+                            max_simultaneous=1, minimum_retrigger_ms=0,
+                            encoding='PCM', streaming=False, files=names))
     catalog.write_text(json.dumps(dict(schema_version=1, category='audio_cues',
                                       maximum_source_voices=64, entries=entries)))
     return audio, catalog
@@ -419,11 +422,61 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         verify()
         action = json.loads(action_path.read_text())
         assert action['recipe_identity'] == 'sha256:' + hashlib.sha256(fixture_audio.read_bytes()).hexdigest()
-        assert len(action['products']) == 380
+        expected_count = len({name for entry in json.loads(catalog.read_text())['entries']
+                              for name in entry['files']}) + 3
+        assert len(action['products']) == expected_count
         for item in action['products']:
             data = (build / item['locator']).read_bytes()
             assert item['size'] == len(data)
             assert item['digest'] == 'sha256:' + hashlib.sha256(data).hexdigest()
+        producer = [fixture_audio, '--produce', '--source-root', source, '--build-root', build]
+        published = {item['logical_id']: (build / item['locator']).read_bytes() for item in action['products']}
+        result_bytes, result_stamp = action_path.read_bytes(), action_path.stat().st_mtime_ns
+        actions = action_path.parent
+
+        def without_preparation(success=True):
+            # A stage create/delete would change this directory, even if it was cleaned before exit.
+            os.utime(actions, ns=(1_600_000_000_000_000_000, 1_600_000_000_000_000_000))
+            stamp = actions.stat().st_mtime_ns
+            output = run(*producer, success=success)
+            assert 'shipping-audio PCM' not in output, output
+            assert actions.stat().st_mtime_ns == stamp, 'forced hit or rejected cache created a stage'
+            assert not list(actions.glob('.stage-*'))
+            return output
+
+        assert f'audio current files={expected_count}' in without_preparation()
+        assert action_path.read_bytes() == result_bytes and action_path.stat().st_mtime_ns == result_stamp
+        assert all((build / item['locator']).read_bytes() == published[item['logical_id']]
+                   for item in action['products'])
+        # Both generated outputs are checked, and matching corrupt state is not silently repaired.
+        for logical_id in ('audio/release-cpp', 'audio/release-pcm'):
+            item = next(item for item in action['products'] if item['logical_id'] == logical_id)
+            path = build / item['locator']
+            damaged = bytearray(published[logical_id])
+            damaged[-1] ^= 1
+            path.write_bytes(damaged)
+            try:
+                assert 'upstream product is missing or corrupt' in without_preparation(False)
+                assert path.read_bytes() == damaged and action_path.read_bytes() == result_bytes
+                assert not (build / 'CorruptProducts').exists(), 'current lookup repaired a corrupt output'
+                verify()  # A producer-side fault must not alter the independently composed snapshot.
+            finally:
+                path.write_bytes(published[logical_id])
+        # A changed schema fails before source discovery/copy and preserves the published set.
+        original_catalog = catalog.read_bytes()
+        invalid = json.loads(original_catalog)
+        invalid['schema_version'] = 2
+        catalog.write_text(json.dumps(invalid))
+        try:
+            assert 'audio catalog schema or maximum voices changed' in without_preparation(False)
+            assert action_path.read_bytes() == result_bytes
+        finally:
+            catalog.write_bytes(original_catalog)
+        # A verified product hit cannot hide missing native completion metadata.
+        (actions / 'result.d').unlink()
+        assert 'shipping-audio PCM' in run(*producer)
+        assert (actions / 'result.d').is_file() and action_path.read_bytes() == result_bytes
+        build_now()  # Settle Ninja's discovered input timestamps after the direct invocations.
         baseline = (action_path.read_bytes(), action_path.stat().st_mtime_ns,
                     pointer_path.stat().st_mtime_ns, consumer.stat().st_mtime_ns, receipt_count())
         build_now()
@@ -461,14 +514,15 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         assert receipt_count() == before_producer_change + 1
         time.sleep(1.1)
         (audio / 'wave_000.wav').write_bytes(wave(1))
-        build_now()
+        changed_output = build_now()
+        assert 'audio current' not in changed_output and 'shipping-audio PCM' in changed_output
         verify()
         assert json.loads(action_path.read_text())['product_set_id'] != action['product_set_id']
         previous_result = action_path.read_bytes()
         previous_pointer = pointer_path.read_bytes()
         (audio / 'wave_000.wav').write_bytes(b'truncated WAV')
         failure = run(args.cmake, '--build', build, success=False)
-        assert 'WAV header is truncated' in failure
+        assert 'release WAV must use canonical PCM chunks' in failure
         assert action_path.read_bytes() == previous_result
         assert pointer_path.read_bytes() == previous_pointer
         verify()
@@ -509,6 +563,12 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
                                if mode == 'missing' else 'audio/replacement.wav: digest/size mismatch')
             assert_generation_diagnostic(failure, expected_code, '-', expected_reason)
             assert pointer_path.read_bytes() == previous_pointer
+            selected = action_path.read_bytes()
+            damaged = product.read_bytes() if product.exists() else None
+            failure = without_preparation(False)
+            assert 'cannot inspect path' in failure or 'upstream product is missing or corrupt' in failure or 'missing regular file' in failure, failure
+            assert action_path.read_bytes() == selected and pointer_path.read_bytes() == previous_pointer
+            assert (product.read_bytes() if product.exists() else None) == damaged
             action_path.unlink()
             build_now()
             verify()

@@ -67,7 +67,8 @@ hs::Result TryRibbonBufferUpdate(VfxRibbonState &state, std::array<TestRibbonBuf
     if (!state.Update(sources, 11, 1, generation, points, .5f, {}, error))
         return reject(hs::Result::Failure(hs::ErrorCode::InvalidArgument, "test", error));
     const auto history_bytes = std::uint64_t(state.Capacity()) * kRibbonHistoryStride;
-    const auto args_bytes = std::max<std::size_t>(state.Outputs().size(), 1) * kRibbonArgumentStride;
+    const auto args_bytes = RibbonArgumentBufferBytes(widths[2],
+        std::max<std::size_t>(state.Outputs().size(), 1) * kRibbonArgumentStride);
     const auto replace = RibbonBufferReplacements(widths, history_bytes, args_bytes);
     unsigned allocations{};
     std::array<std::weak_ptr<int>, 3> candidates;
@@ -174,6 +175,10 @@ void TestRibbonLookupLifecycle()
 void TestRibbonBufferFailureRecovery()
 {
     using namespace hs::renderer_detail;
+    Check(RibbonArgumentBufferBytes(60, 80) == 120 && RibbonArgumentBufferBytes(120, 80) == 120 &&
+          RibbonArgumentBufferBytes(0, 20) == 20 && RibbonArgumentBufferBytes(20, 1000) == 1000 &&
+          RibbonArgumentBufferBytes(UINT64_MAX/2+1, UINT64_MAX) == UINT64_MAX,
+        "ribbon argument growth shrank, overflowed, or lost amortized capacity");
     const std::vector original{Source(10)};
     auto growing = std::vector{Source(20)};
     growing[0].outputs.push_back(growing[0].outputs[0]);
@@ -230,14 +235,25 @@ void TestRibbonBufferFailureRecovery()
     for (std::size_t index = 0; index < buffers.size(); ++index)
         Check(buffers[index].allocation == committed[index].allocation, "steady ribbon frame reallocated a buffer");
 
+    const auto previous_frame_arguments = buffers[2];
+    buffers[2] = {};
+    Check(!TryRibbonBufferUpdate(state, buffers, original, 64, 1, 1, checkpoint_copied) && checkpoint_copied &&
+          !buffers[2].allocation && previous_frame_arguments.allocation == committed[2].allocation,
+        "failed frame-local argument allocation changed another frame's arguments");
+    Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) &&
+          buffers[2].allocation && buffers[2].allocation != previous_frame_arguments.allocation &&
+          buffers[0].allocation == committed[0].allocation && buffers[1].allocation == committed[1].allocation,
+        "frame-local arguments replaced shared history or another frame's allocation");
+    const auto current_frame_arguments = buffers[2].allocation;
+
     buffers[1] = {};
     Check(!TryRibbonBufferUpdate(state, buffers, original, 64, 1, 1, checkpoint_copied) && checkpoint_copied,
         "missing previous history did not prepare a recoverable replacement");
     Check(!buffers[1].allocation && buffers[0].allocation == committed[0].allocation &&
-          buffers[2].allocation == committed[2].allocation, "failed previous repair changed other buffers");
+          buffers[2].allocation == current_frame_arguments, "failed previous repair changed other buffers");
     Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) &&
           buffers[1].allocation && buffers[1].width == kRibbonHistoryStride &&
-          buffers[0].allocation == committed[0].allocation && buffers[2].allocation == committed[2].allocation,
+          buffers[0].allocation == committed[0].allocation && buffers[2].allocation == current_frame_arguments,
         "missing previous history did not recover independently");
     buffers[1].width = 16;
     Check(bool(TryRibbonBufferUpdate(state, buffers, original, 64, 1, 0, checkpoint_copied)) &&

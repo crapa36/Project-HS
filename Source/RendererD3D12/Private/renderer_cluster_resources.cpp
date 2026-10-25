@@ -95,28 +95,19 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
     }
     catch (const std::exception &error) { return ClusterFailure(error.what()); }
     auto page = std::make_unique<GeometryPageGpu>();
-    std::array<AllocationResource *, 4> buffers{&page->vertices, &page->indices,
-                                             &page->meshlets, &page->auxiliary};
     std::uint64_t upload_size{}, resident_size{};
     std::array<std::uint64_t, 4> offsets{};
     const std::array<std::uint64_t, 4> sizes{chunks[0].size(), chunks[1].size(), chunks[2].size(),
         chunks[3].size() + chunks[4].size() + chunks[5].size()};
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    for (std::size_t i = 0; i < buffers.size(); ++i)
-    {
-        if (!sizes[i] || sizes[i] % 4 || sizes[i] > UINT32_MAX ||
-            upload_size > UINT32_MAX - sizes[i])
-            return ClusterFailure("Cluster page exceeds the raw-buffer ABI.");
-        offsets[i] = upload_size;
-        upload_size += sizes[i];
-        if (auto result = CreateAllocation(*buffers[i], allocation,
-            BufferDescription(sizes[i]), D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
-        buffers[i]->graph_access = Access::CopyDest;
-        if (resident_size > UINT64_MAX - buffers[i]->allocation->GetSize())
-            return ClusterFailure("Cluster page allocation size overflow.");
-        resident_size += buffers[i]->allocation->GetSize();
-    }
+    if (!GeometryPageLayout(sizes, offsets, upload_size)) return ClusterFailure("Cluster page exceeds the raw-buffer ABI.");
+    page->offsets = offsets;
+    page->sizes = sizes;
+    if (auto result = CreateAllocation(page->storage, allocation, BufferDescription(upload_size),
+            D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
+    page->storage.graph_access = Access::CopyDest;
+    resident_size = page->storage.allocation->GetSize();
     AllocationResource upload;
     allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     if (auto result = CreateAllocation(upload, allocation, BufferDescription(upload_size),
@@ -125,8 +116,11 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
     const D3D12_RANGE no_read{};
     auto hr = upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(hr)) return HResultFailure("Map hierarchy page upload", hr);
-    std::uint64_t copied{};
-    for (std::size_t i = 0; i < 6; ++i)
+    std::memset(mapped, 0, static_cast<std::size_t>(upload_size));
+    for (std::size_t i = 0; i < 3; ++i)
+        std::memcpy(static_cast<std::byte *>(mapped) + offsets[i], chunks[i].data(), chunks[i].size());
+    auto copied = offsets[3];
+    for (std::size_t i = 3; i < chunks.size(); ++i)
     {
         std::memcpy(static_cast<std::byte *>(mapped) + copied, chunks[i].data(), chunks[i].size());
         copied += chunks[i].size();
@@ -149,13 +143,12 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
     page->meshlet_count = static_cast<std::uint32_t>(stream.decoded.meshlets.size());
     page->triangle_offset = static_cast<std::uint32_t>(stream.decoded.meshlet_vertex_refs.size() * 4u);
     page->remap_offset = page->triangle_offset + static_cast<std::uint32_t>(stream.decoded.meshlet_triangles.size() * 4u);
-    page->vertex_view = {page->vertices.resource->GetGPUVirtualAddress(), static_cast<UINT>(sizes[0]), sizeof(Vertex)};
-    page->index_view = {page->indices.resource->GetGPUVirtualAddress(), static_cast<UINT>(sizes[1]), DXGI_FORMAT_R32_UINT};
+    page->vertex_view = {page->storage.resource->GetGPUVirtualAddress() + offsets[0], static_cast<UINT>(sizes[0]), sizeof(Vertex)};
+    page->index_view = {page->storage.resource->GetGPUVirtualAddress() + offsets[1], static_cast<UINT>(sizes[1]), DXGI_FORMAT_R32_UINT};
     // Hierarchy pages have no authored whole-LOD metadata. Their payload and
     // cluster intervals were validated against the actual hierarchy directory.
     stream.page = std::move(page);
     stream.upload = std::move(upload);
-    stream.upload_offsets = offsets;
     stream.upload_residency = upload_ticket;
     stream.physical_slot = physical_slot;
     stream.version = version;
@@ -168,7 +161,7 @@ void D3D12Renderer::Impl::RecordClusterPageUpload(ID3D12GraphicsCommandList *lis
                                                 std::uint32_t logical_slot) const
 {
     const auto &stream = cluster_runtime->streams.at(logical_slot);
-    RecordGeometryPageUpload(list, *stream.page, stream.upload, stream.upload_offsets);
+    RecordGeometryPageUpload(list, *stream.page, stream.upload);
 }
 
 Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
@@ -266,15 +259,10 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         const std::array<std::uint64_t, 4> sizes{data.vertices.size() * sizeof(render_data::ExpandedVertex),
             data.indices.size() * 4u, data.meshlets.size() * render_data::kGeometryMeshletStride,
             (data.meshlet_vertex_refs.size() + data.meshlet_triangles.size() + data.canonical_primitive_remap.size()) * 4u};
-        std::uint64_t resident_bytes{}, upload_bytes{};
-        for (const auto bytes : sizes)
-        {
-            const auto description = BufferDescription(bytes);
-            const auto size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
-            if (size == UINT64_MAX || resident_bytes > UINT64_MAX - size || upload_bytes > UINT64_MAX - bytes)
-                return ClusterFailure("Pinned root allocation estimate overflow.");
-            resident_bytes += size; upload_bytes += bytes;
-        }
+        std::uint64_t upload_bytes{}; std::array<std::uint64_t, 4> offsets{};
+        if (!GeometryPageLayout(sizes, offsets, upload_bytes)) return ClusterFailure("Pinned root allocation estimate overflow.");
+        const auto resident_description = BufferDescription(upload_bytes);
+        const auto resident_bytes = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_bytes);
         const auto staging_bytes = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
         if (staging_bytes == UINT64_MAX || resident_bytes > UINT64_MAX - staging_bytes)
@@ -285,17 +273,12 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         if (auto result = PrepareClusterPageUpload(stream.logical_slot, physical++); !result) return result;
         admission.Complete();
         RecordClusterPageUpload(list.Get(), stream.logical_slot);
-        std::array<AllocationResource *, 4> buffers{&stream.page->vertices, &stream.page->indices,
-            &stream.page->meshlets, &stream.page->auxiliary};
-        std::array<D3D12_RESOURCE_BARRIER, 4> barriers{};
-        for (std::size_t i = 0; i < buffers.size(); ++i)
-        {
-            barriers[i].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barriers[i].Transition = {buffers[i]->resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-                D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
-            buffers[i]->graph_access = Access::ComputeRead;
-        }
-        list->ResourceBarrier(4, barriers.data());
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {stream.page->storage.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+        stream.page->storage.graph_access = Access::ComputeRead;
+        list->ResourceBarrier(1, &barrier);
         runtime.cpu.pages[stream.logical_slot] = {generation_tag, 1u, stream.physical_slot,
             stream.version, stream.page->triangle_offset, stream.page->remap_offset, 0u, 0u};
         stream.decoded = {};
@@ -543,21 +526,33 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         if (heap == D3D12_HEAP_TYPE_READBACK) target.graph_queue = QueueHint::Copy;
         return Result::Success();
     };
+    // Only variable output storage exposes placement slack. Fixed ABI buffers,
+    // constants, candidate/history inputs and readback keep their exact widths.
+    constexpr auto output_bytes = [](std::uint64_t bytes) {
+        constexpr auto maximum_aligned = UINT64(UINT32_MAX) & ~UINT64(65535u);
+        return bytes <= maximum_aligned ? (bytes + 65535u) & ~UINT64(65535u) : bytes;
+    };
+    static_assert(output_bytes(UINT64(UINT32_MAX) + 1u) > UINT32_MAX);
+    static_assert(output_bytes(65537u) == 131072u);
     if (total > native.ref_capacity)
     {
         AllocationResource refs;
-        if (auto result = create(refs, total * 16u, D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
+        if (auto result = create(refs, output_bytes(total * 16u), D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
         const auto ticket = residency.Register(ResidencyCategory::Geometry, refs.allocation->GetSize(), false);
         if (!ticket) return ClusterFailure("Could not account shared cluster references.");
         if (native.refs_residency) static_cast<void>(residency.ReleaseNow(native.refs_residency));
         native.refs = std::move(refs); native.refs_residency = ticket;
-        native.ref_capacity = static_cast<std::uint32_t>(total);
+        native.ref_capacity = static_cast<std::uint32_t>(native.refs.resource->GetDesc().Width / 16u);
     }
     const auto geometry_bytes = (record_base + total) * sizeof(GpuGeometryDrawRecord);
     if (geometry_bytes > frame.geometry_draw_records.resource->GetDesc().Width)
     {
         AllocationResource records;
-        if (auto result = create(records, geometry_bytes, D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
+        // Expose already-paid 64-KiB placement capacity instead of replacing a
+        // multi-megabyte record buffer when the next frame adds one 64-byte record.
+        const auto capacity = std::min<UINT64>((geometry_bytes + 65535u) & ~UINT64(65535u),
+            (UINT64(UINT32_MAX) / sizeof(GpuGeometryDrawRecord)) * sizeof(GpuGeometryDrawRecord));
+        if (auto result = create(records, capacity, D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
         const auto ticket = residency.Register(ResidencyCategory::Geometry, records.allocation->GetSize(), false);
         if (!ticket) return ClusterFailure("Could not account shared cluster geometry records.");
         if (runtime.geometry_records_residency[frame_slot])
@@ -583,12 +578,12 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         if (!history_words || history_bytes > UINT32_MAX ||
             static_cast<std::uint64_t>(std::max(cut.history_instance_capacity, history_capacity)) * 4u > UINT32_MAX)
             return ClusterFailure("Cluster persistent membership exceeds32-bit buffer addressing.");
-        if (cut.candidate_capacity < candidate_capacity || cut.output_capacity < output_capacity ||
+        if (cut.candidate_capacity < candidate_capacity || cut.allocated_output_capacity < output_capacity ||
             cut.history_instance_capacity < history_capacity)
         {
             ClusterCutBuffers next;
             next.candidate_capacity = std::max(cut.candidate_capacity, candidate_capacity);
-            next.output_capacity = std::max(cut.output_capacity, output_capacity);
+            next.output_capacity = std::max(cut.allocated_output_capacity, output_capacity);
             // Both structured uint2 and raw-clear descriptors cover the entire allocation.
             // Check the larger raw R32 element count before allocating or casting NumElements.
             const std::uint64_t count_cache_elements = 2ull * next.candidate_capacity + next.output_capacity;
@@ -610,22 +605,32 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
                 D3D12_HEAP_TYPE_UPLOAD); !result) return result;
             // Counts, cut directories, then immutable selected (group, mask) entries.
             // One UAV preserves the existing Count/Prefix/Emit dependency chain.
-            if (auto result = make(next.counts, count_cache_bytes); !result) return result;
+            if (auto result = make(next.counts, output_bytes(count_cache_bytes)); !result) return result;
             if (auto result = make(next.offsets, static_cast<std::uint64_t>(next.candidate_capacity) * 8u); !result) return result;
             for (auto *buffer : {&next.block_sums, &next.block_offsets})
                 if (auto result = make(*buffer, blocks * 8u); !result) return result;
             if (auto result = make(next.demand, runtime.cpu.pages.size() * 4u); !result) return result;
             if (auto result = make(next.status, sizeof(GpuClusterCutStatus)); !result) return result;
-            if (auto result = make(next.draw_commands, static_cast<std::uint64_t>(next.output_capacity) * 96u); !result) return result;
-            if (auto result = make(next.mesh_commands, static_cast<std::uint64_t>(next.output_capacity) * 64u); !result) return result;
+            if (auto result = make(next.draw_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 96u)); !result) return result;
+            if (auto result = make(next.mesh_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 64u)); !result) return result;
             if (auto result = make(next.command_counts, 32u); !result) return result;
-            if (auto result = make(next.selected_bounds, static_cast<std::uint64_t>(next.output_capacity) * 16u); !result) return result;
-            if (auto result = make(next.previous_rejected, static_cast<std::uint64_t>(next.output_capacity) * 4u); !result) return result;
-            if (auto result = make(next.retest_draw_commands, static_cast<std::uint64_t>(next.output_capacity) * 24u); !result) return result;
-            if (auto result = make(next.retest_mesh_commands, static_cast<std::uint64_t>(next.output_capacity) * 16u); !result) return result;
+            if (auto result = make(next.selected_bounds, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 16u)); !result) return result;
+            if (auto result = make(next.previous_rejected, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 4u)); !result) return result;
+            if (auto result = make(next.retest_draw_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 24u)); !result) return result;
+            if (auto result = make(next.retest_mesh_commands, output_bytes(static_cast<std::uint64_t>(next.output_capacity) * 16u)); !result) return result;
             if (auto result = make(next.history_bits, history_bytes); !result) return result;
             if (auto result = make(next.history_generations, static_cast<std::uint64_t>(next.history_instance_capacity) * 4u); !result) return result;
             if (auto result = make(next.readback, runtime.cpu.pages.size() * 4u + sizeof(GpuClusterCutStatus), D3D12_HEAP_TYPE_READBACK); !result) return result;
+            // Every output consumer must fit; never promote physical slack into
+            // command counts, per-view offsets, or complete-cut logical limits.
+            next.allocated_output_capacity = static_cast<std::uint32_t>(std::min({
+                next.counts.resource->GetDesc().Width / 8u - 2ull * next.candidate_capacity,
+                next.draw_commands.resource->GetDesc().Width / 96u,
+                next.mesh_commands.resource->GetDesc().Width / 64u,
+                next.selected_bounds.resource->GetDesc().Width / 16u,
+                next.previous_rejected.resource->GetDesc().Width / 4u,
+                next.retest_draw_commands.resource->GetDesc().Width / 24u,
+                next.retest_mesh_commands.resource->GetDesc().Width / 16u}));
             std::uint64_t gpu_bytes{}, staging_bytes{};
             for (const auto *buffer : {&next.counts, &next.offsets, &next.block_sums, &next.block_offsets,
                 &next.demand, &next.status, &next.draw_commands, &next.mesh_commands, &next.command_counts,

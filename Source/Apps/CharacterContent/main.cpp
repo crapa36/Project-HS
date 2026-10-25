@@ -3,6 +3,7 @@
 #endif
 #include "../AssetPipeline/action.hpp"
 #include "character_sources.hpp"
+#include "../Content/character_products.hpp"
 
 #include <Windows.h>
 #include <objbase.h>
@@ -83,7 +84,7 @@ void AddCharacterInputs(ap::ActionSpec &spec, const fs::path &source_root,
 std::vector<std::string> ProductNames(const std::string &output_name,
                                       std::size_t material_count, bool named_animations)
 {
-    std::vector<std::string> names{output_name + ".meshbin", output_name + "_materials.json"};
+    std::vector<std::string> names{output_name + ".rpkg", output_name + ".rpage"};
     for (std::size_t index = 0; index < material_count; ++index)
     {
         const auto suffix = std::to_string(index) + ".dds";
@@ -99,6 +100,10 @@ std::string ProductId(const std::string &name)
     constexpr std::string_view suffix = "_animation.rpkg";
     if (name.ends_with(suffix))
         return "render/animation/" + name.substr(0, name.size() - suffix.size()) + ".rpkg";
+    if (name.ends_with(".rpage"))
+        return "render/geometry/character/" + name;
+    if (name.ends_with(".rpkg"))
+        return "render/character/" + name;
     return "character/" + name;
 }
 
@@ -119,7 +124,7 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
         const auto &products = result.at("products");
         if (products.empty()) return false;
         std::unordered_set<std::string> actual_names;
-        fs::path mesh_path;
+        fs::path metadata_path, page_path, animation_path;
         for (const auto &product : products)
         {
             const auto name = fs::path(product.at("locator").get<std::string>())
@@ -132,22 +137,36 @@ bool IsCurrent(const fs::path &build_root, const ap::ActionSpec &spec,
             fs::path product_path;
             ap::ReadActionResult(build_root, spec.namespace_path,
                                  ProductId(name), dependency, product_path);
-            if (source && name == source->output_name + ".meshbin")
-                mesh_path = product_path;
+            if (source && name == source->output_name + ".rpkg") metadata_path = product_path;
+            if (source && name == source->output_name + ".rpage") page_path = product_path;
+            if (source && name == source->output_name + "_animation.rpkg") animation_path = product_path;
         }
         std::vector<std::string> expected;
         if (source)
         {
-            if (mesh_path.empty()) return false;
-            const auto bytes = ap::ReadBytes(mesh_path);
-            if (bytes.size() < sizeof(hs::CharacterAssetHeader)) return false;
-            hs::CharacterAssetHeader header;
-            std::memcpy(&header, bytes.data(), sizeof(header));
-            if (header.magic != hs::CharacterAssetHeader{}.magic ||
-                header.version != hs::kCharacterAssetVersion ||
-                header.material_count > hs::kMaxCharacterMaterials)
-                return false;
-            expected = ProductNames(source->output_name, header.material_count,
+            if (metadata_path.empty() || page_path.empty()) return false;
+            const auto contents = ap::ReadBytes(metadata_path);
+            const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
+            const auto id = "render/character/" + source->output_name + ".rpkg";
+            const auto prepared = hs::content::PrepareCharacterBinding(id, bytes);
+            const auto &metadata = prepared.character;
+            const auto page = ap::ReadBytes(page_path);
+            const auto page_bytes = std::as_bytes(std::span(page.data(), page.size()));
+            const auto page_id = "render/geometry/character/" + source->output_name + ".rpage";
+            if (!hs::render_data::ReadPackage(page_bytes, hs::MakeAssetId(page_id)).dependencies.empty()) return false;
+            hs::render_data::ValidateCharacterGeometry(metadata,
+                hs::render_data::DecodeGeometryPage(page_bytes, hs::MakeAssetId(page_id), metadata.geometry));
+            if (!source->named_animations.empty())
+            {
+                if (animation_path.empty()) return false;
+                const auto animation = ap::ReadBytes(animation_path);
+                const auto named = hs::render_data::DecodeCharacterAnimationExtension(
+                    std::as_bytes(std::span(animation.data(), animation.size())),
+                    hs::MakeAssetId("render/animation/" + source->output_name + ".rpkg"));
+                hs::render_data::ValidateCharacterAnimationBinding(named, metadata, hs::MakeAssetId(id));
+                if (named.sample_rate_hz != 60 || named.clips.size() != source->named_animations.size() || !named.sockets.empty()) return false;
+            }
+            expected = ProductNames(source->output_name, metadata.material_count,
                                     !source->named_animations.empty());
         }
         else
@@ -181,8 +200,9 @@ void Produce(std::string_view mode, const fs::path &source_root,
 
     ap::ActionSpec spec;
     spec.action_id = "character." + std::string(mode);
-    spec.recipe_id = "project-hs.character." + std::string(mode);
-    spec.recipe_version = 3;
+    spec.recipe_id = "project-hs.character." + std::string(mode) + "." +
+        hs::content::CharacterTextureCookRecipeIdentity();
+    spec.recipe_version = 5;
     spec.namespace_path = "character/" + std::string(mode);
 
     hs::content::CharacterAssetSource character_source;
@@ -214,6 +234,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
     {
         std::string error_message;
         std::vector<std::string> names;
+        std::vector<hs::content::CharacterProduct> final_products;
         if (monster_materials)
         {
             if (!hs::content::CookMonsterMaterialTextures(
@@ -224,13 +245,18 @@ void Produce(std::string_view mode, const fs::path &source_root,
         }
         else
         {
-            hs::content::CharacterCookResult character;
-            if (!hs::content::CookCharacterAsset(
-                    stage, character, error_message, character_source))
+            hs::content::CharacterIR character;
+            if (!hs::content::ImportCharacterAsset(character, error_message, character_source))
                 throw std::runtime_error(error_message);
-            if (!hs::content::WriteCharacterMaterialBindings(stage, character, character_source,
-                    source_root / "ContentSource/Materials/hero_bindings.json", error_message))
+            if (!hs::content::WriteCharacterTextures(stage, character, character_source, error_message))
                 throw std::runtime_error(error_message);
+            const auto material_authoring = ap::Json::parse(ap::ReadBytes(
+                source_root / "ContentSource/Materials/hero_bindings.json"));
+            const auto materials = hs::content::PrepareCharacterMaterialSelections(
+                character, character_source.output_name, material_authoring);
+            final_products = hs::content::BuildCharacterProducts(character, character_source.output_name, materials);
+            for (const auto &product : final_products)
+                ap::WriteBytes(stage / product.filename, product.bytes);
             names = ProductNames(character_source.output_name, character.materials.size(),
                                  !character_source.named_animations.empty());
         }
@@ -238,8 +264,8 @@ void Produce(std::string_view mode, const fs::path &source_root,
         for (const auto &name : names)
         {
             auto product = ap::HashProduct(ProductId(name), name, stage / name);
-            if (name.ends_with("_animation.rpkg"))
-                product.dependencies = {"character/" + character_source.output_name + ".meshbin"};
+            const auto final = std::ranges::find(final_products, name, &hs::content::CharacterProduct::filename);
+            if (final != final_products.end()) product.dependencies = final->dependencies;
             products.push_back(std::move(product));
         }
         const auto staged_count = std::distance(fs::directory_iterator(stage),

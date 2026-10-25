@@ -23,6 +23,26 @@ class FakeModel:
 
 
 class VocalTests(unittest.TestCase):
+    def test_nonfinite_samples_rejected_before_clamping_or_writing(self):
+        for value in (float("nan"), float("inf"), -float("inf")):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                with patch.object(vocal, "_load_model", return_value=FakeModel([0.1, value, -0.1])), \
+                     patch.object(vocal, "_seed"):
+                    with self.assertRaisesRegex(RuntimeError, "non-finite"):
+                        vocal.generate(output_dir=Path(d))
+                self.assertEqual(list(Path(d).iterdir()), [])
+        self.assertEqual(vocal._audio_values([-2.0, -0.5, 0.0, 0.5, 2.0]),
+                         [-1.0, -0.5, 0.0, 0.5, 1.0])
+
+    def test_invalid_model_rate_rejected_before_generation(self):
+        for rate in (float("nan"), float("inf"), -float("inf"), 0, -1, 24000.5):
+            model = FakeModel()
+            model.sr = rate
+            with self.subTest(rate=rate), patch.object(vocal, "_load_model", return_value=model):
+                with self.assertRaisesRegex(ValueError, "sample rate"):
+                    vocal.generate()
+                self.assertEqual(model.calls, [])
+
     def test_load_once_sequential_candidates_and_exact_sidecar(self):
         model = FakeModel()
         with tempfile.TemporaryDirectory() as d:

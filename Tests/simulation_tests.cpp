@@ -10,6 +10,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
+#include <thread>
+#include <ranges>
 
 namespace
 {
@@ -92,7 +96,7 @@ void TestOptionalChecksums()
               actual.checksum == 0, "ordinary tick omits checksum only");
         Check(ordinary.ComputeChecksum() == expected.checksum, "capture mode preserves gameplay state");
         hs::GameReadModelStorage model;
-        ordinary.WriteReadModel(model);
+        ordinary.CopyReadModelForDevelopment(model);
         Check(model.checksum == 0, "explicit checksum does not enable read-model capture");
     }
     for (const auto action : {hs::UiActionKind::ReturnToMainMenu, hs::UiActionKind::StartSession})
@@ -105,6 +109,170 @@ void TestOptionalChecksums()
         Check(actual.checksum == 0 && ordinary.ComputeChecksum() == expected.checksum,
               "optional checksum handles inactive and resumed phases");
     }
+}
+
+void TestOptInSimulationTimings()
+{
+    hs::GameSimulation ordinary, measured;
+    hs::SimulationConfig config{419};
+    Check(ordinary.Initialize(config).Succeeded(), "unmeasured simulation initialize");
+    config.capture_timings = true;
+    Check(measured.Initialize(config).Succeeded(), "measured simulation initialize");
+    Check(ordinary.GetTimingDiagnostics().empty_scope_calibration.calls == 0 &&
+              measured.GetTimingDiagnostics().empty_scope_calibration.calls == 64,
+          "only opt-in initialization performs empty-scope clock calibration");
+    constexpr std::array phase_ids{
+        hs::SimulationTimingId::SessionTimer, hs::SimulationTimingId::Spawn,
+        hs::SimulationTimingId::SpawnBarrier, hs::SimulationTimingId::AiIntent,
+        hs::SimulationTimingId::CastAttack, hs::SimulationTimingId::AbilitySpawnBarrier,
+        hs::SimulationTimingId::Movement, hs::SimulationTimingId::SpatialGrid,
+        hs::SimulationTimingId::CollisionHit, hs::SimulationTimingId::DamageStatus,
+        hs::SimulationTimingId::DeathDrop, hs::SimulationTimingId::XpCard,
+        hs::SimulationTimingId::CleanupBarrier, hs::SimulationTimingId::GameplayHash};
+    for (hs::Tick tick = 1; tick <= 4; ++tick)
+    {
+        hs::InputFrame input{}; input.target_tick = tick;
+        input.held.move_held = true; input.held.move_target_world = {10, 0, 5};
+        const auto plain = ordinary.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto timed = measured.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        Check(plain.tick == timed.tick && plain.checksum == timed.checksum && plain.phase == timed.phase,
+              "clock observations preserve deterministic tick results");
+        const auto off = ordinary.GetTimingDiagnostics();
+        Check(!off.captured && !off.completed && std::ranges::all_of(off.scopes, [](const auto &sample) {
+            return sample.calls == 0 && sample.nanoseconds == 0;
+        }), "disabled capture leaves every timing counter zero");
+        const auto snapshot = measured.GetTimingDiagnostics();
+        Check(snapshot.captured && snapshot.completed && snapshot.tick == timed.tick &&
+                  snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Tick)].calls == 1 &&
+                  snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Input)].calls == 1,
+              "one completed timing snapshot belongs to the actual tick");
+        for (const auto phase : phase_ids)
+            Check(snapshot.scopes[static_cast<std::size_t>(phase)].calls == 1,
+                  "each canonical phase executes once and counters reset between ticks");
+        (void)measured.GetSessionProbe();
+        const auto observed = measured.GetTimingDiagnostics();
+        Check(observed.scopes[static_cast<std::size_t>(hs::SimulationTimingId::SmallFacts)].calls == 1 &&
+                  measured.ComputeChecksum() == timed.checksum,
+              "post-tick small facts are measured without mutating logical state");
+    }
+    Check(measured.ApplyDebugCommand({hs::DebugCommandKind::TogglePause}).Succeeded(), "pause timing fixture");
+    const auto paused = measured.TickFixed({}, hs::FixedStepClock::kFixedStep);
+    const auto snapshot = measured.GetTimingDiagnostics();
+    Check(snapshot.completed && snapshot.tick == paused.tick &&
+              snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Input)].calls == 1,
+          "paused input completion is observable without advancing gameplay time");
+    for (const auto phase : phase_ids)
+        Check(snapshot.scopes[static_cast<std::size_t>(phase)].calls == 0,
+              "paused timing does not invent gameplay phases");
+}
+
+void TestAutomaticSpawningScenarioPolicy()
+{
+    auto rules = hs::SimulationRules::Defaults();
+    rules.arena_obstacle_count = 0;
+    for (auto &stage : rules.spawn_stages) stage.per_second = 60.0f;
+    hs::SimulationConfig controlled{421};
+    controlled.scenario.progression_enabled = false;
+    controlled.scenario.automatic_spawning = false;
+    hs::GameSimulation fixed, natural;
+    Check(fixed.Initialize(controlled, rules).Succeeded(), "fixed-count scenario initialize");
+    controlled.scenario.automatic_spawning = true;
+    Check(natural.Initialize(controlled, rules).Succeeded(), "natural spawn scenario initialize");
+    for (hs::Tick tick = 1; tick <= 2; ++tick)
+    {
+        (void)fixed.TickFixed({tick}, hs::FixedStepClock::kFixedStep);
+        (void)natural.TickFixed({tick}, hs::FixedStepClock::kFixedStep);
+    }
+    Check(fixed.GetSessionProbe().normal_enemy_count == 0 &&
+              natural.GetSessionProbe().normal_enemy_count > 0,
+          "automatic spawn policy is independent of XP progression and defaults to natural spawning");
+    Check(fixed.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, 0}}).Succeeded(),
+          "fixed-count scenario admits explicit enemy setup");
+    (void)fixed.TickFixed({3}, hs::FixedStepClock::kFixedStep);
+    Check(fixed.GetSessionProbe().normal_enemy_count == 1,
+          "manual setup remains active through normal AI ticks without natural additions");
+}
+
+void TestScopedTickReadView()
+{
+    static_assert(std::ranges::input_range<const hs::EnemyReadColumns>);
+    static_assert(std::ranges::input_range<const hs::ProjectileReadColumns>);
+    static_assert(!std::is_copy_constructible_v<hs::GameSimulation::ScopedTickReadView>);
+    static_assert(!std::is_move_constructible_v<hs::GameSimulation>);
+    static_assert(std::is_same_v<decltype(hs::ProjectileReadValue::bleed_extend_ticks), std::span<const hs::Tick>>);
+    hs::GameSimulation simulation;
+    Check(simulation.Initialize({317}).Succeeded(), "borrow simulation initialize");
+    Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, 7}}).Succeeded(),
+          "borrow live enemy fixture");
+    const auto checksum = simulation.ComputeChecksum();
+    {
+        auto first = simulation.BorrowTickReadView();
+        auto nested = simulation.BorrowTickReadView();
+        auto moved = std::move(first);
+        bool moved_rejected{};
+        try { (void)first.View(); } catch (const std::logic_error &) { moved_rejected = true; }
+        Check(moved_rejected && moved.View().enemies.size() == 1 &&
+                  moved.View().enemies.begin()->position.x == 5 &&
+                  &moved.View().session == &nested.View().session,
+              "nested and moved scopes borrow the same current owner");
+        const auto rejects = [&](auto operation) {
+            bool rejected{};
+            try { operation(); } catch (const std::logic_error &) { rejected = true; }
+            Check(rejected, "every public mutation ingress rejects active read borrows");
+        };
+        rejects([&] { (void)simulation.TickFixed({}, hs::FixedStepClock::kFixedStep); });
+        rejects([&] { simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu}); });
+        rejects([&] { (void)simulation.ApplyDebugCommand({hs::DebugCommandKind::DamagePlayer, 1}); });
+        rejects([&] { (void)simulation.ApplySimulationRules(simulation.Rules()); });
+        rejects([&] { simulation.ClearDomainSignals(); });
+        rejects([&] { (void)simulation.Shutdown(); });
+        rejects([&] { (void)simulation.Initialize({318}); });
+        Check(moved.View().checksum == checksum && simulation.ComputeChecksum() == checksum,
+              "rejected mutations leave the borrowed state unchanged");
+    }
+    bool foreign_rejected{};
+    std::thread foreign([&] {
+        try { auto read = simulation.BorrowTickReadView(); }
+        catch (const std::logic_error &) { foreign_rejected = true; }
+    });
+    foreign.join();
+    Check(foreign_rejected, "read scopes stay on their simulation owner thread");
+    Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::TogglePause}).Succeeded(), "pause before same-tick mutation");
+    const auto before = simulation.GetSessionProbe();
+    Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::DamagePlayer, 3}).Succeeded(), "same-tick debug mutation");
+    {
+        auto read = simulation.BorrowTickReadView();
+        Check(read.View().tick == before.tick && read.View().session.health == before.health - 3 &&
+                  read.View().player.health == before.health - 3,
+              "small facts refresh after same-tick paused mutations");
+    }
+    const auto failed = simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantSkill, 999});
+    Check(!failed.Succeeded() && simulation.GetSessionProbe().health == before.health - 3,
+          "failed mutation releases its scope and keeps observation fresh");
+    {
+        auto exception_scope = simulation.BorrowTickReadView();
+        try {
+            auto nested = simulation.BorrowTickReadView();
+            throw std::runtime_error("scope unwinding fixture");
+        } catch (const std::runtime_error &) {}
+        Check(exception_scope.View().session.health == before.health - 3, "nested exception releases only its borrow");
+    }
+    simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
+    auto changed = simulation.Rules();
+    changed.skills[0].range += 1.0f;
+    changed.waves[0].start_tick += 1;
+    Check(simulation.ApplySimulationRules(changed).Succeeded(), "fixture rules mutation");
+    {
+        auto read = simulation.BorrowTickReadView();
+        Check(read.View().skills[0].effective_range == changed.skills[0].range &&
+                  read.View().waves[0].start == changed.waves[0].start_tick &&
+                  read.View().arena_obstacles.data() == simulation.Rules().arena_obstacles.data(),
+              "immutable facts initialize on rules changes while arena stays borrowed");
+    }
+    simulation.ApplyUiAction({hs::UiActionKind::StartSession});
+    Check(simulation.GetSessionProbe().health == simulation.GetSessionProbe().max_health,
+          "session reset invalidates same-tick facts");
+    Check(simulation.Shutdown().Succeeded(), "borrow scopes fully released before shutdown");
 }
 
 void TestQueuedResumePreservesQuit()
@@ -378,7 +546,7 @@ hs::GameplayChecksum RunMovementEchoHistory(hs::Tick age, bool forced_move)
     {
         (void)Advance(simulation);
         hs::GameReadModelStorage model;
-        simulation.WriteReadModel(model);
+        simulation.CopyReadModelForDevelopment(model);
         for (const auto &projectile : model.View().projectiles)
             if (projectile.source_relic == static_cast<std::uint8_t>(hs::RelicKind::MovementEcho))
             {
@@ -481,8 +649,8 @@ void TestNavigationRulesReload()
         CheckPosition(reloaded.GetSessionProbe().player_position, fresh.GetSessionProbe().player_position,
                       "reloaded player navigation matches a fresh rules initialization");
         hs::GameReadModelStorage actual, expected;
-        reloaded.WriteReadModel(actual);
-        fresh.WriteReadModel(expected);
+        reloaded.CopyReadModelForDevelopment(actual);
+        fresh.CopyReadModelForDevelopment(expected);
         Check(actual.View().enemies.size() == 2 && expected.View().enemies.size() == 2,
               "navigation reload keeps both normal enemy and boss alive");
         for (std::size_t index = 0; index < 2; ++index)
@@ -499,6 +667,9 @@ int main()
     {
         TestPauseDoesNotAdvance();
         TestOptionalChecksums();
+        TestOptInSimulationTimings();
+        TestAutomaticSpawningScenarioPolicy();
+        TestScopedTickReadView();
         TestQueuedResumePreservesQuit();
         TestRulesHashAndAbilityMapping();
         TestSameTickFinalBossVictory();

@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Binary,
     [Parameter(Mandatory = $true)]
-    [string]$SourceRoot
+    [string]$SourceRoot,
+    [string]$GenerationPointer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,6 +65,26 @@ function Invoke-OutputGuard([string]$suite) {
 }
 
 try {
+    if ($GenerationPointer) {
+        foreach ($buildCount in @(1, 3)) {
+            $builds = @(for ($index = 0; $index -lt $buildCount; ++$index) {
+                [ordered]@{ id = "ordinary-$index"; skills = @(); upgrades = @{}; relics = @(); stats = @{} }
+            })
+            $suite = Write-JsonFile "ordinary-$buildCount.json" ([ordered]@{
+                schema_version = 1; duration_seconds = 1; seeds = @(1001); builds = $builds
+            })
+            $outputDirectory = Join-Path $work "ordinary-$buildCount-output"
+            & $binaryPath "--suite=$suite" "--output=$outputDirectory" "--generation=$GenerationPointer"
+            if ($LASTEXITCODE -ne 0) { throw "ordinary-${buildCount}: execution failed" }
+            $report = Get-Content -LiteralPath (Join-Path $outputDirectory 'combat_report.json') -Raw | ConvertFrom-Json
+            if (-not $report.execution_valid -or $report.runs.Count -ne $buildCount -or
+                $report.aggregates.Count -ne $buildCount -or $report.PSObject.Properties['relic_pairs'] -or
+                $report.PSObject.Properties['paired_spawn_counts_valid']) {
+                throw "ordinary-${buildCount}: report lost builds/runs or incorrectly paired ordinary builds"
+            }
+            Write-Host "passed ordinary-$buildCount"
+        }
+    }
     $valid = Write-JsonFile 'valid.json' ([ordered]@{
         schema_version = 1; duration_seconds = 1; seeds = @(1001)
         cases = @([ordered]@{
@@ -73,6 +94,17 @@ try {
     })
     Invoke-Validation 'positive' $valid 'validated relic_balance_suite planned_builds=2 pairs=1 seeds=1 ticks=60' $true
     Invoke-OutputGuard $valid
+    if ($GenerationPointer) {
+        $pairedOutput = Join-Path $work 'paired-output'
+        & $binaryPath "--relic-balance-suite=$valid" "--output=$pairedOutput" "--generation=$GenerationPointer"
+        if ($LASTEXITCODE -ne 0) { throw 'paired execution failed' }
+        $report = Get-Content -LiteralPath (Join-Path $pairedOutput 'combat_report.json') -Raw | ConvertFrom-Json
+        if (-not $report.execution_valid -or -not $report.paired_spawn_counts_valid -or
+            $report.relic_pairs.Count -ne 1 -or $report.runs.Count -ne 2) {
+            throw 'paired report lost valid off/on runs or spawn validation'
+        }
+        Write-Host 'passed paired execution'
+    }
 
     $experimentRoot = Join-Path $rootPath 'ContentSource\Experiments'
     foreach ($checkedInSuite in Get-ChildItem -LiteralPath $experimentRoot -Filter 'relic_balance*.json') {

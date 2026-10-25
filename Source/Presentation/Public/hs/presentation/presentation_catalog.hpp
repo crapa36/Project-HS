@@ -1,12 +1,10 @@
 #pragma once
 
-#include <hs/core/result.hpp>
 #include <hs/game_domain/game_types.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 
 namespace hs
 {
@@ -31,9 +29,9 @@ struct PresentationCatalog
     std::array<std::array<char, kRelicRuleBytes>, kRelicCount> relic_rules{};
 };
 
-[[nodiscard]] std::uint64_t PresentationCatalogSchemaHash() noexcept;
-[[nodiscard]] Result LoadPresentationCatalog(const std::filesystem::path &path,
-                                             PresentationCatalog &catalog,
-                                             std::uint64_t *content_hash = nullptr);
+namespace shipping
+{
+[[nodiscard]] const PresentationCatalog &Presentation() noexcept;
+} // namespace shipping
 
 } // namespace hs

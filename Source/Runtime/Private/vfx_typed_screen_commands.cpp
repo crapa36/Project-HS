@@ -15,16 +15,16 @@ constexpr std::uint32_t Hash32(std::string_view s)
 constexpr std::uint64_t Hash64(std::string_view s)
 { std::uint64_t h=14695981039346656037ull; for(unsigned char c:s){h^=c;h*=1099511628211ull;} return h; }
 constexpr auto kHit=Hash64("particle.player.hit_direction"), kHealth=Hash64("post.player.low_health_vignette");
-template<class T> bool Range(VfxRange r,const std::vector<T> &v)
+template<class T> bool Range(VfxRange r,std::span<const T> v)
 { return r.first<=v.size()&&r.count<=v.size()-r.first; }
-std::uint64_t EffectId(const VfxProgramData &p,VfxEffectHandle handle)
+std::uint64_t EffectId(const VfxProgramView &p,VfxEffectHandle handle)
 {
     const auto i=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[=](const auto &x){return x.handle==handle;});
     return i==p.effect_lookup.end()?0:i->effect_id;
 }
 Result Invalid(const char *message)
 { return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_screen",message); }
-bool Parameters(const VfxProgramData &p,const VfxOutputRecord &o,VfxScreenInput &v)
+bool Parameters(const VfxProgramView &p,const VfxOutputRecord &o,VfxScreenInput &v)
 {
     if(!Range(o.parameters,p.parameters))return false;
     bool center=false,edge=false,direction=false;
@@ -42,7 +42,7 @@ bool Parameters(const VfxProgramData &p,const VfxOutputRecord &o,VfxScreenInput 
         std::isfinite(v.center_clear)&&v.center_clear>=0&&v.center_clear<1&&
         std::isfinite(v.edge_power)&&v.edge_power>0;
 }
-bool Textures(const VfxProgramData &p,const VfxOutputRecord &o)
+bool Textures(const VfxProgramView &p,const VfxOutputRecord &o)
 {
     if(!Range(o.textures,p.texture_bindings)||o.textures.count!=1)return false;
     const auto &b=p.texture_bindings[o.textures.first];
@@ -52,7 +52,7 @@ bool Textures(const VfxProgramData &p,const VfxOutputRecord &o)
     return std::string_view(reinterpret_cast<const char *>(p.strings.data())+i->asset_path_bytes.first,
         i->asset_path_bytes.count)=="Content/Textures/VFX/vfx_gradient_lut.dds";
 }
-Result Append(const VfxProgramData &p,const VfxEffectRecord &effect,const VfxContextPayload &context,
+Result Append(const VfxProgramView &p,const VfxEffectRecord &effect,const VfxContextPayload &context,
     float phase,float age,bool persistent,VfxQuality admission,std::uint64_t sequence,
     std::uint64_t owner,std::vector<VfxScreenInput> &commands,float entry_fade=1.0f)
 {
@@ -110,9 +110,9 @@ float VfxLowHealthPulseState::EntryFade() const noexcept
     // Nine simulation ticks soften re-entry without delaying the HP snapshot.
     return std::min(float(last_tick-entered_tick)/9.0f,1.0f);
 }
-bool IsVfxTypedScreenEffect(const VfxProgramData &p,VfxEffectHandle handle) noexcept
+bool IsVfxTypedScreenEffect(const VfxProgramView &p,VfxEffectHandle handle) noexcept
 { const auto id=EffectId(p,handle);return id==kHit||id==kHealth; }
-Result BuildVfxTypedScreenCommands(const VfxProgramData &p,std::span<const VfxEventInput> events,
+Result BuildVfxTypedScreenCommands(const VfxProgramView &p,std::span<const VfxEventInput> events,
     std::span<const VfxPersistentInput> persistent,Tick tick,VfxQuality admission,
     VfxLowHealthPulseState &pulse,std::vector<VfxScreenInput> &output)
 {

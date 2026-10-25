@@ -126,7 +126,7 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
     for (const auto& s:parsed.sources) for (std::uint32_t i=s.outputs.first;i<s.outputs.first+s.outputs.count;++i) if (parsed.outputs[i].source != (&s-&parsed.sources[0])) return Fail(error,"VFX output source back-reference is invalid");
     for (const auto& t:parsed.texture_bindings) if (t.catalog_slot >= parsed.texture_resources.size()) return Fail(error,"VFX texture catalog slot is invalid");
     if(parsed.effect_lookup.size()!=parsed.effects.size()) return Fail(error,"VFX effect lookup is incomplete");
-    std::set<std::uint32_t> effectIds;
+    std::set<std::uint64_t> effectIds;
     for(std::size_t i=0;i<parsed.effect_lookup.size();++i) {
         const auto &e=parsed.effect_lookup[i];
         if(e.handle!=i+1 || !e.effect_id || !effectIds.insert(e.effect_id).second) return Fail(error,"VFX effect identity is duplicate or invalid");
@@ -140,7 +140,7 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
     for(const auto &e:parsed.effects) {if(e.sources.first!=sourceCursor) return Fail(error,"VFX source ownership is not contiguous");sourceCursor+=e.sources.count;}
     for(const auto &source:parsed.sources) {if(source.outputs.first!=outputCursor) return Fail(error,"VFX output ownership is not contiguous");outputCursor+=source.outputs.count;}
     if(sourceCursor!=parsed.sources.size() || outputCursor!=parsed.outputs.size()) return Fail(error,"VFX program contains orphan records");
-    std::set<std::pair<std::uint32_t,std::uint32_t>> upgrades;
+    std::set<std::pair<std::uint64_t,std::uint32_t>> upgrades;
     for(const auto &b:parsed.upgrade_bindings) if(!b.skill_id || !b.ordinal || !upgrades.emplace(b.skill_id,b.ordinal).second) return Fail(error,"VFX upgrade binding is duplicate or invalid");
     for(const auto &e:parsed.effects) {
         if(e.timing_kind==0 && e.seconds<=0) return Fail(error,"VFX fixed lifetime must be positive");

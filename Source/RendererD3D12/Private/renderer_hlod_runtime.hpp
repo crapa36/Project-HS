@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_hlod.hpp"
+#include "renderer_hlod_scene.hpp"
 #include "d3d12_resources.hpp"
 #include "residency_manager.hpp"
 #include <hs/core/render_snapshot.hpp>
@@ -24,6 +25,10 @@ struct HlodRuntimeFrame
     HlodFrameOutputs outputs;
     CompletionSet completion{}, readback_completion{};
     std::uint64_t frame_id{}, qualification_epoch{};
+    std::shared_ptr<const StaticRenderScene> prepared_source;
+    std::uint32_t prepared_generation{};
+    std::size_t prepared_leaf_count{};
+    std::uint64_t prepared_pipeline_revision{};
     bool enabled{}, registered{}, readback_pending{};
 };
 struct HlodViewRuntime
@@ -42,6 +47,7 @@ struct HlodViewRuntime
 struct HlodRuntime
 {
     render_data::SceneHlod scene;
+    HlodScenePreparation prepared_scene;
     std::string logical_id, content_generation;
     std::vector<std::filesystem::path> page_paths;
     std::vector<std::string> page_digests;

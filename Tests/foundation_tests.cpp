@@ -3,6 +3,7 @@
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/core/presentation_event.hpp>
 #include <hs/core/process_info.hpp>
+#include <hs/core/result.hpp>
 #include <hs/core/snapshot_exchange.hpp>
 #include <hs/core/windows_command_line.hpp>
 #include <hs/jobs/task_system.hpp>
@@ -14,10 +15,12 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <source_location>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace
@@ -29,6 +32,63 @@ void Check(bool condition, std::string_view message)
     {
         throw std::runtime_error(std::string(message));
     }
+}
+
+void TestResult()
+{
+    const auto check_success = [](const hs::Result &result) {
+        Check(result.Succeeded() && static_cast<bool>(result) && result.Code() == hs::ErrorCode::None,
+              "success status");
+        Check(result.Subsystem().empty() && result.Message().empty() && result.Location().line() == 0 &&
+                  std::string_view(result.Location().file_name()).empty(),
+              "success has empty diagnostics and default location");
+    };
+    check_success(hs::Result::Success());
+
+    const auto location = std::source_location::current();
+    const std::string expected_message(96, 'x');
+    std::string subsystem = "foundation-owned-subsystem";
+    std::string message = expected_message;
+    auto failure = hs::Result::Failure(hs::ErrorCode::InvalidState, subsystem, message, location);
+    subsystem.assign("changed");
+    message.assign("changed");
+    const auto check_failure = [&](const hs::Result &result) {
+        Check(!result.Succeeded() && !result && result.Code() == hs::ErrorCode::InvalidState,
+              "failure status");
+        Check(result.Subsystem() == "foundation-owned-subsystem" && result.Message() == expected_message,
+              "failure owns subsystem and message");
+        Check(result.Location().line() == location.line() && result.Location().column() == location.column() &&
+                  std::string_view(result.Location().file_name()) == location.file_name() &&
+                  std::string_view(result.Location().function_name()) == location.function_name(),
+              "failure preserves source location");
+    };
+    check_failure(failure);
+    auto copied = failure;
+    failure = hs::Result::Success();
+    check_success(failure);
+    check_failure(copied);
+    auto moved = std::move(copied);
+    check_failure(moved);
+    failure = moved;
+    check_failure(failure);
+    failure = std::move(moved);
+    check_failure(failure);
+    failure = hs::Result::Success();
+    check_success(failure);
+    auto success_copy = failure;
+    check_success(success_copy);
+    auto success_moved = std::move(success_copy);
+    check_success(success_moved);
+
+    const auto caller_line = std::source_location::current().line() + 1;
+    const auto automatic = hs::Result::Failure(hs::ErrorCode::InvalidArgument, "caller", "invalid");
+    Check(automatic.Location().line() == caller_line &&
+              std::string_view(automatic.Location().file_name()) == location.file_name(),
+          "default failure location is its call site");
+    const auto none = hs::Result::Failure(hs::ErrorCode::None, "diagnostic", "retained", location);
+    Check(none.Succeeded() && none.Subsystem() == "diagnostic" && none.Message() == "retained" &&
+              none.Location().line() == location.line(),
+          "explicit None status preserves supplied diagnostics");
 }
 
 void TestFixedStepClock()
@@ -326,6 +386,32 @@ void TestSpscQueueSize()
     Check(!failed.load(std::memory_order_relaxed), "SPSC observed size stays bounded");
 }
 
+void TestStaticSceneViewLifetime()
+{
+    auto storage = std::make_unique<hs::StaticRenderSceneStorage>();
+    storage->content_generation_id = "first";
+    storage->instances.resize(2);
+    storage->instances[0].stable_id = 9;
+    storage->instances[1].stable_id = 3;
+    storage->eligible_static_members.push_back({9, 7, 0});
+    const auto *instances = storage->instances.data();
+    const auto first = hs::FreezeStaticRenderScene(std::move(storage));
+    Check(!storage && first->instances.data() == instances && first->instances.size() == 2 &&
+          first->eligible_static_members.front().stable_id == 9 &&
+          first->static_keys[0].stable_id == 3 && first->static_keys[1].stable_id == 9,
+          "frozen static view must borrow its stable backing and final prepared keys");
+    auto replacement = std::make_unique<hs::StaticRenderSceneStorage>(*first);
+    replacement->content_generation_id = "second";
+    replacement->instances[0].position.x = 42;
+    replacement->instances[0].stable_id = 10;
+    replacement->eligible_static_members[0].stable_id = 10;
+    const auto second = hs::FreezeStaticRenderScene(std::move(replacement));
+    Check(second->instances.data() != first->instances.data() && first->instances[0].position.x == 0 &&
+          second->instances[0].position.x == 42 && second->static_keys.back().stable_id == 10 &&
+          first->content_generation_id == "first" && second->content_generation_id == "second",
+          "development scene replacement must own new storage without rebinding an old leased view");
+}
+
 void TestVfxEventParameters()
 {
     const hs::VfxEventParameters expected{{0.6f, 0.0f, 0.8f}, 1.75f,
@@ -402,6 +488,8 @@ void TestWindowsCommandLineQuoting()
 
 } // namespace
 
+void TestShippedContentOwner();
+
 int main(int argc, char **argv)
 {
     try
@@ -409,15 +497,18 @@ int main(int argc, char **argv)
         const std::string_view group = argc > 1 ? argv[1] : "all";
         if (group == "all" || group == "foundation")
         {
+            TestResult();
             TestFixedStepClock();
             TestSpscQueueSize();
             TestSnapshotExchange();
             TestSnapshotExchangeQueuedPublications();
             TestSnapshotExchangeConcurrentOwnership();
+            TestStaticSceneViewLifetime();
             TestVfxEventParameters();
             TestCookedHeaderValidation();
             TestWindowsCommandLineQuoting();
             TestProcessInfo();
+            TestShippedContentOwner();
         }
         if (group == "all" || group == "jobs") TestTaskSystem();
         Check(group == "all" || group == "foundation" || group == "jobs",

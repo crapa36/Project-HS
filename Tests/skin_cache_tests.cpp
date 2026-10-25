@@ -30,7 +30,7 @@ int main()
         auto first = cache.Resolve({7, 0}, instance, &pose, 1.5f);
         cache.EndFrame();
         cache.Commit();
-        Check(!first.history_valid && first.previous_pose_revision == first.current_pose_revision,
+        Check(!first.history_valid && first.previous_pose == first.current_pose,
               "new skin cache entry must initialize previous from current");
         Check(first.conservative_radius == 3.0f, "scaled conservative bound");
 
@@ -88,7 +88,7 @@ int main()
         cache.EndFrame();
         cache.Commit();
         Check(!content_changed.history_valid,
-              "content revision change must invalidate skin history");
+              "exact content binding change must invalidate skin history");
 
         cache.BeginFrame();
         cache.EndFrame();

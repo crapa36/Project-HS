@@ -208,6 +208,44 @@ float HsBsdfCoatFresnel(float cosine)
     return 0.04 + 0.96 * pow(1.0 - saturate(cosine), 5.0);
 }
 
+bool HsBsdfCanUseCoatedIbl(HsSurfaceClosure surface, float no_v)
+{
+    // Keep the sampled path below the finite LUT's reliable grazing domain.
+    return no_v >= 1.0 / 64.0 && !surface.unlit && surface.coat_weight > 0.0 &&
+        surface.anisotropy == 0.0 && HsBsdfThinTransmissionWeight(surface) == 0.0 &&
+        !(surface.sheen_weight > 0.0 && any(surface.sheen_color > 0.0));
+}
+
+float3 HsBsdfCoatedDiffuseKernel(float coat_weight)
+{
+    const float w = saturate(coat_weight), a = 1.0 - 0.04 * w, b = 0.96 * w;
+    // Exact band0..2 cosine-SH ratios for (1-q)*(a-b*q), q=(1-NoL)^5.
+    const float m0 = a * (20.0 / 21.0) - b * (1.0 / 21.0 - 1.0 / 66.0);
+    const float m1 = a * (2.0 / 3.0 - 1.0 / 84.0) - b * (1.0 / 84.0 - 1.0 / 429.0);
+    const float m2 = a * (0.5 - 1.0 / 252.0) - b * (1.0 / 252.0 - 1.0 / 2002.0);
+    return float3(m0, 1.5 * m1, 6.0 * m2 - 2.0 * m0);
+}
+
+void HsBsdfCoatedIblFactors(HsSurfaceClosure surface, float no_v, float4 base_dfg,
+    float2 coat_dfg, float base_fresnel_override,
+    out float3 diffuse, out float3 substrate_specular, out float coat_specular)
+{
+    const float w = saturate(surface.coat_weight);
+    const float entry = 1.0 - w * HsBsdfCoatFresnel(no_v);
+    // ZW integrates the same GGX DFG against the full coat exit Fresnel.
+    const float2 dfg = max(base_dfg.xy - w * base_dfg.zw, 0.0);
+    const float3 f0 = HsBsdfF0(surface);
+    substrate_specular = f0 * dfg.x + dfg.y;
+    if (base_fresnel_override >= 0.0)
+        substrate_specular = lerp(substrate_specular,
+            saturate(base_fresnel_override).xxx * (dfg.x + dfg.y), saturate(surface.solid_transmission_weight));
+    substrate_specular *= entry;
+    coat_specular = w * (0.04 * coat_dfg.x + coat_dfg.y);
+    // The exit factor is carried by the weighted diffuse SH convolution.
+    diffuse = (1.0 - HsBsdfSchlickFresnel(f0, no_v)) * (1.0 - f0) *
+        (1.0 - HsBsdfMetallic(surface)) * surface.base_color * entry;
+}
+
 float3 HsBsdfSheenColor(HsSurfaceClosure surface)
 {
     return saturate(surface.sheen_weight) * saturate(surface.sheen_color);
@@ -371,34 +409,80 @@ float3 HsBsdfSolidBeerLambert(HsSurfaceClosure surface, float optical_path_m)
     return exp(-max(surface.absorption_per_m, 0.0) * max(optical_path_m, 0.0));
 }
 
-float HsBsdfPdf(HsSurfaceClosure surface, float3 wo, float3 wi)
+struct HsBsdfPdfContext
 {
-    if (surface.unlit)
+    float3 view;
+    float3 normal;
+    float4 probabilities;
+    bool unlit;
+    bool layered;
+    bool rejected_view;
+    bool flip_normal;
+};
+
+HsBsdfPdfContext HsBsdfPreparePdf(HsSurfaceClosure surface, float3 wo)
+{
+    HsBsdfPdfContext context = (HsBsdfPdfContext)0;
+    context.unlit = surface.unlit;
+    if (context.unlit)
+    {
+        return context;
+    }
+    context.layered = HsBsdfHasLayers(surface);
+    if (!context.layered)
+    {
+        return context;
+    }
+    context.view = normalize(wo);
+    context.flip_normal = HsBsdfThinTransmissionWeight(surface) > 0.0 &&
+        dot(surface.normal, context.view) < 0.0;
+    if (context.flip_normal)
+    {
+        surface.normal = -surface.normal;
+    }
+    context.normal = normalize(surface.normal);
+    context.rejected_view = dot(context.normal, context.view) <= 0.0;
+    if (!context.rejected_view)
+    {
+        context.probabilities = HsBsdfLayerProbabilities(surface, context.view);
+    }
+    return context;
+}
+
+float HsBsdfPdfPrepared(HsSurfaceClosure surface, float3 wo,
+    HsBsdfPdfContext context, float3 wi)
+{
+    if (context.unlit)
     {
         return 0.0;
     }
-    if (!HsBsdfHasLayers(surface))
+    if (!context.layered)
     {
         return HsBsdfBasePdf(surface, wo, wi);
     }
-    float3 view = normalize(wo);
+    if (context.flip_normal)
+    {
+        surface.normal = -surface.normal;
+    }
     float3 light = normalize(wi);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    float no_l = dot(normal, light);
-    if (dot(normal, view) <= 0.0 || no_l == 0.0)
+    float no_l = dot(context.normal, light);
+    if (context.rejected_view || no_l == 0.0)
     {
         return 0.0;
     }
-    float4 probabilities = HsBsdfLayerProbabilities(surface, view);
     if (no_l < 0.0)
     {
-        return probabilities.w * (-no_l) * HsBsdfInvPi;
+        return context.probabilities.w * (-no_l) * HsBsdfInvPi;
     }
     // The primary Charlie reference recommends uniform hemisphere sampling.
-    return probabilities.x * HsBsdfAnisotropicPdf(surface, view, light)
-        + probabilities.y * HsBsdfBasePdf(HsBsdfCoatSurface(surface), view, light)
-        + probabilities.z * (0.5 * HsBsdfInvPi);
+    return context.probabilities.x * HsBsdfAnisotropicPdf(surface, context.view, light)
+        + context.probabilities.y * HsBsdfBasePdf(HsBsdfCoatSurface(surface), context.view, light)
+        + context.probabilities.z * (0.5 * HsBsdfInvPi);
+}
+
+float HsBsdfPdf(HsSurfaceClosure surface, float3 wo, float3 wi)
+{
+    return HsBsdfPdfPrepared(surface, wo, HsBsdfPreparePdf(surface, wo), wi);
 }
 
 
@@ -407,36 +491,81 @@ float HsBsdfPdf(HsSurfaceClosure surface, float3 wo, float3 wi)
 
 
 
-HsBsdfSampleResult HsBsdfSample(HsSurfaceClosure surface, float3 wo, float u_lobe, float2 u_dir)
+struct HsBsdfSamplingContext
 {
-    if (surface.unlit)
+    float3 view;
+    float3 normal;
+    float4 probabilities;
+    HsBsdfPdfContext pdf;
+    bool unlit;
+    bool layered;
+    bool rejected_view;
+    bool flip_normal;
+};
+
+HsBsdfSamplingContext HsBsdfPrepareSampling(HsSurfaceClosure surface, float3 wo)
+{
+    HsBsdfSamplingContext context = (HsBsdfSamplingContext)0;
+    context.unlit = surface.unlit;
+    if (context.unlit)
+    {
+        return context;
+    }
+    context.layered = HsBsdfHasLayers(surface);
+    if (!context.layered)
+    {
+        return context;
+    }
+    context.view = normalize(wo);
+    context.flip_normal = HsBsdfThinTransmissionWeight(surface) > 0.0 &&
+        dot(surface.normal, context.view) < 0.0;
+    if (context.flip_normal)
+    {
+        surface.normal = -surface.normal;
+    }
+    context.normal = normalize(surface.normal);
+    context.rejected_view = dot(context.normal, context.view) <= 0.0;
+    if (!context.rejected_view)
+    {
+        context.probabilities = HsBsdfLayerProbabilities(surface, context.view);
+        // Preserve Sample's nested Pdf input: the already-normalized view and oriented surface.
+        context.pdf = HsBsdfPreparePdf(surface, context.view);
+    }
+    return context;
+}
+
+HsBsdfSampleResult HsBsdfSamplePrepared(HsSurfaceClosure surface, float3 wo,
+    HsBsdfSamplingContext context, float u_lobe, float2 u_dir)
+{
+    if (context.unlit)
     {
         return (HsBsdfSampleResult)0;
     }
-    if (!HsBsdfHasLayers(surface))
+    if (!context.layered)
     {
         return HsBsdfBaseSample(surface, wo, u_lobe, u_dir);
     }
     HsBsdfSampleResult result = (HsBsdfSampleResult)0;
-    float3 view = normalize(wo);
-    surface = HsBsdfOrientThinSurface(surface, view);
-    float3 normal = normalize(surface.normal);
-    if (dot(normal, view) <= 0.0)
+    if (context.flip_normal)
+    {
+        surface.normal = -surface.normal;
+    }
+    if (context.rejected_view)
     {
         return result;
     }
-    float4 probabilities = HsBsdfLayerProbabilities(surface, view);
-    if (u_lobe < probabilities.x)
+    if (u_lobe < context.probabilities.x)
     {
-        result = HsBsdfAnisotropicSample(surface, view, u_lobe / probabilities.x, u_dir);
+        result = HsBsdfAnisotropicSample(surface, context.view,
+            u_lobe / context.probabilities.x, u_dir);
         if (!result.valid)
         {
             return result;
         }
     }
-    else if (u_lobe < probabilities.x + probabilities.y)
+    else if (u_lobe < context.probabilities.x + context.probabilities.y)
     {
-        result = HsBsdfBaseSample(HsBsdfCoatSurface(surface), view, 0.0, u_dir);
+        result = HsBsdfBaseSample(HsBsdfCoatSurface(surface), context.view, 0.0, u_dir);
         if (!result.valid)
         {
             return result;
@@ -444,29 +573,36 @@ HsBsdfSampleResult HsBsdfSample(HsSurfaceClosure surface, float3 wo, float u_lob
     }
     else
     {
-        float3 tangent = HsBsdfTangent(normal);
-        float3 bitangent = cross(normal, tangent);
-        if (u_lobe < probabilities.x + probabilities.y + probabilities.z)
+        float3 tangent = HsBsdfTangent(context.normal);
+        float3 bitangent = cross(context.normal, tangent);
+        if (u_lobe < context.probabilities.x + context.probabilities.y + context.probabilities.z)
         {
             float cosine = u_dir.x;
             float sine = sqrt(max(0.0, 1.0 - cosine * cosine));
             float phi = 2.0 * HsBsdfPi * u_dir.y;
-            result.wi = HsBsdfToWorld(float3(sine * cos(phi), sine * sin(phi), cosine), tangent, bitangent, normal);
+            result.wi = HsBsdfToWorld(float3(sine * cos(phi), sine * sin(phi), cosine),
+                tangent, bitangent, context.normal);
         }
         else
         {
-            result.wi = HsBsdfSampleCosineHemisphere(u_dir, tangent, bitangent, -normal);
+            result.wi = HsBsdfSampleCosineHemisphere(u_dir, tangent, bitangent, -context.normal);
         }
     }
     result.wi = normalize(result.wi);
-    result.f = HsBsdfEvaluate(surface, view, result.wi);
-    result.pdf = HsBsdfPdf(surface, view, result.wi);
+    result.f = HsBsdfEvaluate(surface, context.view, result.wi);
+    result.pdf = HsBsdfPdfPrepared(surface, context.view, context.pdf, result.wi);
     result.valid = result.pdf > 0.0;
     if (!result.valid)
     {
         return (HsBsdfSampleResult)0;
     }
     return result;
+}
+
+HsBsdfSampleResult HsBsdfSample(HsSurfaceClosure surface, float3 wo, float u_lobe, float2 u_dir)
+{
+    const HsBsdfSamplingContext context = HsBsdfPrepareSampling(surface, wo);
+    return HsBsdfSamplePrepared(surface, wo, context, u_lobe, u_dir);
 }
 
 float3 HsBsdfIndirectSampleWeight(HsSurfaceClosure surface, HsBsdfSampleResult sample)
@@ -493,13 +629,14 @@ float3 HsBsdfIntegrateAnalyticSky(HsSurfaceClosure surface, float3 wo, float3 sk
     // sheet lobes. A GGX AB lookup is not the cloth directional albedo.
     const uint sample_count = 32;
     float3 accumulated = 0.0;
+    const HsBsdfSamplingContext sampling = HsBsdfPrepareSampling(surface, wo);
     [loop]
     for (uint index = 0; index < sample_count; ++index)
     {
         float u_lobe = frac((float(index) + 0.5) * 0.6180339887498948482);
         float2 u_dir = float2((float(index) + 0.5) / float(sample_count),
                              float(HsBsdfReverseBits(index)) * 2.3283064365386962890625e-10);
-        HsBsdfSampleResult sample = HsBsdfSample(surface, wo, u_lobe, u_dir);
+        HsBsdfSampleResult sample = HsBsdfSamplePrepared(surface, wo, sampling, u_lobe, u_dir);
         float3 sky = lerp(sky_bottom, sky_top, saturate(sample.wi.y * 0.5 + 0.5));
         accumulated += sky * HsBsdfIndirectSampleWeight(surface, sample);
     }

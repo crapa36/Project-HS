@@ -1,8 +1,8 @@
+#include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/process_info.hpp>
-#include <hs/presentation/projector.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -37,14 +37,6 @@ constexpr std::array<std::string_view, hs::kCombatSkillCount> kCombatSuiteSkillI
     "basic_attack", "piercing_shot", "multishot", "charged_shot",
     "explosive_arrow", "ricochet_arrow", "arrow_rain", "trap", "retreat_shot"};
 
-bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &snapshot)
-{
-    static const hs::PresentationCatalog presentation;
-    static const hs::SettingsData settings;
-    hs::GameReadModelStorage model;
-    simulation.WriteReadModel(model);
-    return hs::ProjectRenderSnapshot(model.View(), presentation, {}, settings, snapshot);
-}
 constexpr std::array<std::string_view, hs::kRelicCount> kCombatSuiteRelicIds{
     "bleed_kill_heal", "burn_spread_on_kill", "kill_cooldown_surge",
     "bleed_burn_explosion", "sixth_basic_radial", "basic_kill_tracking_arrow",
@@ -353,32 +345,44 @@ CombatSimulationSuite LoadRelicBalanceSuite(const std::filesystem::path &path)
     return suite;
 }
 
-hs::Float3 SelectNearestEnemyAim(const hs::RenderSnapshot &snapshot,
-                     hs::Float2 player_position)
+template <typename Enemies>
+constexpr hs::Float3 SelectNearestEnemyAim(const Enemies &enemies,
+                                          hs::Float2 player_position)
 {
     hs::Float2 best{player_position.x, player_position.y + 20.0f};
     auto best_distance = std::numeric_limits<float>::max();
-    for (const auto &instance : snapshot.instances)
+    // Projection emitted these same live rows in order and changed only height.
+    for (const auto &enemy : enemies)
     {
-        if (instance.mesh == hs::RenderMesh::MonsterMelee ||
-            instance.mesh == hs::RenderMesh::MonsterRanged ||
-            instance.mesh == hs::RenderMesh::MonsterSuicide ||
-            instance.mesh == hs::RenderMesh::BossFiveMinute ||
-            instance.mesh == hs::RenderMesh::BossTenMinute ||
-            instance.mesh == hs::RenderMesh::BossFinal)
+        if (enemy.dead) continue;
+        const auto dx = enemy.position.x - player_position.x;
+        const auto dy = enemy.position.y - player_position.y;
+        const auto distance = dx * dx + dy * dy;
+        if (distance < best_distance)
         {
-            const auto dx = instance.position.x - player_position.x;
-            const auto dy = instance.position.z - player_position.y;
-            const auto distance = dx * dx + dy * dy;
-            if (distance < best_distance)
-            {
-                best = {instance.position.x, instance.position.z};
-                best_distance = distance;
-            }
+            best = enemy.position;
+            best_distance = distance;
         }
     }
     return {best.x, 0.0f, best.y};
 }
+
+static_assert([] {
+    const auto empty = SelectNearestEnemyAim(std::span<const hs::EnemyView>{}, {3.0f, 4.0f});
+    if (empty.x != 3.0f || empty.y != 0.0f || empty.z != 24.0f) return false;
+    std::array<hs::EnemyView, 3> enemies{};
+    enemies[0].position = {2.0f, 0.0f};
+    enemies[1].position = {-2.0f, 0.0f};
+    enemies[1].kind = hs::EnemyKind::Ranged;
+    enemies[2].position = {0.0f, 1.0f};
+    enemies[2].boss = hs::BossKind::Final;
+    enemies[2].dead = true;
+    if (SelectNearestEnemyAim(enemies, {}).x != 2.0f) return false;
+    enemies[0].dead = true;
+    if (SelectNearestEnemyAim(enemies, {}).x != -2.0f) return false;
+    enemies[2].dead = false; // Projection included a not-yet-dead zero-HP row.
+    return SelectNearestEnemyAim(enemies, {}).z == 1.0f;
+}());
 
 hs::GameAction SkillSlotAction(std::size_t slot)
 {
@@ -400,13 +404,13 @@ struct CombatControlState
 };
 
 hs::InputFrame MakeCombatInput(const hs::SessionProbe &probe,
-                               const hs::RenderSnapshot &snapshot,
+                               const hs::EnemyReadColumns &enemies,
                                hs::Tick target_tick,
                                CombatControlState &state)
 {
     state.held = {};
     state.held.basic_attack_held = state.scenario != "movement" || target_tick % 300 >= 120;
-    state.held.aim_world = SelectNearestEnemyAim(snapshot, probe.player_position);
+    state.held.aim_world = SelectNearestEnemyAim(enemies, probe.player_position);
     if (state.scenario == "movement") {
         state.held.move_held = true;
         state.held.move_target_world = {(target_tick / 600) % 2 == 0 ? 20.0f : -20.0f, 0.0f, 0.0f};
@@ -598,7 +602,6 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
         for (int i = 0; i < 5; ++i)
             apply({hs::DebugCommandKind::SpawnEnemy, 0, 0, {0.5f + i * 0.25f, 0.0f}});
 
-    hs::RenderSnapshotStorage snapshot(20'000, 2, 2, 128);
     std::vector<std::uint64_t> tick_microseconds;
     tick_microseconds.reserve(static_cast<std::size_t>(maximum_ticks));
     std::uint32_t maximum_enemies{};
@@ -619,12 +622,10 @@ Json RunCombatBuild(const CombatBuild &build, std::uint64_t seed, hs::Tick maxim
         const auto before = simulation.GetObservation();
         if (before.phase == hs::SessionPhase::Victory ||
             before.phase == hs::SessionPhase::Defeat || before.health == 0) break;
-        snapshot.Clear();
-        if (!WriteSnapshot(simulation, snapshot))
-            throw std::runtime_error("Combat target snapshot capacity was exceeded.");
-
-        const auto input = MakeCombatInput(before, snapshot.View(), target_tick,
-                                           control);
+        const auto input = [&] {
+            auto read = simulation.BorrowTickReadView();
+            return MakeCombatInput(before, read.View().enemies, target_tick, control);
+        }();
         const auto started = std::chrono::steady_clock::now();
         const auto tick = simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
         tick_microseconds.push_back(static_cast<std::uint64_t>(
@@ -964,7 +965,6 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
     if (auto initialized = simulation.Initialize(config, rules); !initialized)
         throw std::runtime_error(std::string(initialized.Message()));
 
-    hs::RenderSnapshotStorage snapshot(20'000, 2, 2, 128);
     CombatControlState control;
     std::vector<Acquisition> acquisitions;
     std::vector<hs::SimulationObservation> checkpoints{simulation.GetObservation()};
@@ -973,10 +973,10 @@ Json RunProgression(const ProgressionDraftProfile &profile, std::uint64_t seed,
         ResolveProgressionChoices(simulation, profile, seed, acquisitions);
         const auto before = simulation.GetObservation();
         if (before.phase == hs::SessionPhase::Victory) break;
-        snapshot.Clear();
-        if (!WriteSnapshot(simulation, snapshot))
-            throw std::runtime_error("Progression target snapshot capacity was exceeded.");
-        const auto input = MakeCombatInput(before, snapshot.View(), target_tick, control);
+        const auto input = [&] {
+            auto read = simulation.BorrowTickReadView();
+            return MakeCombatInput(before, read.View().enemies, target_tick, control);
+        }();
         (void)simulation.TickFixed(input, hs::FixedStepClock::kFixedStep);
         simulation.ClearDomainSignals();
         const auto after = simulation.GetObservation();
@@ -1341,7 +1341,7 @@ Json AggregateRelicPairs(const CombatSimulationSuite &suite, const Json &runs)
     for (std::size_t build = 0; build < suite.builds.size(); build += 2)
     {
         const auto &off_build = suite.builds[build];
-        const auto &on_build = suite.builds[build + 1];
+        const auto &on_build = suite.builds.at(build + 1);
         const auto relic = on_build.relics.front();
         const auto skill_it = static_cast<std::size_t>(std::ranges::find_if(
             on_build.upgrade_masks, [](std::uint8_t mask) { return mask != 0; }) -
@@ -1360,6 +1360,9 @@ Json AggregateRelicPairs(const CombatSimulationSuite &suite, const Json &runs)
         {
             const auto off = indexed_runs.at({off_build.id, seed});
             const auto on = indexed_runs.at({on_build.id, seed});
+            if (off->at("enemy_spawned") != on->at("enemy_spawned"))
+                throw std::runtime_error(
+                    "Paired build comparison received different enemy spawn counts.");
             const auto off_run_dps = off->at("dps").get<double>();
             const auto on_run_dps = on->at("dps").get<double>();
             off_dps.push_back(off_run_dps);
@@ -1462,27 +1465,6 @@ Json AggregateRelicPairs(const CombatSimulationSuite &suite, const Json &runs)
     return pairs;
 }
 
-void ValidatePairedWorkloads(const CombatSimulationSuite &suite, const Json &runs)
-{
-    for (std::size_t build = 0; build < suite.builds.size(); build += 2)
-    {
-        const auto &off_id = suite.builds[build].id;
-        const auto &on_id = suite.builds[build + 1].id;
-        for (const auto seed : suite.seeds)
-        {
-            const Json *off{}, *on{};
-            for (const auto &run : runs)
-                if (run.at("seed").get<std::uint64_t>() == seed)
-                {
-                    if (run.at("build_id") == off_id) off = &run;
-                    if (run.at("build_id") == on_id) on = &run;
-                }
-            if (off && on && off->at("enemy_spawned") != on->at("enemy_spawned"))
-                throw std::runtime_error(
-                    "Paired build comparison received different enemy spawn counts.");
-        }
-    }
-}
 } // namespace
 
 int main(int argc, char **argv)
@@ -1707,7 +1689,6 @@ int main(int argc, char **argv)
                                         suite.maximum_ticks, rules));
             }
         }
-        ValidatePairedWorkloads(suite, runs);
         const auto aggregates = relic_balance_mode ? Json::array() : Aggregate(suite, runs);
         Json builds = Json::array();
         for (const auto &build : suite.builds)
@@ -1718,7 +1699,6 @@ int main(int argc, char **argv)
                     {"aim_policy", "nearest_enemy"},
                     {"active_skill_policy", "round_robin_when_ready"},
                     {"charged_skill_policy", "full_charge"},
-                     {"paired_spawn_counts_valid", true},
                      {"fixed_tick_hz", 60},
                      {"rules_hash", hs::SimulationRulesHash(rules)},
                      {"duration_ticks", suite.maximum_ticks},
@@ -1739,6 +1719,7 @@ int main(int argc, char **argv)
                                    {"paired_off_on_builds", suite.builds.size()},
                                    {"metric_semantics", {"uses", "casts", "casts_with_hit", "hit_events", "damage", "kills", "activation_count", "cooldown_saved", "damage_prevented", "dps"}}};
             report["relic_pairs"] = AggregateRelicPairs(suite, runs);
+            report["paired_spawn_counts_valid"] = true;
         }
         std::ofstream(output_directory / "combat_report.json", std::ios::trunc)
             << report.dump(2) << '\n';

@@ -35,6 +35,8 @@ struct NavigationGrid
     int height{kNavigationGridDimension};
     // Edge costs are 10/14; fifteen buckets preserve Dijkstra's cost order.
     std::array<std::vector<std::pair<int, int>>, 15> flow_pending;
+    Float2 requested_target{};
+    bool flow_dirty{};
 
     int Index(int x, int y) const noexcept { return y * width + x; }
     bool In(int x, int y) const noexcept { return x >= 0 && y >= 0 && x < width && y < height; }
@@ -51,6 +53,7 @@ struct NavigationGrid
     void Rebuild(const ArenaBoundary &boundary, std::span<const ArenaObstacle2D> obstacles,
                  float clearance = 0.0f) noexcept
     {
+        flow_dirty = false;
         distance.fill(kUnreachableNavigationDistance);
         const auto cell_padding = cell_size * 0.70710678f;
         for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
@@ -83,8 +86,14 @@ struct NavigationGrid
         }
         return best;
     }
+    void RequestFlow(Float2 target) noexcept
+    {
+        requested_target = target;
+        flow_dirty = true;
+    }
     void RebuildFlow(Float2 target) noexcept
     {
+        flow_dirty = false;
         distance.fill(kUnreachableNavigationDistance);
         const auto target_index = NearestClearCell(target);
         if (target_index < 0) return;
@@ -117,8 +126,10 @@ struct NavigationGrid
             }
         }
     }
-    Float2 NextWaypoint(Float2 from, Float2 fallback) const noexcept
+    Float2 NextWaypoint(Float2 from, Float2 fallback) noexcept
     {
+        // Use the cell-gate position, even if the player moved before this first query.
+        if (flow_dirty) RebuildFlow(requested_target);
         const auto [x, y] = Cell(from);
         if (!In(x, y)) return fallback;
         auto best = Index(x, y);

@@ -4,10 +4,18 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace hs::renderer_detail
 {
+inline std::uint64_t RibbonArgumentBufferBytes(std::uint64_t current, std::uint64_t required)
+{
+    if (required <= current) return current;
+    return std::max(required, current <= std::numeric_limits<std::uint64_t>::max()/2 ? current*2 : required);
+}
+
 inline std::array<bool, 3> RibbonBufferReplacements(
     const std::array<std::uint64_t, 3> &widths, std::uint64_t history_bytes, std::uint64_t argument_bytes)
 {

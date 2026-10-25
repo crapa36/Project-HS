@@ -1,11 +1,25 @@
+#include "vfx_light_reference.hpp"
 #include <hs/runtime/experiment_spec.hpp>
+#include <hs/runtime/shipping_content.hpp>
+#include <hs/core/shipped_content_owner.hpp>
+#include <hs/core/process_info.hpp>
+#include <bit>
 #include <hs/runtime/save_store.hpp>
 #include <hs/runtime/audio_engine.hpp>
 #include <hs/runtime/playtest_recording.hpp>
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/sha256.hpp>
+#include <hs/presentation/presentation_catalog_io.hpp>
+#include <hs/game_rules/simulation_rules_io.hpp>
+#include <hs/gameplay/game_simulation.hpp>
+#include <hs/core/fixed_step_clock.hpp>
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
 #include "session_music.hpp"
+#include "audio_session.hpp"
+#include "audio_native.hpp"
+#include "scene_generation_binding.hpp"
+#include "native_input_frame.hpp"
 #include "camera_pose.hpp"
 #include "recording_io.hpp"
 #include "window.hpp"
@@ -29,6 +43,7 @@
 #pragma comment(lib, "dwrite.lib")
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
@@ -96,6 +111,71 @@ void TestSaveRecovery(const std::filesystem::path &root)
     Check(corrupt_count >= 2, "corrupt profile copies are preserved");
 }
 
+void TestProfileMigration(const std::filesystem::path &root)
+{
+    const std::string legacy = R"({"schema_version":1,"best_level":42,"total_wins":19,"total_kills":18446744073709551614,"unlocked_skills_mask":255,"unlocked_relics_mask":4095})";
+    const auto read = [](const std::filesystem::path &path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
+    };
+    const auto folder = root / "profile-migration";
+    std::filesystem::create_directories(folder);
+    hs::SaveStore store(folder);
+    const auto primary = folder / "profile.json";
+    const auto backup = folder / "profile.json.bak";
+    std::ofstream(primary) << legacy;
+    hs::ProfileData profile;
+    Check(store.LoadProfile(profile).Succeeded() && profile.schema_version == 2 &&
+              profile.best_level == 42 && profile.total_wins == 19 &&
+              profile.total_kills == std::numeric_limits<std::uint64_t>::max() - 1,
+          "v1 profile migrates all used statistics without narrowing");
+    Check(read(primary) == legacy && !std::filesystem::exists(backup),
+          "reading legacy profile does not rewrite user bytes");
+    Check(store.SaveProfile(profile).Succeeded(), "explicit save writes migrated profile");
+    const auto current = read(primary);
+    Check(current.find("unlocked_") == std::string::npos && read(backup) == legacy,
+          "v2 removes unused masks while atomic backup preserves original v1");
+    hs::ProfileData roundtrip;
+    Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.schema_version == 2 &&
+              roundtrip.total_kills == profile.total_kills && roundtrip.total_wins == 19,
+          "v2 profile round trips statistics exactly");
+
+    WriteCorrupt(primary);
+    Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.best_level == 42 &&
+              roundtrip.total_kills == profile.total_kills && read(backup) == legacy,
+          "corrupt v2 primary recovers v1 backup without losing its original bytes");
+
+    for (const auto &bad : {
+             R"({"schema_version":1,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":256,"unlocked_relics_mask":4095})",
+             R"({"schema_version":1,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":255,"unlocked_relics_mask":4096})",
+             R"({"schema_version":2,"best_level":99,"best_level":100,"total_wins":0,"total_kills":0})",
+             R"({"schema_version":2,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":255})"})
+    {
+        std::ofstream(primary, std::ios::trunc) << bad;
+        Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.best_level == 42,
+              "migration keeps legacy mask bounds and strict duplicate/current field checks");
+    }
+
+    const std::string future = R"({"schema_version":3,"future_data":[1,2,3]})";
+    std::ofstream(primary, std::ios::trunc) << future;
+    Check(!store.LoadProfile(roundtrip) && !store.SaveProfile(profile) &&
+              read(primary) == future && read(backup) == legacy,
+          "future profile primary remains byte-for-byte read-only on load and save");
+    // WriteDocument emits LF bytes directly; text-mode output would translate them to CRLF.
+    std::ofstream(primary, std::ios::binary | std::ios::trunc) << current;
+    std::ofstream(backup, std::ios::trunc) << future;
+    Check(!store.SaveProfile(profile), "future backup blocks profile save");
+    Check(read(primary) == current && read(backup) == future,
+          "blocked save preserves primary and future backup bytes exactly");
+    WriteCorrupt(primary);
+    Check(!store.LoadProfile(roundtrip) && read(primary) == "{broken" && read(backup) == future,
+          "future backup blocks recovery before corrupt primary is moved");
+    const std::string duplicate_future = R"({"schema_version":3,"future_data":1,"future_data":2})";
+    std::ofstream(primary, std::ios::trunc) << duplicate_future;
+    Check(!store.LoadProfile(roundtrip) && !store.SaveProfile(profile) && read(primary) == duplicate_future,
+          "future duplicate-key document is read-only even though strict parsing rejects it");
+}
+
 void TestSettingsPersistence(const std::filesystem::path &root)
 {
     hs::SaveStore store(root);
@@ -156,6 +236,74 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
     Check(rejected({{1, 0, "damage_player", "{}"}}), "elapsed tick zero is rejected");
     Check(rejected({{1, 61, "damage_player", "{}"}}), "action after termination is rejected");
     Check(rejected({{1, 1, "damage_player", "[]"}}), "non-object payload is rejected");
+    source.timeline_actions.clear();
+    source.config_overrides_json = "{\"diagnostic_enemy_count\":200}";
+    hs::ApplicationConfig diagnostic;
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              hs::ApplyExperimentOverrides(loaded, diagnostic) && diagnostic.diagnostic_enemy_count == 200 && diagnostic.capture_diagnostics,
+          "diagnostic enemy population round trips and applies as a number");
+    source.config_overrides_json = "{\"diagnostic_enemy_count\":10001}";
+    Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+          "diagnostic enemy population above the fixture bound is rejected");
+    Check(!hs::ApplicationConfig{}.graphics_preset,
+          "graphics preset override is absent by default");
+    for (const auto &[name, expected] : std::array{
+             std::pair{"low", hs::GraphicsPreset::Low},
+             std::pair{"medium", hs::GraphicsPreset::Medium},
+             std::pair{"high", hs::GraphicsPreset::High},
+             std::pair{"ultra", hs::GraphicsPreset::Ultra}})
+    {
+        source.config_overrides_json = std::string("{\"graphics_preset\":\"") + name + "\"}";
+        hs::ApplicationConfig preset;
+        Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+                  hs::ApplyExperimentOverrides(loaded, preset) && preset.graphics_preset == expected,
+              "typed graphics preset override round trips");
+    }
+    for (const auto invalid : {"{\"graphics_preset\":\"custom\"}",
+                               "{\"graphics_preset\":\"fast\"}",
+                               "{\"graphics_preset\":true}",
+                               "{\"graphics_preset\":1}"})
+    {
+        source.config_overrides_json = invalid;
+        Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+              "graphics preset rejects custom, unknown, and nonstring values");
+    }
+    source.config_overrides_json = R"({"graphics_preset":"ultra","width":1920,"height":1080,"vsync":false,"frame_cap":30,"render_scale_percent":75,"shadow_resolution":1024,"particle_percentage":50,"borderless":true,"bloom":false,"outline":false})";
+    hs::ApplicationConfig explicit_graphics;
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              hs::ApplyExperimentOverrides(loaded, explicit_graphics) && explicit_graphics.graphics_preset == hs::GraphicsPreset::Ultra &&
+              explicit_graphics.resolution_explicit && explicit_graphics.vsync_explicit &&
+              explicit_graphics.frame_cap_explicit && explicit_graphics.render_scale_explicit &&
+              explicit_graphics.shadow_resolution_explicit && explicit_graphics.particle_percentage_explicit &&
+              explicit_graphics.borderless_explicit && explicit_graphics.bloom_explicit && explicit_graphics.outline_explicit,
+          "experiment preset preserves explicit field precedence metadata");
+    hs::ApplicationConfig hero;
+    Check(!hero.capture_hero_work, "isolated Hero work capture defaults off");
+    source.config_overrides_json = "{\"capture_hero_work\":true}";
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              hs::ApplyExperimentOverrides(loaded, hero) && hero.capture_hero_work && hero.capture_diagnostics,
+          "Hero work boolean override round trips and reaches Runtime configuration");
+    source.config_overrides_json = "{\"capture_hero_work\":\"true\"}";
+    Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+          "Hero work capture rejects a nonboolean override");
+    Check(hs::ApplicationConfig{}.hero_work_mode == hs::HeroWorkDiagnosticMode::Full,
+          "Hero work shading defaults to the unchanged full path");
+    for (const auto &[name, expected] : std::array{
+             std::pair{"full", hs::HeroWorkDiagnosticMode::Full},
+             std::pair{"no-environment", hs::HeroWorkDiagnosticMode::NoEnvironment},
+             std::pair{"coverage-only", hs::HeroWorkDiagnosticMode::CoverageOnly}})
+    {
+        source.config_overrides_json = std::string("{\"capture_hero_work\":true,\"capture_hero_work_mode\":\"") + name + "\"}";
+        Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+                  hs::ApplyExperimentOverrides(loaded, hero) && hero.hero_work_mode == expected,
+              "explicit Hero diagnostic mode round trips without changing its meaning");
+    }
+    for (const auto invalid : {"{\"capture_hero_work_mode\":true}", "{\"capture_hero_work_mode\":\"fast\"}"})
+    {
+        source.config_overrides_json = invalid;
+        Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+              "Hero diagnostic mode rejects wrong types and unknown values");
+    }
 }
 
 void TestProductionVfxDecoding()
@@ -241,7 +389,19 @@ void TestProductionVfxDecoding()
         else if(effect.payload_kind==hash32("ConePayload")){hs::VfxConePayload p;p.direction={0,0,1};p.range=3;p.half_angle_degrees=40;input.payload=p;}
         std::size_t decoded=0;
         for(hs::Tick tick=0;tick<static_cast<hs::Tick>(std::ceil(effect.seconds*60));++tick)
-            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedLightCommands(program,std::span(&input,1),tick).size());
+            decoded=(std::max)(decoded,hs::runtime_detail::BuildVfxTypedLightCommands(catalog.Image(),std::span(&input,1),tick).size());
+
+        for(auto quality:{hs::VfxQuality::Low,hs::VfxQuality::Medium,hs::VfxQuality::High})
+        for(bool owned:{false,true})
+        {
+            input.quality=quality; input.geometry_owner_id=owned?91:0;input.geometry_start_tick=3;input.geometry_end_tick=243;
+            for(hs::Tick tick=0;tick<=250;++tick)
+            {
+                const auto reference=hs::runtime_detail::light_reference::BuildVfxTypedLightCommands(program,std::span(&input,1),tick);
+                vfx_light_test::Compare(reference,hs::runtime_detail::BuildVfxTypedLightCommands(catalog.Image(),std::span(&input,1),tick));
+                vfx_light_test::Compare(reference,hs::runtime_detail::BuildVfxTypedLightCommands(hs::shipping::Vfx(),std::span(&input,1),tick));
+            }
+        }
         Check(decoded==expected,"actual cooked VFX light recipe rejected: handle "+std::to_string(effect.handle));
         light_outputs+=decoded;
     }
@@ -495,6 +655,45 @@ void TestVfxCatalog()
                 "new VFX expands into particles");
       }
 
+    // Exercise the prepared static policies after ownership transfer as well as Load.
+    hs::VfxCatalog transferred;
+    transferred.Swap(catalog);
+    catalog = std::move(transferred);
+    std::size_t compared_policies{};
+    for (const auto &lookup : catalog.Program().effect_lookup)
+    {
+        const auto *definition = catalog.FindEffect({lookup.effect_id});
+        if (!definition || definition->kind == hs::VfxDefinitionKind::Line) continue;
+        const auto &policy = catalog.Program().effects[lookup.handle - 1];
+        const bool decorative = !policy.must_match_logic && std::ranges::none_of(
+            std::span(catalog.Program().sources).subspan(policy.sources.first, policy.sources.count),
+            [](const auto &source) {
+                return source.authoritative || source.type == hs::VfxSourceType::ProjectileFollow;
+            });
+        event.asset = {lookup.effect_id};
+        std::vector<hs::ParticleSpawnCommand> reference;
+        std::vector<hs::VfxLineSpawnCommand> ignored_lines;
+        Check(catalog.ExpandEvent(event, 1.0f, reference, ignored_lines).Succeeded(),
+              "prepared policy baseline expands after catalog swap and move");
+        for (const auto fraction : {0.0f, 0.5f, 1.0f})
+        {
+            std::vector<hs::ParticleSpawnCommand> actual;
+            Check(catalog.ExpandEvent(event, fraction, actual, ignored_lines).Succeeded() &&
+                      actual.size() == reference.size(), "prepared policy retains emitter order and count");
+            for (std::size_t i = 0; i < reference.size(); ++i)
+            {
+                const auto expected = decorative && reference[i].renderer != hs::VfxRenderer::Ground
+                    ? static_cast<std::uint32_t>(std::ceil(double(reference[i].count) * fraction))
+                    : reference[i].count;
+                Check(actual[i].count == expected && actual[i].seed == reference[i].seed &&
+                          actual[i].mesh_index == reference[i].mesh_index,
+                      "prepared policy matches original source-based quality admission and seed");
+            }
+        }
+        ++compared_policies;
+    }
+    Check(compared_policies != 0, "catalog policy regression visits authored legacy effects");
+
     event.asset = hs::MakeAssetId("particle.boss.shockwave.release");
     event.geometry.kind = hs::PresentationGeometryKind::RingGaps;
     std::vector<hs::ParticleSpawnCommand> shockwave_accents;
@@ -607,6 +806,226 @@ void TestVfxCatalog()
                  hs::VfxPrimitive::Flame);
 }
 
+void TestMainWakeAndSceneLeases()
+{
+    hs::runtime_detail::MainWake wake;
+    Check(wake.Handle() && wake.Error() == 0, "create owner-scoped Main event");
+    wake.Notify();
+    Check(wake.PrepareWait([] { return false; }) && WaitForSingleObject(wake.Handle(), 0) == WAIT_TIMEOUT,
+          "drained coalesced notification resets before the final work check");
+    bool injected = false;
+    Check(!wake.PrepareWait([&] { injected = true; wake.Notify(); return false; }) && injected &&
+              WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0,
+          "publication between reset and recheck cannot lose its wake");
+    Check(wake.PrepareWait([] { return false; }), "prepare an empty wait");
+    wake.Notify();
+    Check(WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0,
+          "successful publication immediately before wait remains signaled");
+    Check(!wake.PrepareWait([] { return true; }), "queued/stop work never enters a wait");
+    const auto processed = wake.Sequence();
+    wake.Notify(); // Reader/callback completion after the owner's readiness/reclaim work.
+    Check(!wake.PrepareWait([] { return false; }, processed),
+          "a callback arriving during Main work cannot be swallowed by a later reset even without a queued item");
+    auto channels = std::make_unique<hs::RuntimeChannels>(&wake);
+    auto simulation = channels->ForSimulation();
+    Check(wake.PrepareWait([] { return false; }), "reset before an actual producer push");
+    simulation.PublishAudioTick({1, 1, hs::SessionPhase::Playing, {}});
+    Check(WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0 &&
+              !wake.PrepareWait([&] { return channels->sim_audio_events.Size() != 0; }),
+          "successful sim audio publication notifies and the actual queue recheck prevents sleeping");
+    hs::NativeInputFrame input;
+    input.BindMainWake(hs::runtime_detail::MainWake::NotifyOpaque, &wake);
+    Check(wake.PrepareWait([] { return false; }), "reset before native shutdown cancellation");
+    input.Cancel();
+    Check(WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0 && !input.MainWorkPending(),
+          "native cancellation wakes Main without inventing a sampling token");
+
+    MSG message{};
+    (void)PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE); // Create this test thread's message queue.
+    const auto thread = GetCurrentThreadId();
+    Check(PostThreadMessageW(thread, WM_KEYDOWN, VK_F24, 0x321) &&
+              PostThreadMessageW(thread, WM_MOUSEMOVE, 0x321, 0) &&
+              PostThreadMessageW(thread, WM_APP + 61, 0x321, 0), "publish sampled and system test messages");
+    bool saw_system = false;
+    while (hs::runtime_detail::PeekMainMessage(message, false))
+    {
+        Check(message.message != WM_KEYDOWN && message.message != WM_MOUSEMOVE,
+              "parked native token cannot consume queued key/mouse input");
+        if (message.message == WM_APP + 61) saw_system = true;
+    }
+    Check(saw_system && (hs::runtime_detail::MainMessageMask(true) & QS_INPUT) == 0 &&
+              hs::runtime_detail::MainMessageFlags(true) == 0,
+          "system peeking and wait flags exclude retained native input instead of repeatedly waking on it");
+    unsigned sampled{};
+    while (hs::runtime_detail::PeekMainMessage(message, true))
+        if ((message.message == WM_KEYDOWN || message.message == WM_MOUSEMOVE) && message.wParam != 0) ++sampled;
+    Check(sampled == 2 && hs::runtime_detail::MainMessageFlags(false) == MWMO_INPUTAVAILABLE,
+          "the next normal sample drains already queued input under the ordinary message mask");
+
+    hs::runtime_detail::SceneGenerationBinding binding;
+    binding.source_generation_id = "source"; binding.resident_generation_id = "resident";
+    const auto scene = [](std::uint64_t id) {
+        auto storage = std::make_unique<hs::StaticRenderSceneStorage>();
+        storage->content_generation_id = "source";
+        hs::RenderInstance instance; instance.stable_id = id; instance.position.x = static_cast<float>(id);
+        storage->instances.push_back(instance);
+        storage->eligible_static_members.push_back({id, id + 1, 0});
+        return hs::FreezeStaticRenderScene(std::move(storage));
+    };
+    auto original = scene(11);
+    std::weak_ptr<const hs::StaticRenderScene> original_lifetime = original;
+    auto rebound = binding.Resolve(original);
+    original.reset();
+    (void)binding.Resolve(scene(22)); (void)binding.Resolve(scene(33));
+    Check(!original_lifetime.expired() && rebound->content_generation_id == "resident" &&
+              rebound->instances[0].stable_id == 11 && rebound->instances[0].position.x == 11.0f &&
+              rebound->eligible_static_members[0].object_id == 12 && rebound->static_keys[0].stable_id == 11,
+          "evicted generation-relabel cache entries still retain the source owner of every exported span");
+    rebound.reset();
+    Check(original_lifetime.expired(), "source span backing retires after the final rebound packet lease");
+}
+
+void TestAudioNativeOperations()
+{
+    using Op = hs::AudioNativeOperation;
+    struct Voice
+    {
+        std::array<Op, 24> trace{};
+        std::size_t count{};
+        Op fail{};
+        std::atomic<std::uint32_t> *pins{};
+        bool destroyed{}, pin_held_at_destroy{};
+        HRESULT Call(Op op) noexcept { trace[count++] = op; return op == fail ? E_FAIL : S_OK; }
+        HRESULT Stop() noexcept { return Call(Op::Stop); }
+        HRESULT FlushSourceBuffers() noexcept { return Call(Op::Flush); }
+        HRESULT SetFrequencyRatio(float) noexcept { return Call(Op::Frequency); }
+        HRESULT SetOutputVoices(const XAUDIO2_VOICE_SENDS *) noexcept { return Call(Op::Route); }
+        HRESULT SetOutputMatrix(IXAudio2Voice *, UINT32, UINT32, const float *) noexcept { return Call(Op::Matrix); }
+        HRESULT SubmitSourceBuffer(const XAUDIO2_BUFFER *) noexcept { return Call(Op::Submit); }
+        HRESULT Start() noexcept { return Call(Op::Start); }
+        void DestroyVoice() noexcept
+        { destroyed = true; pin_held_at_destroy = pins && pins->load() == 1; }
+    };
+    constexpr std::array order{Op::Stop, Op::Flush, Op::Frequency, Op::Route, Op::Matrix, Op::Submit, Op::Start};
+    XAUDIO2_VOICE_SENDS sends{}; XAUDIO2_BUFFER buffer{};
+    const std::array matrix{0.25f, 0.75f};
+    for (std::size_t failed = 0; failed <= order.size(); ++failed)
+    {
+        Voice voice; if (failed < order.size()) voice.fail = order[failed];
+        const auto result = hs::audio_detail::SubmitPreparedVoice(voice, sends, nullptr, 2, matrix, buffer);
+        Check(result.Succeeded() == (failed == order.size()), "each native failure is returned at its actual operation");
+        if (failed < order.size()) Check(result.operation == order[failed] && result.error == E_FAIL,
+            "Stop/Flush/frequency/route/matrix/Submit/Start failures retain distinct receipts");
+        const auto expected = std::min(failed + 1, order.size());
+        Check(voice.count == expected && std::equal(order.begin(), order.begin() + expected, voice.trace.begin()),
+              "route and first matrix precede Submit/Start and no operation follows a failed boundary");
+    }
+    Voice defaults;
+    Check(hs::audio_detail::SubmitPreparedVoice(defaults, sends, nullptr, 2, {}, buffer).Succeeded() &&
+              defaults.count == 6 && defaults.trace[3] == Op::Route && defaults.trace[4] == Op::Submit,
+          "native default mapping skips custom matrix without a late correction");
+    Voice paused;
+    Check(hs::audio_detail::SubmitPreparedVoice(paused, sends, nullptr, 2, matrix, buffer, nullptr, nullptr, false).Succeeded() &&
+              paused.count == 6 && paused.trace[5] == Op::Submit,
+          "a cue delivered after its pause boundary remains submitted and stopped until explicit Resume");
+
+    std::atomic<std::uint32_t> first_pins{}, second_pins{};
+    std::atomic<unsigned> callback_wakes{};
+    hs::audio_detail::AudioBufferCompletion first, second;
+    first.wake_main = +[](void *context) noexcept { static_cast<std::atomic<unsigned> *>(context)->fetch_add(1); };
+    first.wake_context = &callback_wakes;
+    first.Begin(first_pins, {5, 9, 100}); second.Begin(second_pins, {5, 10, 101});
+    first.OnBufferEnd(&second);
+    Check(first_pins.load() == 1 && second_pins.load() == 1, "a callback cannot release a different buffer record");
+    second.OnBufferEnd(&second); second.OnBufferEnd(&second);
+    Check(second_pins.load() == 0 && first_pins.load() == 1 && second.claimed,
+          "out-of-order and repeated Flush completions release exactly one matching pin and cannot recycle a live voice record");
+    first.OnVoiceError(&first, E_FAIL);
+    Check(first.native_error.load() == E_FAIL && first_pins.load() == 1,
+          "callback failure only publishes a fixed receipt and retains native-readable PCM");
+    Voice native; native.pins = &first_pins;
+    auto *native_pointer = &native; auto *record = &first;
+    hs::audio_detail::DestroyOwnedVoice(native_pointer, record);
+    Check(native.destroyed && native.pin_held_at_destroy && !native_pointer && !record &&
+              first_pins.load() == 0 && !first.claimed && callback_wakes.load() == 2,
+          "teardown destroys and joins the native voice before releasing its final transition pin");
+    second.AfterVoiceQuiescence();
+    first.Begin(first_pins, {6, 1, 102});
+    Check(first.token != second.token && first_pins.load() == 1,
+          "device reset/voice reuse receive distinct exact buffer identities");
+    Voice *failed_create{}; record = &first;
+    hs::audio_detail::DestroyOwnedVoice(failed_create, record);
+    Check(first_pins.load() == 0 && !first.claimed, "failed dormant voice creation releases its reserved pin without touching old playback");
+}
+
+void TestAudioDeliverySessions()
+{
+    auto channels = std::make_unique<hs::RuntimeChannels>();
+    auto delivery = std::make_unique<hs::runtime_detail::AudioDelivery>();
+    auto simulation = channels->ForSimulation();
+    std::vector<std::pair<bool, hs::Sequence>> seen;
+    const auto consume = [&](const hs::QueuedAudioEvent &packet) {
+        seen.emplace_back(packet.kind == hs::QueuedAudioEvent::Kind::Tick,
+            packet.kind == hs::QueuedAudioEvent::Kind::Tick ? packet.tick_info.tick : packet.event.sequence);
+    };
+    const auto observe = [](const auto &, std::size_t) {};
+    const auto event = [](std::uint64_t session, hs::Sequence sequence, hs::Tick tick) {
+        hs::PresentationEvent result;
+        result.kind = hs::PresentationKind::Audio; result.session_id = session;
+        result.sequence = sequence; result.tick = tick; result.asset = hs::MakeAssetId("audio.test");
+        return hs::QueuedAudioEvent{result, 0};
+    };
+    simulation.PublishAudioTick({1, 90, hs::SessionPhase::Playing, {}});
+    Check(channels->sim_audio_events.TryPush(event(1, 1, 90)), "queue old session audio");
+    simulation.PublishAudioTick({2, 1, hs::SessionPhase::Playing, {}});
+    Check(channels->sim_audio_events.TryPush(event(2, 2, 1)) && channels->sim_audio_events.TryPush(event(2, 3, 1)),
+          "queue ordered first sounds of restarted session");
+    Check(channels->render_audio_events.TryPush(event(1, 4, 90)) && channels->render_audio_events.TryPush(event(2, 5, 1)),
+          "render origin keeps a separate producer FIFO");
+    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    const std::vector<std::pair<bool, hs::Sequence>> expected{{true, 1}, {false, 2}, {false, 3}, {false, 5}};
+    Check(seen == expected && delivery->Stats().discarded_old_session == 2,
+          "batch discards old sessions before execution, then keeps boundary/first-signal/same-tick FIFO and sim-before-render merge");
+
+    seen.clear();
+    for (std::size_t i = 0; i < 1023; ++i)
+        Check(channels->sim_audio_events.TryPush(event(2, 100 + i, 1)), "fill final old-session batch");
+    simulation.PublishAudioTick({3, 1, hs::SessionPhase::Playing, {}});
+    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 1}},
+          "boundary at the final capacity slot closes every older queued event");
+    seen.clear();
+    Check(channels->sim_audio_events.TryPush(event(3, 5000, 1)), "new first sound arrives in next batch");
+    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{false, 5000}},
+          "first sound after a batch-final session boundary is never lost or reset again");
+
+    seen.clear(); bool published_late = false;
+    Check(channels->render_audio_events.TryPush(event(4, 6000, 1)), "future rendered session becomes visible");
+    const auto racing_observe = [&](const hs::QueuedAudioEvent &, std::size_t source) {
+        if (source == 1 && !published_late)
+        {
+            published_late = true;
+            simulation.PublishAudioTick({4, 1, hs::SessionPhase::Playing, {}});
+            Check(channels->sim_audio_events.TryPush(event(4, 5999, 1)), "publish preceding sim boundary after initial empty pop");
+        }
+    };
+    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, racing_observe);
+    Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 1}, {false, 5999}, {false, 6000}},
+          "late observation refreshes the preceding simulation boundary before admitting new-session render sound");
+    seen.clear();
+    simulation.PublishAudioTick({4, 7, hs::SessionPhase::Paused, {}});
+    Check(channels->sim_audio_events.TryPush(event(4, 6001, 5)), "queue same-session delayed audio");
+    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 7}, {false, 6001}} &&
+              delivery->Stats().maximum_event_age_ticks == 2,
+          "same-session FIFO observes actual event age without inventing an arbitrary expiry cutoff");
+    for (std::size_t i = 0; i < 1024; ++i) Check(channels->sim_audio_events.TryPush(event(4, i, 7)), "fill audio queue");
+    simulation.PublishAudioTick({5, 0, hs::SessionPhase::Playing, {}});
+    Check(channels->dropped_presentation_events.load() == 1,
+          "lost session boundary retains the original explicit overflow invalidation");
+}
+
 void TestAudioCatalogValidation(const std::filesystem::path &root)
 {
     hs::SettingsData settings;
@@ -629,6 +1048,278 @@ void TestAudioCatalogValidation(const std::filesystem::path &root)
     hs::AudioEngine streaming_engine;
     Check(!streaming_engine.Initialize(settings, streaming_directory),
           "audio catalog rejects unsupported streaming before device setup");
+}
+
+void TestTypedAudioPcm(const std::filesystem::path &root)
+{
+    const auto path = root / "typed-audio.pcm";
+    std::filesystem::create_directories(root);
+    std::vector<std::byte> pcm(28800);
+    {
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char *>(pcm.data()), static_cast<std::streamsize>(pcm.size()));
+        Check(bool(output), "typed audio PCM fixture write");
+    }
+    hs::ShippedContentOwner owner;
+    Check(hs::ShippedContentOwner::Open(path, owner).Succeeded(), "typed audio backing open");
+    const std::array samples{hs::AudioSampleRow{0, 14400, 48000, 1, 24},
+                             hs::AudioSampleRow{14400, 14400, 48000, 1, 24}};
+    const auto digest = hs::Sha256(std::span(pcm).first(14400));
+    const std::array chunks{hs::AudioPcmChunk{0, 14400, 0, 1, true, digest},
+                           hs::AudioPcmChunk{14400, 14400, 1, 1, false, digest}};
+    const auto preload = hs::MakeAssetId("audio.typed.preload");
+    const auto transition = hs::MakeAssetId("audio.typed.transition");
+    std::array cues{
+        hs::AudioCueRow{preload, 0, 1, 1, 0, hs::AudioBus::Sfx, hs::AudioPriority::Other, false, true, false, false},
+        hs::AudioCueRow{transition, 1, 1, 1, 0, hs::AudioBus::Bgm, hs::AudioPriority::Other, false, false, false, true}};
+    std::ranges::sort(cues, {}, [](const hs::AudioCueRow &cue) { return cue.id.value; });
+    hs::runtime_detail::MainWake wake;
+    hs::AudioEngine engine;
+    hs::SettingsData settings; settings.master_volume = 0;
+    const hs::AudioImage image{cues, samples, chunks};
+    const auto corrupt_path = root / "typed-audio-corrupt.pcm";
+    for (std::size_t damaged_sample = 0; damaged_sample < samples.size(); ++damaged_sample)
+    {
+        auto damaged = pcm;
+        damaged[damaged_sample * 14400] ^= std::byte{1};
+        {
+            std::ofstream output(corrupt_path, std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char *>(damaged.data()), static_cast<std::streamsize>(damaged.size()));
+            Check(bool(output), "same-size corrupt PCM fixture write");
+        }
+        hs::ShippedContentOwner corrupt_owner;
+        Check(hs::ShippedContentOwner::Open(corrupt_path, corrupt_owner).Succeeded(), "corrupt PCM backing open");
+        hs::AudioEngine rejected;
+        const auto initialized = rejected.Initialize(settings, image, corrupt_owner);
+        if (damaged_sample == 0)
+            Check(!initialized && rejected.Status().loaded_files == 0,
+                  "preload digest failure must not expose resident PCM");
+        else
+        {
+            Check(initialized.Succeeded() && rejected.Status().loaded_files == 1,
+                  "unloaded transition corruption must not reject a verified preload chunk");
+            for (unsigned attempt = 0; attempt < 2; ++attempt)
+            {
+                const auto failures = rejected.Status().skipped_load_failures;
+                const auto failure_deadline = GetTickCount64() + 1000;
+                do
+                {
+                    Check(!rejected.PrepareCue(transition), "corrupt transition became Ready");
+                    if (rejected.Status().skipped_load_failures > failures) break;
+                    Sleep(1);
+                } while (GetTickCount64() < failure_deadline);
+                Check(rejected.Status().skipped_load_failures == failures + 1 && rejected.Status().loaded_files == 1,
+                      "transition digest failure must retain only verified resident PCM");
+                rejected.Stop(transition);
+                rejected.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+            }
+        }
+        rejected.Shutdown();
+    }
+    std::filesystem::remove(corrupt_path);
+    Check(!engine.CaptureTimings().captured, "audio timing capture defaults off");
+    engine.SetCaptureTimings(true);
+    engine.SetWakeCallback(hs::runtime_detail::MainWake::NotifyOpaque, &wake);
+    Check(engine.Initialize(settings, image, owner).Succeeded(), "typed audio initializes without JSON or WAV");
+    Check(engine.Status().loaded_cues == 2 && engine.Status().loaded_files == 1, "typed audio preloads only declared samples");
+    Check(engine.PrepareCue(preload), "verified resident PCM remains ready without another load");
+    std::filesystem::remove(path); // Subsequent reads must use the held content handle.
+    const auto deadline = GetTickCount64() + 1000;
+    while (!engine.PrepareCue(transition) && GetTickCount64() < deadline) Sleep(1);
+    Check(engine.PrepareCue(transition) && engine.Status().loaded_files == 2,
+          "typed transition preparation reads headerless PCM from the retained pack");
+    hs::PresentationEvent event{};
+    event.kind = hs::PresentationKind::Audio; event.asset = transition; event.sequence = 1;
+    engine.Play(event);
+    engine.Stop(transition);
+    const auto completion_deadline = GetTickCount64() + 1000;
+    do
+    {
+        engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+        if (engine.Status().loaded_files == 1) break;
+        Sleep(1);
+    } while (GetTickCount64() < completion_deadline);
+    Check(engine.Status().loaded_files == 1, "stopped transition PCM releases only after native completion");
+    const auto reload_deadline = GetTickCount64() + 1000;
+    while (!engine.PrepareCue(transition) && GetTickCount64() < reload_deadline) Sleep(1);
+    Check(engine.PrepareCue(transition) && engine.Status().loaded_files == 2,
+          "evicted transition reloads and verifies through the retained content handle");
+    const auto work = engine.CaptureTimings();
+    Check(work.captured && work.qpc_frequency != 0 && work.reader_jobs == 2 && work.reader_failures == 0 &&
+              work.reader_bytes == 28800 && work.scopes[static_cast<std::size_t>(hs::AudioWorkId::PrepareCue)].calls != 0 &&
+              work.scopes[static_cast<std::size_t>(hs::AudioWorkId::Play)].calls == 1,
+          "opt-in audio work counts actual verified worker loads and API activity without counting resident reuse as IO");
+    engine.Stop(transition);
+    engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+    (void)engine.PrepareCue(transition);
+    engine.Shutdown(); // Joins a queued/in-flight preparation before owner destruction.
+    Check(engine.Status().loaded_files == 0, "shutdown releases typed PCM and pending preparation");
+}
+
+void TestPreparedNonLoopTransition(const std::filesystem::path &root)
+{
+    const auto path = root / "prepared-stinger.pcm";
+    const std::vector<std::byte> pcm(14400);
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char *>(pcm.data()), static_cast<std::streamsize>(pcm.size()));
+        Check(bool(file), "write nonloop transition fixture");
+    }
+    hs::ShippedContentOwner content;
+    Check(hs::ShippedContentOwner::Open(path, content).Succeeded(), "open nonloop transition backing");
+    const auto id = hs::MakeAssetId("audio.stinger.defeat");
+    const std::array cues{hs::AudioCueRow{id, 0, 1, 1, 0, hs::AudioBus::Bgm,
+        hs::AudioPriority::Other, false, false, false, false}};
+    const std::array samples{hs::AudioSampleRow{0, pcm.size(), 48000, 1, 24}};
+    const std::array chunks{hs::AudioPcmChunk{0, pcm.size(), 0, 1, false, hs::Sha256(pcm)}};
+    hs::runtime_detail::MainWake wake;
+    hs::AudioEngine engine;
+    hs::SettingsData settings; settings.master_volume = 0;
+    engine.SetCaptureTimings(true);
+    engine.SetWakeCallback(hs::runtime_detail::MainWake::NotifyOpaque, &wake);
+    Check(engine.Initialize(settings, {cues, samples, chunks}, content).Succeeded(), "initialize transition-only bank");
+    hs::PresentationEvent event;
+    event.kind = hs::PresentationKind::Audio; event.asset = id; event.sequence = 17;
+    Check(engine.Play(event) == hs::AudioPlayResult::NotReady && engine.Status().loaded_files == 0 &&
+              engine.CaptureTimings().reader_jobs == 0,
+          "cold Play reports not ready and never schedules disk work or hides a pending replay");
+    const auto prior_failures = engine.Status().skipped_load_failures;
+    hs::Sequence sequence{};
+    auto owner = std::make_unique<hs::runtime_detail::MainAudioSession>(engine, sequence);
+    auto channels = std::make_unique<hs::RuntimeChannels>();
+    auto simulation = channels->ForSimulation();
+    simulation.PublishAudioTick({1, 1, hs::SessionPhase::Defeat, {}});
+    event.session_id = 1; event.tick = 1;
+    Check(channels->sim_audio_events.TryPush({event, 0}), "queue same-tick projected defeat stinger");
+    owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+    Check(owner->HasPendingMusic(), "Main retains a nonloop transition intent while complete PCM prepares");
+    const auto deadline = GetTickCount64() + 1000;
+    while (owner->HasPendingMusic() && GetTickCount64() < deadline)
+    {
+        owner->Update();
+        if (owner->HasPendingMusic()) Sleep(1);
+    }
+    Check(!owner->HasPendingMusic() && owner->ActiveMusic().value == id.value &&
+              owner->Failure() == hs::runtime_detail::MainAudioFailure::None &&
+              engine.CueReadiness(id) == hs::AudioCueReadiness::Ready &&
+              engine.Status().skipped_load_failures == prior_failures && engine.CaptureTimings().reader_jobs == 1,
+          "cold nonloop stinger starts only after verified Ready instead of being silently dropped");
+    Check(WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0,
+          "worker Ready notifies Main independently of rendering or another simulation sound");
+    owner.reset();
+    engine.Shutdown();
+}
+
+void TestPreparedSessionAmbience(const std::filesystem::path &root)
+{
+    constexpr std::size_t bytes = 14400;
+    const std::vector<std::byte> pcm(bytes * 6);
+    const auto ambience = hs::MakeAssetId("audio.ambience.arena");
+    const auto menu = hs::MakeAssetId("audio.bgm.main_menu"), music = hs::MakeAssetId("audio.bgm.session");
+    std::array cues{
+        hs::AudioCueRow{ambience, 0, 2, 1, 50, hs::AudioBus::Sfx, hs::AudioPriority::Other, false, false, false, true},
+        hs::AudioCueRow{menu, 2, 1, 1, 50, hs::AudioBus::Bgm, hs::AudioPriority::Other, false, false, false, true},
+        hs::AudioCueRow{music, 3, 1, 1, 50, hs::AudioBus::Bgm, hs::AudioPriority::Other, false, false, false, true},
+        hs::AudioCueRow{hs::MakeAssetId("audio.ui.pause_open"), 4, 1, 1, 0, hs::AudioBus::Ui, hs::AudioPriority::Ui, false, true, false, false},
+        hs::AudioCueRow{hs::MakeAssetId("audio.ui.pause_close"), 5, 1, 1, 0, hs::AudioBus::Ui, hs::AudioPriority::Ui, false, true, false, false}};
+    std::ranges::sort(cues, {}, [](const auto &cue) { return cue.id.value; });
+    std::array<hs::AudioSampleRow, 6> samples;
+    for (std::size_t i = 0; i < samples.size(); ++i) samples[i] = {i * bytes, bytes, 48000, 1, 24};
+    const auto digest = hs::Sha256(std::span(pcm).first(bytes));
+    const std::array chunks{
+        hs::AudioPcmChunk{0, bytes, 0, 1, false, digest}, hs::AudioPcmChunk{bytes, bytes, 1, 1, false, digest},
+        hs::AudioPcmChunk{bytes * 2, bytes, 2, 1, false, digest}, hs::AudioPcmChunk{bytes * 3, bytes, 3, 1, false, digest},
+        hs::AudioPcmChunk{bytes * 4, bytes * 2, 4, 2, true, hs::Sha256(std::span(pcm).subspan(bytes * 4))}};
+    for (unsigned scenario = 0; scenario < 3; ++scenario)
+    {
+        const bool corrupt = scenario == 2;
+        const auto path = root / ("session-ambience-" + std::to_string(scenario) + ".pcm");
+        auto stored = pcm;
+        if (corrupt) stored[0] ^= std::byte{1};
+        {
+            std::ofstream file(path, std::ios::binary);
+            file.write(reinterpret_cast<const char *>(stored.data()), static_cast<std::streamsize>(stored.size()));
+            Check(bool(file), "write actual-shape ambience/session fixture");
+        }
+        hs::ShippedContentOwner content;
+        Check(hs::ShippedContentOwner::Open(path, content).Succeeded(), "open ambience/session fixture");
+        hs::runtime_detail::MainWake wake;
+        hs::AudioEngine engine;
+        hs::SettingsData settings; settings.master_volume = 0;
+        engine.SetCaptureTimings(true);
+        engine.SetWakeCallback(hs::runtime_detail::MainWake::NotifyOpaque, &wake);
+        Check(engine.Initialize(settings, {cues, samples, chunks}, content).Succeeded() && engine.Status().loaded_files == 2,
+            "session bank retains preloaded UI but deliberately leaves two SFX ambience variants cold");
+        Check(!engine.IsTransitionTrack(ambience) && engine.CueReadiness(ambience) == hs::AudioCueReadiness::Pending,
+            "actual arena ambience is nonpreloaded SFX, independently owned from BGM transitions");
+        hs::Sequence sequence{};
+        auto owner = std::make_unique<hs::runtime_detail::MainAudioSession>(engine, sequence);
+        auto channels = std::make_unique<hs::RuntimeChannels>();
+        auto simulation = channels->ForSimulation();
+        const auto boundary = [&](std::uint64_t session, hs::Tick tick, hs::SessionPhase phase) {
+            simulation.PublishAudioTick({session, tick, phase, {}});
+            Check(channels->dropped_presentation_events.load() == 0, "publish ambience session boundary");
+            owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+        };
+        const auto pump = [&](const auto &done) {
+            const auto deadline = GetTickCount64() + 1000;
+            do
+            {
+                owner->Update();
+                if (done()) return;
+                Sleep(1);
+            } while (GetTickCount64() < deadline);
+            Check(false, "session ambience worker/main completion deadline");
+        };
+        boundary(1, 1, hs::SessionPhase::Playing);
+        Check(owner->Failure() == hs::runtime_detail::MainAudioFailure::None && owner->HasPendingAmbience() &&
+            owner->ActiveAmbience().value == 0 && engine.CaptureTimings().scopes[static_cast<std::size_t>(hs::AudioWorkId::Play)].calls == 0,
+            "first Playing boundary prepares the original ambience event without an illegal cold Play");
+        if (corrupt)
+        {
+            pump([&] { return owner->Failure() != hs::runtime_detail::MainAudioFailure::None; });
+            const auto &failure = owner->FailureDetails();
+            Check(owner->Failure() == hs::runtime_detail::MainAudioFailure::Preparation && failure.cue.value == ambience.value &&
+                failure.readiness == hs::AudioCueReadiness::Failed && failure.session_id == 1 && failure.tick == 1 &&
+                failure.phase == hs::SessionPhase::Playing && std::string_view(failure.stage) == "ambience_prepare" &&
+                owner->ActiveAmbience().value == 0 && engine.Status().skipped_load_failures != 0 &&
+                engine.Status().native_operation == hs::AudioNativeOperation::None,
+                "same-size corrupt ambience remains a real preparation failure with exact cue/session metadata");
+        }
+        else
+        {
+            if (scenario == 1)
+            {
+                boundary(1, 2, hs::SessionPhase::Paused); // Before Main ever attempts the pending ambience.
+                Check(!owner->HasPendingAmbience() && owner->ActiveAmbience().value == 0 && engine.Status().combat_paused,
+                    "pause cancels an unsubmitted ambience intent instead of replaying it after worker Ready");
+                pump([&] { return wake.Sequence() >= 4 && engine.CaptureTimings().reader_jobs >= 4 && !owner->HasPendingMusic(); });
+                owner->Update();
+                Check(owner->Failure() == hs::runtime_detail::MainAudioFailure::None && owner->ActiveAmbience().value == 0 &&
+                    engine.CueReadiness(ambience) != hs::AudioCueReadiness::Ready,
+                    "late Ready from a cancelled ambience is reclaimed while paused");
+                boundary(1, 3, hs::SessionPhase::Playing);
+            }
+            pump([&] { return owner->ActiveAmbience().value == ambience.value; });
+            Check(!owner->HasPendingAmbience() && owner->Failure() == hs::runtime_detail::MainAudioFailure::None &&
+                engine.CueReadiness(ambience) == hs::AudioCueReadiness::Ready && engine.Status().skipped_load_failures == 0,
+                "both nonpreloaded ambience variants verify before the retained event starts with no false load failure");
+            const auto original_sequence = sequence;
+            boundary(1, 4, hs::SessionPhase::Playing);
+            owner->Update();
+            Check(sequence == original_sequence && owner->ActiveAmbience().value == ambience.value,
+                "repeated Playing ticks do not regenerate the sequence or retrigger the loop");
+            const auto reads = engine.CaptureTimings().reader_jobs;
+            engine.SetBackgroundMuted(true);
+            boundary(2, 1, hs::SessionPhase::Playing);
+            owner->Update();
+            Check(owner->Failure() == hs::runtime_detail::MainAudioFailure::None && owner->ActiveAmbience().value == ambience.value &&
+                engine.CaptureTimings().reader_jobs == reads && engine.Status().background_muted,
+                "new-session first ambience reuses verified resident bytes after old native retirement without changing background policy");
+        }
+        owner.reset();
+        engine.Shutdown();
+    }
 }
 
 void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
@@ -707,13 +1398,95 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
     event.kind = hs::PresentationKind::Audio;
     event.asset = hs::MakeAssetId("audio.lazy");
     event.sequence = 1;
+    const auto preparation_deadline = GetTickCount64() + 1000;
+    while (!engine.PrepareCue(event.asset) && GetTickCount64() < preparation_deadline) Sleep(1);
+    Check(engine.PrepareCue(event.asset), "lazy PCM is prepared asynchronously before playback");
     engine.Play(event);
     status = engine.Status();
     Check(status.loaded_files == 1 && status.skipped_load_failures == 0,
-          "first Play loads and caches a lazy PCM payload");
+          "Play consumes an already prepared PCM payload");
     engine.Play(event);
     Check(engine.Status().loaded_files == 1,
           "cached PCM payload is not loaded again");
+
+    engine.Shutdown();
+    wav.open(directory / "spatial.wav", std::ios::binary | std::ios::trunc);
+    wav.write("RIFF", 4);
+    write_u32(36 + 48000 * 3);
+    wav.write("WAVEfmt ", 8);
+    write_u32(16);
+    write_u16(1);
+    write_u16(1);
+    write_u32(48000);
+    write_u32(144000);
+    write_u16(3);
+    write_u16(24);
+    wav.write("data", 4);
+    write_u32(48000 * 3);
+    const std::vector<char> silence(48000 * 3);
+    wav.write(silence.data(), static_cast<std::streamsize>(silence.size()));
+    wav.close();
+    std::filesystem::copy_file(directory / "spatial.wav", directory / "xp.wav",
+                               std::filesystem::copy_options::overwrite_existing);
+    std::ofstream(directory / "audio_cues.json") << R"({"entries":[
+      {"id":"audio.spatial","asset_id":"audio.spatial","submix":"SFX","spatial":true,"preload":true,"streaming":false,"encoding":"PCM","loop":true,"priority":"Other","max_simultaneous":2,"minimum_retrigger_ms":0,"files":["spatial.wav"]},
+      {"id":"audio.pickup.xp_collect","asset_id":"audio.pickup.xp_collect","submix":"UI","spatial":false,"preload":true,"streaming":false,"encoding":"PCM","loop":true,"priority":"UI","max_simultaneous":4,"minimum_retrigger_ms":60000,"files":["xp.wav"]}
+    ]})";
+    Check(engine.Initialize(settings, directory).Succeeded(), "spatial admission catalog initializes");
+    if (engine.Status().device_state == hs::AudioDeviceState::Ready)
+    {
+        event.asset = hs::MakeAssetId("audio.spatial");
+        event.position = {3.0f, 0.0f, 1.0f};
+        engine.Play(event);
+        engine.Play(event);
+        engine.Play(event);
+        Check(engine.Status().played_count == 2 && engine.Status().active_source_voices == 2,
+              "single admission scan retains the per-cue voice cap");
+        engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+        engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+        engine.UpdateListener({1, 0, 0}, {1, 0, 0}, {0, 1, 0});
+        Check(engine.Status().active_source_voices == 2 && engine.Status().native_error == 0,
+              "unchanged and moved listeners retain spatial voice routing");
+        const auto wait_for_native_drain = [&] {
+            // FlushSourceBuffers completes asynchronously; observe BuffersQueued through Reclaim.
+            const auto deadline = GetTickCount64() + 1000;
+            while (engine.Status().active_source_voices != 0 && GetTickCount64() < deadline)
+            {
+                Sleep(1);
+                engine.UpdateListener({1, 0, 0}, {1, 0, 0}, {0, 1, 0});
+            }
+            Check(engine.Status().active_source_voices == 0 && engine.Status().native_error == 0,
+                  "stopped native buffers drain within one second without errors");
+        };
+        engine.Stop(event.asset);
+        wait_for_native_drain();
+        engine.Play(event);
+        Check(engine.Status().played_count == 3 && engine.Status().active_source_voices == 1,
+              "admission observes Stop completion and reuses the first free voice");
+        event.asset = hs::MakeAssetId("audio.pickup.xp_collect");
+        engine.Play(event);
+        engine.Play(event);
+        Check(engine.Status().played_count == 4 && engine.Status().active_source_voices == 2,
+              "cue-owned retrigger timestamp preserves XP aggregation without another voice");
+        engine.StopBus(hs::AudioBus::Sfx);
+        engine.StopBus(hs::AudioBus::Ui);
+        wait_for_native_drain();
+        Check(engine.Status().active_source_voices == 0, "all native buffers release before shutdown");
+        event.asset = hs::MakeAssetId("audio.spatial"); event.session_id = 77;
+        engine.BeginSession(77); engine.Play(event);
+        event.asset = hs::MakeAssetId("audio.pickup.xp_collect"); engine.Play(event);
+        engine.BeginSession(78);
+        Check(engine.Status().active_source_voices == 0,
+              "session close quiesces old scoped voices before new event admission");
+        const auto before_first = engine.Status().played_count;
+        event.session_id = 78; ++event.sequence; engine.Play(event);
+        ++event.sequence; engine.Play(event);
+        event.session_id = 0; ++event.sequence; engine.Play(event);
+        Check(engine.Status().played_count == before_first + 1,
+              "new-session first cue survives reset, then same-tick and Main-origin calls share the original retrigger clock");
+        engine.StopBus(hs::AudioBus::Ui); wait_for_native_drain();
+    }
+
 }
 
 void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
@@ -1076,6 +1849,100 @@ void TestSessionProbeUiBridge()
           "session probe bridge preserves skills and loadout");
 }
 
+void TestSimulationSignalFanout()
+{
+    auto storage = std::make_unique<hs::RuntimeChannels>();
+    auto &channels = *storage;
+    auto simulation = channels.ForSimulation();
+    auto rendering = channels.ForRender();
+    std::array<hs::DomainSignal, 2> signals{};
+    for (std::size_t row = 0; row < signals.size(); ++row)
+    {
+        auto &signal = signals[row];
+        signal.kind = hs::DomainSignalKind::ArrowReleased;
+        signal.sequence = 101 + row;
+        signal.tick = 42;
+        signal.session_id = 7;
+        signal.context = static_cast<std::uint8_t>(hs::SkillKind::BasicAttack);
+        signal.position = {static_cast<float>(row + 1), 1.05f, -3.0f};
+        signal.direction = {1, 0, 0};
+    }
+    std::vector<hs::PresentationEvent> expected;
+    for (const auto &signal : signals)
+    {
+        std::array<hs::PresentationEvent, 3> projected{};
+        const auto count = hs::ProjectDomainSignal(signal, projected, 12.0f);
+        Check(count == 3 && projected[0].kind == hs::PresentationKind::Vfx &&
+                  projected[1].kind == hs::PresentationKind::Audio &&
+                  projected[2].kind == hs::PresentationKind::Audio,
+              "arrow signal retains visual then two ordered audio values");
+        expected.insert(expected.end(), projected.begin(), projected.begin() + count);
+    }
+    const auto same = [](const auto &a, const auto &b) {
+        return a.sequence == b.sequence && a.tick == b.tick && a.kind == b.kind &&
+            a.session_id == b.session_id && a.asset.value == b.asset.value && a.parameters == b.parameters &&
+            a.position.x == b.position.x && a.position.y == b.position.y && a.position.z == b.position.z &&
+            a.vfx_ratio01 == b.vfx_ratio01 && a.status_episode_generation == b.status_episode_generation &&
+            a.upgrade_skill == b.upgrade_skill && a.upgrade_index == b.upgrade_index &&
+            a.upgrade_stage == b.upgrade_stage && a.upgrade_cast_id == b.upgrade_cast_id &&
+            a.upgrade_owner_id == b.upgrade_owner_id;
+    };
+    std::vector<hs::PresentationEvent> recorded(1);
+    simulation.ProjectDomainSignalsOnce(signals, 12.0f, false, &recorded);
+    Check(recorded.size() == expected.size(), "per-tick record buffer resets and keeps every ordered value");
+    hs::PresentationEvent event;
+    hs::QueuedAudioEvent queued;
+    for (std::size_t row = 0; row < expected.size(); ++row)
+    {
+        Check(same(recorded[row], expected[row]), "recording observes exactly the projected owned values");
+        if (expected[row].kind == hs::PresentationKind::Audio)
+            Check(channels.sim_audio_events.TryPop(queued) && same(queued.event, expected[row]) && queued.enqueued_qpc == 0,
+                  "simulation audio reaches Main in source order");
+        else
+            Check(channels.presentation_events.TryPop(event) && same(event, expected[row]),
+                  "normal render destination contains each visual once");
+    }
+    Check(channels.presentation_events.Size() == 0 && channels.sim_audio_events.Size() == 0 &&
+              channels.render_audio_events.Size() == 0 && channels.dropped_presentation_events.load() == 0,
+          "normal fanout has no duplicate audio or borrowed queue payload");
+    simulation.capture_clock = +[]() noexcept -> std::uint64_t { return 1234; };
+
+    hs::PresentationEvent footstep{};
+    footstep.kind = hs::PresentationKind::Audio;
+    footstep.sequence = 900;
+    footstep.asset = hs::MakeAssetId("audio.player.footstep_walk");
+    Check(rendering.render_audio_events.TryPush({footstep, 17}), "render keeps its own audio producer queue");
+    simulation.ProjectDomainSignalsOnce(signals, 12.0f, true, &recorded);
+    for (const auto &wanted : expected)
+        Check(channels.presentation_events.TryPop(event) && same(event, wanted),
+              "explicit capture preserves the original mixed diagnostic trace order");
+    for (const auto &wanted : expected)
+        if (wanted.kind == hs::PresentationKind::Audio)
+            Check(channels.sim_audio_events.TryPop(queued) && same(queued.event, wanted) && queued.enqueued_qpc == 1234,
+                  "diagnostic trace copies do not delay or duplicate live simulation audio");
+    Check(channels.render_audio_events.TryPop(queued) && same(queued.event, footstep) && queued.enqueued_qpc == 17 &&
+              !channels.render_audio_events.TryPop(queued),
+          "simulation fanout cannot write or reorder render footsteps");
+
+    for (std::size_t row = 0; row < 1024; ++row)
+        Check(channels.sim_audio_events.TryPush({footstep, 0}), "fill simulation audio destination");
+    simulation.ProjectDomainSignalsOnce(signals, 12.0f, false, &recorded);
+    Check(channels.dropped_presentation_events.load() == 4 && recorded.size() == expected.size() &&
+              channels.presentation_events.Size() == 2,
+          "live audio overflow preserves exact recording and the existing drop invalidation policy");
+    channels.sim_audio_events.ClearConsumer();
+    channels.presentation_events.ClearConsumer();
+    channels.dropped_presentation_events.store(0);
+    for (std::size_t row = 0; row < 8192; ++row)
+        Check(channels.presentation_events.TryPush(expected[0]), "fill render and diagnostic destination");
+    simulation.ProjectDomainSignalsOnce(signals, 12.0f, true, &recorded);
+    Check(channels.dropped_presentation_events.load() == expected.size() &&
+              channels.sim_audio_events.Size() == 4 && recorded.size() == expected.size(),
+          "stalled rendering cannot block audio and lost trace rows still invalidate diagnostic completeness");
+    for (std::size_t row = 0; row < expected.size(); ++row)
+        Check(same(recorded[row], expected[row]), "queue overflow never changes exact recorded event order");
+}
+
 void TestCharacterDetailsTextFit()
 {
     using Microsoft::WRL::ComPtr;
@@ -1084,6 +1951,8 @@ void TestCharacterDetailsTextFit()
               reinterpret_cast<IUnknown **>(base.GetAddressOf()))), "create text-fit factory");
     ComPtr<IDWriteFactory5> factory;
     Check(SUCCEEDED(base.As(&factory)), "query bundled-font factory");
+    ComPtr<IDWriteInMemoryFontFileLoader> memory_loader;
+    struct UnregisterFont { IDWriteFactory5 *factory; IDWriteFontFileLoader *loader{}; ~UnregisterFont(){if(loader)factory->UnregisterFontFileLoader(loader);} } unregister{factory.Get()};
     std::array<wchar_t, 32768> executable{};
     Check(GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size())) != 0,
           "locate bundled text-fit font");
@@ -1098,6 +1967,35 @@ void TestCharacterDetailsTextFit()
               SUCCEEDED(builder->CreateFontSet(&set)) &&
               SUCCEEDED(factory->CreateFontCollectionFromFontSet(set.Get(), &collection)),
           "load the renderer's bundled Noto Sans KR font");
+
+    hs::ShippedContentOwner packed_owner;
+    Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(),hs::shipping::ImageInfo(),packed_owner).Succeeded(),"open packed text-fit font");
+    std::vector<std::byte> packed_font;
+    Check(hs::shipping::ReadFont(packed_owner,hs::shipping::ImageInfo(),packed_font).Succeeded(),"read packed text-fit font");
+    std::ifstream font_stream(directory / L"Fonts" / L"NotoSansKR.ttf",std::ios::binary);
+    const std::vector<char> loose_font((std::istreambuf_iterator<char>(font_stream)),{});
+    Check(packed_font.size()==loose_font.size() && std::equal(packed_font.begin(),packed_font.end(),loose_font.begin(),
+        [](std::byte a,char b){return std::to_integer<unsigned char>(a)==static_cast<unsigned char>(b);}),"packed and file font bytes match");
+    Check(SUCCEEDED(factory->CreateInMemoryFontFileLoader(&memory_loader)) && SUCCEEDED(factory->RegisterFontFileLoader(memory_loader.Get())),"register memory font loader");
+    unregister.loader=memory_loader.Get();
+    {
+        ComPtr<IDWriteFontFile> truncated;
+        Check(SUCCEEDED(memory_loader->CreateInMemoryFontFileReference(factory.Get(),packed_font.data(),16,nullptr,&truncated)),"create truncated memory reference");
+        BOOL supported=FALSE;DWRITE_FONT_FILE_TYPE file_type{};DWRITE_FONT_FACE_TYPE face_type{};UINT32 faces{};
+        const auto analyzed=truncated->Analyze(&supported,&file_type,&face_type,&faces);
+        Check(FAILED(analyzed)||!supported||faces==0,"truncated font must not be accepted");
+    }
+    ComPtr<IDWriteFontFile> memory_file;
+    Check(SUCCEEDED(memory_loader->CreateInMemoryFontFileReference(factory.Get(),packed_font.data(),static_cast<UINT32>(packed_font.size()),nullptr,&memory_file)),"create owned memory font");
+    std::fill(packed_font.begin(),packed_font.end(),std::byte{0});packed_font.clear();packed_font.shrink_to_fit();
+    packed_owner=hs::ShippedContentOwner{}; // Native copy must outlive both input buffer and file handle.
+    ComPtr<IDWriteFontSetBuilder1> memory_builder;
+    ComPtr<IDWriteFontSet> memory_set;
+    ComPtr<IDWriteFontCollection1> memory_collection;
+    Check(SUCCEEDED(factory->CreateFontSetBuilder(&memory_builder)) && SUCCEEDED(memory_builder->AddFontFile(memory_file.Get())) &&
+        SUCCEEDED(memory_builder->CreateFontSet(&memory_set)) && SUCCEEDED(factory->CreateFontCollectionFromFontSet(memory_set.Get(),&memory_collection)),"memory font survives source retirement");
+    auto file_collection=collection;
+    collection=memory_collection;
     ComPtr<IDWriteFontFamily> family;
     ComPtr<IDWriteLocalizedStrings> names;
     Check(collection->GetFontFamilyCount() && SUCCEEDED(collection->GetFontFamily(0, &family)) &&
@@ -1129,6 +2027,18 @@ void TestCharacterDetailsTextFit()
                       entry.size_pixels.x, 1080, &layout)), "measure unshrunk details text");
         DWRITE_TEXT_METRICS metrics{};
         Check(SUCCEEDED(layout->GetMetrics(&metrics)), "read details glyph metrics");
+
+        ComPtr<IDWriteTextFormat> file_format;
+        ComPtr<IDWriteTextLayout> file_layout;
+        Check(SUCCEEDED(factory->CreateTextFormat(family_name.c_str(),file_collection.Get(),DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,static_cast<float>(entry.font_pixels),L"ko-kr",&file_format)) &&
+            SUCCEEDED(file_format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)) &&
+            SUCCEEDED(factory->CreateTextLayout(wide.data(),count,file_format.Get(),entry.size_pixels.x,1080,&file_layout)),"create file font comparison layout");
+        DWRITE_TEXT_METRICS file_metrics{};
+        Check(SUCCEEDED(file_layout->GetMetrics(&file_metrics)) && metrics.left==file_metrics.left && metrics.top==file_metrics.top &&
+            metrics.width==file_metrics.width && metrics.widthIncludingTrailingWhitespace==file_metrics.widthIncludingTrailingWhitespace &&
+            metrics.height==file_metrics.height && metrics.layoutWidth==file_metrics.layoutWidth && metrics.layoutHeight==file_metrics.layoutHeight &&
+            metrics.maxBidiReorderingDepth==file_metrics.maxBidiReorderingDepth && metrics.lineCount==file_metrics.lineCount,"memory/file text layout equivalence");
         // Wrapped trailing spaces are not visible overflow and must not trigger renderer shrink/trim.
         if (metrics.widthIncludingTrailingWhitespace > entry.size_pixels.x &&
             metrics.width <= entry.size_pixels.x && metrics.height <= entry.size_pixels.y)
@@ -1335,6 +2245,200 @@ void TestDpiWindowCoordinates()
 
 } // namespace
 
+void TestShippingImage();
+
+
+// Explicit semantic fields, independent of generator inventory and object padding.
+std::vector<std::uint64_t> SpawnFields(const hs::ParticleSpawnCommand &c)
+{
+    std::vector<std::uint64_t> f{c.sequence,c.tick,static_cast<std::uint64_t>(c.shape),static_cast<std::uint64_t>(c.velocity_mode),
+        static_cast<std::uint64_t>(c.facing),static_cast<std::uint64_t>(c.renderer),static_cast<std::uint64_t>(c.primitive),
+        c.mesh_index,c.sprite,c.frame_columns,c.frame_rows,c.count,c.seed,c.authored_ballistic,c.authored_birth_tick,c.authored_gradient_row};
+    for(float v : {c.position.x,c.position.y,c.position.z,c.shape_extent.x,c.shape_extent.y,c.shape_extent.z,
+        c.direction.x,c.direction.y,c.direction.z,c.speed_min,c.speed_max,c.cone_radians,c.lifetime_min,c.lifetime_max,
+        c.start_color.x,c.start_color.y,c.start_color.z,c.start_color.w,c.end_color.x,c.end_color.y,c.end_color.z,c.end_color.w,
+        c.start_size_min,c.start_size_max,c.end_size_min,c.end_size_max,c.gravity,c.rotation_min,c.rotation_max,
+        c.angular_velocity_min,c.angular_velocity_max,c.stretch,c.uv_repeat,c.scroll_speed,
+        c.authored_initial_velocity.x,c.authored_initial_velocity.y,c.authored_initial_velocity.z,c.authored_drag,
+        c.authored_bounce,c.authored_ground_y,c.authored_collision_radius,c.authored_hdr,c.authored_birth_fraction})
+        f.push_back(std::bit_cast<std::uint32_t>(v));
+    return f;
+}
+std::vector<std::uint64_t> LineFields(const hs::VfxLineSpawnCommand &c)
+{
+    std::vector<std::uint64_t> f{c.sequence,c.tick,c.sprite,c.frame_columns,c.frame_rows,static_cast<std::uint64_t>(c.primitive)};
+    for(float v : {c.start.x,c.start.y,c.start.z,c.end.x,c.end.y,c.end.z,c.color.x,c.color.y,c.color.z,c.color.w,
+        c.width,c.lifetime,c.uv_repeat,c.scroll_speed}) f.push_back(std::bit_cast<std::uint32_t>(v));
+    return f;
+}
+void TestCompiledVfxImage()
+{
+    hs::VfxCatalog loaded,compiled;
+    Check(hs::VfxCatalog::Load(test_generation::ProductPath("vfx/particle_effects.hsbin"),
+        test_generation::ProductPath("vfx/vfx_program.hsbin"),loaded).Succeeded(),"load independent VFX reference");
+    const auto &image=hs::shipping::Vfx(); const auto &ref=loaded.Image();
+    Check(&image==&hs::shipping::Vfx(),"compiled VFX stable identity"); compiled.Bind(image);
+    Check(image.payload_hash==ref.payload_hash && image.sprite_count==ref.sprite_count &&
+        image.has_typed_wavefront==ref.has_typed_wavefront && image.has_required_sprite_bindings==ref.has_required_sprite_bindings &&
+        image.definitions.size()==ref.definitions.size() && image.emitters.size()==ref.emitters.size(),"compiled VFX identity and extents");
+    Check(std::ranges::equal(image.authored_mesh_indices,ref.authored_mesh_indices) &&
+        std::ranges::equal(image.decorative_definitions,ref.decorative_definitions),"compiled legacy static policies");
+    Check(image.program.effect_lookup.size()==ref.program.effect_lookup.size(),"compiled VFX lookup extent");
+    for(std::size_t i=0;i<ref.program.effect_lookup.size();++i)
+        Check(image.program.effect_lookup[i].effect_id==ref.program.effect_lookup[i].effect_id &&
+            image.program.effect_lookup[i].handle==ref.program.effect_lookup[i].handle,"compiled ID to handle relation");
+    Check(image.sprites.size()==ref.sprites.size(),"compiled sprite extent");
+    for(std::size_t i=0;i<ref.sprites.size();++i)
+        Check(image.sprites[i].sprite_id==ref.sprites[i].sprite_id && image.sprites[i].index==ref.sprites[i].index &&
+            image.sprites[i].frame_columns==ref.sprites[i].frame_columns && image.sprites[i].frame_rows==ref.sprites[i].frame_rows,
+            "compiled sprite relations");
+    const auto bindings=[](const hs::RendererVfxSpriteBindings &b){
+        std::vector<std::uint32_t> f;
+        for(auto v:{b.bleed_status_sprite,b.burn_status_sprite,b.slow_status_sprite,b.mark_status_sprite,b.trap_sprite,b.fire_area_sprite})
+            f.insert(f.end(),{v.sprite,v.frame_columns,v.frame_rows});
+        return f;
+    };
+    Check(bindings(image.sprite_bindings)==bindings(ref.sprite_bindings),"compiled sprite bindings");
+    std::size_t particles{},lines{};
+    for(std::size_t i=0;i<ref.definitions.size();++i){
+        const auto &a=image.definitions[i], &b=ref.definitions[i];
+        Check(a.effect_id==b.effect_id && a.first_emitter==b.first_emitter && a.emitter_count==b.emitter_count && a.kind==b.kind,
+            "compiled definition order and ranges");
+        for(float fraction:{0.0f,0.5f,1.0f})
+        for(auto geometry:{hs::PresentationGeometryKind::None,hs::PresentationGeometryKind::RingGaps}){
+            hs::PresentationEvent event; event.kind=hs::PresentationKind::Vfx; event.asset={b.effect_id};
+            event.sequence=0x123456789ull+i; event.tick=137+i; event.position={-3.25f,2.5f,7.75f}; event.geometry.kind=geometry;
+            hs::VfxEventParameters params; params.direction={0.6f,0.2f,-0.8f}; params.scale=1.375f;
+            params.target={8.5f,1.25f,-4.75f}; params.flags=static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
+            event.parameters=hs::EncodeVfxParameters(params);
+            std::vector<hs::ParticleSpawnCommand> expected,actual; std::vector<hs::VfxLineSpawnCommand> el,al;
+            Check(loaded.ExpandEvent(event,fraction,expected,el).Succeeded() && compiled.ExpandEvent(event,fraction,actual,al).Succeeded(),
+                "all authored legacy events expand");
+            Check(expected.size()==actual.size() && el.size()==al.size(),"compiled emission counts");
+            for(std::size_t j=0;j<expected.size();++j) Check(SpawnFields(expected[j])==SpawnFields(actual[j]),"compiled ordered particle fields and seed");
+            for(std::size_t j=0;j<el.size();++j) Check(LineFields(el[j])==LineFields(al[j]),"compiled ordered line fields");
+            particles+=expected.size(); lines+=el.size();
+        }
+    }
+    Check(particles>0 && lines>0,"comparison exercises both command families");
+    const auto *backing=loaded.Image().definitions.data(); loaded.Bind(loaded.Image());
+    Check(loaded.Image().definitions.data()==backing,"self-bind preserves owned backing");
+    hs::VfxCatalog moved(std::move(loaded));
+    Check(loaded.Image().definitions.empty() && moved.Image().definitions.data()==backing,"move clears source and transfers owner");
+    moved.Swap(compiled);
+    Check(compiled.Image().definitions.data()==backing && moved.Image().definitions.data()==image.definitions.data(),"swap pairs spans with owner");
+}
+
+void TestCompiledShippingTables()
+{
+    TestCompiledVfxImage();
+    hs::ShippedContentOwner owner;
+    Check(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), hs::shipping::ImageInfo(), owner).Succeeded(),
+          "compiled image must open its immutable bundle");
+    hs::PresentationCatalog reference;
+    std::uint64_t hash{};
+    Check(hs::LoadPresentationCatalog(test_generation::ProductPath("game-data/presentation-catalog"), reference, &hash).Succeeded(),
+          "reference presentation must load");
+    const auto &compiled = hs::shipping::Presentation();
+    Check(&compiled == &hs::shipping::Presentation() && hash == hs::shipping::ImageInfo().content_hash,
+          "compiled presentation identity");
+    Check(compiled.relic_names == reference.relic_names && compiled.relic_rules == reference.relic_rules,
+          "compiled presentation text bytes");
+    const auto same = [](float a, float b) { return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b); };
+    Check(same(compiled.camera.yaw_degrees, reference.camera.yaw_degrees) &&
+          same(compiled.camera.pitch_degrees, reference.camera.pitch_degrees) &&
+          same(compiled.camera.vertical_fov_degrees, reference.camera.vertical_fov_degrees) &&
+          same(compiled.camera.distance_m, reference.camera.distance_m) &&
+          compiled.camera.minimum_distance_percent == reference.camera.minimum_distance_percent &&
+          compiled.camera.maximum_distance_percent == reference.camera.maximum_distance_percent,
+          "compiled presentation camera bits");
+
+    hs::SimulationRules reference_rules;
+    Check(hs::LoadSimulationRules(test_generation::ProductPath("game-data/simulation-rules"), reference_rules).Succeeded(),
+          "reference simulation rules must load");
+    const auto &compiled_rules = hs::shipping::Simulation();
+    Check(&compiled_rules == &hs::shipping::Simulation(), "compiled simulation rules have a stable address");
+    Check(hs::CanonicalSimulationRulesBytes(compiled_rules) == hs::CanonicalSimulationRulesBytes(reference_rules),
+          "compiled simulation rules preserve all canonical field bytes");
+    Check(hs::SimulationRulesHash(compiled_rules) == hs::SimulationRulesHash(reference_rules),
+          "compiled simulation rules preserve the gameplay rules hash");
+
+    // The independently loaded cooked rules remain the behavioral reference.
+    // Both worlds use unchanged production rules and the same scripted input.
+    hs::SimulationConfig config;
+    config.seed = 0x5a674bc;
+    config.automatic_choices = true;
+    config.scenario.player_invulnerable = true;
+    hs::GameSimulation loaded_world, compiled_world;
+    Check(loaded_world.Initialize(config, reference_rules).Succeeded() &&
+              compiled_world.Initialize(config, compiled_rules).Succeeded(), "shipping rules simulation initialization");
+    const hs::DebugCommand grant{hs::DebugCommandKind::GrantSkill, static_cast<std::uint64_t>(hs::SkillKind::PiercingShot)};
+    Check(loaded_world.ApplyDebugCommand(grant).Succeeded() && compiled_world.ApplyDebugCommand(grant).Succeeded(),
+          "shipping rules fixture must equip its active skill");
+    const auto initial_position = loaded_world.GetObservation().player_position;
+    bool moved = false;
+    hs::Sequence sequence{};
+    for (hs::Tick tick = 1; tick <= 600; ++tick)
+    {
+        if (tick % 120 == 1)
+        {
+            const hs::DebugCommand spawn{hs::DebugCommandKind::SpawnEnemy, (tick / 120) % 3, 0, {6, -4}};
+            Check(loaded_world.ApplyDebugCommand(spawn).Succeeded() && compiled_world.ApplyDebugCommand(spawn).Succeeded(),
+                  "shipping rules fixture enemy spawn");
+        }
+        hs::InputFrame input{};
+        input.target_tick = tick;
+        input.held.move_held = true;
+        input.held.move_target_world = (tick / 150) % 2 == 0 ? hs::Float3{12, 0, 8} : hs::Float3{-10, 0, -6};
+        input.held.aim_world = {6, 0, -4};
+        input.held.basic_attack_held = tick % 60 < 40;
+        std::array<hs::ActionEdge, 1> edges{};
+        if (tick % 90 == 1 || tick % 90 == 2)
+        {
+            edges[0] = {++sequence, hs::GameAction::SkillQ,
+                        tick % 90 == 1 ? hs::EdgeKind::Pressed : hs::EdgeKind::Released};
+            input.ordered_edges = edges;
+        }
+        const auto expected = loaded_world.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        const auto actual = compiled_world.TickFixed(input, hs::FixedStepClock::kFixedStep);
+        Check(actual.tick == expected.tick && actual.phase == expected.phase && actual.checksum == expected.checksum,
+              "compiled rules must preserve each scripted gameplay tick");
+        const auto position = loaded_world.GetObservation().player_position;
+        moved |= position.x != initial_position.x || position.y != initial_position.y;
+        loaded_world.ClearDomainSignals(); compiled_world.ClearDomainSignals();
+    }
+    Check(moved && loaded_world.GetObservation().balance.skill_uses[static_cast<std::size_t>(hs::SkillKind::PiercingShot)] > 0,
+          "shipping rules comparison must exercise movement and an active skill");
+    Check(compiled_world.ComputeChecksum() == loaded_world.ComputeChecksum(), "compiled rules final gameplay state");
+    Check(loaded_world.Shutdown().Succeeded() && compiled_world.Shutdown().Succeeded(), "shipping rules simulation shutdown");
+    const auto &audio_image = hs::shipping::Audio();
+    Check(&audio_image == &hs::shipping::Audio() && audio_image.cues.size() == 107 && audio_image.samples.size() == 379,
+          "compiled audio tables retain stable identity and complete authored coverage");
+    std::uint32_t preload_samples{};
+    for (const auto &cue : audio_image.cues) if (cue.preload) preload_samples += cue.sample_count;
+    Check(preload_samples == 374, "compiled audio keeps the qualified preload versus transition split");
+    std::uint32_t preload_chunks{}, transition_chunks{}, chunk_samples{};
+    for (const auto &chunk : audio_image.chunks)
+    {
+        Check(chunk.offset >= 64 && chunk.offset <= owner.Size() && chunk.bytes <= owner.Size() - chunk.offset,
+              "compiled PCM chunk belongs to the matching immutable image");
+        chunk_samples += chunk.sample_count;
+        if (chunk.preload) ++preload_chunks;
+        else { ++transition_chunks; Check(chunk.sample_count == 1, "transition PCM keeps an independent owner"); }
+    }
+    Check(preload_chunks == 1 && transition_chunks == 5 && chunk_samples == 379,
+          "compiled PCM groups the contiguous preload run without merging transition samples");
+    for (const auto &sample : audio_image.samples)
+        Check(sample.offset >= 64 && sample.offset <= owner.Size() && sample.bytes <= owner.Size() - sample.offset,
+              "compiled PCM ranges belong to the matching immutable image");
+    hs::SettingsData silent_settings; silent_settings.master_volume = 0;
+    hs::AudioEngine compiled_audio;
+    Check(compiled_audio.Initialize(silent_settings, audio_image, owner).Succeeded(), "compiled audio consumes PCM ranges directly");
+    Check(compiled_audio.Status().loaded_cues == 107 && compiled_audio.Status().loaded_files == 374,
+          "compiled audio does not eagerly load the five transition samples");
+    compiled_audio.Shutdown();
+}
+
 int main(int argc, char **argv)
 {
     const auto root = TestDirectory();
@@ -1344,22 +2448,38 @@ int main(int argc, char **argv)
     {
         if (argc > 1)
         {
+            if (argc == 2 && std::string_view(argv[1]) == "shipping-content")
+            {
+                TestShippingImage();
+                TestCompiledShippingTables();
+                return 0;
+            }
             Check(argc == 2 && std::string_view(argv[1]) == "ui-text-fit", "unknown runtime test case");
             TestCharacterDetailsTextFit();
             return 0;
         }
         TestVfxCatalog();
+        TestShippingImage();
+        TestCompiledShippingTables();
         TestProductionVfxDecoding();
         TestSaveRecovery(root);
+        TestProfileMigration(root);
         TestSettingsPersistence(root);
         TestAudioCatalogValidation(root);
+        TestAudioNativeOperations();
+        TestMainWakeAndSceneLeases();
+        TestAudioDeliverySessions();
         TestAudioPayloadLazyLoad(root);
+        TestTypedAudioPcm(root);
+        TestPreparedNonLoopTransition(root);
+        TestPreparedSessionAmbience(root);
         TestExperimentSpecRoundTrip(root);
         TestPlaytestRecordAndReplay(root);
         TestRecordingFileFinalization(root);
         TestPlaytestFinalizationFailures(root);
         TestSessionMusicTransitions();
         TestSessionProbeUiBridge();
+        TestSimulationSignalFanout();
         TestVfxSessionReset();
         TestCameraPoseContinuity();
         TestDpiWindowCoordinates();

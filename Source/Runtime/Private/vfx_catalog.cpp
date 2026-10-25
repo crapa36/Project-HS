@@ -1,35 +1,16 @@
 #include "vfx_catalog.hpp"
 
 #include <hs/core/cooked_format.hpp>
-#include <hs/renderer/vfx_program_loader.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
-#include <fstream>
-#include <limits>
-#include <iostream>
-#include <string_view>
 #include <utility>
 
 namespace hs
 {
 namespace
 {
-constexpr std::uint32_t ShapeId(std::string_view name) noexcept
-{
-    std::uint32_t hash = 2166136261u;
-    for (const unsigned char character : name) { hash ^= character; hash *= 16777619u; }
-    return hash;
-}
-std::uint8_t MeshIndex(std::uint32_t shape) noexcept
-{
-    constexpr std::string_view names[]{"arrowhead_mesh", "shard_mesh", "debris_shard_mesh",
-        "small_shard_mesh", "enemy_thorn_mesh", "boss_crest_lance_mesh", "needle_shard_mesh"};
-    for (std::uint8_t index = 0; index < 7; ++index)
-        if (shape == ShapeId(names[index])) return index + 1;
-    return 0;
-}
 std::uint32_t SpawnSeed(Sequence sequence, std::uint32_t emitter) noexcept
 {
     auto value = sequence ^ (0x9e3779b97f4a7c15ull + emitter);
@@ -40,184 +21,46 @@ std::uint32_t SpawnSeed(Sequence sequence, std::uint32_t emitter) noexcept
 }
 }
 
-Result VfxCatalog::Load(const std::filesystem::path &path, VfxCatalog &catalog)
-{
-    return Load(path, path.parent_path() / "vfx_program.hsbin", catalog);
-}
-
-Result VfxCatalog::Load(const std::filesystem::path &path,
-                        const std::filesystem::path &program_path,
-                        VfxCatalog &catalog)
-{
-    std::ifstream stream(path, std::ios::binary | std::ios::ate);
-    if (!stream)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog is missing.");
-    const auto size = stream.tellg();
-    if (size < static_cast<std::streamoff>(sizeof(CookedParticleEffectsHeader)))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog header is missing.");
-    stream.seekg(0);
-    CookedParticleEffectsHeader header;
-    stream.read(reinterpret_cast<char *>(&header), sizeof(header));
-    const char magic[8]{'H', 'S', 'P', 'F', 'X', '\0', '\0', '\0'};
-    if (std::memcmp(header.magic, magic, sizeof(magic)) != 0 ||
-        header.format_version != 4 || header.sprite_count == 0 ||
-        header.schema_hash != kParticleEffectsSchemaHash)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog header is incompatible.");
-    const auto payload_size = static_cast<std::uint64_t>(header.effect_count) * sizeof(CookedVfxDefinition) +
-                              static_cast<std::uint64_t>(header.emitter_count) * sizeof(CookedParticleEmitter) +
-                              static_cast<std::uint64_t>(header.sprite_count) * sizeof(CookedParticleSprite);
-    if (payload_size > std::numeric_limits<std::uint32_t>::max() ||
-        static_cast<std::uint64_t>(size) != sizeof(header) + payload_size)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog size is invalid.");
-    std::vector<std::byte> payload(static_cast<std::size_t>(payload_size));
-    if (!stream.read(reinterpret_cast<char *>(payload.data()), static_cast<std::streamsize>(payload.size())) ||
-        Fnv1a64(payload) != header.payload_hash)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog payload is corrupt.");
-
-    VfxCatalog loaded;
-    loaded.definitions_.resize(header.effect_count);
-    loaded.emitters_.resize(header.emitter_count);
-    loaded.sprites_.resize(header.sprite_count);
-    std::memcpy(loaded.definitions_.data(), payload.data(), loaded.definitions_.size() * sizeof(CookedVfxDefinition));
-    std::memcpy(loaded.emitters_.data(), payload.data() + loaded.definitions_.size() * sizeof(CookedVfxDefinition),
-                loaded.emitters_.size() * sizeof(CookedParticleEmitter));
-    std::memcpy(loaded.sprites_.data(), payload.data() +
-                    loaded.definitions_.size() * sizeof(CookedVfxDefinition) +
-                    loaded.emitters_.size() * sizeof(CookedParticleEmitter),
-                loaded.sprites_.size() * sizeof(CookedParticleSprite));
-    std::uint64_t previous{};
-    for (std::size_t index = 0; index < loaded.definitions_.size(); ++index)
-    {
-        const auto &definition = loaded.definitions_[index];
-        if (definition.effect_id == 0 || (index && definition.effect_id <= previous) || definition.reserved != 0 ||
-            static_cast<std::uint64_t>(definition.first_emitter) + definition.emitter_count > loaded.emitters_.size())
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition table is invalid.");
-        if ((definition.kind == VfxDefinitionKind::Particles) != (definition.emitter_count != 0))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition kind is invalid.");
-        if (definition.kind == VfxDefinitionKind::Line &&
-            (definition.line_primitive < VfxPrimitive::SolidTrail ||
-             definition.line_primitive > VfxPrimitive::DashWake))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX line primitive is invalid.");
-        if (definition.line_sprite >= header.sprite_count || definition.line_frame_columns == 0 ||
-            definition.line_frame_rows == 0)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition sprite is invalid.");
-        previous = definition.effect_id;
-    }
-    for (const auto &emitter : loaded.emitters_)
-    {
-        const auto valid_primitive =
-            (emitter.renderer == VfxRenderer::Sprite &&
-             (emitter.primitive == VfxPrimitive::Soft || emitter.primitive == VfxPrimitive::Flame)) ||
-            (emitter.renderer == VfxRenderer::Ground &&
-             ((emitter.primitive >= VfxPrimitive::Disc && emitter.primitive <= VfxPrimitive::Cracks) ||
-              emitter.primitive == VfxPrimitive::Flame)) ||
-            (emitter.renderer == VfxRenderer::Segment &&
-             emitter.primitive >= VfxPrimitive::SolidTrail && emitter.primitive <= VfxPrimitive::DashWake) ||
-            (emitter.renderer == VfxRenderer::Mesh && emitter.primitive >= VfxPrimitive::Arrow &&
-             emitter.primitive <= VfxPrimitive::ShockShell);
-        if (emitter.sprite >= header.sprite_count || emitter.frame_columns == 0 ||
-            emitter.frame_rows == 0 || !valid_primitive)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle emitter contract is invalid.");
-    }
-    previous = 0;
-    for (std::size_t index = 0; index < loaded.sprites_.size(); ++index)
-    {
-        const auto &sprite = loaded.sprites_[index];
-        if (sprite.sprite_id == 0 || (index && sprite.sprite_id <= previous) ||
-            sprite.index >= header.sprite_count || sprite.frame_columns == 0 ||
-            sprite.frame_rows == 0)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle sprite table is invalid.");
-        previous = sprite.sprite_id;
-    }
-    std::ifstream program_stream(program_path, std::ios::binary | std::ios::ate);
-    if (!program_stream)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program is missing.");
-    const auto program_size = program_stream.tellg();
-    if (program_size <= 0 || program_size > std::numeric_limits<std::uint32_t>::max())
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program size is invalid.");
-    std::vector<std::byte> program_bytes(static_cast<std::size_t>(program_size));
-    program_stream.seekg(0);
-    if (!program_stream.read(reinterpret_cast<char *>(program_bytes.data()), program_size))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program cannot be read.");
-    VfxProgramData program;
-    std::string program_error;
-    if (!LoadVfxProgram(program_bytes, program, program_error))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX v4 program: " + program_error);
-    loaded.program_ = std::move(program);
-    const auto &cooked_program = loaded.program_;
-    loaded.authored_mesh_indices_.resize(loaded.emitters_.size());
-    std::uint32_t mapped{}, unmapped{};
-    for (const auto &definition : loaded.definitions_)
-    {
-        const auto lookup = std::find_if(cooked_program.effect_lookup.begin(), cooked_program.effect_lookup.end(),
-            [&](const auto &entry) { return entry.effect_id == definition.effect_id; });
-        for (std::uint32_t ei = definition.first_emitter; ei < definition.first_emitter + definition.emitter_count; ++ei)
-        {
-            const auto &emitter = loaded.emitters_[ei];
-            if (emitter.renderer != VfxRenderer::Mesh) continue;
-            std::uint8_t selected{};
-            bool ambiguous = false;
-            if (lookup != cooked_program.effect_lookup.end())
-            {
-                const auto &effect = cooked_program.effects[lookup->handle - 1];
-                for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
-                {
-                    const auto &source = cooked_program.sources[si];
-                    for (std::uint32_t oi = source.outputs.first; oi < source.outputs.first + source.outputs.count; ++oi)
-                    {
-                        const auto &output = cooked_program.outputs[oi];
-                        if (output.profile != VfxOutputProfile::MeshEmissiveOit) continue;
-                        const auto mesh = MeshIndex(output.shape);
-                        if (!mesh) continue;
-                        const bool compatible =
-                            (emitter.primitive == VfxPrimitive::Arrow && mesh == 1) ||
-                            (emitter.primitive == VfxPrimitive::Shard && (mesh == 2 || mesh == 3 || mesh == 4)) ||
-                            (emitter.primitive == VfxPrimitive::Ember && (mesh == 2 || mesh == 3 || mesh == 4)) ||
-                            (emitter.primitive == VfxPrimitive::Spike && (mesh == 5 || mesh == 6 || mesh == 7));
-                        if (!compatible) continue;
-                        if (selected && selected != mesh) ambiguous = true;
-                        selected = mesh;
-                    }
-                }
-            }
-            if (selected && !ambiguous) { loaded.authored_mesh_indices_[ei] = selected; ++mapped; }
-            else ++unmapped;
-        }
-    }
-    std::clog << "vfx.authored_mesh mapped_emitters=" << mapped << " unmapped_emitters=" << unmapped
-              << " policy=primitive_compatible_unique_shape motion=legacy\n";
-    loaded.sprite_count_ = header.sprite_count;
-    loaded.payload_hash_ = header.payload_hash;
-    catalog = std::move(loaded);
-    return Result::Success();
-}
-
 const CookedVfxDefinition *VfxCatalog::FindEffect(EffectId id) const noexcept
 {
-    const auto found = std::lower_bound(definitions_.begin(), definitions_.end(), id.value,
+    const auto found = std::lower_bound(image_.definitions.begin(), image_.definitions.end(), id.value,
         [](const CookedVfxDefinition &definition, std::uint64_t value) { return definition.effect_id < value; });
-    return found != definitions_.end() && found->effect_id == id.value ? &*found : nullptr;
+    return found != image_.definitions.end() && found->effect_id == id.value ? &*found : nullptr;
 }
 
+VfxCatalog::VfxCatalog() noexcept = default;
+VfxCatalog::~VfxCatalog() = default;
+VfxCatalog::VfxCatalog(VfxCatalog &&other) noexcept
+    : image_(std::exchange(other.image_, {})), owned_(std::move(other.owned_)) {}
+VfxCatalog &VfxCatalog::operator=(VfxCatalog &&other) noexcept
+{
+    if (this != &other)
+    {
+        image_ = std::exchange(other.image_, {});
+        owned_ = std::move(other.owned_);
+    }
+    return *this;
+}
+void VfxCatalog::Bind(const VfxImage &image) noexcept
+{
+    if (&image == &image_) return;
+    owned_.reset();
+    image_ = image;
+}
 void VfxCatalog::Swap(VfxCatalog &prepared) noexcept
 {
-    definitions_.swap(prepared.definitions_);
-    emitters_.swap(prepared.emitters_);
-    sprites_.swap(prepared.sprites_);
-    authored_mesh_indices_.swap(prepared.authored_mesh_indices_);
     using std::swap;
-    swap(program_, prepared.program_);
-    swap(sprite_count_, prepared.sprite_count_);
-    swap(payload_hash_, prepared.payload_hash_);
+    swap(image_, prepared.image_);
+    swap(owned_, prepared.owned_);
 }
 
 const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
 {
-    const auto found = std::lower_bound(sprites_.begin(), sprites_.end(), id.value,
+    const auto found = std::lower_bound(image_.sprites.begin(), image_.sprites.end(), id.value,
         [](const CookedParticleSprite &sprite, std::uint64_t value) {
             return sprite.sprite_id < value;
         });
-    return found != sprites_.end() && found->sprite_id == id.value ? &*found : nullptr;
+    return found != image_.sprites.end() && found->sprite_id == id.value ? &*found : nullptr;
 }
 
 Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_fraction,
@@ -231,7 +74,7 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     {
         // The legacy emitter catalog is only the compatibility path. New v4
         // events are decoded by the typed program and need no legacy emitter.
-        if (std::ranges::any_of(program_.effect_lookup, [&](const VfxEffectLookupRecord &effect) {
+        if (std::ranges::any_of(image_.program.effect_lookup, [&](const VfxEffectLookupRecord &effect) {
                 return effect.effect_id == event.asset.value;
             }))
             return Result::Success();
@@ -239,13 +82,7 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     }
     if (!std::isfinite(decorative_fraction) || decorative_fraction < 0 || decorative_fraction > 1)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Decorative particle fraction is invalid.");
-    const auto authored = std::ranges::find(program_.effect_lookup, event.asset.value, &VfxEffectLookupRecord::effect_id);
-    const auto *policy = authored != program_.effect_lookup.end() && authored->handle && authored->handle <= program_.effects.size()
-        ? &program_.effects[authored->handle - 1] : nullptr;
-    const bool decorative = policy && !policy->must_match_logic && std::ranges::none_of(
-        std::span(program_.sources).subspan(policy->sources.first, policy->sources.count), [](const auto &source) {
-            return source.authoritative || source.type == VfxSourceType::ProjectileFollow;
-        });
+    const bool decorative = image_.decorative_definitions[static_cast<std::size_t>(definition - image_.definitions.data())] != 0;
     const auto parameters = DecodeVfxParameters(event.parameters);
     const auto direction_length = std::hypot(parameters.direction.x, parameters.direction.z);
     if (!std::isfinite(parameters.scale) || parameters.scale <= 0.0f || direction_length <= 0.0001f)
@@ -268,13 +105,10 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
     // authoritative wavefront. Keep its other accents while the typed snapshot
     // owns this boundary for the area's entire lifetime.
     const bool typed_wavefront = event.asset.value == MakeAssetId("particle.boss.shockwave.release").value &&
-        event.geometry.kind == PresentationGeometryKind::RingGaps &&
-        std::ranges::any_of(program_.effect_lookup, [](const auto &effect) {
-            return effect.effect_id == MakeAssetId("particle.boss.shockwave.wavefront").value;
-        });
+        event.geometry.kind == PresentationGeometryKind::RingGaps && image_.has_typed_wavefront;
     for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
     {
-        const auto &emitter = emitters_[definition->first_emitter + index];
+        const auto &emitter = image_.emitters[definition->first_emitter + index];
         if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
             continue;
         const auto scaled = parameters.scale;
@@ -289,7 +123,7 @@ Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_
         command.facing = emitter.facing;
         command.renderer = emitter.renderer;
         if (emitter.renderer == VfxRenderer::Mesh)
-            command.mesh_index = authored_mesh_indices_[definition->first_emitter + index];
+            command.mesh_index = image_.authored_mesh_indices[definition->first_emitter + index];
         command.primitive = emitter.primitive;
         command.sprite = emitter.sprite;
         command.frame_columns = emitter.frame_columns;

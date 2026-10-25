@@ -24,9 +24,9 @@ int main(int argc, char **argv)
             if (!stream.write(data, static_cast<std::streamsize>(size)))
                 throw std::runtime_error("cannot write output: " + destination.string());
         };
-        const auto source = imported.source.dump(2);
+        const auto source = imported.runtime.source_metadata.dump(2);
         const nlohmann::json report{{"schema_version",1},{"status","compatibility_projection_only"},
-            {"source_clip_count",imported.source.at("clips").size()},
+            {"source_clip_count",imported.runtime.source_metadata.at("clips").size()},
             {"runtime_clip_count",imported.runtime.clips.size()},
             {"bone_count",imported.runtime.bone_count},{"vertex_count",imported.runtime.vertices.size()},
             {"limitations",imported.limitations}};

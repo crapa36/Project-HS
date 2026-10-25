@@ -139,7 +139,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(std::uint32_t frame,
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (index == 2 || index == 3)
+        if (index == 2 || index == 3 || index == 5 || index == 6)
         {
             view.Format = DXGI_FORMAT_R32_FLOAT;
             view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;

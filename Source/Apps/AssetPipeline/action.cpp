@@ -819,6 +819,11 @@ std::size_t ActionResultSnapshot::ProductCount() const
     return result_.at("products").size();
 }
 
+bool ActionResultSnapshot::HasProduct(std::string_view product_id) const
+{
+    return product_indexes_.contains(std::string(product_id));
+}
+
 const Json &ActionResultSnapshot::ProductMetadata(std::string_view product_id) const
 {
     const auto found = product_indexes_.find(std::string(product_id));
@@ -827,10 +832,9 @@ const Json &ActionResultSnapshot::ProductMetadata(std::string_view product_id) c
     return result_.at("products").at(found->second);
 }
 
-void ActionResultSnapshot::ReadProduct(std::string_view product_id,
+void ActionResultSnapshot::ResolveProduct(std::string_view product_id,
                                        UpstreamProduct &dependency,
-                                       fs::path &product_path,
-                                       ProductReadPolicy policy) const
+                                       fs::path &product_path) const
 {
     const auto &product = ProductMetadata(product_id);
     const auto id = result_.at("product_set_id").get<std::string>();
@@ -842,27 +846,36 @@ void ActionResultSnapshot::ReadProduct(std::string_view product_id,
     dependency = {std::string(product_id), product.at("digest").get<std::string>(),
                   product.at("size").get<std::uint64_t>(), result_path_};
     Require(IsDigest(dependency.digest), "invalid upstream product digest");
-    if (policy == ProductReadPolicy::VerifyIntegrity)
-    {
-        const auto [digest, size] = HashFile(product_path);
-        Require(digest == dependency.digest && size == dependency.size,
-                "upstream product is missing or corrupt: " + std::string(product_id));
-    }
-    else
-    {
-        Require(fs::is_regular_file(product_path) &&
-                    fs::file_size(product_path) == dependency.size,
-                "upstream product is missing or has unexpected size: " +
-                    std::string(product_id));
-    }
+}
+
+void ActionResultSnapshot::ReadProduct(std::string_view product_id,
+                                      UpstreamProduct &dependency,
+                                      fs::path &product_path) const
+{
+    ResolveProduct(product_id, dependency, product_path);
+    const auto [digest, size] = HashFile(product_path);
+    Require(digest == dependency.digest && size == dependency.size,
+            "upstream product is missing or corrupt: " + std::string(product_id));
+}
+
+std::string ActionResultSnapshot::ReadProductBytes(std::string_view product_id,
+                                                  UpstreamProduct &dependency) const
+{
+    fs::path path;
+    ResolveProduct(product_id, dependency, path);
+    auto bytes = ReadBytes(path);
+    Require(bytes.size() == dependency.size &&
+                Sha256Bytes(std::as_bytes(std::span(bytes.data(), bytes.size()))) == dependency.digest,
+            "upstream product is missing or corrupt: " + std::string(product_id));
+    return bytes;
 }
 
 Json ReadActionResult(const fs::path &build_root, std::string_view namespace_path,
                       std::string_view product_id, UpstreamProduct &dependency,
-                      fs::path &product_path, ProductReadPolicy policy)
+                      fs::path &product_path)
 {
     ActionResultSnapshot snapshot(build_root, namespace_path);
-    snapshot.ReadProduct(product_id, dependency, product_path, policy);
+    snapshot.ReadProduct(product_id, dependency, product_path);
     return std::move(snapshot.result_);
 }
 

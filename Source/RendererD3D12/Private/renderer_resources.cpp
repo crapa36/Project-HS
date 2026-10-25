@@ -46,9 +46,9 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
         enhanced && resource.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER
             ? D3D12_RESOURCE_STATE_COMMON
             : initial_state;
-    const auto result = allocator->CreateResource(&allocation, &resource, effective_state, clear,
+    const auto result = MeasureStartupOperation(RendererStartupOperation::NativeResourceAllocation, [&] { return allocator->CreateResource(&allocation, &resource, effective_state, clear,
                                                   &output.allocation,
-                                                  IID_PPV_ARGS(output.resource.ReleaseAndGetAddressOf()));
+                                                  IID_PPV_ARGS(output.resource.ReleaseAndGetAddressOf())); });
     if (FAILED(result)) return CheckDevice(result, std::format(
         "D3D12MA::CreateResource dimension={} extent={}x{} mips={} format={} flags={} heap={}",
         static_cast<unsigned>(resource.Dimension), resource.Width, resource.Height, resource.MipLevels,
@@ -824,6 +824,7 @@ void D3D12Renderer::Impl::SwapOptionPools(
 
 void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
     D3D12_DEPTH_STENCIL_VIEW_DESC depth_view{};
     depth_view.Format = DXGI_FORMAT_D32_FLOAT;
@@ -968,6 +969,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors() noexcept
 
 void D3D12Renderer::Impl::ClearTransientDescriptors() noexcept
 {
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     D3D12_RENDER_TARGET_VIEW_DESC rtv_view{};
     rtv_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     rtv_view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
@@ -1031,9 +1033,8 @@ Result D3D12Renderer::Impl::CreateGpuData()
         if (auto read = ReadBinary(metadata_path, metadata_bytes); !read) return read;
         try
         {
-            character = render_data::DecodeCharacterMetadataPackage(
-                metadata_bytes, MakeAssetId(logical_id), validate_upper_body_mask);
-            const auto package = render_data::ReadPackage(metadata_bytes, MakeAssetId(logical_id));
+            const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(metadata_bytes, MakeAssetId(logical_id)); });
+            character = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeCharacterMetadataPackage(package, validate_upper_body_mask); });
             if (logical_id == "render/character/archer.rpkg")
             {
                 constexpr std::string_view extension_id = "render/animation/archer.rpkg";
@@ -1043,8 +1044,8 @@ Result D3D12Renderer::Impl::CreateGpuData()
                 if (auto resolved = config.ResolveProduct(extension_id, extension_path); !resolved) return resolved;
                 std::vector<std::byte> extension_bytes;
                 if (auto read = ReadBinary(extension_path, extension_bytes); !read) return read;
-                auto extension = render_data::DecodeCharacterAnimationExtension(extension_bytes, MakeAssetId(extension_id));
-                render_data::ValidateCharacterAnimationBinding(extension, character, MakeAssetId(logical_id));
+                auto extension = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return MeasureStartupOperation(RendererStartupOperation::AnimationPrepare, [&] { return render_data::DecodeCharacterAnimationExtension(extension_bytes, MakeAssetId(extension_id)); }); });
+                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ValidateCharacterAnimationBinding(extension, character, MakeAssetId(logical_id)); });
                 archer_named_animations = std::move(extension);
             }
             for (const auto &binding : character.material_bindings)
@@ -1055,7 +1056,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
                 if (auto resolved = config.ResolveProduct(material_id, material_path); !resolved) return resolved;
                 std::vector<std::byte> material_bytes;
                 if (auto read = ReadBinary(material_path, material_bytes); !read) return read;
-                const auto material = render_data::ReadHeroMaterialPackage(material_bytes, name);
+                const auto material = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadHeroMaterialPackage(material_bytes, name); });
                 if (material.domain != binding.domain)
                     throw std::runtime_error("character FBX slot binding disagrees with its material closure domain");
             }
@@ -1064,18 +1065,15 @@ Result D3D12Renderer::Impl::CreateGpuData()
             if (auto resolved = config.ResolveProduct(page_id, page_path); !resolved) return resolved;
             std::vector<std::byte> page_bytes;
             if (auto read = ReadBinary(page_path, page_bytes); !read) return read;
-            const auto character_stem = std::filesystem::path(logical_id).stem().string();
-            const auto mesh_source_id = "character/" + character_stem + ".meshbin";
-            const auto page_package = render_data::ReadPackage(page_bytes, MakeAssetId(page_id));
-            if (page_package.dependencies != std::vector<std::string>{mesh_source_id})
+            const auto page_package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(page_bytes, MakeAssetId(page_id)); });
+            if (!page_package.dependencies.empty())
                 throw std::runtime_error(
-                    "character geometry page has an unexpected source dependency; expected only " +
-                    mesh_source_id);
-            auto geometry = render_data::DecodeGeometryPage(
-                page_bytes, MakeAssetId(page_id), character.geometry);
-            render_data::ValidateCharacterGeometry(character, geometry);
-            if (auto created = CreateGeometryPage(geometry_page, character.geometry, page_bytes,
-                    MakeAssetId(page_id), page_slot, command_list.Get(), geometry_uploads); !created)
+                    "direct character geometry page has an unexpected intermediate dependency; recook the character product");
+            auto geometry = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryPage(
+                page_bytes, MakeAssetId(page_id), character.geometry); });
+            MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ValidateCharacterGeometry(character, geometry); });
+            if (auto created = MeasureStartupOperation(RendererStartupOperation::GeometryPrepare, [&] { return CreateGeometryPage(geometry_page, character.geometry, page_bytes,
+                    MakeAssetId(page_id), page_slot, command_list.Get(), geometry_uploads); }); !created)
                 return created;
             if (support_vertices) *support_vertices = std::move(geometry.vertices);
         }
@@ -1104,51 +1102,23 @@ Result D3D12Renderer::Impl::CreateGpuData()
         asset.material_count = character.material_count;
         asset.material_bindings = std::move(character.material_bindings);
         asset.skin_offset = static_cast<std::uint32_t>(skin_matrices.size());
+        if (!character.monster)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "Monster product is missing its cooked final palette; recook the character product.");
         for (const auto &clip : character.clips)
-        {
             asset.clip_meta[static_cast<std::size_t>(clip.clip)] = {
-                static_cast<std::uint32_t>(skin_matrices.size() - asset.skin_offset),
-                clip.frame_count, clip.looping, asset.bone_count};
-            for (std::uint32_t frame = 0; frame < clip.frame_count; ++frame)
-            {
-                std::array<DirectX::XMFLOAT4X4, kMaxCharacterBones> globals{};
-                for (std::uint32_t bone = 0; bone < asset.bone_count; ++bone)
-                {
-                    const auto &local = character.transforms[clip.first_transform +
-                        frame * asset.bone_count + bone];
-                    const auto local_matrix = DirectX::XMMatrixScaling(
-                        local.scale[0], local.scale[1], local.scale[2]) *
-                        DirectX::XMMatrixRotationQuaternion(DirectX::XMVectorSet(
-                            local.rotation[0], local.rotation[1], local.rotation[2], local.rotation[3])) *
-                        DirectX::XMMatrixTranslation(local.translation[0], local.translation[1],
-                                                     local.translation[2]);
-                    const auto parent = character.parents[bone];
-                    const auto global = parent == std::numeric_limits<std::uint16_t>::max()
-                                            ? local_matrix
-                                            : local_matrix * DirectX::XMLoadFloat4x4(&globals[parent]);
-                    DirectX::XMStoreFloat4x4(&globals[bone], global);
-                    DirectX::XMFLOAT4X4 inverse_bind{};
-                    std::memcpy(&inverse_bind, character.inverse_bind_matrices[bone].data(),
-                                sizeof(inverse_bind));
-                    // Cooked FBX inverse-bind matrices use column-vector layout;
-                    // DirectX runtime transforms use row-vector layout.
-                    const auto skin = DirectX::XMMatrixTranspose(
-                                          DirectX::XMLoadFloat4x4(&inverse_bind)) *
-                                      global;
-                    const auto determinant = DirectX::XMVectorGetX(
-                        DirectX::XMMatrixDeterminant(skin));
-                    if (!std::isfinite(determinant) || determinant <= 0.0001f ||
-                        DirectX::XMMatrixIsNaN(skin) || DirectX::XMMatrixIsInfinite(skin))
-                    {
-                        return Result::Failure(
-                            ErrorCode::InvalidState, "hs_renderer_d3d12",
-                            "Monster animation produced an invalid skin pose.");
-                    }
-                    auto &stored_skin = skin_matrices.emplace_back();
-                    DirectX::XMStoreFloat4x4(&stored_skin,
-                                             DirectX::XMMatrixTranspose(skin));
-                }
-            }
+                clip.first_transform, clip.frame_count, clip.looping, asset.bone_count};
+        auto &cooked = *character.monster;
+        asset.skeleton_binding = cooked.skeleton_binding;
+        asset.deformation_flags = cooked.flags;
+        asset.geometry_lods = std::move(cooked.lods);
+        asset.interval_bounds = std::move(cooked.interval_bounds);
+        StartupOperationScope palette_timing(RendererStartupOperation::AnimationPrepare);
+        for (const auto &matrix : cooked.final_matrices)
+        {
+            auto &stored = skin_matrices.emplace_back();
+            static_assert(sizeof(stored) == sizeof(matrix));
+            std::memcpy(&stored, matrix.data(), sizeof(stored));
         }
     }
     const auto skin_bytes = skin_matrices.size() * sizeof(skin_matrices.front());
@@ -1168,6 +1138,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
     if (auto resolved = config.ResolveProduct("vfx/vfx_mesh_atlas.hsbin", atlas_path);
         !resolved)
         return resolved;
+    StartupOperationScope atlas_read_timing(RendererStartupOperation::CheckedBinaryRead);
     std::ifstream atlas_stream(atlas_path, std::ios::binary | std::ios::ate);
     const auto atlas_failure = [] {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid or missing VFX mesh atlas");
@@ -1179,6 +1150,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
     if (static_cast<std::size_t>(atlas_size) % 4 != 0) return atlas_failure();
     atlas_stream.seekg(0);
     if (!atlas_stream.read(reinterpret_cast<char *>(atlas_words.data()), atlas_size)) return atlas_failure();
+    atlas_read_timing.Stop();
     if (atlas_words[0] != 0x4d565348u || atlas_words[1] != 1 || atlas_words[2] != 7 ||
         atlas_words.size() != 25ull + 12ull * atlas_words[3]) return atlas_failure();
     constexpr std::array<std::string_view, 7> mesh_names{
@@ -1348,6 +1320,8 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                                const std::vector<std::string> &names,
                                std::uint32_t width, std::uint32_t height,
                                std::uint32_t mips) -> Result {
+        if (names.empty() || names.size() > 2048 || !width || !height || !mips)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid character texture array shape.");
         std::vector<PackageSource> sources(names.size());
         for (std::size_t slice = 0; slice < names.size(); ++slice)
         {
@@ -1360,8 +1334,8 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                 return loaded;
             try
             {
-                sources[slice].view = render_data::ReadTexturePackage(
-                    sources[slice].storage, MakeAssetId(package_id));
+                sources[slice].view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(
+                    sources[slice].storage, MakeAssetId(package_id)); });
             }
             catch (const std::exception &error)
             {
@@ -1372,22 +1346,20 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             const auto &view = sources[slice].view;
             const bool normal = names[slice].find("_normal_") != std::string::npos ||
                                 names[slice] == "monster_ram";
-            const bool placeholder = names[slice] == "archer_normal_0";
-            const auto source_width = placeholder ? 1u : width;
-            const auto source_height = placeholder ? 1u : height;
-            const auto source_mips = placeholder ? 1u : mips;
-            if (view.description.width != source_width ||
-                view.description.height != source_height ||
+            if (view.description.width != width ||
+                view.description.height != height ||
                 view.description.array_size != 1 ||
-                view.description.mip_count != source_mips ||
+                view.description.mip_count != mips ||
                 view.description.format != (normal ?
-                    render_data::kTextureFormatRgba8 :
-                    render_data::kTextureFormatRgba8Srgb) ||
+                    render_data::kTextureFormatBc7 :
+                    render_data::kTextureFormatBc7Srgb) ||
                 view.dependencies != std::vector<std::string>{source_id} ||
-                view.subresources.size() != source_mips)
+                view.subresources.size() != mips)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Character texture package shape or dependency changed: " +
                     path.string());
+            if (slice && view.description.format != sources.front().view.description.format)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character texture array mixes native formats.");
         }
 
         D3D12_RESOURCE_DESC description{};
@@ -1396,7 +1368,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         description.Height = height;
         description.DepthOrArraySize = static_cast<UINT16>(names.size());
         description.MipLevels = static_cast<UINT16>(mips);
-        description.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+        description.Format = static_cast<DXGI_FORMAT>(sources.front().view.description.format);
         description.SampleDesc = {1, 0};
         D3D12MA::ALLOCATION_DESC allocation{};
         allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -1422,6 +1394,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                                                reinterpret_cast<void **>(&mapped));
         if (FAILED(result))
             return HResultFailure("Map character texture upload", result);
+        StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
         for (std::size_t slice = 0; slice < names.size(); ++slice)
             for (std::uint32_t mip = 0; mip < mips; ++mip)
             {
@@ -1429,36 +1402,23 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                 const auto target_width = std::max(1u, width >> mip);
                 const auto target_height = std::max(1u, height >> mip);
                 const auto &source = sources[slice].view.subresources[mip];
-                if (source.width == target_width && source.height == target_height)
+                const auto block_rows = (target_height + 3) / 4;
+                const auto tight_row = ((target_width + 3) / 4) * 16;
+                if (source.width != target_width || source.height != target_height ||
+                    source.row_pitch != tight_row || source.slice_pitch != std::uint64_t(tight_row) * block_rows ||
+                    source.bytes.size() != source.slice_pitch || rows[index] != block_rows ||
+                    row_sizes[index] != tight_row || footprints[index].Footprint.RowPitch < tight_row ||
+                    footprints[index].Offset > upload_size ||
+                    std::uint64_t(footprints[index].Footprint.RowPitch) * (block_rows - 1) + tight_row > upload_size - footprints[index].Offset)
                 {
-                    for (std::uint32_t row = 0; row < target_height; ++row)
-                        std::memcpy(mapped + footprints[index].Offset +
-                                        static_cast<std::size_t>(row) *
-                                            footprints[index].Footprint.RowPitch,
-                                    source.bytes.data() + static_cast<std::size_t>(row) *
-                                        source.row_pitch,
-                                    source.row_pitch);
+                    uploads.back().resource->Unmap(0, nullptr);
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Character BC7 subresource disagrees with its native footprint.");
                 }
-                else
-                {
-                    for (std::uint32_t row = 0; row < target_height; ++row)
-                    {
-                        auto *destination = mapped + footprints[index].Offset +
-                            static_cast<std::size_t>(row) *
-                                footprints[index].Footprint.RowPitch;
-                        const auto source_row = std::uint64_t(row) * source.height /
-                                                target_height;
-                        for (std::uint32_t column = 0; column < target_width; ++column)
-                        {
-                            const auto source_column = std::uint64_t(column) *
-                                                       source.width / target_width;
-                            std::memcpy(destination + static_cast<std::size_t>(column) * 4,
-                                        source.bytes.data() +
-                                            source_row * source.row_pitch +
-                                            source_column * 4, 4);
-                        }
-                    }
-                }
+                for (std::uint32_t row = 0; row < block_rows; ++row)
+                    std::memcpy(mapped + footprints[index].Offset +
+                                    std::size_t(row) * footprints[index].Footprint.RowPitch,
+                                source.bytes.data() + std::size_t(row) * tight_row, tight_row);
                 D3D12_TEXTURE_COPY_LOCATION dst{};
                 dst.pResource = texture.resource.Get();
                 dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -1470,6 +1430,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                 command_list->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
             }
         uploads.back().resource->Unmap(0, nullptr);
+        pack_timing.Stop();
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = texture.resource.Get();
@@ -1487,14 +1448,14 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         archer_normal_names.push_back("archer_normal_" + std::to_string(index));
     }
     if (auto uploaded = upload_packaged(archer_diffuse, archer_diffuse_names,
-                                         kCharacterTextureSize, kCharacterTextureSize, 1);
+                                         kCharacterTextureSize, kCharacterTextureSize, 12);
         !uploaded) return uploaded;
     if (auto uploaded = upload_packaged(monster_basecolor, {"monster_basecolor"},
-                                         512, 512, 1); !uploaded) return uploaded;
+                                         512, 512, 10); !uploaded) return uploaded;
     if (auto uploaded = upload_packaged(monster_emissive, {"monster_emissive"},
-                                         512, 512, 1); !uploaded) return uploaded;
+                                         512, 512, 10); !uploaded) return uploaded;
     if (auto uploaded = upload_packaged(monster_ram, {"monster_ram"},
-                                         512, 512, 1); !uploaded) return uploaded;
+                                         512, 512, 10); !uploaded) return uploaded;
     if (auto uploaded = upload_packaged(family_diffuse,
                                          {"enemy_melee_diffuse_0",
                                           "enemy_ranged_diffuse_0",
@@ -1506,7 +1467,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                                           "enemy_suicide_normal_0"},
                                          1024, 1024, 11); !uploaded) return uploaded;
     if (auto uploaded = upload_packaged(archer_normal, archer_normal_names,
-                                         kCharacterTextureSize, kCharacterTextureSize, 1);
+                                         kCharacterTextureSize, kCharacterTextureSize, 12);
         !uploaded) return uploaded;
     const auto upload_vfx_package = [&](AllocationResource &texture, const char *filename,
                                         std::uint32_t expected_width,
@@ -1532,7 +1493,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         render_data::TexturePackageView view;
         try
         {
-            view = render_data::ReadTexturePackage(storage, MakeAssetId(package_id));
+            view = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadTexturePackage(storage, MakeAssetId(package_id)); });
         }
         catch (const std::exception &error)
         {
@@ -1599,6 +1560,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         result = uploads.back().resource->Map(0, &no_read,
                                                reinterpret_cast<void **>(&mapped));
         if (FAILED(result)) return HResultFailure("Map VFX texture upload", result);
+        StartupOperationScope pack_timing(RendererStartupOperation::HostUploadPack);
         for (UINT index = 0; index < subresource_count; ++index)
         {
             const auto &source = view.subresources[index];
@@ -1621,6 +1583,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
                                             &source_location, nullptr);
         }
         uploads.back().resource->Unmap(0, nullptr);
+        pack_timing.Stop();
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = texture.resource.Get();
@@ -1691,6 +1654,7 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
         return waited;
     }
 
+    StartupOperationScope character_descriptors_timing(RendererStartupOperation::DescriptorWrite);
     for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
     {
         auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
@@ -1701,14 +1665,14 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             view.Format = format;
             view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Texture2DArray.MipLevels = 1;
+            view.Texture2DArray.MipLevels = texture->GetDesc().MipLevels;
             view.Texture2DArray.ArraySize = archer_material_count;
             device->CreateShaderResourceView(texture, &view, handle);
             handle.ptr += srv_stride;
         };
         create_view(archer_diffuse.resource.Get(),
-                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-        create_view(archer_normal.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+                    DXGI_FORMAT_BC7_UNORM_SRGB);
+        create_view(archer_normal.resource.Get(), DXGI_FORMAT_BC7_UNORM);
         D3D12_SHADER_RESOURCE_VIEW_DESC vfx_view{};
         vfx_view.Format = DXGI_FORMAT_BC4_UNORM;
         vfx_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -1722,13 +1686,13 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             view.Format = format;
             view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Texture2D.MipLevels = 1;
+            view.Texture2D.MipLevels = texture->GetDesc().MipLevels;
             device->CreateShaderResourceView(texture, &view, handle);
             handle.ptr += srv_stride;
         };
-        create_shared_view(monster_basecolor.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-        create_shared_view(monster_emissive.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-        create_shared_view(monster_ram.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        create_shared_view(monster_basecolor.resource.Get(), DXGI_FORMAT_BC7_UNORM_SRGB);
+        create_shared_view(monster_emissive.resource.Get(), DXGI_FORMAT_BC7_UNORM_SRGB);
+        create_shared_view(monster_ram.resource.Get(), DXGI_FORMAT_BC7_UNORM);
         auto create_family_view = [&](ID3D12Resource *texture, DXGI_FORMAT format) {
             D3D12_SHADER_RESOURCE_VIEW_DESC view{};
             view.Format = format; view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -1736,8 +1700,8 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             view.Texture2DArray.MipLevels = 11; view.Texture2DArray.ArraySize = 3;
             device->CreateShaderResourceView(texture, &view, handle); handle.ptr += srv_stride;
         };
-        create_family_view(family_diffuse.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
-        create_family_view(family_normal.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
+        create_family_view(family_diffuse.resource.Get(), DXGI_FORMAT_BC7_UNORM_SRGB);
+        create_family_view(family_normal.resource.Get(), DXGI_FORMAT_BC7_UNORM);
         auto gradient_handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
         gradient_handle.ptr +=
             (static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount +

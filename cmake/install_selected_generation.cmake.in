@@ -12,3 +12,13 @@ execute_process(COMMAND "${_hs_generation_exe}" --export-snapshot
 if(NOT _hs_export_result EQUAL 0)
     message(FATAL_ERROR "Selected runtime Generation snapshot export failed")
 endif()
+
+# Temporary legacy Generation export remains necessary for renderer products.
+# N01 is incomplete until those consumers use the packed image as well.
+set(_hs_pack_relative "@HS_SHIPPING_PACK_RELATIVE_PATH@")
+set(_hs_pack_source "${_hs_build_root}/${_hs_pack_relative}")
+if(NOT EXISTS "${_hs_pack_source}")
+    message(FATAL_ERROR "Runtime package requires the linked shipping content image")
+endif()
+get_filename_component(_hs_pack_destination "${_hs_package_root}/${_hs_pack_relative}" DIRECTORY)
+file(INSTALL DESTINATION "${_hs_pack_destination}" TYPE FILE FILES "${_hs_pack_source}")
