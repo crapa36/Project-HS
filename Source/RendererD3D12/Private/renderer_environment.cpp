@@ -1,6 +1,7 @@
 #include "renderer_impl.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/sha256.hpp>
 #include <hs/render_data/texture_package.hpp>
 
 #include <stdexcept>
@@ -15,6 +16,42 @@ namespace
 constexpr D3D12_RESOURCE_STATES kAllShaderRead =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+
+render_data::TextureDescriptorStorage TextureStreamingDescriptor(
+    const RendererConfig &config, AssetId asset, std::span<const std::byte> bytes,
+    const render_data::TexturePackageView &package)
+{
+    render_data::TextureDescriptor descriptor;
+    if (config.development_catalog)
+    {
+        const auto found = config.development_catalog->FindTexture(asset);
+        if (!found) throw std::runtime_error("Missing admitted development texture descriptor.");
+        descriptor = *found;
+    }
+    else if (config.packed_content)
+    {
+        const auto handle = FindRendererTexture(config, asset);
+        if (!handle) throw std::runtime_error("Missing packed texture descriptor.");
+        descriptor = config.packed_textures[handle.value];
+    }
+    else
+    {
+        render_data::TextureDescriptorStorage result;
+        result.asset_id = asset; result.description = package.description;
+        result.dependencies.reserve(package.dependencies.size());
+        for (const auto &dependency : package.dependencies) result.dependencies.push_back(MakeAssetId(dependency));
+        result.subresources.reserve(package.subresources.size());
+        for (const auto &subresource : package.subresources)
+            result.subresources.push_back({static_cast<std::uint64_t>(subresource.bytes.data() - bytes.data()),
+                subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size()),
+                Sha256(subresource.bytes), true});
+        return result;
+    }
+    return {descriptor.asset_id, descriptor.bulk_index, descriptor.description,
+        std::vector<AssetId>(descriptor.dependencies.begin(), descriptor.dependencies.end()),
+        std::vector<render_data::TextureSubresourceLayout>(descriptor.subresources.begin(), descriptor.subresources.end()),
+        descriptor.dimension, descriptor.depth};
+}
 } // namespace
 
 Result D3D12Renderer::Impl::PrepareMaterialParameters(
@@ -249,6 +286,17 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
                 !RendererTextureDependencyMatches(config, logical_id, package, source_id) ||
                 package.subresources.size() != spec.slices * spec.mips)
                 return invalid();
+            try
+            {
+                auto descriptor = TextureStreamingDescriptor(config, MakeAssetId(logical_id), storage, package);
+                if (auto supplied = texture_streaming.SupplyDescriptor(logical_id, std::move(descriptor)); !supplied)
+                    return supplied;
+            }
+            catch (const std::exception &error)
+            {
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Could not retain environment texture streaming metadata: " + std::string(error.what()));
+            }
         }
         const auto source_mip_base = std::min(kFallbackFirstMip, spec.mips - 1u);
         const auto target_mips = spec.mips - source_mip_base;
@@ -363,9 +411,10 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         PublishEnvironmentMaterialTextures(frame);
     }
     if (environment_textures[kStreamTextureIndex].allocation)
-        environment_stream.fallback_residency = residency.Register(
+        environment_stream.fallback_residency = RegisterNativeAllocation(
             ResidencyCategory::Texture,
-            environment_textures[kStreamTextureIndex].allocation->GetSize(), true);
+            environment_textures[kStreamTextureIndex].allocation->GetSize(), true,
+            ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
     if (!environment_stream.fallback_residency)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Could not account the pinned coarse texture.");
     if (auto budget = UpdateResidencyBudget(); !budget) return budget;
@@ -432,6 +481,17 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
         return compiled_texture ? render_data::BindTextureDescriptor(bytes, config.packed_textures[compiled_texture.value]) :
             ReadRendererTexturePackage(config, binding.product_id, bytes);
     });
+    try
+    {
+        auto descriptor = TextureStreamingDescriptor(config, MakeAssetId(binding.product_id), bytes, package);
+        if (auto supplied = texture_streaming.SupplyDescriptor(binding.product_id, std::move(descriptor)); !supplied)
+            return supplied;
+    }
+    catch (const std::exception &error)
+    {
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Could not retain texture streaming metadata: " + std::string(error.what()));
+    }
     render_data::ValidateMaterialTexturePackage(binding, package.description, required_layer);
     if (config.development_catalog)
     {
@@ -656,35 +716,14 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
 
 Result D3D12Renderer::Impl::UpdateResidencyBudget()
 {
-    ResidencyBudgetSnapshot snapshot;
-    DXGI_QUERY_VIDEO_MEMORY_INFO local{};
-    DXGI_QUERY_VIDEO_MEMORY_INFO nonlocal{};
-    const auto local_result =
-        adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local);
-    const auto nonlocal_result =
-        adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal);
-    snapshot.valid = SUCCEEDED(local_result);
-    if (SUCCEEDED(local_result))
-    {
-        snapshot.local_budget = local.Budget;
-        snapshot.local_usage = local.CurrentUsage;
-    }
-    if (SUCCEEDED(nonlocal_result))
-    {
-        snapshot.nonlocal_budget = nonlocal.Budget;
-        snapshot.nonlocal_usage = nonlocal.CurrentUsage;
-    }
-    MEMORYSTATUSEX host{};
-    host.dwLength = sizeof(host);
-    if (GlobalMemoryStatusEx(&host))
-    {
-        // Host read/decode memory has its own bounded reservoir. It must never
-        // consume DXGI local-video headroom while waiting to become GPU data.
-        snapshot.host_budget_valid = true;
-        snapshot.host_staging_budget = std::min<std::uint64_t>(host.ullAvailPhys / 8u, 512ull * 1024u * 1024u);
-    }
-    residency.UpdateBudget(snapshot);
-    return Result::Success();
+    const auto now = std::chrono::steady_clock::now();
+    const auto recent = [&](auto attempted) {
+        return attempted != std::chrono::steady_clock::time_point{} && now - attempted < std::chrono::seconds(1);
+    };
+    if (recent(local_budget_observation.attempted_at) &&
+        (adapter_unified_memory || recent(nonlocal_budget_observation.attempted_at)) &&
+        recent(host_budget_observation.attempted_at)) return Result::Success();
+    return RefreshBudgetObservations();
 }
 
 Result D3D12Renderer::Impl::PrepareEnvironmentStreaming()
@@ -876,16 +915,14 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     const auto allocation_info = device->GetResourceAllocationInfo(0, 1, &description);
     const auto upload_description = BufferDescription(upload_size);
     const auto upload_allocation = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
-    if (allocation_info.SizeInBytes == UINT64_MAX || upload_allocation == UINT64_MAX ||
-        upload_allocation > std::numeric_limits<std::uint64_t>::max() -
-                          allocation_info.SizeInBytes)
+    if (allocation_info.SizeInBytes == UINT64_MAX || upload_allocation == UINT64_MAX)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Streamed texture allocation size overflow.");
-    const auto gpu_peak = allocation_info.SizeInBytes + upload_allocation;
-    ScopedGpuAdmission admission(residency, gpu_peak);
+    SampleAllocatorBudgetStats(false, false);
+    ScopedGpuAdmission admission(residency, allocation_info.SizeInBytes, upload_allocation);
     if (!admission)
     {
-        return TryRelieveStreamingPressure(gpu_peak, stream.priority);
+        return TryRelieveStreamingPressure(allocation_info.SizeInBytes, upload_allocation, stream.priority);
     }
 
     AllocationResource candidate;
@@ -933,10 +970,12 @@ Result D3D12Renderer::Impl::PumpEnvironmentStreaming(std::uint32_t frame_slot)
     }
     upload.resource->Unmap(0, nullptr);
 
-    const auto candidate_ticket = residency.Register(
-        ResidencyCategory::Texture, candidate.allocation->GetSize(), false);
-    const auto upload_ticket = residency.Register(
-        ResidencyCategory::Staging, upload.allocation->GetSize(), false);
+    const auto candidate_ticket = RegisterNativeAllocation(
+        ResidencyCategory::Texture, candidate.allocation->GetSize(), false,
+        ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
+    const auto upload_ticket = RegisterNativeAllocation(
+        ResidencyCategory::Staging, upload.allocation->GetSize(), false,
+        ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
     if (!candidate_ticket || !upload_ticket)
     {
         if (candidate_ticket) static_cast<void>(residency.ReleaseNow(candidate_ticket));

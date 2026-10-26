@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <unordered_set>
 
 namespace hs
 {
@@ -35,6 +34,7 @@ void MergeMemoryPeak(RendererDiagnosticsMemory &peak, const RendererDiagnosticsM
     peak.budget_available |= sample.budget_available;
     peak.nonlocal_budget_available |= sample.nonlocal_budget_available;
     peak.host_budget_available |= sample.host_budget_available;
+    peak.allocator_stats_available |= sample.allocator_stats_available;
 #define HS_DIAGNOSTICS_PEAK(field) peak.field = std::max(peak.field, sample.field)
     HS_DIAGNOSTICS_PEAK(local_usage_bytes); HS_DIAGNOSTICS_PEAK(local_budget_bytes);
     HS_DIAGNOSTICS_PEAK(nonlocal_usage_bytes); HS_DIAGNOSTICS_PEAK(nonlocal_budget_bytes);
@@ -42,7 +42,11 @@ void MergeMemoryPeak(RendererDiagnosticsMemory &peak, const RendererDiagnosticsM
     HS_DIAGNOSTICS_PEAK(tracked_reclaimed_bytes); HS_DIAGNOSTICS_PEAK(tracked_gpu_bytes);
     HS_DIAGNOSTICS_PEAK(host_staging_bytes); HS_DIAGNOSTICS_PEAK(host_reserved_bytes);
     HS_DIAGNOSTICS_PEAK(gpu_reserved_bytes); HS_DIAGNOSTICS_PEAK(gpu_growth_since_budget_bytes);
+    HS_DIAGNOSTICS_PEAK(local_gpu_reserved_bytes); HS_DIAGNOSTICS_PEAK(nonlocal_gpu_reserved_bytes);
+    HS_DIAGNOSTICS_PEAK(local_growth_since_budget_bytes); HS_DIAGNOSTICS_PEAK(nonlocal_growth_since_budget_bytes);
     HS_DIAGNOSTICS_PEAK(host_staging_budget_bytes); HS_DIAGNOSTICS_PEAK(texture_physical_bytes);
+    HS_DIAGNOSTICS_PEAK(allocator_local_block_bytes); HS_DIAGNOSTICS_PEAK(allocator_nonlocal_block_bytes);
+    HS_DIAGNOSTICS_PEAK(allocator_local_usage_estimate_bytes); HS_DIAGNOSTICS_PEAK(allocator_nonlocal_usage_estimate_bytes);
     HS_DIAGNOSTICS_PEAK(presentation_provider_bytes);
     HS_DIAGNOSTICS_PEAK(reconstruction_guide_bytes);
     HS_DIAGNOSTICS_PEAK(renderer_view_bytes); HS_DIAGNOSTICS_PEAK(shared_deformation_bytes);
@@ -51,6 +55,10 @@ void MergeMemoryPeak(RendererDiagnosticsMemory &peak, const RendererDiagnosticsM
     {
         peak.live_bytes[index] = std::max(peak.live_bytes[index], sample.live_bytes[index]);
         peak.retiring_bytes[index] = std::max(peak.retiring_bytes[index], sample.retiring_bytes[index]);
+        peak.local_live_bytes[index] = std::max(peak.local_live_bytes[index], sample.local_live_bytes[index]);
+        peak.local_retiring_bytes[index] = std::max(peak.local_retiring_bytes[index], sample.local_retiring_bytes[index]);
+        peak.nonlocal_live_bytes[index] = std::max(peak.nonlocal_live_bytes[index], sample.nonlocal_live_bytes[index]);
+        peak.nonlocal_retiring_bytes[index] = std::max(peak.nonlocal_retiring_bytes[index], sample.nonlocal_retiring_bytes[index]);
     }
 }
 
@@ -366,109 +374,66 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
     const auto accounting = residency.Accounting();
     static_assert(static_cast<std::size_t>(RendererDiagnosticsMemoryCategory::Count) == static_cast<std::size_t>(ResidencyCategory::Count));
     output.live_bytes = accounting.live_bytes; output.retiring_bytes = accounting.retiring_bytes;
+    output.local_live_bytes = accounting.local_live_bytes; output.local_retiring_bytes = accounting.local_retiring_bytes;
+    output.nonlocal_live_bytes = accounting.nonlocal_live_bytes; output.nonlocal_retiring_bytes = accounting.nonlocal_retiring_bytes;
     output.tracked_live_bytes = accounting.live_total; output.tracked_retiring_bytes = accounting.retiring_total;
     output.tracked_reclaimed_bytes = accounting.reclaimed_total;
     output.tracked_gpu_bytes = accounting.live_total + accounting.retiring_total;
     output.host_staging_bytes = accounting.host_staging_total; output.host_reserved_bytes = accounting.host_reserved_total;
     output.gpu_reserved_bytes = accounting.gpu_reserved_total; output.gpu_growth_since_budget_bytes = accounting.gpu_growth_since_snapshot;
+    output.local_gpu_reserved_bytes = accounting.gpu_reserved_by_segment[0];
+    output.nonlocal_gpu_reserved_bytes = accounting.gpu_reserved_by_segment[1];
+    output.local_growth_since_budget_bytes = accounting.local_growth_since_snapshot;
+    output.nonlocal_growth_since_budget_bytes = accounting.nonlocal_growth_since_snapshot;
     output.host_budget_available = accounting.budget.host_budget_valid;
     output.host_staging_budget_bytes = accounting.budget.host_staging_budget;
-    // Query here as well as at normal frame admission: a transition observation
-    // must see current process usage while old and candidate resources coexist.
-    DXGI_QUERY_VIDEO_MEMORY_INFO local{}, nonlocal{};
-    if (adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &local)))
-    {
-        output.budget_available = true;
-        output.local_usage_bytes = local.CurrentUsage; output.local_budget_bytes = local.Budget;
-    }
-    if (adapter && SUCCEEDED(adapter->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &nonlocal)))
-    {
-        output.nonlocal_budget_available = true;
-        output.nonlocal_usage_bytes = nonlocal.CurrentUsage; output.nonlocal_budget_bytes = nonlocal.Budget;
-    }
+    const auto age_ms = [](auto observed_at) -> std::uint64_t {
+        if (observed_at == std::chrono::steady_clock::time_point{}) return 0;
+        return static_cast<std::uint64_t>(std::max<std::int64_t>(0,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - observed_at).count()));
+    };
+    const auto status = [](bool valid, bool supported, HRESULT result, std::uint64_t age) {
+        using Status = RendererDiagnosticsMemory::ObservationStatus;
+        if (!supported) return Status::Unsupported;
+        if (!valid) return FAILED(result) ? Status::Failed : Status::Unavailable;
+        if (FAILED(result)) return Status::Failed;
+        return age <= 1000 ? Status::Fresh : Status::Cached;
+    };
+    output.budget_available = local_budget_observation.valid;
+    output.local_usage_bytes = local_budget_observation.last_valid.CurrentUsage;
+    output.local_budget_bytes = local_budget_observation.last_valid.Budget;
+    output.local_success_sequence = local_budget_observation.success_sequence;
+    output.local_observed_age_ms = age_ms(local_budget_observation.observed_at);
+    output.local_last_error = static_cast<std::int32_t>(local_budget_observation.last_result);
+    output.local_status = status(local_budget_observation.valid, local_budget_observation.supported,
+        local_budget_observation.last_result, output.local_observed_age_ms);
+    output.nonlocal_budget_available = nonlocal_budget_observation.valid;
+    output.nonlocal_usage_bytes = nonlocal_budget_observation.last_valid.CurrentUsage;
+    output.nonlocal_budget_bytes = nonlocal_budget_observation.last_valid.Budget;
+    output.nonlocal_success_sequence = nonlocal_budget_observation.success_sequence;
+    output.nonlocal_observed_age_ms = age_ms(nonlocal_budget_observation.observed_at);
+    output.nonlocal_last_error = static_cast<std::int32_t>(nonlocal_budget_observation.last_result);
+    output.nonlocal_status = status(nonlocal_budget_observation.valid, nonlocal_budget_observation.supported,
+        nonlocal_budget_observation.last_result, output.nonlocal_observed_age_ms);
+    output.host_budget_available = host_budget_observation.valid;
+    output.host_success_sequence = host_budget_observation.success_sequence;
+    output.host_observed_age_ms = age_ms(host_budget_observation.observed_at);
+    output.host_last_error = static_cast<std::int32_t>(host_budget_observation.last_error);
+    output.host_status = !host_budget_observation.last_attempt_succeeded
+        ? (host_budget_observation.attempted_at == std::chrono::steady_clock::time_point{}
+            ? RendererDiagnosticsMemory::ObservationStatus::Unavailable
+            : RendererDiagnosticsMemory::ObservationStatus::Failed)
+        : output.host_observed_age_ms <= 1000 ? RendererDiagnosticsMemory::ObservationStatus::Fresh
+                                              : RendererDiagnosticsMemory::ObservationStatus::Cached;
+    output.allocator_local_block_bytes = accounting.allocator_stats.local_block_bytes;
+    output.allocator_nonlocal_block_bytes = accounting.allocator_stats.nonlocal_block_bytes;
+    output.allocator_local_usage_estimate_bytes = accounting.allocator_stats.local_usage_bytes;
+    output.allocator_nonlocal_usage_estimate_bytes = accounting.allocator_stats.nonlocal_usage_bytes;
+    output.allocator_stats_available = accounting.allocator_stats_available;
     output.texture_physical_bytes = texture_streaming.PhysicalBytes();
     output.presentation_provider_bytes = sdk_presentation.Status().allocated_bytes + presentation_guides.AllocatedBytes();
     output.reconstruction_guide_bytes = reconstruction_guides.AllocatedBytes();
-    // Known renderer allocations are independent of ResidencyManager's partial
-    // tracking and of opaque native SDK allocations. Shared deformation leases
-    // retain allocation identities, so count those allocations only once.
-    std::unordered_set<const D3D12MA::Allocation *> allocations;
-    const auto bytes = [&](const AllocationResource &resource) -> std::uint64_t {
-        return resource.allocation && allocations.insert(resource.allocation).second
-            ? resource.allocation->GetSize() : 0;
-    };
-    const auto target_bytes = [&](const auto &targets) {
-        std::uint64_t total{};
-#define HS_VIEW_ALLOCATION(field) total += bytes(targets.field)
-        HS_VIEW_ALLOCATION(depth); HS_VIEW_ALLOCATION(shadow);
-        HS_VIEW_ALLOCATION(gbuffer_base); HS_VIEW_ALLOCATION(gbuffer_normal);
-        HS_VIEW_ALLOCATION(gbuffer_metadata); HS_VIEW_ALLOCATION(gbuffer_material);
-        HS_VIEW_ALLOCATION(gbuffer_motion); HS_VIEW_ALLOCATION(gbuffer_surface_history);
-        HS_VIEW_ALLOCATION(visibility_ids); HS_VIEW_ALLOCATION(visibility_front_face);
-        HS_VIEW_ALLOCATION(visibility_pixels); HS_VIEW_ALLOCATION(visibility_counts);
-        HS_VIEW_ALLOCATION(visibility_dispatch_args); HS_VIEW_ALLOCATION(hdr_color);
-        HS_VIEW_ALLOCATION(oit_accumulation); HS_VIEW_ALLOCATION(oit_revealage);
-        HS_VIEW_ALLOCATION(subsurface_diffuse); HS_VIEW_ALLOCATION(environment_specular);
-        HS_VIEW_ALLOCATION(indirect_diffuse); HS_VIEW_ALLOCATION(post_a); HS_VIEW_ALLOCATION(post_b);
-        HS_VIEW_ALLOCATION(scene_work); HS_VIEW_ALLOCATION(display_linear); HS_VIEW_ALLOCATION(composite_hdr);
-#undef HS_VIEW_ALLOCATION
-        for (const auto *bank : {&targets.material_sidecars, &targets.temporal_history,
-                &targets.temporal_normal_history, &targets.temporal_material_history, &targets.hzb_history})
-            for (const auto &resource : *bank) total += bytes(resource);
-        for (const auto &pool : targets.transient_pools) total += pool.AllocatedBytes();
-        return total;
-    };
-    const auto auxiliary_bytes = [&](const auto &view) {
-        std::uint64_t total{};
-        for (const auto &resource : view.exposure_values) total += bytes(resource);
-        total += bytes(view.exposure_histogram) + bytes(view.initial_exposure);
-#define HS_VIEW_SERVICE(field) total += view.field.AllocatedBytes()
-        HS_VIEW_SERVICE(ambient_occlusion); HS_VIEW_SERVICE(adaptive_shading);
-        HS_VIEW_SERVICE(subsurface); HS_VIEW_SERVICE(screen_reflections);
-        HS_VIEW_SERVICE(hero_transparency); HS_VIEW_SERVICE(hdr_post); HS_VIEW_SERVICE(screen_overlay);
-        HS_VIEW_SERVICE(brixelizer_gi);
-        HS_VIEW_SERVICE(virtual_shadows); HS_VIEW_SERVICE(local_shadows);
-        HS_VIEW_SERVICE(volumetrics); HS_VIEW_SERVICE(light_list); HS_VIEW_SERVICE(decal_surface);
-        HS_VIEW_SERVICE(reconstruction_guides);
-#undef HS_VIEW_SERVICE
-        const auto lod_bytes = [&](const GpuLodStateBuffer &lod) {
-            total += bytes(lod.states) + bytes(lod.zero_upload) + bytes(lod.prefix_source);
-            for (const auto &retired : lod.retired) total += bytes(retired.staging) + bytes(retired.source);
-        };
-        lod_bytes(view.dynamic_lod_states);
-        return total;
-    };
-    output.renderer_view_bytes = target_bytes(*this) + auxiliary_bytes(*this);
-    if (static_gpu_scene)
-    {
-        const auto &lod = static_gpu_scene->lod_states;
-        output.renderer_view_bytes += bytes(lod.states) + bytes(lod.zero_upload) + bytes(lod.prefix_source);
-        for (const auto &retired : lod.retired)
-            output.renderer_view_bytes += bytes(retired.staging) + bytes(retired.source);
-    }
-    for (const auto &resource : ui_textures) output.renderer_view_bytes += bytes(resource);
-    for (const auto &frame : frames) output.renderer_view_bytes += bytes(frame.ui_upload);
-    for (const auto &[id, view] : owned_views)
-    {
-        for (const auto &resource : view->offscreen_allocations) output.renderer_view_bytes += bytes(resource);
-        if (id == active_view_id.value) continue;
-        for (const auto &resource : view->ui.textures) output.renderer_view_bytes += bytes(resource);
-        for (const auto &resource : view->ui.uploads) output.renderer_view_bytes += bytes(resource);
-        output.reconstruction_guide_bytes += view->reconstruction_guides.AllocatedBytes();
-        output.renderer_view_bytes += target_bytes(view->targets) + auxiliary_bytes(*view);
-        output.renderer_view_bytes += bytes(view->static_lod_states.states) + bytes(view->static_lod_states.zero_upload)
-            + bytes(view->static_lod_states.prefix_source);
-        for (const auto &retired : view->static_lod_states.retired)
-            output.renderer_view_bytes += bytes(retired.staging) + bytes(retired.source);
-    }
-    for (const auto &frame : frames)
-        output.shared_deformation_bytes += bytes(frame.skin_cache_vertices) + bytes(frame.skin_cache_bounds);
-    const auto skin_bytes = [&](const auto &lease) {
-        if (lease) output.shared_deformation_bytes += bytes(lease->skin_cache_vertices) + bytes(lease->skin_cache_bounds);
-    };
-    skin_bytes(canonical_skin_current); skin_bytes(previous_skin_deformation);
-    for (const auto &lease : canonical_skin_frames) skin_bytes(lease);
-    for (const auto &[id, view] : owned_views) skin_bytes(view->previous_skin_deformation);
     return output;
 }
 

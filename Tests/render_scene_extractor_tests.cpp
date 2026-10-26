@@ -28,13 +28,11 @@ void TestSnapshotExchange()
         auto slot = exchange.TryBeginWrite();
         Check(slot.has_value(), "snapshot write slot");
         slot->storage->header.tick = sequence;
-        Check(slot->storage->AddInstance(
-                  {{static_cast<float>(sequence), 0, 0}, 0, {}, 0xFFFFFFFFu,
-                   hs::RenderMesh::Enemy}),
-              "snapshot instance");
-        Check(slot->storage->AddInstance(
-                  {{static_cast<float>(sequence), 0, 1}, 0, {}, 0xFFFFFFFFu,
-                   hs::RenderMesh::Pickup}),
+        slot->storage->AddInstance(
+            {{static_cast<float>(sequence), 0, 0}, 0, {}, 0xFFFFFFFFu, hs::RenderMesh::Enemy});
+        slot->storage->AddInstance(
+            {{static_cast<float>(sequence), 0, 1}, 0, {}, 0xFFFFFFFFu, hs::RenderMesh::Pickup});
+        Check(slot->storage->View().instances.size() == 2,
               "snapshot grows beyond its initial reserve");
         const auto previous_view = previous.View();
         exchange.Publish(*slot, sequence, sequence > 1 ? &previous_view : nullptr);
@@ -130,7 +128,7 @@ void TestSnapshotExchangeConcurrentOwnership()
     hs::RenderSnapshotExchange exchange(1, 0, 0, 0);
     hs::RenderSnapshotExchange::Consumer consumer(exchange);
     constexpr hs::Sequence publication_count = 20'000;
-    std::atomic<bool> finished{}, producer_failed{};
+    std::atomic<bool> finished{};
     std::jthread producer([&](std::stop_token stop) {
         hs::RenderSnapshotStorage previous(1, 0, 0, 0);
         hs::RenderSnapshotStorage next(1, 0, 0, 0);
@@ -144,9 +142,8 @@ void TestSnapshotExchangeConcurrentOwnership()
             }
             if (!slot) return;
             slot->storage->header.tick = sequence;
-            if (!slot->storage->AddInstance({{static_cast<float>(sequence), 0, 0}, 0, {},
-                                             0xFFFFFFFFu, hs::RenderMesh::Enemy}))
-                producer_failed.store(true, std::memory_order_relaxed);
+            slot->storage->AddInstance({{static_cast<float>(sequence), 0, 0}, 0, {},
+                                        0xFFFFFFFFu, hs::RenderMesh::Enemy});
             const auto previous_view = previous.View();
             // Copy the new producer state before publishing can release its slot.
             next.CopyDynamicFrom(slot->storage->View());
@@ -176,7 +173,7 @@ void TestSnapshotExchangeConcurrentOwnership()
     do { inspect(); } while (!finished.load(std::memory_order_acquire));
     producer.join();
     for (int read = 0; read < 4; ++read) inspect();
-    Check(!producer_failed.load() && current_tick == publication_count,
+    Check(current_tick == publication_count,
           "concurrent snapshot consumer receives the final publication");
 }
 
@@ -206,46 +203,53 @@ void TestStaticSceneViewLifetime()
           "development scene replacement must own new storage without rebinding an old leased view");
 }
 
-void CheckDevelopmentAdapter()
+void CheckSnapshotStorageInputs()
 {
     hs::RenderSnapshotStorage packet(4, 4, 0, 0);
     hs::RenderInstance instance;
     instance.mesh = hs::RenderMesh::Archer;
     instance.revisions = {11, 22, 33, 44};
-    Check(packet.AddInstance(instance), "development instance append");
-    Check(packet.View().instances[0].asset_id.value != 0 &&
+    packet.AddInstance(instance);
+    Check(packet.View().instances[0].asset_id.value == 0 &&
               packet.View().instances[0].revisions == instance.revisions,
-          "development explicit revisions retain identity population");
+          "snapshot storage preserves instance inputs without deriving identity");
     hs::AnimationPoseRef pose;
     pose.revision = 77;
-    Check(packet.AddPose(pose), "development pose append");
+    packet.AddPose(pose);
     pose.revision = 88;
-    Check(packet.AddPose(pose) && packet.View().poses.size() == 2 &&
-              packet.View().instances[0].revisions.pose == 88 &&
+    packet.AddPose(pose);
+    Check(packet.View().poses.size() == 2 &&
+              packet.View().instances[0].revisions == instance.revisions &&
+              packet.View().poses.back().revision == 88 &&
               hs::FindLastRenderPose(packet.View().poses, 0) == &packet.View().poses.back(),
-          "last development pose owns the supplied pose revision");
+          "snapshot storage preserves pose inputs without deriving instance revisions");
     pose.instance_index = 3;
-    Check(packet.AddPose(pose) && packet.View().poses.size() == 3,
+    packet.AddPose(pose);
+    Check(packet.View().poses.size() == 3,
           "development unassociated pose append remains accepted");
     instance.animation_clip_id.value = 123;
     instance.animation_time_seconds = 0.5;
     packet.Clear();
-    Check(packet.AddInstance(instance), "named development instance append");
+    packet.AddInstance(instance);
     pose.instance_index = 0;
-    Check(packet.AddPose(pose) && packet.View().instances[0].revisions.pose ==
-              hs::DeriveNamedAnimationPoseRevision(instance),
-          "named animation takes precedence over supplied legacy pose revision");
+    packet.AddPose(pose);
+    Check(packet.View().instances[0].revisions.pose == instance.revisions.pose &&
+              packet.View().poses.back().revision == 88,
+          "snapshot storage leaves final animation revisions to its display owner");
     hs::CapturedRenderInstance capture;
     capture.instance = instance;
     capture.animation_pose = pose;
-    Check(packet.AddCapturedInstance(capture) && packet.View().captured_instances[0].instance.revisions.pose ==
-              hs::DeriveAnimationPoseRevision(pose), "manual capture retains its legacy pose-revision rule");
+    packet.AddCapturedInstance(capture);
+    Check(packet.View().captured_instances[0].instance.revisions == capture.instance.revisions &&
+              packet.View().captured_instances[0].animation_pose.revision == capture.animation_pose.revision,
+          "snapshot storage preserves captured inputs without deriving revisions");
     packet.Clear();
     instance.revisions = {};
     instance.animation_clip_id = {};
     pose.revision = 0;
-    Check(packet.AppendInstance(instance) && packet.AppendPose(pose) &&
-              packet.AppendCapturedInstance({}), "complete producer operands append");
+    packet.AddInstance(instance);
+    packet.AddPose(pose);
+    packet.AddCapturedInstance({});
     Check(packet.View().instances[0].revisions == hs::RenderInstance::Revisions{} &&
               packet.View().poses[0].revision == 0 &&
               packet.View().captured_instances[0].instance.revisions == hs::RenderInstance::Revisions{},
@@ -328,7 +332,7 @@ int main()
         TestSnapshotExchangeQueuedPublications();
         TestSnapshotExchangeConcurrentOwnership();
         TestStaticSceneViewLifetime();
-        CheckDevelopmentAdapter();
+    CheckSnapshotStorageInputs();
         CheckExactFinalPoseInputs();
         CheckInstantMotionSample();
         hs::RenderSnapshotPair camera_pair;

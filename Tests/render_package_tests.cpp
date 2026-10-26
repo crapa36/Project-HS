@@ -3161,7 +3161,8 @@ void TestTexturePackage()
         Require(proof.description.width == compiled.description.width &&
             proof.description.format == compiled.description.format &&
             proof.subresources.size() == compiled.subresources.size() &&
-            proof.subresources.front().offset == compiled.subresources.front().offset,
+            proof.subresources.front().offset == compiled.subresources.front().offset &&
+            proof.subresources.front().digest == compiled.subresources.front().digest,
             "bounded texture metadata proof differs from full admission");
         rd::ValidateTextureDescriptor(descriptor, bytes.size());
         const auto bound = rd::BindTextureDescriptor(bytes, descriptor);
@@ -3180,7 +3181,8 @@ void TestTexturePackage()
             Require(a.array_slice == b.array_slice && a.mip_level == b.mip_level && a.width == b.width &&
                     a.height == b.height && a.row_pitch == b.row_pitch && a.slice_pitch == b.slice_pitch &&
                     a.bytes.data() == b.bytes.data() && a.bytes.size() == b.bytes.size() &&
-                    descriptor.subresources[i].byte_count == b.slice_pitch,
+                    descriptor.subresources[i].byte_count == b.slice_pitch &&
+                    descriptor.subresources[i].digest == hs::Sha256(b.bytes),
                     "compiled texture binding changed layout or copied payload bytes");
         }
     };
@@ -3233,14 +3235,26 @@ void TestTexturePackage()
     Require(rebound.subresources[0].bytes.data() == authenticated_bytes.data() + first_offset &&
             rebound.subresources[0].bytes[0] == authenticated_bytes[first_offset],
             "bound texture did not retain caller byte aliases");
+    Reject([&] { (void)rd::BindTextureDescriptor(authenticated_bytes, compiled.View()); },
+           "texture binding accepted a subresource with the wrong range digest");
 
     const auto base = rd::ReadPackage(package, asset);
     auto metadata = std::vector<std::byte>(base.chunks[0].bytes.begin(),
                                            base.chunks[0].bytes.end());
+    auto wrong_digest = metadata;
+    wrong_digest[40 + 16] ^= std::byte{1};
+    const std::array wrong_digest_chunks{
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureMetadata), 2, true,
+                        wrong_digest, 1, static_cast<std::uint32_t>(wrong_digest.size())},
+        rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureSubresources), 1, true,
+                        base.chunks[1].bytes, payload.size() / 16, 16}};
+    const auto wrong_digest_package = rd::BuildPackage(asset, dependencies, wrong_digest_chunks);
+    Reject([&] { (void)rd::ReadTexturePackage(wrong_digest_package, asset); },
+           "texture package accepted a metadata subresource digest mismatch");
     metadata[40] = std::byte{1}; // First subresource must begin at payload offset zero.
     const std::array malformed{
         rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureMetadata),
-                        1, true, metadata, 1, static_cast<std::uint32_t>(metadata.size())},
+                        2, true, metadata, 1, static_cast<std::uint32_t>(metadata.size())},
         rd::ChunkSource{static_cast<std::uint32_t>(rd::ChunkType::TextureSubresources),
                         1, true, base.chunks[1].bytes, payload.size() / 16, 16}};
     const auto bad_offset = rd::BuildPackage(asset, dependencies, malformed);
@@ -3324,9 +3338,9 @@ void TestVolumeTextureDescriptor()
     const auto compiled = rd::CompileTextureDescriptor(bytes, asset, 11);
     const auto directory = rd::ReadPackageDirectory(std::span(bytes).first(std::min<std::size_t>(bytes.size(), 16 * 1024)),
         bytes.size(), asset);
-    const auto &metadata = directory.chunks.front();
+    const auto &metadata_chunk = directory.chunks.front();
     const auto proof = rd::CompileVolumeTextureMetadataDescriptor(directory,
-        std::span(bytes).subspan(static_cast<std::size_t>(metadata.offset), static_cast<std::size_t>(metadata.byte_count)),
+        std::span(bytes).subspan(static_cast<std::size_t>(metadata_chunk.offset), static_cast<std::size_t>(metadata_chunk.byte_count)),
         11, bytes.size());
     Require(proof.depth == compiled.depth && proof.subresources.size() == compiled.subresources.size() &&
         proof.subresources.front().offset == compiled.subresources.front().offset,

@@ -3714,7 +3714,8 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             }
             if (source_enemy < kEnemyArchetypeCount)
             {
-                if (telemetry->balance_observer.RecordEnemyHit(
+                if (Metrics().detailed_balance_captured &&
+                    telemetry->balance_observer.RecordEnemyHit(
                         source_enemy, event.cast_id & 0x00FFFFFFFFFFFFFFull))
                 {
                     ++Metrics().enemy_hits[source_enemy];
@@ -3748,7 +3749,7 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             if (enemy->life.boss)
                 Metrics().skill_boss_damage[skill_index] += applied_damage;
             ++Metrics().skill_hit_events[skill_index];
-            if (event.cast_id != 0)
+            if (Metrics().detailed_balance_captured && event.cast_id != 0)
             {
                 if (BalanceObserver::RecordHit(
                         telemetry->balance_observer.player_hit_casts, event.cast_id))

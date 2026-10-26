@@ -2,10 +2,14 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <charconv>
 #include <cstdint>
+#include <memory>
+#include <new>
 #include <ostream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace hs::runtime_detail
 {
@@ -50,6 +54,39 @@ inline std::string CsvField(std::string_view value)
     }
     field += '"';
     return field;
+}
+
+template <typename T>
+inline void AppendCsvValue(std::string &row, T value)
+{
+    static_assert(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>);
+    char buffer[64];
+    const auto converted = [&] {
+        if constexpr (std::is_floating_point_v<T>)
+            return std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general);
+        else
+            return std::to_chars(buffer, buffer + sizeof(buffer), value);
+    }();
+    if (!row.empty()) row += ',';
+    row.append(buffer, converted.ptr);
+}
+
+template <typename... Values>
+inline void AppendCsvValues(std::string &row, const Values &...values)
+{
+    (AppendCsvValue(row, values), ...);
+}
+
+inline void AppendCsvText(std::string &row, std::string_view value)
+{
+    if (!row.empty()) row += ',';
+    row += '"';
+    for (const auto ch : value)
+    {
+        if (ch == '"') row += '"';
+        row += ch;
+    }
+    row += '"';
 }
 
 // Runtime captures one main view; slot reuse and capture can observe completions out of order.
@@ -112,7 +149,12 @@ class DiagnosticLog
                   DiagnosticClock clock = nullptr)
         : sink_(sink), enabled_(enabled), clock_(clock)
     {
-        if (enabled_) Write(header);
+        if (enabled_)
+        {
+            chunk_.reset(new (std::nothrow) Chunk{});
+            failed_ = !chunk_;
+            if (!failed_) Write(header);
+        }
     }
     void Append(std::string_view line)
     {
@@ -150,7 +192,7 @@ class DiagnosticLog
         if (used_ && !failed_)
         {
             DiagnosticScope scope(io_, clock_);
-            try { sink_.write(chunk_.data(), static_cast<std::streamsize>(used_)); failed_ |= !sink_; }
+            try { sink_.write(chunk_->data(), static_cast<std::streamsize>(used_)); failed_ |= !sink_; }
             catch (...) { failed_ = true; }
             if (!failed_) bytes_ += used_;
         }
@@ -160,17 +202,18 @@ class DiagnosticLog
     {
         while (!text.empty() && !failed_)
         {
-            const auto count = std::min(text.size(), chunk_.size() - used_);
-            text.copy(chunk_.data() + used_, count);
+            const auto count = std::min(text.size(), chunk_->size() - used_);
+            text.copy(chunk_->data() + used_, count);
             used_ += count; text.remove_prefix(count);
-            if (used_ == chunk_.size()) FlushChunk();
+            if (used_ == chunk_->size()) FlushChunk();
         }
     }
     std::ostream &sink_;
     bool enabled_{}, failed_{}, finished_{};
     DiagnosticClock clock_{};
     DiagnosticSample io_{};
-    std::array<char, 64 * 1024> chunk_{};
+    using Chunk = std::array<char, 64 * 1024>;
+    std::unique_ptr<Chunk> chunk_;
     std::size_t used_{};
     std::uint64_t records_{}, dropped_{}, bytes_{};
 };

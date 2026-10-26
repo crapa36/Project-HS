@@ -94,7 +94,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         RenderInstance instance{
             position, yaw, scale, color, mesh, stable_id, 0,
             static_cast<std::uint32_t>(seed ^ (seed >> 32)), variant};
-        PopulateRenderInstanceRevisions(instance);
+        PopulateRenderInstanceIdentity(instance);
         Require(layout.instances.size() < 3'000'000, "layout allocation cap");
         if (object_id != 0)
             layout.eligible_static_members.push_back({stable_id, object_id,

@@ -164,6 +164,8 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
                                "Movement echo history age exceeds storage capacity.");
     impl_->config = config;
     impl_->telemetry->balance_observer.Reset(config.capture_detailed_balance);
+    if (config.capture_detailed_balance)
+        impl_->telemetry->balance_observer.player_hit_casts.reserve(256);
     impl_->timings = {};
     if (config.capture_timings)
         for (std::size_t sample = 0; sample < 64; ++sample)
@@ -192,18 +194,23 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
     auto tick_timing = impl_->Measure(SimulationTimingId::Tick);
     auto input_timing = impl_->Measure(SimulationTimingId::Input);
     impl_->current_input = input;
-    for (const auto &action : input.ui_actions) impl_->ApplyUiAction(action);
-    impl_->ProcessInput();
+    bool world_changed{};
+    for (const auto &action : input.ui_actions)
+        world_changed |= impl_->ApplyUiAction(action);
+    world_changed |= impl_->ProcessInput();
     input_timing.Finish();
     if (impl_->session_phase != SessionPhase::Playing)
     {
+        world_changed |= impl_->actors->player.buffered_skill != SkillKind::Count ||
+            impl_->actors->player.buffered_skill_expires != 0 ||
+            impl_->actors->player.buffered_skill_slot != 0xFF;
         impl_->actors->player.buffered_skill = SkillKind::Count;
         impl_->actors->player.buffered_skill_expires = 0;
         impl_->actors->player.buffered_skill_slot = 0xFF;
         impl_->UpdateChecksum();
         impl_->timings.tick = impl_->tick;
         impl_->timings.completed = impl_->config.capture_timings;
-        return {impl_->tick, impl_->checksum, impl_->session_phase};
+        return {impl_->tick, impl_->checksum, impl_->session_phase, world_changed};
     }
     (void)fixed_delta;
     NextSimulationSequence(impl_->tick);
@@ -212,7 +219,7 @@ TickResult GameSimulation::TickFixed(const InputFrame &input,
     impl_->RunPipeline();
     impl_->timings.tick = impl_->tick;
     impl_->timings.completed = impl_->config.capture_timings;
-    return {impl_->tick, impl_->checksum, impl_->session_phase};
+    return {impl_->tick, impl_->checksum, impl_->session_phase, true};
 }
 
 GameplayChecksum GameSimulation::ComputeChecksum() const
@@ -462,29 +469,34 @@ SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
 void GameSimulation::ApplyUiAction(const UiAction &action)
 {
     SimulationWorld::MutationScope mutation(*impl_);
-    impl_->ApplyUiAction(action);
+    (void)impl_->ApplyUiAction(action);
     impl_->UpdateChecksum();
 }
 
-void GameSimulation::SimulationWorld::ApplyUiAction(const UiAction &action)
+bool GameSimulation::SimulationWorld::ApplyUiAction(const UiAction &action)
 {
     switch (action.kind)
     {
     case UiActionKind::StartSession:
-        if (session_phase == SessionPhase::MainMenu) StartSession();
-        break;
+        if (session_phase == SessionPhase::MainMenu) { StartSession(); return true; }
+        return false;
     case UiActionKind::ReturnToMainMenu:
+        if (session_phase == SessionPhase::MainMenu) return false;
         session_phase = SessionPhase::MainMenu;
-        break;
-    case UiActionKind::Quit: session_phase = SessionPhase::QuitRequested; break;
+        return true;
+    case UiActionKind::Quit:
+        if (session_phase == SessionPhase::QuitRequested) return false;
+        session_phase = SessionPhase::QuitRequested;
+        return true;
     case UiActionKind::Reroll:
         if (selection_input_guard_frames > 0 ||
-            selection_waiting_for_release) break;
+            selection_waiting_for_release) return false;
         if (session_phase == SessionPhase::RelicSelection && actors->player.relic_rerolls > 0)
         {
             --actors->player.relic_rerolls;
             ++progression->relic_reroll_sequence;
             GenerateRelicCards(true);
+            return true;
         }
         else if (session_phase == SessionPhase::CardSelection &&
                  actors->player.level_rerolls > 0)
@@ -492,28 +504,33 @@ void GameSimulation::SimulationWorld::ApplyUiAction(const UiAction &action)
             --actors->player.level_rerolls;
             ++progression->level_reroll_sequence;
             GenerateLevelCards(true);
+            return true;
         }
-        break;
+        return false;
     case UiActionKind::SelectCard:
-        if (selection_input_guard_frames == 0 &&
-            !selection_waiting_for_release) (void)SelectCard(action.value);
-        break;
+        return selection_input_guard_frames == 0 && !selection_waiting_for_release &&
+            SelectCard(action.value);
     case UiActionKind::AssignStat:
         if (selection_input_guard_frames == 0 &&
             !selection_waiting_for_release && action.value < kStatCount)
-            AssignStat(static_cast<StatKind>(action.value));
-        break;
+            return AssignStat(static_cast<StatKind>(action.value));
+        return false;
     case UiActionKind::Resume:
-        if (session_phase == SessionPhase::Paused)
-            session_phase = SessionPhase::Playing;
-        break;
+        if (session_phase != SessionPhase::Paused) return false;
+        session_phase = SessionPhase::Playing;
+        return true;
     case UiActionKind::SwapLoadoutSlots:
         if (action.value < actors->player.loadout.size() &&
-            action.secondary < actors->player.loadout.size())
+            action.secondary < actors->player.loadout.size() &&
+            actors->player.loadout[action.value] != actors->player.loadout[action.secondary])
+        {
             std::swap(actors->player.loadout[action.value],
                       actors->player.loadout[action.secondary]);
-        break;
+            return true;
+        }
+        return false;
     }
+    return false;
 }
 
 void GameSimulation::SimulationWorld::InitializeContentReadFacts()
@@ -746,34 +763,6 @@ TickReadView GameSimulation::SimulationWorld::MakeTickReadView() const
         {m.direct_damage, m.derived_damage, m.damage_over_time, m.upgrade_damage, m.relic_damage, m.relic_triggers, m.relic_kills, m.relic_effects},
         session_id, links, bombs, warnings, deliveries,
         std::span(combat_state->boss_death_visuals).first(combat_state->boss_death_visual_count), combat_state->domain_signals};
-}
-
-void GameSimulation::CopyReadModelForDevelopment(GameReadModelStorage &model) const
-{
-    auto scope = BorrowTickReadView();
-    const auto &view = scope.View();
-    model.Clear(); model.tick = view.tick; model.checksum = view.checksum; model.seed = view.seed;
-    model.session = view.session; model.session_id = view.session_id; model.player = view.player;
-    model.effective_attack = view.effective_attack; model.effective_attack_speed = view.effective_attack_speed;
-    model.effective_move_speed = view.effective_move_speed; model.effective_magnet_radius = view.effective_magnet_radius;
-    model.arena_half_extent = view.arena_half_extent; model.arena_boundary = view.arena_boundary;
-    model.arena_obstacle_count = static_cast<std::uint32_t>(view.arena_obstacles.size());
-    std::ranges::copy(view.arena_obstacles, model.arena_obstacles.begin());
-    model.charge_range = view.charge_range; model.charge_radius = view.charge_radius;
-    model.charge_normal_ready_tick = view.charge_normal_ready_tick; model.charge_ratio = view.charge_ratio;
-    std::ranges::copy(view.skills, model.skills.begin()); std::ranges::copy(view.waves, model.waves.begin());
-    model.summary = {view.summary.direct_damage, view.summary.derived_damage, view.summary.damage_over_time,
-        view.summary.upgrade_damage, view.summary.relic_damage, view.summary.relic_triggers, view.summary.relic_kills, view.summary.relic_effects};
-    for (const auto &e : view.enemies) model.AddEnemy(e);
-    for (const auto &p : view.projectiles) model.AddProjectile({p.id, p.player_owned, p.position, p.velocity, p.spawned_tick, p.skill, p.dead, p.radius, p.charge_ratio, p.origin, p.source_upgrade, p.previous_position, p.remaining_range, p.cast_id, p.source_relic, p.source_enemy, p.returning, p.homing, p.return_started_tick, p.return_start_position, p.upgrade_mask, {p.bleed_extend_ticks.begin(), p.bleed_extend_ticks.end()}});
-    for (const auto &a : view.areas) model.AddArea(a);
-    for (const auto &p : view.pickups) model.AddPickup(p);
-    for (const auto &a : view.boss_actions) model.AddBossAction(a);
-    for (const auto &v : view.visual_links) model.AddVisualLink(v);
-    for (const auto &v : view.mini_bombs) model.AddMiniBomb(v);
-    for (const auto &v : view.spawn_warnings) model.AddSpawnWarning(v);
-    for (const auto &v : view.scheduled_area_deliveries) model.AddScheduledAreaDelivery(v);
-    for (const auto &v : view.boss_death_visuals) model.AddBossDeathVisual(v);
 }
 
 std::span<const DomainSignal> GameSimulation::PendingDomainSignals() const noexcept

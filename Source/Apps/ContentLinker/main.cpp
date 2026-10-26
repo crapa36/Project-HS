@@ -326,15 +326,13 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     ap::ActionSpec spec;
     spec.action_id = "shipping-image";
     spec.recipe_id = "shipping-image-v1";
-    spec.recipe_version = 15;
+    spec.recipe_version = 16;
     spec.upstream = {presentation_dependency, simulation_dependency, identity_dependency};
     BindCharacters(build_root, characters, binding_results, spec);
     const ap::ActionResultSnapshot audio(build_root, "audio");
     ap::UpstreamProduct audio_cpp_dependency, audio_pcm_dependency;
     source += audio.ReadProductBytes("audio/release-cpp", audio_cpp_dependency);
-    auto pcm = audio.ReadProductBytes("audio/release-pcm", audio_pcm_dependency);
     spec.upstream.push_back(std::move(audio_cpp_dependency));
-    spec.upstream.push_back(std::move(audio_pcm_dependency));
     const ap::ActionResultSnapshot particles(build_root, "vfx/particle-definitions");
     const ap::ActionResultSnapshot program(build_root, "vfx/vfx-runtime");
     ap::UpstreamProduct particles_dependency, program_dependency;
@@ -348,10 +346,9 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     spec.upstream.push_back(std::move(particles_dependency));
     spec.upstream.push_back(std::move(program_dependency));
     ap::RequireRegularFile(font_path);
-    const auto font = ap::ReadBytes(font_path);
-    Require(!font.empty() && font.size() <= UINT32_MAX, "font extent exceeds DirectWrite input range");
-    const auto font_digest = ap::Sha256Bytes(Bytes(font));
-    Require(font_digest == "sha256:194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252", "font differs from pinned Noto Sans KR input");
+    const auto font_bytes = fs::file_size(font_path);
+    Require(font_bytes != 0 && font_bytes <= UINT32_MAX, "font extent exceeds DirectWrite input range");
+    const std::string font_digest = "sha256:194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252";
     spec.inputs.push_back({"font/noto-sans-kr",font_path,font_digest});
     Require(renderer_result_list.is_absolute(), "renderer result list must be absolute");
     const auto list_bytes = ap::ReadBytes(renderer_result_list);
@@ -432,8 +429,14 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     std::ofstream output(temporary,std::ios::binary);
     Require(output.is_open(),"cannot create staged shipping pack");
     const auto write=[&](std::string_view bytes){output.write(bytes.data(),static_cast<std::streamsize>(bytes.size()));Require(bool(output),"cannot write shipping pack");};
-    write(std::string(64,'\0'));write(pcm);write(font);
-    std::uint64_t extent=64ull+pcm.size()+font.size();
+    std::vector<char> copy_scratch(1024 * 1024);
+    write(std::string(64,'\0'));
+    audio.CopyProductBytesTo("audio/release-pcm",output,audio_pcm_dependency,copy_scratch);
+    const auto pcm_bytes=audio_pcm_dependency.size;
+    Require(pcm_bytes<=UINT64_MAX-64ull-font_bytes,"shipping prefix extent overflow");
+    spec.upstream.push_back(std::move(audio_pcm_dependency));
+    ap::CopyFileBytesTo(font_path,output,font_bytes,font_digest,copy_scratch);
+    std::uint64_t extent=64ull+pcm_bytes+font_bytes;
     std::string bulk_source="\n#include <hs/render_data/render_bulk.hpp>\nnamespace hs::shipping { namespace {\nconstinit const render_data::RendererBulkDescriptor kRendererBulks[]{\n";
     std::vector<hs::render_data::TextureDescriptorStorage> textures;
     std::vector<rd::GeometryDescriptorStorage> geometries;
@@ -474,7 +477,7 @@ void Link(const fs::path &build_root, const fs::path &font_path,
             dependency=std::move(retained->second.dependency);
             write(retained->second.bytes);
         }
-        else bulk.snapshot->CopyProductBytesTo(bulk.id,output,dependency);
+        else bulk.snapshot->CopyProductBytesTo(bulk.id,output,dependency,copy_scratch);
         ++bulk_index;
         Require(dependency.size<=UINT64_MAX-aligned,"renderer bulk extent overflow");
         extent=aligned+dependency.size;
@@ -529,7 +532,15 @@ void Link(const fs::path &build_root, const fs::path &font_path,
         bulk_source+="{"+std::to_string(id.value)+"ull},\n";
     bulk_source+="}};\nconstinit const std::array<render_data::TextureSubresourceLayout,"+std::to_string(layout_count)+"> kTextureLayouts{{\n";
     for(const auto &texture:textures)for(const auto &layout:texture.subresources)
-        bulk_source+="{"+std::to_string(layout.offset)+"ull,"+std::to_string(layout.row_pitch)+"u,"+std::to_string(layout.slice_pitch)+"u,"+std::to_string(layout.byte_count)+"ull},\n";
+    {
+        bulk_source+="{"+std::to_string(layout.offset)+"ull,"+std::to_string(layout.row_pitch)+"u,"+
+            std::to_string(layout.slice_pitch)+"u,"+std::to_string(layout.byte_count)+"u,{";
+        for(std::size_t i=0;i<layout.digest.size();++i)
+        { if(i) bulk_source+=","; bulk_source+="std::byte{"+std::to_string(std::to_integer<unsigned>(layout.digest[i]))+"}"; }
+        bulk_source+="},";
+        bulk_source+=layout.has_digest?"true":"false";
+        bulk_source+="},\n";
+    }
     bulk_source+="}};\nconstinit const std::array<render_data::TextureDescriptor,"+std::to_string(textures.size())+"> kTextures{{\n";
     std::size_t dependency_first{},layout_first{};
     for(const auto &texture:textures)
@@ -629,11 +640,12 @@ void Link(const fs::path &build_root, const fs::path &font_path,
     Require(action_key.starts_with("sha256:") && action_key.size() == 71,
             "invalid shipping action key");
     const auto build_id = action_key.substr(7);
-    const auto font_offset = 64 + pcm.size();
+    const auto font_offset = 64 + pcm_bytes;
     const auto header = Header(build_id, extent);
     output.seekp(0);write(header);output.flush();Require(bool(output),"cannot flush shipping pack");
     output.close();Require(bool(output),"cannot close shipping pack");
-    source += ImageSource(header, content_hash, font_offset, font.size(), font_digest);
+    Require(fs::file_size(temporary)==extent,"staged shipping pack extent differs from its catalog");
+    source += ImageSource(header, content_hash, font_offset, font_bytes, font_digest);
     source += bulk_source;
     const auto shipping = build_root / "Shipping";
     ap::MakeDirectory(shipping);

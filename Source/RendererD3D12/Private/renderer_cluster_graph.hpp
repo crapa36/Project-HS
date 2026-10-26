@@ -49,8 +49,9 @@ struct ClusterGraphPageRecord
 // topology or the native range/capacity contract of a cluster pass.
 struct ClusterFrameRecordData
 {
-    static_assert(kClusterRuntimeCatalogs <= 32);
-    std::uint32_t frame_slot{}, active_mask{}, runtime_generation{};
+    static_assert(kClusterRuntimeCatalogs <= 64);
+    std::uint32_t frame_slot{}, runtime_generation{};
+    std::uint64_t active_mask{};
     std::array<std::uint32_t,kClusterRuntimeCatalogs> previous_slots{},
         output_capacities{}, frontend_flags{};
     std::vector<ClusterGraphPageRecord> pages;

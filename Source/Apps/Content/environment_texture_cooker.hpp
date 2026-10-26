@@ -14,9 +14,8 @@ struct EnvironmentTextureRoleRequest
 };
 
 void ValidateEnvironmentTextures(const std::filesystem::path& source);
-void CookEnvironmentTextures(const std::filesystem::path& source, const std::filesystem::path& output);
 void CookEnvironmentTextures(const std::filesystem::path& source, const std::filesystem::path& output,
-                             ID3D11Device* device, bool use_cache);
+                             ID3D11Device* device);
 std::vector<std::filesystem::path> EnvironmentTextureInputs(const std::filesystem::path& source);
 std::vector<std::string> EnvironmentTextureProducts(const std::filesystem::path& source);
 std::vector<std::filesystem::path> EnvironmentTextureRoleInputs(

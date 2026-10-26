@@ -419,7 +419,8 @@ void AppendPersistentTrapMotes(const VfxProgramView &program,
          phase != PersistentVfxKind::TrapPending && phase != PersistentVfxKind::TrapArmed))
         return;
 
-    const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
+    const double elapsed_ticks = owner.elapsed_ticks >= 0.0 && std::isfinite(owner.elapsed_ticks)
+        ? owner.elapsed_ticks : static_cast<double>(owner.elapsed_seconds) * 60.0;
     if (!std::isfinite(elapsed_ticks) ||
         elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2))
         return;
@@ -863,7 +864,8 @@ std::vector<VfxFlashSpawnInput> BuildVfxPersistentMoteCommandsImpl(
             (owner.normalized_age >= 1.0f || entity->lifetime01 >= 1.0f))
             continue;
 
-        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
+        const double elapsed_ticks = owner.elapsed_ticks >= 0.0 && std::isfinite(owner.elapsed_ticks)
+            ? owner.elapsed_ticks : static_cast<double>(owner.elapsed_seconds) * 60.0;
         if (!std::isfinite(elapsed_ticks) ||
             elapsed_ticks > static_cast<double>(std::numeric_limits<std::int64_t>::max() / 2)) continue;
         const double current_ticks = elapsed_ticks;
@@ -1113,7 +1115,9 @@ std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(
         const float speed = std::sqrt(projectile->velocity.x*projectile->velocity.x +
             projectile->velocity.y*projectile->velocity.y +
             projectile->velocity.z*projectile->velocity.z);
-        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0 +
+        const double owner_elapsed_ticks = owner.elapsed_ticks >= 0.0 && std::isfinite(owner.elapsed_ticks)
+            ? owner.elapsed_ticks : static_cast<double>(owner.elapsed_seconds) * 60.0;
+        const double elapsed_ticks = owner_elapsed_ticks +
             (current_tick != 0 ? 1.0 - interpolation : 0.0);
         if (!Finite(position) || !std::isfinite(speed) || speed <= .0001f ||
             !std::isfinite(elapsed_ticks) ||

@@ -123,6 +123,10 @@ struct VfxPersistentInput
     float source_duration_seconds{};
     std::uint32_t state_flags{}, stable_seed{};
     VfxQuality quality{VfxQuality::High};
+    // Precise elapsed display age for tick-boundary work. This stays in tick
+    // units so consumers do not reconstruct it from rounded elapsed_seconds.
+    // Negative means the producer only supplied the compatibility seconds field.
+    double elapsed_ticks{-1.0};
 };
 struct VfxGroundSpawnInput
 {

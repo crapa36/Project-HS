@@ -1124,10 +1124,10 @@ bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
     if (input.Mesh == 9 || input.Mesh == 20 ||
         ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
     {
-        const HsMaterialContext material_context =
-            EnvironmentMaterialContext(input, front, gradients, materialWord);
         if (!defer_environment_opacity && !environment_opaque && (input.Mesh == 17 || input.Mesh == 19))
         {
+            const HsMaterialContext material_context =
+                EnvironmentMaterialContext(input, front, gradients, materialWord);
             if (HsMaterialEvaluateOpacity(material_context) < HsMaterialOpacityCutoff)
                 return false;
         }
@@ -1159,8 +1159,6 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
                                      uint materialWord,
                                      bool cover_environment_surface = false)
 {
-    const HsMaterialContext material_context =
-        EnvironmentMaterialContext(input, front, gradients, materialWord);
     GBufferOutput output;
     output.BaseColor = input.Color;
     output.Material = float4(0.3, 0.0, 1.0, 0.0);
@@ -1240,6 +1238,8 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
     }
     else if (input.Mesh == 9 || input.Mesh == 20 || ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
     {
+        const HsMaterialContext material_context =
+            EnvironmentMaterialContext(input, front, gradients, materialWord);
         EnvMaterial m = (EnvMaterial)0;
 #ifdef HS_GENERATED_ENVIRONMENT_MATERIAL
         HsSurfaceClosure surface;

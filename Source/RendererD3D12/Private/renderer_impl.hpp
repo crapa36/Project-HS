@@ -86,6 +86,7 @@
 #include <wrl/client.h>
 
 #include <DirectXMath.h>
+#include <chrono>
 
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <imgui.h>
@@ -705,7 +706,7 @@ struct FrameUploadGraphLayout
 {
     std::uint32_t pass_index{};
     ResourceVersion dynamic_lod{}, static_lod{}, geometry_records{}, dynamic_instances{};
-    ResourceVersion static_instances{}, environment_stream{};
+    ResourceVersion static_instances{}, static_refs{}, environment_stream{};
     std::vector<ResourceVersion> geometry_streams;
 };
 
@@ -789,9 +790,9 @@ struct FrameGraphLayout
     {
         std::uint32_t frame_slot{}, render_width{}, render_height{}, output_width{}, output_height{};
         std::uint32_t material_sidecar_planes{};
-        bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{};
+        bool presented{}, visibility{}, enhanced{}, skinned{}, previous_skin{}, static_scene_present{};
         bool exposure_initialization{}, ui_upload{}, temporal_initialization{}, offscreen_initialization{};
-        bool static_scene_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
+        bool static_scene_upload{}, static_refs_upload{}, dynamic_scene_upload{}, environment_upload{}, geometry_upload{};
         bool geometry_draw_upload{}, hero_contributors{}, hero_occupancy{}, hero_capture{};
         bool composite_gradient_read{};
         bool dynamic_lod_initialized{}, static_lod_initialized{}, dynamic_lod_prefix{}, static_lod_prefix{};
@@ -818,6 +819,8 @@ struct FrameGraphLayout
     std::vector<ResourceShape> direct_import_shapes;
     std::vector<ImportSlot> imports;
     std::vector<PassSlot> passes;
+    bool output_closure_cached{};
+    std::vector<std::uint32_t> output_closure_slots;
     TextureStreamingLayout texture_streaming;
     TextureFeedbackLayout texture_feedback;
     TextureHandle distortion{}, bloom_half{}, bloom_quarter{}, bloom_combined{}, back_buffer{};
@@ -867,8 +870,48 @@ struct FrameGraphLayout
     BrixelizerGraphLayout brixelizer;
 };
 
+// CPU/device discovery for one output extent. No SDK or device object is
+// retained; the option catalog is rebuilt from these values when policy changes.
+struct NativeGraphicsCapabilitySnapshot
+{
+    struct Admission
+    {
+        bool available{};
+        GraphicsCapabilityReason reason{GraphicsCapabilityReason::Unavailable};
+    };
+
+    bool valid{};
+    ViewExtent output{};
+    std::array<Admission, 7> dlss_quality{}, fsr_quality{}, xess_quality{}, dsr_quality{};
+    Admission dlss_sr{}, fsr_sr{}, xess_sr{}, directsr{};
+    Admission fsr_fg{}, dlss_fg{}, reflex{}, xell_fg{}, xell_standalone{}, intel_fg{}, software_gi{};
+    std::uint32_t dlss_fg_maximum_multiplier{};
+    std::uint32_t dlss_fg_minimum_dimension{};
+    std::uint32_t xess_fg_maximum_generated_frames{};
+    bool dlss_fg_vsync_supported{};
+    bool dlss_fg_dynamic_supported{};
+};
+
 struct D3D12Renderer::Impl
 {
+    struct NativeBudgetObservation
+    {
+        DXGI_QUERY_VIDEO_MEMORY_INFO last_valid{};
+        std::chrono::steady_clock::time_point observed_at{};
+        std::chrono::steady_clock::time_point attempted_at{};
+        std::uint64_t success_sequence{};
+        HRESULT last_result{E_PENDING};
+        bool valid{}, supported{true};
+    };
+    struct HostBudgetObservation
+    {
+        MEMORYSTATUSEX last_valid{};
+        std::chrono::steady_clock::time_point observed_at{};
+        std::chrono::steady_clock::time_point attempted_at{};
+        std::uint64_t success_sequence{};
+        DWORD last_error{};
+        bool valid{}, last_attempt_succeeded{};
+    };
     RendererStartupTimings startup_timings;
     struct ShadowCasterKeyHash
     {
@@ -1071,8 +1114,13 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ResetOwnedViewsAfterCompletion();
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
     [[nodiscard]] Result ValidateFrameInput(const RenderFrameInput &);
-    [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &) const;
+    [[nodiscard]] Result ValidateFramePayload(const RenderFrameInput &);
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
+    [[nodiscard]] Result RefreshBudgetObservations();
+    [[nodiscard]] ResidencySegment ResidencySegmentForHeap(D3D12_HEAP_TYPE type) const noexcept;
+    void SampleAllocatorBudgetStats(bool local_absorbed, bool nonlocal_absorbed) noexcept;
+    [[nodiscard]] ResidencyTicket RegisterNativeAllocation(ResidencyCategory category,
+        std::uint64_t bytes, bool pinned, ResidencySegment segment = ResidencySegment::Local);
     struct StaticDrawData
     {
         // The leaf prefix is immutable until foliage density changes; HLOD owns only the tail.
@@ -1089,8 +1137,18 @@ struct D3D12Renderer::Impl
     };
     struct StaticGpuScene
     {
+        struct RefTable
+        {
+            std::shared_ptr<const std::vector<GpuStaticDrawRef>> cpu;
+            AllocationResource storage, upload;
+            CompletionSet last_completion{}, upload_completion{};
+            bool submitted{};
+        };
         std::shared_ptr<const StaticRenderScene> source;
         StaticDrawData draws;
+        std::shared_ptr<RefTable> refs;
+        std::vector<std::shared_ptr<RefTable>> retired_refs;
+        bool refs_dirty{};
         AllocationResource instances;
         AllocationResource upload;
         GpuSceneTableLayout layout{};
@@ -1099,6 +1157,7 @@ struct D3D12Renderer::Impl
         CompletionSet upload_completion{};
         bool submitted{};
         std::uint32_t instance_generation{};
+        bool has_authored_material{}, has_masked_material{};
     };
     struct RetiredDynamicInstanceBuffer
     {
@@ -1320,7 +1379,8 @@ struct D3D12Renderer::Impl
                                                     std::vector<AllocationResource> &);
     void CollectResidentUtilityUploads() noexcept;
     [[nodiscard]] bool HasUnresolvedResidentUtilityUploads() const noexcept;
-    [[nodiscard]] Result AdmitResidentAllocation(const D3D12_RESOURCE_DESC &, D3D12_HEAP_TYPE);
+    [[nodiscard]] Result AdmitResidentAllocation(const D3D12_RESOURCE_DESC &,
+        const D3D12MA::ALLOCATION_DESC &);
     void RecordResidentAllocation(const AllocationResource &, D3D12_HEAP_TYPE) noexcept;
     [[nodiscard]] Result PrepareResidentServices(Impl &candidate);
     void SwapResidentServices(Impl &candidate) noexcept;
@@ -1378,7 +1438,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] HlodViewRuntime *ActiveHlodView() noexcept;
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
     [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::span<const RenderInstance> &);
-    [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &);
+    [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &, bool &);
     [[nodiscard]] Result PrepareHlodFrameRecordData(std::uint32_t frame_slot,
         std::uint32_t active_view_mask, ResourceVersion geometry_records,
         ResourceVersion static_scene, ResourceVersion proxy_refs,
@@ -1456,7 +1516,8 @@ struct D3D12Renderer::Impl
         std::uint32_t target_width, std::uint32_t target_height);
     [[nodiscard]] Result WriteVisibilityDescriptors(std::uint32_t frame_slot,
         ID3D12Resource *static_scene, ID3D12Resource *dynamic_scene,
-        std::uint64_t static_ref_offset, std::uint32_t static_ref_count,
+        ID3D12Resource *static_refs, std::uint64_t static_ref_offset,
+        std::uint32_t static_ref_count,
         std::uint64_t dynamic_ref_offset, std::uint32_t dynamic_ref_count);
     [[nodiscard]] Result PrepareGeometryPageUpload(
         GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
@@ -1494,6 +1555,9 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result UpdateResidencyBudget();
     [[nodiscard]] Result TryRelieveStreamingPressure(std::uint64_t bytes,
         std::uint32_t priority, bool need_cluster_slot = false,
+        bool for_hlod_admission = false);
+    [[nodiscard]] Result TryRelieveStreamingPressure(std::uint64_t local_bytes,
+        std::uint64_t nonlocal_bytes, std::uint32_t priority, bool need_cluster_slot = false,
         bool for_hlod_admission = false);
     [[nodiscard]] Result PrepareEnvironmentStreaming();
     [[nodiscard]] Result PrepareHardwareTextureStreaming(const RendererAssetIo *live_transport = nullptr);
@@ -1574,6 +1638,10 @@ struct D3D12Renderer::Impl
     std::array<FrameContext, kFrameCount> frames;
     std::array<VisibilityFrameBuffers, kFrameCount> visibility_frames;
     ResidencyManager residency;
+    NativeBudgetObservation local_budget_observation, nonlocal_budget_observation;
+    HostBudgetObservation host_budget_observation;
+    bool adapter_unified_memory{};
+    bool adapter_architecture_observed{};
     StreamingManager streaming;
     RendererAssetIo asset_io;
     RendererTextureStreaming texture_streaming;
@@ -1766,9 +1834,7 @@ struct D3D12Renderer::Impl
     HeroTransparencySystem hero_transparency;
     ReconstructionPlan reconstruction_plan;
     std::unique_ptr<StreamlineSession> streamline_session;
-    // Discovery copies CPU/device query results; it never owns evaluation history.
-    GraphicsCapabilitiesView graphics_capabilities;
-    std::string graphics_capabilities_key;
+    NativeGraphicsCapabilitySnapshot native_graphics_capabilities;
     std::unique_ptr<FsrSession> fsr_session;
     std::unique_ptr<ReconstructionProvider> reconstruction_provider;
     SdkCamera sdk_camera;
@@ -1993,6 +2059,7 @@ struct D3D12Renderer::Impl
     bool frame_submission_faulted{};
     std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
     std::uint64_t validation_errors{};
+    RendererValidationStatus validation_status{};
     std::uint32_t last_particle_count{};
     bool enhanced{};
     bool mesh_shader_supported{};

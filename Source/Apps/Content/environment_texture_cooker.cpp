@@ -1,11 +1,9 @@
 #include "environment_texture_cooker.hpp"
-#include "environment_histogram_cooker.hpp"
 #include "../AssetPipeline/action.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <d3d11.h>
-#include <wrl/client.h>
 #include <DirectXTex.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -98,54 +96,10 @@ std::filesystem::path TexturePath(const std::filesystem::path& root, const Json&
     for (const auto& part : relative) if (part == "..") throw std::runtime_error("Environment source path escapes pack");
     return root / relative;
 }
-std::string HashBytes(const std::string& bytes)
-{
-    uint64_t hash=14695981039346656037ull;
-    for (unsigned char byte:bytes) { hash^=byte; hash*=1099511628211ull; }
-    return std::to_string(hash);
-}
-std::string HashFile(const std::filesystem::path& path)
-{
-    std::ifstream input(path,std::ios::binary);
-    if (!input) throw std::runtime_error("Cannot hash "+path.string());
-    uint64_t hash=14695981039346656037ull;
-    std::array<char,65536> bytes{};
-    while (input) {
-        input.read(bytes.data(),bytes.size());
-        for (std::streamsize i=0;i<input.gcount();++i) { hash^=static_cast<unsigned char>(bytes[static_cast<size_t>(i)]); hash*=1099511628211ull; }
-    }
-    if (!input.eof()) throw std::runtime_error("Failed hashing "+path.string());
-    return std::to_string(hash);
-}
 std::filesystem::path OutputPath(const std::filesystem::path& output,const Group& group,const std::string& role)
 {
     const std::string suffix=role=="base_color"?"basecolor":role=="surface_ra"?"surface":role=="detail_normal"?"detail":role;
     return output/("environment_"+group.name+"_"+suffix+".dds");
-}
-std::string InputHash(const std::filesystem::path& root,const Json& manifest,const Group& group,const std::string& role,bool gpu)
-{
-    // Bump the recipe for any mip/filter/encoder change. No build timestamps: unrelated
-    // mesh or shader builds must retain identical texture cache identities.
-    Json identity{{"recipe","environment-v9-mips-1-bc7-d3d11-1"},{"manifest",manifest},
-        {"group",group.name},{"role",role},{"encoder",role=="base_color"&&gpu?"gpu":"cpu"}};
-    std::set<std::filesystem::path> files;
-    for (const auto& page:group.pages) {
-        files.insert(TexturePath(root,page,role));
-        if (role=="surface_ra"||role=="roughness") files.insert(TexturePath(root,page,"normal"));
-        if (group.foliage) files.insert(TexturePath(root,page,"base_color"));
-    }
-    for (const auto& file:files) identity["sources"][file.lexically_relative(root).generic_string()]=HashFile(file);
-    return HashBytes(identity.dump());
-}
-bool CacheHit(const std::filesystem::path& path,const std::string& inputHash)
-{
-    if (!std::filesystem::is_regular_file(path)) return false;
-    std::ifstream stream(path.string()+".cache.json");
-    if (!stream) return false;
-    const auto cache=Json::parse(stream,nullptr,false);
-    return cache.is_object()&&cache.contains("input")&&cache["input"].is_string()&&
-        cache.contains("output")&&cache["output"].is_string()&&
-        cache["input"]==inputHash&&cache["output"]==HashFile(path);
 }
 void ValidatePngRole(const std::filesystem::path& path, const std::string& role)
 {
@@ -414,41 +368,16 @@ void CookEnvironmentTextureRoles(const std::filesystem::path& source,
     }
 }
 void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output,
-                             ID3D11Device* device, bool use_cache)
+                             ID3D11Device* device)
 {
     const auto manifest=Read(source);
     const auto groups=Groups(manifest);
     DecodedImageCache decoded;
     std::filesystem::create_directories(output);
     for(const auto& group:groups) for(const auto& role:Roles(group)) {
-        const auto path=OutputPath(output,group,role);
-        const auto inputHash=use_cache?InputHash(source,manifest,group,role,device!=nullptr):std::string{};
-        if (use_cache && CacheHit(path,inputHash)) {
-            std::cout<<"Environment "<<group.name<<" "<<role<<": cache hit"<<std::endl;
-            continue;
-        }
         std::cout<<"Environment "<<group.name<<" "<<role<<": cooking"<<std::endl;
         CookRole(source,output,group,role,device,decoded);
-        if (use_cache) {
-            std::ofstream cache(path.string()+".cache.json",std::ios::trunc);
-            cache<<Json{{"input",inputHash},{"output",HashFile(path)}}.dump()<<'\n';
-            cache.close();
-            if (!cache) throw std::runtime_error("Cannot save texture cache "+path.string());
-        }
         std::cout<<"Environment "<<group.name<<" "<<role<<": complete"<<std::endl;
     }
-}
-void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output)
-{
-    Microsoft::WRL::ComPtr<ID3D11Device> device;
-    const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_0};
-    const HRESULT result=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,0,
-        levels,1,D3D11_SDK_VERSION,device.GetAddressOf(),nullptr,nullptr);
-    if (FAILED(result))
-        std::cout<<"Environment BC7: D3D11 hardware unavailable (HRESULT "<<result<<"); using CPU compressor"<<std::endl;
-    else
-        std::cout<<"Environment BC7: D3D11 GPU compressor"<<std::endl;
-    CookEnvironmentHistogram(source,output,device.Get());
-    CookEnvironmentTextures(source,output,device.Get(),true);
 }
 }

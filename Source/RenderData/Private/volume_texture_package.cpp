@@ -1,5 +1,6 @@
 #include <hs/render_data/volume_texture_package.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
+#include <hs/core/cooked_format.hpp>
 
 #include <algorithm>
 #include <array>
@@ -136,6 +137,7 @@ VolumeTexturePackageView ReadVolumeTexturePackage(const PackageView &package)
 {
     Require(package.chunks.size() == 2 &&
                 package.chunks[0].type == ChunkType::TextureMetadata &&
+                package.chunks[0].version == kMetadataVersion &&
                 package.chunks[1].type == ChunkType::TextureSubresources &&
                 package.chunks[0].required && package.chunks[1].required,
             "expected required texture metadata and subresource chunks");
@@ -181,6 +183,7 @@ TextureDescriptorStorage CompileVolumeTextureMetadataDescriptor(const PackageDir
 {
     Require(directory.asset_id.value && directory.chunks.size() == 2 &&
         directory.chunks[0].type == ChunkType::TextureMetadata &&
+         directory.chunks[0].version == kMetadataVersion &&
         directory.chunks[1].type == ChunkType::TextureSubresources &&
         directory.chunks[0].required && directory.chunks[1].required &&
         metadata.size() == directory.chunks[0].byte_count && metadata.size() >= kMetadataHeader &&

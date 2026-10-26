@@ -676,12 +676,12 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         const auto staging_size =
             device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
         const auto maximum = std::numeric_limits<std::uint64_t>::max();
-        if (staging_size == maximum || resident_size > maximum - staging_size)
+        if (staging_size == maximum || resident_size == maximum)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Streamed geometry staging allocation size overflow.");
-        const auto gpu_peak = resident_size + staging_size;
-        ScopedGpuAdmission admission(residency, gpu_peak);
-        if (!admission) return TryRelieveStreamingPressure(gpu_peak, stream.priority);
+        SampleAllocatorBudgetStats(false, false);
+        ScopedGpuAdmission admission(residency, resident_size, staging_size);
+        if (!admission) return TryRelieveStreamingPressure(resident_size, staging_size, stream.priority);
 
         GeometryPageGpu candidate;
         candidate.fallback_page_slot = stream.fallback_index;
@@ -697,8 +697,9 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             stream.preparation.reset();
             return prepared;
         }
-        const auto upload_ticket = residency.Register(
-            ResidencyCategory::Staging, upload.allocation->GetSize(), false);
+        const auto upload_ticket = RegisterNativeAllocation(
+            ResidencyCategory::Staging, upload.allocation->GetSize(), false,
+            ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
         if (!upload_ticket)
         {
             static_cast<void>(residency.ReleaseNow(candidate.residency));

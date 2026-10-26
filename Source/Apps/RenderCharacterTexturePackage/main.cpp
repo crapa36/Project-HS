@@ -120,7 +120,7 @@ void Produce(std::string_view mode, const fs::path &build_root)
     ap::ActionSpec spec;
     spec.action_id = "render.texture.character." + std::string(mode);
     spec.recipe_id = "project-hs.render.texture.character.bc7-semantic-v1";
-    spec.recipe_version = 2;
+    spec.recipe_version = 3;
     spec.namespace_path = "render/texture/character/" + std::string(mode);
     const ap::ActionResultSnapshot source_result(build_root, "character/" + std::string(mode));
     std::vector<std::string> source_bytes;

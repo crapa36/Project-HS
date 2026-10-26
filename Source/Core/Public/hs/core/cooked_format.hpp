@@ -17,7 +17,6 @@ namespace hs
 
 inline constexpr std::uint16_t kCookedFormatVersion = 1;
 inline constexpr std::uint16_t kLittleEndianMarker = 0x4C45;
-inline constexpr std::uint32_t kCharacterAssetVersion = 6;
 inline constexpr std::uint32_t kMaxCharacterBones = 128;
 inline constexpr std::uint32_t kMaxCharacterMaterials = 8;
 
@@ -67,28 +66,6 @@ struct CharacterLocalTransform
 };
 
 static_assert(sizeof(CharacterLocalTransform) == 48);
-
-struct CharacterAssetHeader
-{
-    std::array<char, 8> magic{'H', 'S', 'C', 'H', 'A', 'R', '1', '\0'};
-    std::uint32_t version{kCharacterAssetVersion};
-    std::uint32_t vertex_count{};
-    std::uint32_t bone_count{};
-    std::uint32_t clip_count{};
-    std::uint32_t material_count{};
-    std::uint32_t vertices_offset{sizeof(CharacterAssetHeader)};
-    std::uint32_t clips_offset{};
-    std::uint32_t parents_offset{};
-    std::uint32_t inverse_bind_matrices_offset{};
-    std::uint32_t upper_body_weights_offset{};
-    std::uint32_t transforms_offset{};
-    std::uint32_t payload_size{};
-    std::uint32_t payload_crc32{};
-    std::array<float, 3> bounds_min{};
-    std::array<float, 3> bounds_max{};
-};
-
-static_assert(sizeof(CharacterAssetHeader) == 84);
 
 struct CookedHeader
 {

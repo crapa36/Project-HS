@@ -6,7 +6,6 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/scene_probe.hpp>
 
-#include <Windows.h>
 
 #include <algorithm>
 #include <fstream>
@@ -18,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace hs::render_test
+namespace hs::scene_probe_bake
 {
 namespace
 {
@@ -29,21 +28,8 @@ constexpr std::string_view kAction="render.lighting.scene-probes-baked";
 constexpr std::string_view kNamespace="render/lighting/scene-probes-baked";
 constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
 constexpr std::string_view kFilename="local_probes.spkg";
-constexpr DWORD kNativeBakeTimeoutMs=20u*60u*1000u;
 
 void Require(bool value,const std::string &message) { if(!value) throw std::runtime_error(message); }
-
-std::wstring Quote(const std::wstring &value)
-{
-    std::wstring result=L"\""; std::size_t slashes{};
-    for(const wchar_t ch:value)
-    {
-        if(ch==L'\\') { ++slashes; continue; }
-        if(ch==L'\"') { result.append(slashes*2+1,L'\\'); result+=ch; slashes=0; continue; }
-        result.append(slashes,L'\\'); slashes=0; result+=ch;
-    }
-    result.append(slashes*2,L'\\'); result+=L'\"'; return result;
-}
 
 bool Current(const fs::path &build,const ap::ActionSpec &spec,std::span<const std::string> dependencies)
 {
@@ -60,35 +46,6 @@ bool Current(const fs::path &build,const ap::ActionSpec &spec,std::span<const st
     catch(...) { return false; }
 }
 
-void RunNativeBake(const fs::path &generation,const fs::path &output,const fs::path &artifacts)
-{
-    std::wstring executable(32768,L'\0');
-    const auto count=GetModuleFileNameW(nullptr,executable.data(),static_cast<DWORD>(executable.size()));
-    Require(count>0&&count<executable.size(),"Cannot locate render-test-runner executable");
-    executable.resize(count);
-    const auto command=Quote(executable)+L" --scene-probe-bake-only "+
-        Quote(L"--generation="+generation.wstring())+L" "+Quote(L"--scene-probe-output="+output.wstring())+
-        L" "+Quote(L"--artifacts="+artifacts.wstring());
-    std::vector<wchar_t> mutable_command(command.begin(),command.end()); mutable_command.push_back(L'\0');
-    STARTUPINFOW startup{}; startup.cb=sizeof(startup); PROCESS_INFORMATION process{};
-    Require(CreateProcessW(executable.c_str(),mutable_command.data(),nullptr,nullptr,FALSE,CREATE_NO_WINDOW,
-        nullptr,nullptr,&startup,&process)!=FALSE,"Cannot launch bounded native scene probe render");
-    CloseHandle(process.hThread);
-    auto wait=WaitForSingleObject(process.hProcess,kNativeBakeTimeoutMs);
-    const bool timed_out=wait==WAIT_TIMEOUT;
-    if(timed_out)
-    {
-        (void)TerminateProcess(process.hProcess,ERROR_TIMEOUT);
-        // Keep the owned handle until termination completes so stage cleanup
-        // cannot race this child writing its package or diagnostic artifacts.
-        wait=WaitForSingleObject(process.hProcess,INFINITE);
-    }
-    DWORD exit_code=1; const bool got_code=GetExitCodeProcess(process.hProcess,&exit_code)!=FALSE;
-    CloseHandle(process.hProcess);
-    Require(!timed_out&&wait==WAIT_OBJECT_0&&got_code&&exit_code==0,
-        timed_out ? "Native scene probe render exceeded its 20-minute timeout; diagnostics: " + artifacts.string()
-                  : "Native scene probe render failed (exit " + std::to_string(exit_code) + "); diagnostics: " + artifacts.string());
-}
 }
 
 int ProduceSceneProbe(int argc,char **argv)
@@ -125,6 +82,7 @@ int ProduceSceneProbe(int argc,char **argv)
             "Cannot load layout-only SPB1 input");
         const auto layout=rd::ReadSceneProbePackage(layout_bytes,MakeAssetId(kProduct));
         Require(layout.payload==rd::SceneProbePayload::Layout,"Bake input must be layout-only SPB1");
+        const auto probe_count=static_cast<std::uint32_t>(layout.probes.size());
 
         ap::ActionSpec spec; spec.action_id=kAction; spec.namespace_path=kNamespace;
         spec.recipe_id="project-hs.render.scene-probes/native-four-payload"; spec.recipe_version=1;
@@ -134,18 +92,7 @@ int ProduceSceneProbe(int argc,char **argv)
         spec.inputs.push_back(ap::HashInput("scene-probe/layout-input",layout_path));
         for(const auto &[id,path]:std::initializer_list<std::pair<std::string_view,fs::path>>{
             {"scene-probe/source",source/"ContentSource/Lighting/local_probes.json"},
-            {"scene-probe/schema",source/"Schemas/scene_probe.schema.json"},
-            {"scene-probe/package-format",source/"Source/RenderData/Private/scene_probe.cpp"},
-            {"scene-probe/package-contract",source/"Source/RenderData/Public/hs/render_data/scene_probe.hpp"},
-            {"scene-probe/renderer-capture",source/"Source/RendererD3D12/Private/renderer_local_probe.cpp"},
-            {"scene-probe/renderer-capture-interface",source/"Source/RendererD3D12/Private/renderer_local_probe.hpp"},
-            {"scene-probe/renderer-runtime",source/"Source/RendererD3D12/Private/renderer_local_probe_runtime.cpp"},
-            {"scene-probe/renderer-frame",source/"Source/RendererD3D12/Private/renderer_frame.cpp"},
-            {"scene-probe/renderer-export",source/"Source/RendererD3D12/Private/renderer_capture.cpp"},
-            {"scene-probe/capture-request",source/"Source/RendererD3D12/Public/hs/renderer/capture_request.hpp"},
-            {"scene-probe/render-action",source/"Source/Apps/RenderTestRunner/main.cpp"},
-            {"scene-probe/action-interface",source/"Source/Apps/RenderTestRunner/scene_probe_action.hpp"},
-            {"scene-probe/action-coordinator",source/"Source/Apps/RenderTestRunner/scene_probe_action.cpp"}})
+            {"scene-probe/schema",source/"Schemas/scene_probe.schema.json"}})
             spec.inputs.push_back(ap::HashInput(std::string(id),path));
 
         std::map<std::string,std::string> owners;
@@ -192,7 +139,7 @@ int ProduceSceneProbe(int argc,char **argv)
         {
             const auto output=stage/kFilename;
             const auto artifacts=build/"Artifacts"/"scene-probe-bake"/stage.filename();
-            ap::MakeDirectory(artifacts); RunNativeBake(pointer,output,artifacts);
+            ap::MakeDirectory(artifacts); BakeSceneProbe(generation,output,artifacts,probe_count);
             std::ifstream baked_stream(output,std::ios::binary|std::ios::ate);
             Require(static_cast<bool>(baked_stream)&&baked_stream.tellg()>0,"Native scene probe output is missing");
             std::vector<std::byte> baked_bytes(static_cast<std::size_t>(baked_stream.tellg())); baked_stream.seekg(0);

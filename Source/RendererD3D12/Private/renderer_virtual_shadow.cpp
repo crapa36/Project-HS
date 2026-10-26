@@ -1453,7 +1453,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
-            if (caster_count) list->Dispatch((caster_count+63)/64, t->words, 1);
+            if (caster_count) list->Dispatch((caster_count+63)/64, 1, 1);
         });
     }
     {
@@ -1483,7 +1483,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             BindCompute(list, *t, t->frames[slot], slot, 3);
             list->SetComputeRoot32BitConstant(3, 2, 0);
-            if (caster_count) list->Dispatch((caster_count+63)/64, t->words, 1);
+            if (caster_count) list->Dispatch((caster_count+63)/64, 1, 1);
         });
     }
     if(plan.fixed_root)

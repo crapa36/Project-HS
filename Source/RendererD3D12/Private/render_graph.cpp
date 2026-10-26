@@ -307,6 +307,54 @@ struct TopologyValues
         return true;
     }
 
+    std::string FirstMismatch(std::span<const LogicalResource> current_resources,
+                              std::span<const Pass> current_passes,
+                              const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
+                              bool restored_declarations = false) const
+    {
+        if (!valid) return "cached topology is invalid";
+        if (resources.size() != current_resources.size()) return "resource count";
+        if (passes.size() != current_passes.size()) return "pass count";
+        if (ordering != current_ordering) return "ordering dependencies";
+        for (std::size_t i = 0; i < resources.size(); ++i)
+        {
+            const auto &a = resources[i]; const auto &b = current_resources[i];
+            const auto name = b.Name();
+            if (a.kind != b.kind) return "resource[" + std::to_string(i) + "] " + std::string(name) + " kind";
+            if (a.imported != b.imported) return "resource[" + std::to_string(i) + "] " + std::string(name) + " import mode";
+            if (a.final_set != b.final_set || a.final != (b.final_set ? b.final : Access::Undefined))
+                return "resource[" + std::to_string(i) + "] " + std::string(name) + " final access";
+            if (a.fixed_heap != b.fixed_buffer_heap)
+                return "resource[" + std::to_string(i) + "] " + std::string(name) + " fixed heap";
+            if (!SameVersion(a.final_version, b.final_version))
+                return "resource[" + std::to_string(i) + "] " + std::string(name) + " final version";
+            if (!SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
+                return "resource[" + std::to_string(i) + "] " + std::string(name) + " descriptor";
+        }
+        for (std::size_t i = 0; i < passes.size(); ++i)
+        {
+            const auto &a = passes[i]; const auto &b = current_passes[i];
+            const auto name = b.Name();
+            if (a.id != b.id) return "pass[" + std::to_string(i) + "] " + std::string(name) + " id";
+            if (a.queue != b.queue) return "pass[" + std::to_string(i) + "] " + std::string(name) + " queue";
+            if (a.execution_kind != ExecutionKind(b)) return "pass[" + std::to_string(i) + "] " + std::string(name) + " execution binding";
+            if (!restored_declarations && !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))
+                return "pass[" + std::to_string(i) + "] " + std::string(name) + " resource uses";
+            if (b.external)
+            {
+                if (a.external_queue != b.external->binding.queue_type)
+                    return "pass[" + std::to_string(i) + "] " + std::string(name) + " external queue";
+                if (!std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(),
+                        b.external->accesses.end(), [](const auto &left, const auto &right) {
+                            return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
+                                left.incoming == right.incoming && left.outgoing == right.outgoing;
+                        }))
+                    return "pass[" + std::to_string(i) + "] " + std::string(name) + " external boundaries";
+            }
+        }
+        return "external binding or unknown topology value";
+    }
+
     void Capture(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
                  const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering)
     {
@@ -962,7 +1010,46 @@ struct RenderGraphQueueExecutor::Impl
         bool bridged{};
     };
 
+    enum class BarrierOperation { Transition, Uav, Release, Acquire, Alias };
+    struct PlannedBarrier
+    {
+        std::uint32_t resource{};
+        Access before{}, after{};
+        BarrierOperation operation{};
+    };
+    struct Batch
+    {
+        QueueHint queue{};
+        std::uint32_t pass{UINT32_MAX};
+        std::uint32_t position{};
+        std::vector<PlannedBarrier> before, after;
+        std::vector<std::uint32_t> dependencies, resources;
+        std::optional<std::unordered_set<std::uint32_t>> resource_membership;
+        CompletionSet imported;
+        std::vector<std::uint32_t> external_imports;
+        std::size_t recorder{};
+        bool resolve_timestamps{};
+        std::uint32_t external_finish{UINT32_MAX};
+
+        void Reset()
+        {
+            queue = {}; pass = external_finish = UINT32_MAX; position = 0;
+            before.clear(); after.clear(); dependencies.clear(); resources.clear();
+            if (resource_membership) resource_membership->clear();
+            imported = {}; external_imports.clear(); recorder = 0; resolve_timestamps = false;
+        }
+    };
+    struct ResourceState
+    {
+        Access logical{}, physical{};
+        QueueHint queue{};
+        std::uint32_t batch{UINT32_MAX};
+        std::uint32_t read_entry{UINT32_MAX};
+        std::array<std::uint32_t, 3> readers{UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    };
+
     Microsoft::WRL::ComPtr<ID3D12Device> device;
+    Microsoft::WRL::ComPtr<ID3D12Device4> device4;
     std::array<QueueState, 3> queues;
     std::vector<FrameSlot> frames;
     HANDLE completion_event{};
@@ -971,6 +1058,16 @@ struct RenderGraphQueueExecutor::Impl
     CompletionSet submitted{};
     GraphExecutionStats stats{};
     std::vector<ExternalRetention> external_retained;
+    // Only CPU values survive Execute; recording tasks join before these are reused.
+    std::vector<Batch> batches;
+    std::vector<ResourceState> resource_states;
+    std::vector<std::uint32_t> submission_order;
+    std::vector<std::size_t> counted_blocks, ordering_predecessor;
+    std::vector<bool> shareable, waits_before, signal_after;
+    std::vector<Result> record_results;
+    std::vector<std::uint64_t> signals;
+    std::vector<std::pair<std::uint32_t, std::size_t>> pass_positions;
+    std::vector<ID3D12CommandList *> lists;
 
     void ReleaseCompletedExternal(const CompletionSet &completed)
     {
@@ -1005,6 +1102,11 @@ Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
     }
 
     impl_->device = device;
+    // Device4 creates command lists closed, which matches the recorder's
+    // first operation (allocator/list Reset) and avoids the legacy open/Close
+    // bootstrap. Keep the older path for devices without this interface.
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&impl_->device4))))
+        impl_->device4.Reset();
     for (const auto queue_hint : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
     {
         auto &state = impl_->queues[QueueIndex(queue_hint)];
@@ -1205,6 +1307,7 @@ void RenderGraphQueueExecutor::Clear() noexcept
         if (!drained && impl_->device && SUCCEEDED(impl_->device->GetDeviceRemovedReason())) return;
     }
     impl_->external_retained.clear();
+    impl_->lists.clear();
     impl_->frames.clear();
     for (auto &state : impl_->queues)
     {
@@ -1215,6 +1318,7 @@ void RenderGraphQueueExecutor::Clear() noexcept
         state.joined = {};
     }
     impl_->device.Reset();
+    impl_->device4.Reset();
     impl_->reliable = true;
     impl_->fault_drained = false;
     impl_->submitted = {};
@@ -1277,7 +1381,8 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     };
     impl_->stats.transient_resource_count = 0;
     impl_->stats.transient_backing_bytes = 0;
-    std::vector<std::size_t> counted_blocks;
+    auto &counted_blocks = impl_->counted_blocks;
+    counted_blocks.clear();
     for (const auto &group : g.alias_plan.groups)
     {
         impl_->stats.transient_resource_count += static_cast<std::uint32_t>(group.resources.size());
@@ -1309,38 +1414,13 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     slot.completion = {};
     impl_->ReleaseCompletedExternal(Completed());
 
-    enum class BarrierOperation { Transition, Uav, Release, Acquire, Alias };
-    struct PlannedBarrier
-    {
-        std::uint32_t resource{};
-        Access before{}, after{};
-        BarrierOperation operation{};
-    };
-    struct Batch
-    {
-        QueueHint queue{};
-        std::uint32_t pass{UINT32_MAX};
-        std::uint32_t position{};
-        std::vector<PlannedBarrier> before, after;
-        std::vector<std::uint32_t> dependencies, resources;
-        std::optional<std::unordered_set<std::uint32_t>> resource_membership;
-        CompletionSet imported;
-        std::vector<std::uint32_t> external_imports;
-        std::size_t recorder{};
-        bool resolve_timestamps{};
-        std::uint32_t external_finish{UINT32_MAX};
-    };
-    struct ResourceState
-    {
-        Access logical{}, physical{};
-        QueueHint queue{};
-        std::uint32_t batch{UINT32_MAX};
-        std::uint32_t read_entry{UINT32_MAX};
-        std::array<std::uint32_t, 3> readers{UINT32_MAX, UINT32_MAX, UINT32_MAX};
-    };
+    using BarrierOperation = Impl::BarrierOperation;
+    using PlannedBarrier = Impl::PlannedBarrier;
+    using Batch = Impl::Batch;
+    using ResourceState = Impl::ResourceState;
     // Legacy ownership, promotion and decay retain the single-queue path.
     const bool shared_readers = barriers == BarrierMode::Enhanced;
-    std::vector<bool> shareable;
+    auto &shareable = impl_->shareable;
     if (shared_readers)
     {
         shareable.assign(g.resources.size(), false);
@@ -1357,9 +1437,13 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (pass.external || pass.execute_on_owner)
                 for (const auto &use : pass.Uses()) shareable[use.predecessor.resource.value - 1] = false;
     }
-    std::vector<Batch> batches(g.passes.size());
-    std::vector<std::uint32_t> submission_order;
-    std::vector<ResourceState> states;
+    auto &batches = impl_->batches;
+    batches.resize(g.passes.size());
+    for (auto &batch : batches) batch.Reset();
+    auto &submission_order = impl_->submission_order;
+    submission_order.clear();
+    auto &states = impl_->resource_states;
+    states.clear();
     states.reserve(g.resources.size());
     for (auto &resource : g.resources)
     {
@@ -1398,18 +1482,24 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         submission_order.push_back(index);
         state.batch = index;
     };
+    std::array<std::uint32_t, 3> initial_releases{UINT32_MAX, UINT32_MAX, UINT32_MAX};
     const auto release = [&](std::uint32_t resource, ResourceState &state) {
         if (FixedBufferHeap(g.resources[resource]) != D3D12_HEAP_TYPE_DEFAULT) return;
         if (state.physical == Access::Common || state.physical == Access::Undefined) return;
         if (state.batch == UINT32_MAX)
         {
-            Batch initial;
-            initial.queue = state.queue;
-            initial.imported = g.resources[resource].imported_completion;
-            state.batch = static_cast<std::uint32_t>(batches.size());
-            batches.push_back(std::move(initial));
+            auto &initial = initial_releases[QueueIndex(state.queue)];
+            if (initial == UINT32_MAX)
+            {
+                Batch prefix;
+                prefix.queue = state.queue;
+                initial = static_cast<std::uint32_t>(batches.size());
+                batches.push_back(std::move(prefix));
+                submission_order.push_back(initial);
+            }
+            state.batch = initial;
+            batches[initial].imported.Merge(g.resources[resource].imported_completion);
             include_external_import(state.batch, resource);
-            submission_order.push_back(state.batch);
         }
         const auto released = Access::Common;
         batches[state.batch].after.push_back(
@@ -1531,6 +1621,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         include_resource(pass, resource);
         state.physical = Access::Common;
     }
+    std::array<std::uint32_t, 3> final_reader_joins{UINT32_MAX, UINT32_MAX, UINT32_MAX};
     std::array<std::uint32_t, 3> final_exports{UINT32_MAX, UINT32_MAX, UINT32_MAX};
     for (std::uint32_t resource = 0; resource < g.resources.size(); ++resource)
     {
@@ -1541,7 +1632,25 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         const auto target = logical.final == Access::Undefined ? state.logical : logical.final;
         if (state.read_entry != UINT32_MAX && target != Access::ComputeRead)
         {
-            join_readers(resource, state);
+            const bool cross_queue_readers = std::any_of(state.readers.begin(), state.readers.end(),
+                [&](const auto reader) {
+                    return reader != UINT32_MAX && batches[reader].queue != state.queue;
+                });
+            if (cross_queue_readers)
+            {
+                auto &joined = final_reader_joins[QueueIndex(state.queue)];
+                if (joined == UINT32_MAX)
+                {
+                    Batch tail;
+                    tail.queue = state.queue;
+                    joined = static_cast<std::uint32_t>(batches.size());
+                    batches.push_back(std::move(tail));
+                    submission_order.push_back(joined);
+                }
+                for (const auto reader : state.readers) depend(joined, reader);
+                include_resource(joined, resource);
+                state.batch = joined;
+            }
             state.read_entry = UINT32_MAX;
             state.readers.fill(UINT32_MAX);
         }
@@ -1620,18 +1729,28 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             const auto type = NativeQueueType(batch.queue);
             auto result = impl_->device->CreateCommandAllocator(type, IID_PPV_ARGS(&recorder.allocator));
             if (FAILED(result)) return QueueFailure("Create graph command allocator", result);
-            result = impl_->device->CreateCommandList(0, type, recorder.allocator.Get(), nullptr,
-                                                      IID_PPV_ARGS(&recorder.commands));
-            if (FAILED(result)) return QueueFailure("Create graph command list", result);
-            result = recorder.commands->Close();
-            if (FAILED(result)) return QueueFailure("Close new graph command list", result);
+            if (impl_->device4)
+            {
+                result = impl_->device4->CreateCommandList1(
+                    0, type, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(&recorder.commands));
+                if (FAILED(result)) return QueueFailure("Create closed graph command list", result);
+            }
+            else
+            {
+                result = impl_->device->CreateCommandList(0, type, recorder.allocator.Get(), nullptr,
+                                                          IID_PPV_ARGS(&recorder.commands));
+                if (FAILED(result)) return QueueFailure("Create graph command list", result);
+                result = recorder.commands->Close();
+                if (FAILED(result)) return QueueFailure("Close new graph command list", result);
+            }
             recorders.push_back(std::move(recorder));
         }
         auto &recorder = recorders[batch.recorder];
         if (barriers == BarrierMode::Enhanced && !recorder.enhanced && FAILED(recorder.commands.As(&recorder.enhanced)))
             return fail("Enhanced barriers unavailable on graph command list.");
     }
-    std::vector<Result> record_results(batches.size(), Result::Success());
+    auto &record_results = impl_->record_results;
+    record_results.assign(batches.size(), Result::Success());
     const auto record = [&](std::uint32_t index) {
         const auto &batch = batches[index];
         auto &recorder = slot.recorders[QueueIndex(batch.queue)][batch.recorder];
@@ -1665,13 +1784,19 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             };
             for (const auto &barrier : batch.before) emit(barrier);
             buffer_barriers.Flush();
-            if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries && batch.queue != QueueHint::Copy)
-                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, options->timestamp_base + batch.position * 2);
+            const auto query_slot = options && options->timestamp_query_slots &&
+                batch.position < options->timestamp_query_slot_count
+                ? options->timestamp_query_slots[batch.position] : batch.position;
+            const bool pass_has_queries = query_slot != UINT32_MAX;
+            const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
+            if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
+                batch.queue != QueueHint::Copy && pass_has_queries)
+                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
             if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
             {
                 auto &pass = g.passes[batch.pass];
-                const auto query = options ? options->timestamp_base + batch.position * 2 : 0;
-                if (queries && batch.queue != QueueHint::Copy) commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
+                if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
+                    commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
                 // WinPixEventRuntime's command-list marker path issues
                 // compute-only calls on COPY lists under the D3D12 debug layer.
                 // Copy queues have no timestamp support here either, so leave
@@ -1691,20 +1816,26 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                         cpu_timing->cpu_callback_end_qpc >= cpu_timing->cpu_callback_begin_qpc;
                 }
                 if (batch.queue != QueueHint::Copy) PIXEndEvent(commands);
-                if (queries && batch.queue != QueueHint::Copy) commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
+                if (queries && batch.queue != QueueHint::Copy && pass_has_queries)
+                    commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             }
             for (const auto &barrier : batch.after) emit(barrier);
             buffer_barriers.Flush();
-            if (batch.external_finish != UINT32_MAX && queries && batch.queue != QueueHint::Copy)
-                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, options->timestamp_base + batch.position * 2 + 1);
+            if (batch.external_finish != UINT32_MAX && queries && batch.queue != QueueHint::Copy && pass_has_queries)
+                commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query + 1);
             if (batch.resolve_timestamps)
                 for (std::uint32_t position = 0; position < g.schedule.execution_order.size(); ++position)
-                    if (g.passes[g.schedule.execution_order[position]].queue != QueueHint::Copy)
+                {
+                    const auto slot = options && options->timestamp_query_slots &&
+                        position < options->timestamp_query_slot_count
+                        ? options->timestamp_query_slots[position] : position;
+                    if (slot != UINT32_MAX && g.passes[g.schedule.execution_order[position]].queue != QueueHint::Copy)
                     {
-                        const auto query = options->timestamp_base + position * 2;
+                        const auto query = options->timestamp_base + slot * 2;
                         commands->ResolveQueryData(queries, D3D12_QUERY_TYPE_TIMESTAMP, query, 2, readback,
                                                   static_cast<UINT64>(query) * sizeof(std::uint64_t));
                     }
+                }
             result = commands->Close();
             if (FAILED(result)) record_results[index] = QueueFailure("Close graph command list", result);
         }
@@ -1788,10 +1919,16 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         pending_imports[resource].resources.emplace_back(static_cast<ID3D12Resource *>(logical.native));
     }
 
-    std::vector<std::uint64_t> signals(batches.size());
-    std::vector<bool> waits_before(batches.size()), signal_after(batches.size());
-    std::vector<std::size_t> ordering_predecessor(batches.size(), SIZE_MAX);
-    std::vector<std::pair<std::uint32_t, std::size_t>> pass_positions;
+    auto &signals = impl_->signals;
+    signals.assign(batches.size(), 0);
+    auto &waits_before = impl_->waits_before;
+    auto &signal_after = impl_->signal_after;
+    waits_before.assign(batches.size(), false);
+    signal_after.assign(batches.size(), false);
+    auto &ordering_predecessor = impl_->ordering_predecessor;
+    ordering_predecessor.assign(batches.size(), SIZE_MAX);
+    auto &pass_positions = impl_->pass_positions;
+    pass_positions.clear();
     pass_positions.reserve(g.passes.size());
     for (std::size_t position = 0; position < submission_order.size(); ++position)
     {
@@ -1823,7 +1960,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         return !batch.external_imports.empty() || batch.external_finish != UINT32_MAX ||
             batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].external);
     };
-    std::vector<ID3D12CommandList *> lists;
+    auto &lists = impl_->lists;
     lists.reserve(submission_order.size());
     const auto retain = [&](std::uint32_t index, std::uint64_t value) {
         const auto &batch = batches[index];
@@ -2719,7 +2856,9 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     };
     const bool current_matches = matches(impl_->topology);
     if (impl_->restored_plan && !current_matches)
-        return fail("RenderGraph restored plan does not match current resource or pass bindings.");
+        return fail("RenderGraph restored plan does not match current resource or pass bindings (" +
+            impl_->topology.FirstMismatch(impl_->resources, impl_->passes, impl_->ordering_dependencies,
+                impl_->restored_plan) + ").");
     bool reused = current_matches;
     if (!reused)
         if (const auto previous = std::find_if(impl_->previous_plans.begin(), impl_->previous_plans.end(),

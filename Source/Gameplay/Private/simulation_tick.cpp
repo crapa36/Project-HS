@@ -33,7 +33,6 @@ GameSimulation::SimulationWorld::SimulationWorld()
     combat_state->area_hit_index.reserve(1'024);
     combat_state->cast_runtimes.reserve(512);
     combat_state->cast_runtime_index.reserve(512);
-    telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
     combat_state->collision_query.rows.reserve(1'024);
@@ -373,15 +372,18 @@ void GameSimulation::SimulationWorld::StartSession()
     progression->card_count = 0;
 }
 
-void GameSimulation::SimulationWorld::ProcessInput()
+bool GameSimulation::SimulationWorld::ProcessInput()
 {
+    bool changed{};
     if (selection_input_guard_frames > 0) --selection_input_guard_frames;
     if (!current_input.held.basic_attack_held) selection_waiting_for_release = false;
     const auto aim_delta = Float2{current_input.held.aim_world.x - actors->player.position.x,
                                   current_input.held.aim_world.z - actors->player.position.y};
     if (LengthSquared(aim_delta) > 0.0001f)
     {
-        actors->player.aim = Normalize(aim_delta, actors->player.aim);
+        const auto aim = Normalize(aim_delta, actors->player.aim);
+        changed |= aim.x != actors->player.aim.x || aim.y != actors->player.aim.y;
+        actors->player.aim = aim;
     }
     if (current_input.held.move_held && session_phase == SessionPhase::Playing)
     {
@@ -403,10 +405,12 @@ void GameSimulation::SimulationWorld::ProcessInput()
             {
                 CancelChargedShot();
                 session_phase = SessionPhase::Paused;
+                changed = true;
             }
             else if (session_phase == SessionPhase::Paused)
             {
                 session_phase = SessionPhase::Playing;
+                changed = true;
             }
             continue;
         }
@@ -416,10 +420,12 @@ void GameSimulation::SimulationWorld::ProcessInput()
             {
                 CancelChargedShot();
                 session_phase = SessionPhase::Paused;
+                changed = true;
             }
             else if (session_phase == SessionPhase::Paused)
             {
                 session_phase = SessionPhase::Playing;
+                changed = true;
             }
             continue;
         }
@@ -485,6 +491,7 @@ void GameSimulation::SimulationWorld::ProcessInput()
     }
 
     ConsumeBufferedSkill();
+    return changed;
 }
 
 void GameSimulation::SimulationWorld::CollectEnemies(Float2 position, float radius,
@@ -680,6 +687,11 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
 void GameSimulation::SimulationWorld::RetireBalanceHitCauses()
 {
     auto &observer = telemetry->balance_observer;
+    if (!observer.metrics.detailed_balance_captured ||
+        (observer.player_hit_casts.empty() &&
+         std::ranges::all_of(observer.enemy_hit_casts,
+                             [](const auto &casts) { return casts.empty(); })))
+        return;
     observer.active_player_casts.clear();
     for (auto &casts : observer.active_enemy_casts) casts.clear();
 
@@ -730,6 +742,8 @@ void GameSimulation::SimulationWorld::RetireBalanceHitCauses()
 
     add_player(actors->player.basic_attack_cast_id);
     add_player(actors->player.charge_cast_id);
+    if (actors->player.retreat_landing_pending || actors->player.retreat_followup_tick != 0)
+        add_player(actors->player.retreat_followup_cast);
     for (const auto &command : combat_state->combat.commands)
     {
         if (command.target == 0)

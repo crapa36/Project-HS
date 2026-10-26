@@ -1,9 +1,12 @@
 #include "render_graph_validation.hpp"
+#include "hero_coverage.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -21,6 +24,61 @@ constexpr ResourceHandle texture{1, ResourceKind::Texture};
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void HeroProjectedCoverage()
+{
+    using hs::renderer_detail::HeroCoverageProjection;
+    using hs::renderer_detail::HeroProjectedBounds;
+    using hs::renderer_detail::ProjectHeroSphere;
+    using Kind = HeroProjectedBounds::Kind;
+    const HeroCoverageProjection view{1920, 1080, 1.1, 1.7, 0.0002, -0.0003, 0.1, 300};
+    Check(ProjectHeroSphere(view, 0, 0, 5, 0.5).kind == Kind::Visible, "visible Hero rejected");
+    const std::array<std::array<double, 3>, 6> clipped{{{50., 0., 5.}, {-50., 0., 5.},
+        {0., 50., 5.}, {0., -50., 5.}, {0., 0., -10.}, {0., 0., 400.}}};
+    for (const auto center : clipped)
+        Check(ProjectHeroSphere(view, center[0], center[1], center[2], 0.5).kind == Kind::Outside,
+            "fully clipped Hero not proven empty");
+    Check(ProjectHeroSphere(view, 0, 0, 0.5, 0.5).kind == Kind::Unknown &&
+        ProjectHeroSphere(view, 0, 0, 299.8, 0.5).kind == Kind::Unknown,
+        "clip-crossing Hero must retain the full path");
+    const auto edge = ProjectHeroSphere(view, 3.5, 0, 5, 1);
+    Check(edge.kind == Kind::Visible && edge.right == 1920 && edge.left < edge.right,
+        "partially visible Hero was culled or left the viewport");
+    Check(ProjectHeroSphere(view, 0, 0, 5, -1).kind == Kind::Unknown &&
+        ProjectHeroSphere(view, 0, 0, 5, std::numeric_limits<double>::infinity()).kind == Kind::Unknown &&
+        ProjectHeroSphere(view, std::numeric_limits<double>::quiet_NaN(), 0, 5, 1).kind == Kind::Unknown,
+        "uncertain Hero bounds must not authorize culling");
+    std::mt19937 random(0x4845524f);
+    std::uniform_real_distribution<double> unit(0, 1);
+    for (const double resolution : {1.0, 0.5})
+        for (unsigned sample = 0; sample < 256; ++sample)
+        {
+            auto current = view;
+            current.width = static_cast<std::uint32_t>(view.width * resolution);
+            current.height = static_cast<std::uint32_t>(view.height * resolution);
+            current.jitter_x = (unit(random) - 0.5) * 2 / current.width;
+            current.jitter_y = (unit(random) - 0.5) * 2 / current.height;
+            const double x = unit(random) * 60 - 30, y = unit(random) * 40 - 20;
+            const double z = unit(random) * 49 + 1, radius = unit(random) * 2 + 0.01;
+            const auto bounds = ProjectHeroSphere(current, x, y, z, radius);
+            for (unsigned point = 0; point < 32; ++point)
+            {
+                const double cosine = unit(random) * 2 - 1, angle = unit(random) * 6.283185307179586;
+                const double ring = std::sqrt(1 - cosine * cosine);
+                const double px = x + radius * ring * std::cos(angle);
+                const double py = y + radius * ring * std::sin(angle), pz = z + radius * cosine;
+                if (pz < current.near_plane || pz > current.far_plane) continue;
+                const double screen_x = (px / pz * current.scale_x + current.jitter_x + 1) * current.width * 0.5;
+                const double screen_y = (1 - py / pz * current.scale_y - current.jitter_y) * current.height * 0.5;
+                if (screen_x < 0 || screen_y < 0 || screen_x >= current.width || screen_y >= current.height) continue;
+                Check(bounds.kind != Kind::Outside, "visible sphere sample falsely proved empty");
+                if (bounds.kind == Kind::Visible)
+                    Check(screen_x >= bounds.left && screen_x <= bounds.right &&
+                        screen_y >= bounds.top && screen_y <= bounds.bottom,
+                        "Hero projection failed to enclose a current jittered sample");
+            }
+        }
 }
 
 ResourceUse Read(std::uint32_t ordinal, Range range = {}, ResourceHandle handle = buffer)
@@ -521,6 +579,9 @@ void MultiQueueSchedule()
           "queue-local schedules preserve compiled order");
     Check(g.schedule.cross_queue_dependencies.size() == 2,
           "cross-queue RAW chain emits two queue waits");
+    Check(g.schedule.predecessors[0] == std::vector<std::uint32_t>{1} &&
+          g.schedule.predecessors[1] == std::vector<std::uint32_t>{2},
+          "compiled output closure retains the actual resource predecessors");
     const auto &copy_to_compute = g.schedule.cross_queue_dependencies[0];
     const auto &compute_to_direct = g.schedule.cross_queue_dependencies[1];
     Check(copy_to_compute.producer == 2 && copy_to_compute.consumer == 1 &&
@@ -839,7 +900,7 @@ int main(int argc, char **argv)
             BenchmarkExplicitDags();
             return 0;
         }
-        ExplicitDagOrdering();
+        HeroProjectedCoverage(); ExplicitDagOrdering();
         BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
         QueueAccessPolicy(); PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();
         std::puts("Render graph CPU range/version validation passed.");

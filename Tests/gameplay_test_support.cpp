@@ -26,6 +26,11 @@ void Check(bool condition, std::string_view message)
     }
 }
 
+void Check(const hs::Result &result, std::string_view message)
+{
+    Check(result.Succeeded(), message);
+}
+
 const TestContent &DefaultContent()
 {
     static const auto data = [] {
@@ -120,7 +125,7 @@ bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &sn
     auto read = simulation.BorrowTickReadView();
     static const hs::SettingsData settings;
     return hs::ProjectTick(read.View(), DefaultContent().presentation, test_ui,
-        settings, snapshot, hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read.View(), {})));
+        settings, snapshot, hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read.View(), {}))).Succeeded();
 }
 
 bool HasVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind kind)

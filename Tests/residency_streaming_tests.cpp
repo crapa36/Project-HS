@@ -2,6 +2,7 @@
 #include "renderer_asset_io.hpp"
 #include "renderer_content.hpp"
 #include "streaming_manager.hpp"
+#include "renderer_texture_streaming.hpp"
 #include <hs/core/sha256.hpp>
 
 #include <algorithm>
@@ -28,6 +29,18 @@ void Check(bool condition, const char *message)
 
 void CheckAsyncAssetPreparation()
 {
+    Check(hs::NextTextureTransactionTarget(4, 2, true, true, 4) == 3 &&
+        hs::NextTextureTransactionTarget(3, 2, true, true, 4) == 2 &&
+        hs::NextTextureTransactionTarget(4, 2, true, false, 4) == 4 &&
+        hs::NextTextureTransactionTarget(4, 2, false, false, 4) == 2,
+        "fixed texture transaction target skipped a legal resident mip step");
+    hs::ResidencyManager mip_budget;
+    mip_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
+    const auto mip_payload = mip_budget.ReserveHost(512);
+    const auto mip_metadata = mip_budget.ReserveHost(256);
+    Check(mip_payload && mip_metadata && !mip_budget.CanStage(257) &&
+        mip_budget.ReleaseNow(mip_payload) && mip_budget.ReleaseNow(mip_metadata) &&
+        mip_budget.CanStage(768), "completed mip step did not return its payload and metadata budget");
     const std::array<std::byte, 4> contents{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     const auto path = std::filesystem::temp_directory_path() /
         ("hs_stream_prepare_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
@@ -80,6 +93,34 @@ void CheckAsyncAssetPreparation()
     Check(streaming.CompleteRead(success, "generation"), "prepared read did not enter Decoded");
     Check(residency.ReleaseNow(success_output.storage) && !residency.Contains(success_storage),
         "prepared read storage was not reclaimed");
+
+    const auto ranged = streaming.Request("ranged-subresources", "ranged-subresources", "generation", 1);
+    const auto ranged_storage = residency.ReserveHost(3);
+    const std::array ranges{
+        hs::ImmutableAssetRange{1, 2, hs::Sha256(std::span(contents).subspan(1, 2))},
+        hs::ImmutableAssetRange{3, 1, hs::Sha256(std::span(contents).subspan(3, 1))}};
+    bool ranged_submitted{};
+    Check(ranged && ranged_storage && bool(io.Enqueue({ranged, "generation", "ranged-subresources",
+        hs::RendererAssetSource{path}, 3, std::make_shared<int>(1), {},
+        std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency,
+        ranged_storage, ranged_submitted)) && ranged_submitted,
+        "authenticated texture subresource ranges were not submitted");
+    hs::AssetReadCompletion ranged_output;
+    Check(bool(poll(ranged, ranged_output)) && ranged_output.ready && !ranged_output.cancelled &&
+        ranged_output.bytes == std::vector<std::byte>{contents[1], contents[2], contents[3]} &&
+        streaming.CompleteRead(ranged, "generation") && residency.ReleaseNow(ranged_output.storage) &&
+        !residency.Contains(ranged_storage), "range IO did not verify or compact its selected subresources");
+    auto invalid_range = ranges[0]; invalid_range.digest[0] ^= std::byte{1};
+    const auto corrupt_request = streaming.Request("corrupt-subresource-range", "corrupt-subresource-range", "generation", 1);
+    const auto corrupt_storage = residency.ReserveHost(invalid_range.byte_count);
+    bool corrupt_submitted{};
+    Check(corrupt_request && corrupt_storage && bool(io.Enqueue({corrupt_request, "generation",
+        "corrupt-subresource-range", hs::RendererAssetSource{path}, invalid_range.byte_count,
+        std::make_shared<int>(1), {}, {invalid_range}}, streaming, residency, corrupt_storage,
+        corrupt_submitted)) && corrupt_submitted, "corrupt range fixture was not submitted");
+    hs::AssetReadCompletion corrupt_output;
+    Check(!poll(corrupt_request, corrupt_output) && !corrupt_output.ready &&
+        !residency.Contains(corrupt_storage), "range IO accepted a mismatched subresource digest");
 
     auto started = std::make_shared<std::promise<void>>();
     auto release = std::make_shared<std::promise<void>>();
@@ -265,6 +306,45 @@ void CheckPackAssetReads(bool native)
     }
     Check(bool(initialized) && io.NativeEnabled() == native, "pack IO initialization mode mismatch");
     io.SetWaitForReads(true);
+    if (native)
+    {
+        // Loose immutable products retain FILE->MEMORY transport for compact
+        // authenticated ranges; texture Pump defers these requests so one
+        // queue submission covers every texture admitted in that pump.
+        hs::RendererAssetSource loose{path, {}, {}};
+        const std::array ranges{hs::ImmutableAssetRange{64, static_cast<std::uint32_t>(payload.size()), hs::Sha256(payload)}};
+        const auto range_request = streaming.Request("native-range", "native-range", "generation", 1);
+        const auto range_storage = residency.ReserveHost(payload.size() * 2);
+        Check(range_request && range_storage, "native range reservation failed");
+        bool range_submitted{};
+        Check(bool(io.Enqueue({range_request, "generation", "native-range", loose, payload.size(), owner, {},
+                               std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency, range_storage,
+                             range_submitted, true)) && range_submitted && io.HasPendingReads(),
+              "native range was not retained for deferred batch submission");
+        io.SubmitQueuedReads();
+        hs::AssetReadCompletion range_output;
+        Check(bool(io.Poll(range_request, streaming, residency, range_output)) && range_output.ready &&
+              !range_output.cancelled && range_output.bytes == std::vector<std::byte>(payload.begin(), payload.end()),
+              "native loose range returned incorrect compact bytes");
+        Check(streaming.CompleteRead(range_request, "generation") && residency.ReleaseNow(range_output.storage),
+              "native range completion did not reclaim its reservation");
+
+        const auto cancelled_range = streaming.Request("native-range-cancel", "native-range-cancel", "generation", 1);
+        const auto cancelled_range_storage = residency.ReserveHost(payload.size() * 2);
+        Check(cancelled_range && cancelled_range_storage, "native cancellation range reservation failed");
+        bool cancel_submitted{};
+        Check(bool(io.Enqueue({cancelled_range, "generation", "native-range-cancel", loose, payload.size(), owner, {},
+                               std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency, cancelled_range_storage,
+                             cancel_submitted, true)) && cancel_submitted,
+              "native cancellation range was not queued");
+        io.Cancel(cancelled_range, streaming); // Must submit and retain queued storage through its terminal marker.
+        hs::AssetReadCompletion cancelled_range_output;
+        const auto cancelled_range_result = io.Poll(cancelled_range, streaming, residency, cancelled_range_output);
+        Check(bool(cancelled_range_result), std::string(cancelled_range_result.Message()).c_str());
+        Check(cancelled_range_output.ready && cancelled_range_output.cancelled &&
+              cancelled_range_output.bytes.empty() && !residency.Contains(cancelled_range_storage),
+              "queued native cancellation published bytes or released storage before terminal status");
+    }
     unsigned sequence{};
     const auto enqueue = [&](const hs::RendererAssetSource &input, std::function<void(std::span<const std::byte>)> prepare = {}) {
         const auto id = "pack-" + std::to_string(++sequence);
@@ -341,6 +421,8 @@ int main()
 
         // Admission uses cached domain totals; verify mutations and overflow recovery against the ledger.
         hs::ResidencyManager admission;
+        Check(!admission.CanAdmit(1) && !admission.CanStage(1),
+            "optional native or host work was admitted without an initial observation");
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         const auto gpu_reservation = admission.ReserveGpu(300);
         const auto host_reservation = admission.ReserveHost(700);
@@ -358,11 +440,10 @@ int main()
                                    hs::ResidencyStorage::HostStaging})
         {
             admission.Reset();
+            admission.UpdateBudget({true, UINT64_MAX, 0, 0, 0, true, UINT64_MAX});
             const auto huge = admission.Register(hs::ResidencyCategory::Staging, UINT64_MAX, false, storage);
             const auto extra = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
-            Check(huge && extra && admission.CanAdmit(1) && admission.CanStage(1),
-                "invalid budget policy changed for overflowing ledger");
-            admission.UpdateBudget({true, UINT64_MAX, 0, 0, 0, true, UINT64_MAX});
+            Check(huge && extra, "overflow test could not create its tracked ledger entries");
             const auto allowed = [&](std::uint64_t bytes) {
                 return storage == hs::ResidencyStorage::GpuReservation ? admission.CanAdmit(bytes, 0) : admission.CanStage(bytes);
             };
@@ -383,11 +464,61 @@ int main()
         }
         admission.Reset();
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
+        admission.RecordNativeGrowth(hs::ResidencySegment::Local, 100);
         const auto native = admission.Register(hs::ResidencyCategory::Texture, 100, false);
         Check(native && admission.CanAdmit(800) && !admission.CanAdmit(801) && admission.ReleaseNow(native) &&
             !admission.CanAdmit(801), "release incorrectly credited an old DXGI snapshot");
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         Check(admission.CanAdmit(900) && admission.CanStage(1000), "fresh snapshot/reset admission mismatch");
+
+        hs::ResidencyManager observations;
+        hs::ResidencyBudgetSnapshot domains{true, 1'000, 100, 1'000, 200, true, 4'000};
+        domains.nonlocal_valid = true;
+        observations.UpdateBudget(domains);
+        const auto local_growth = observations.Register(hs::ResidencyCategory::Geometry, 100, false,
+            hs::ResidencyStorage::GpuAllocation, hs::ResidencySegment::Local);
+        const auto nonlocal_growth = observations.Register(hs::ResidencyCategory::Staging, 120, false,
+            hs::ResidencyStorage::GpuAllocation, hs::ResidencySegment::NonLocal);
+        Check(observations.Accounting().gpu_growth_since_snapshot == 0,
+            "logical allocation bytes were treated as observed native growth");
+        observations.RecordNativeGrowth(hs::ResidencySegment::Local, 100);
+        observations.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 120);
+        observations.UpdateBudget({});
+        auto domain_accounting = observations.Accounting();
+        Check(local_growth && nonlocal_growth && domain_accounting.budget.valid &&
+            domain_accounting.budget.nonlocal_valid && domain_accounting.local_growth_since_snapshot == 100 &&
+            domain_accounting.nonlocal_growth_since_snapshot == 120 &&
+            !observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
+            !observations.CanStage(1), "failed refresh erased last-valid data or left stale admission open");
+        hs::ResidencyBudgetSnapshot local_only{true, 1'000, 220, 0, 0, false, 0};
+        observations.UpdateBudget(local_only);
+        domain_accounting = observations.Accounting();
+        Check(domain_accounting.local_growth_since_snapshot == 0 &&
+            domain_accounting.nonlocal_growth_since_snapshot == 120 &&
+            domain_accounting.budget.local_usage == 220 && domain_accounting.budget.nonlocal_usage == 200 &&
+            observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
+            !observations.CanAdmit(1, 10, hs::ResidencySegment::NonLocal),
+            "partial refresh absorbed or replaced another segment's growth/last-valid observation");
+        hs::ResidencyBudgetSnapshot nonlocal_only{};
+        nonlocal_only.nonlocal_valid = true;
+        nonlocal_only.nonlocal_budget = 1'000;
+        nonlocal_only.nonlocal_usage = 320;
+        observations.UpdateBudget(nonlocal_only);
+        domain_accounting = observations.Accounting();
+        Check(domain_accounting.nonlocal_growth_since_snapshot == 0 &&
+            domain_accounting.budget.local_usage == 220 && domain_accounting.budget.nonlocal_usage == 320,
+            "successful non-local refresh did not independently absorb only its own growth");
+
+        hs::ResidencyManager unified;
+        hs::ResidencyBudgetSnapshot unified_budget{true, 1'000, 0, 0, 0, true, 1'000};
+        unified_budget.unified_memory = true;
+        unified.UpdateBudget(unified_budget);
+        {
+            hs::ScopedGpuAdmission admission(unified, 500, 400);
+            Check(admission && unified.Accounting().gpu_reserved_by_segment[0] == 900 &&
+                unified.Accounting().gpu_reserved_by_segment[1] == 0,
+                "UMA upload reservation was not combined with LOCAL capacity");
+        }
 
         hs::StreamingManager streaming;
         const auto request = streaming.Request("render/texture/environment_terrain_gaussian.rpkg",

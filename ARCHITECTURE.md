@@ -73,6 +73,8 @@ TickReadView borrows those owners through semantic accessors, immutable spans an
 cached small facts; it owns no actor/history mirror. Mutation is rejected while a
 scope is active. Presentation consumes the view synchronously and owns the render
 packet it publishes across threads. Full read-model copies are development exports.
+The `hs_gameplay_development` leaf target owns the explicit copy function and is
+linked by tests; ordinary Gameplay and Runtime do not contain the export body.
 
 Checksum capture is optional observability, not a gameplay decision. Existing
 simulation callers default to capture enabled; ordinary Runtime play disables
@@ -97,6 +99,14 @@ Core snapshot read pairs expose the publication sequence of each retained slot;
 tick/session values alone are not a publication identity.
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
+
+Presentation's immutable UiFrame owns both draw models and their displayed
+interaction facts. The exchange retains that owner with the current packet;
+Renderer receives its native-free draw span and the existing publication identity.
+Runtime accepts only a matching successful Present receipt, retaining the same UI
+owner plus the actual output extent for click admission. UI reuse compares concrete
+world/UI/settings dependencies before generating models; it does not compare draws.
+Simulation GPU submission history and accepted UI Present history are independent.
 
 PresentationCatalog and SimulationRules are typed tables. Their developer file
 decoders are the separate hs_presentation_io and hs_game_rules_io libraries.

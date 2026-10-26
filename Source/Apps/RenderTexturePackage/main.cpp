@@ -152,7 +152,7 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
                     texture.description.format == rd::kTextureFormatRgba32Float ? "rgba32f-linear" :
                     texture.description.format == rd::kTextureFormatBc7 ? "bc7-linear" :
                     "bc7-srgb");
-    spec.recipe_version = 1;
+    spec.recipe_version = 2;
     spec.namespace_path = action_namespace;
     spec.upstream.push_back(upstream);
     if (Current(build_root, spec, texture, source_id, product_id))

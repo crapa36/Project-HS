@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -154,6 +155,8 @@ struct AudioEngine::Impl
     std::thread reader;
     bool stopping{};
     std::array<float, XAUDIO2_MAX_AUDIO_CHANNELS> spatial_matrix{};
+    std::array<std::uint32_t, 4> spatial_matrix_key{};
+    bool spatial_matrix_valid{};
     bool capture_timings{}; // Configured before the reader is started.
     void (*wake_main)(void *) noexcept{};
     void *wake_context{};
@@ -163,6 +166,32 @@ struct AudioEngine::Impl
     AudioWorkTimings native_timings{};
     runtime_detail::DiagnosticClock Clock() const noexcept { return capture_timings ? AudioQpc : nullptr; }
     auto &Work(AudioWorkId id) noexcept { return work[static_cast<std::size_t>(id)]; }
+
+    std::span<const float> SpatialMatrix(Float3 position, AudioPriority priority) noexcept
+    {
+        const auto distance = DistanceScaler(priority);
+        const std::array key{std::bit_cast<std::uint32_t>(position.x),
+            std::bit_cast<std::uint32_t>(position.y), std::bit_cast<std::uint32_t>(position.z),
+            std::bit_cast<std::uint32_t>(distance)};
+        if (!spatial_matrix_valid || spatial_matrix_key != key)
+        {
+            runtime_detail::DiagnosticScope spatial(Work(AudioWorkId::Spatial), Clock());
+            X3DAUDIO_EMITTER emitter{};
+            emitter.Position = {position.x, position.y, position.z};
+            emitter.OrientFront = {0.0f, 0.0f, 1.0f};
+            emitter.OrientTop = {0.0f, 1.0f, 0.0f};
+            emitter.ChannelCount = 1;
+            emitter.CurveDistanceScaler = distance;
+            X3DAUDIO_DSP_SETTINGS dsp{};
+            dsp.SrcChannelCount = 1;
+            dsp.DstChannelCount = device_channels;
+            dsp.pMatrixCoefficients = spatial_matrix.data();
+            X3DAudioCalculate(x3d, &listener, &emitter, X3DAUDIO_CALCULATE_MATRIX, &dsp);
+            spatial_matrix_key = key;
+            spatial_matrix_valid = true;
+        }
+        return {spatial_matrix.data(), device_channels};
+    }
 
     void Failure(NativeAudioResult result, bool cleanup = false) noexcept
     {
@@ -296,6 +325,7 @@ struct AudioEngine::Impl
 
     void ReleaseNative() noexcept
     {
+        spatial_matrix_valid = false;
         for (auto &active : active_voices)
         {
             if (active.voice)
@@ -608,6 +638,7 @@ Result AudioEngine::InitializeDevice(const SettingsData &settings)
         return Result::Success();
     }
 
+    impl_->spatial_matrix_valid = false;
     impl_->listener.OrientFront = {0.0f, 0.0f, 1.0f};
     impl_->listener.OrientTop = {0.0f, 1.0f, 0.0f};
     impl_->device_channels = device_details.InputChannels;
@@ -748,20 +779,8 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     admission.Stop();
     auto *selected = free_slot ? free_slot : victim;
     if (!free_slot && (!selected || selected->priority >= cue.priority)) return AudioPlayResult::Limited;
-    const bool spatial_matrix = cue.spatial && sample->format.nChannels == 1;
-    if (spatial_matrix)
-    {
-        runtime_detail::DiagnosticScope spatial(impl_->Work(AudioWorkId::Spatial), impl_->Clock());
-        std::fill_n(impl_->spatial_matrix.data(), impl_->device_channels, 0.0f);
-        X3DAUDIO_EMITTER emitter{};
-        emitter.Position = {event.position.x, event.position.y, event.position.z};
-        emitter.OrientFront = {0.0f, 0.0f, 1.0f}; emitter.OrientTop = {0.0f, 1.0f, 0.0f};
-        emitter.ChannelCount = 1; emitter.CurveDistanceScaler = DistanceScaler(cue.priority);
-        X3DAUDIO_DSP_SETTINGS dsp{};
-        dsp.SrcChannelCount = 1; dsp.DstChannelCount = impl_->device_channels;
-        dsp.pMatrixCoefficients = impl_->spatial_matrix.data();
-        X3DAudioCalculate(impl_->x3d, &impl_->listener, &emitter, X3DAUDIO_CALCULATE_MATRIX, &dsp);
-    }
+    const auto spatial_matrix = cue.spatial && sample->format.nChannels == 1
+        ? impl_->SpatialMatrix(event.position, cue.priority) : std::span<const float>{};
     auto *target_bus = cue.bus == AudioBus::Sfx ? impl_->sfx_bus : cue.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
     auto *destination = target_bus ? target_bus : impl_->master_bus;
     XAUDIO2_SEND_DESCRIPTOR send{0, destination}; XAUDIO2_VOICE_SENDS sends{1, &send};
@@ -816,7 +835,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     std::uint64_t submit_qpc{};
     const bool start = !impl_->status.combat_paused || !IsCombatBus(cue.bus);
     const auto submitted = SubmitPreparedVoice(*source, sends, destination, impl_->device_channels,
-        spatial_matrix ? std::span<const float>(impl_->spatial_matrix.data(), impl_->device_channels) : std::span<const float>{}, buffer,
+        spatial_matrix, buffer,
         dequeued_qpc ? impl_->Clock() : nullptr, &submit_qpc, start);
     if (!submitted.Succeeded())
     {
@@ -926,32 +945,21 @@ void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noe
     if (equal(impl_->listener.Position, next_position) &&
         equal(impl_->listener.OrientFront, next_front) &&
         equal(impl_->listener.OrientTop, next_top)) return;
+    impl_->spatial_matrix_valid = false;
     impl_->listener.Position = next_position;
     impl_->listener.OrientFront = next_front;
     impl_->listener.OrientTop = next_top;
-    runtime_detail::DiagnosticScope spatial(impl_->Work(AudioWorkId::Spatial), impl_->Clock());
     for (auto &active : impl_->active_voices)
     {
         if (!active.voice || !active.queued || !active.spatial || !active.sample ||
             active.sample->format.nChannels != 1)
             continue;
-        X3DAUDIO_EMITTER emitter{};
-        emitter.Position = {active.position.x, active.position.y, active.position.z};
-        emitter.OrientFront = {0.0f, 0.0f, 1.0f};
-        emitter.OrientTop = {0.0f, 1.0f, 0.0f};
-        emitter.ChannelCount = 1;
-        emitter.CurveDistanceScaler = DistanceScaler(active.priority);
-        X3DAUDIO_DSP_SETTINGS dsp{};
-        dsp.SrcChannelCount = 1;
-        dsp.DstChannelCount = impl_->device_channels;
-        dsp.pMatrixCoefficients = impl_->spatial_matrix.data();
-        X3DAudioCalculate(impl_->x3d, &impl_->listener, &emitter,
-                          X3DAUDIO_CALCULATE_MATRIX,
-                          &dsp);
+        const auto matrix = impl_->SpatialMatrix(active.position, active.priority);
         const auto target_bus = active.bus == AudioBus::Sfx ? impl_->sfx_bus :
                                 active.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
+        runtime_detail::DiagnosticScope native(impl_->Work(AudioWorkId::NativeVoice), impl_->Clock());
         const auto result = active.voice->SetOutputMatrix(target_bus ? target_bus : impl_->master_bus,
-                                                          1, dsp.DstChannelCount, impl_->spatial_matrix.data());
+                                                          1, impl_->device_channels, matrix.data());
         if (FAILED(result))
         {
             impl_->Failure({AudioNativeOperation::Matrix, result});

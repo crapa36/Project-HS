@@ -490,6 +490,25 @@ void TestBalanceHitDeduplication()
     Check(!observer.metrics.detailed_balance_captured &&
               observer.player_hit_casts.empty() && !observer.enemy_seen_zero[0],
           "session reset marks disabled detail and clears all retained causes");
+
+    PickupWorld world;
+    auto &retained = world.telemetry->balance_observer;
+    retained.Reset(true);
+    retained.player_hit_casts = {123};
+    world.actors->player.retreat_followup_cast = 123;
+    world.actors->player.retreat_landing_pending = true;
+    world.RetireBalanceHitCauses();
+    Check(retained.player_hit_casts == std::vector<std::uint64_t>{123},
+          "landing still owns the original hit-cast membership");
+    world.actors->player.retreat_landing_pending = false;
+    world.actors->player.retreat_followup_tick = 20;
+    world.RetireBalanceHitCauses();
+    Check(retained.player_hit_casts == std::vector<std::uint64_t>{123},
+          "delayed second retreat still owns the original hit-cast membership");
+    world.actors->player.retreat_followup_tick = 0;
+    world.RetireBalanceHitCauses();
+    Check(retained.player_hit_casts.empty(),
+          "retreat membership retires after both future causes resolve");
 }
 
 void TestBleedActivePrefix()
@@ -557,23 +576,21 @@ void TestSpatialGridAgainstBruteForce()
     }
     grid.FinishBuild();
 
-    std::vector<std::size_t> candidates;
-    EnemyQuery range_query;
+    EnemyQuery collision_query, range_query;
     for (std::uint32_t query = 0; query < 256; ++query)
     {
         const Float2 from{(next() * 2.0f - 1.0f) * arena_half_extent,
                           (next() * 2.0f - 1.0f) * arena_half_extent};
         const Float2 to{(next() * 2.0f - 1.0f) * arena_half_extent,
                         (next() * 2.0f - 1.0f) * arena_half_extent};
-        CollectSpatialGridCandidates(
-            grid,
+        collision_query.Collect(grid,
             {std::min(from.x, to.x) - collision_radius,
              std::min(from.y, to.y) - collision_radius},
             {std::max(from.x, to.x) + collision_radius,
              std::max(from.y, to.y) + collision_radius},
-            arena_half_extent, candidates);
+            arena_half_extent, positions.size());
         std::vector<std::size_t> grid_hits;
-        for (const auto index : candidates)
+        for (const auto index : collision_query.rows)
             if (segment_circle(from, to, positions[index], collision_radius))
                 grid_hits.push_back(index);
         std::vector<std::size_t> brute_hits;
@@ -630,11 +647,6 @@ void TestSweptSpatialGridOrder()
         for (std::size_t cell = 0; cell < reference.size(); ++cell)
             Check(std::ranges::equal(grid[cell], reference[cell]),
                   "flat swept bins preserve each cell's insertion order and empty rebuilds");
-        std::vector<std::size_t> outer, nested;
-        CollectSpatialGridCandidates(grid, {-60, -60}, {60, 60}, 60, outer);
-        const auto retained = outer;
-        CollectSpatialGridCandidates(grid, {0, 0}, {8, 8}, 60, nested);
-        Check(outer == retained, "nested query owns separate output storage");
         unique.Collect(grid, {-60, -60}, {60, 60}, 60, count);
         Check(unique.rows.size() == count && std::ranges::is_sorted(unique.rows),
               "swept-cell visits produce one candidate per actor in original order");

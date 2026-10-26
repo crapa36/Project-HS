@@ -6,6 +6,7 @@
 #include <hs/render_data/texture_descriptor.hpp>
 
 #include <filesystem>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -19,9 +20,16 @@ struct TextureStreamId
     explicit operator bool() const noexcept { return value != 0; }
     friend bool operator==(TextureStreamId, TextureStreamId) = default;
 };
+[[nodiscard]] constexpr std::uint32_t NextTextureTransactionTarget(std::uint32_t actual_mip,
+    std::uint32_t desired_mip, bool reserved, bool reserved_published, std::uint32_t tail_mip) noexcept
+{
+    if (reserved && !reserved_published) return tail_mip;
+    return reserved && desired_mip < actual_mip
+        ? std::max(desired_mip, actual_mip - 1u) : desired_mip;
+}
 struct TextureStreamingCapabilities
 {
-    bool tiled_resources{}, sampler_feedback{}, packed_mip_arrays{};
+    bool tiled_resources{}, sampler_feedback{}, packed_mip_arrays{}, unified_memory{};
 };
 struct TextureStreamRegistration
 {
@@ -52,6 +60,9 @@ struct TextureStreamingGraphBinding
 {
     TextureStreamId texture;
     ResourceVersion sampled;
+    std::string_view logical_id;
+    std::uint32_t resident_mip{}, required_mip{}, effective_desired_mip{};
+    bool ready{};
 };
 struct TextureStreamingLayout
 {
@@ -102,6 +113,7 @@ class RendererTextureStreaming
         GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities &,
         std::uint32_t frame_count, std::span<const render_data::TextureDescriptor> texture_catalog);
     [[nodiscard]] Result Register(TextureStreamRegistration, ResidencyManager &, TextureStreamId &);
+    [[nodiscard]] Result SupplyDescriptor(std::string logical_id, render_data::TextureDescriptorStorage);
     [[nodiscard]] Result ValidateConfiguration(GraphicsQuality, std::uint32_t budget_mib) const;
     [[nodiscard]] Result Configure(GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib);
     void Demand(TextureStreamId, std::uint32_t logical_first_mip, std::uint32_t priority,

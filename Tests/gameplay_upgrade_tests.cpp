@@ -246,14 +246,16 @@ void TestDetailedBalanceSwitchPreservesSimulation()
     Check(enabled.ComputeChecksum() == disabled.ComputeChecksum(),
           "detailed balance capture does not change gameplay checksum");
     Check(enabled_probe.balance.skill_uses == disabled_probe.balance.skill_uses &&
-              enabled_probe.balance.skill_casts_with_hit ==
-                  disabled_probe.balance.skill_casts_with_hit &&
               enabled_probe.balance.skill_hit_events ==
                   disabled_probe.balance.skill_hit_events &&
-              enabled_probe.balance.enemy_hits == disabled_probe.balance.enemy_hits &&
               enabled_probe.balance.enemy_damage == disabled_probe.balance.enemy_damage &&
               enabled_probe.damage_by_skill == disabled_probe.damage_by_skill,
           "fixed UI balance aggregates are identical with detailed collection disabled");
+    Check(enabled_probe.balance.skill_casts_with_hit[0] > 0 &&
+              disabled_probe.balance.skill_casts_with_hit[0] == 0 &&
+              std::ranges::all_of(disabled_probe.balance.enemy_hits,
+                                  [](auto hits) { return hits == 0; }),
+          "disabled detail leaves unique hit membership metrics unavailable");
     Check(enabled_probe.balance.detailed_balance_captured &&
               !disabled_probe.balance.detailed_balance_captured &&
               enabled_probe.balance.upgrade_relic_synergy_count == 0 &&
@@ -485,7 +487,7 @@ void TestRetreatSlowTrailUsesPath()
     (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
                    sequence, held);
     hs::GameReadModelStorage model;
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto areas = model.View().areas;
     const auto trail = std::ranges::find_if(areas, [](const hs::AreaView &area) {
         return area.skill == hs::SkillKind::RetreatShot &&
@@ -505,7 +507,7 @@ void TestRetreatSlowTrailUsesPath()
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, on_path);
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, off_path);
     for (std::uint32_t step = 0; step < 35; ++step) (void)Tick(simulation, held);
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto enemies = model.View().enemies;
     Check(enemies.size() == 2, "retreat path probes disappeared");
     const auto slow = static_cast<std::uint8_t>(hs::StatusFlag::Slow);
@@ -602,7 +604,7 @@ void TestSecondRetreatRespectsCollision()
         {
             const auto before = simulation.GetObservation().player_position;
             (void)Tick(simulation, held);
-            simulation.CopyReadModelForDevelopment(model);
+            hs::CopyReadModelForDevelopment(simulation, model);
             const auto view = model.View();
             const auto arrow = std::ranges::find_if(view.projectiles, [](const auto &p) {
                 return p.skill == hs::SkillKind::RetreatShot &&

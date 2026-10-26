@@ -25,18 +25,40 @@ std::uint64_t DecodedBytes(const render_data::GeometryData &data)
         (data.meshlet_vertex_refs.capacity() + data.meshlet_triangles.capacity() +
             data.canonical_primitive_remap.capacity()) * sizeof(std::uint32_t);
 }
-bool AddBytes(std::uint64_t &sum, std::uint64_t bytes)
-{
-    if (sum > UINT64_MAX - bytes) return false;
-    sum += bytes;
-    return true;
-}
 }
 
 Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t bytes,
     std::uint32_t priority, bool need_cluster_slot, bool for_hlod_admission)
 {
-    if (!need_cluster_slot && residency.CanAdmit(bytes)) return Result::Success();
+    return TryRelieveStreamingPressure(bytes, 0, priority, need_cluster_slot, for_hlod_admission);
+}
+
+Result D3D12Renderer::Impl::TryRelieveStreamingPressure(std::uint64_t local_bytes,
+    std::uint64_t nonlocal_bytes, std::uint32_t priority, bool need_cluster_slot,
+    bool for_hlod_admission)
+{
+    if (adapter_unified_memory)
+    {
+        local_bytes = nonlocal_bytes > UINT64_MAX - local_bytes ? UINT64_MAX : local_bytes + nonlocal_bytes;
+        nonlocal_bytes = 0;
+    }
+    auto local_admitted = !local_bytes || residency.CanAdmit(local_bytes, 10, ResidencySegment::Local);
+    auto nonlocal_admitted = !nonlocal_bytes || residency.CanAdmit(nonlocal_bytes, 10, ResidencySegment::NonLocal);
+    if (!need_cluster_slot && local_admitted && nonlocal_admitted) return Result::Success();
+    if (!local_admitted || !nonlocal_admitted)
+    {
+        const auto attempted = std::max(local_budget_observation.attempted_at,
+            std::max(nonlocal_budget_observation.attempted_at, host_budget_observation.attempted_at));
+        if (attempted == std::chrono::steady_clock::time_point{} ||
+            std::chrono::steady_clock::now() - attempted >= std::chrono::milliseconds(250))
+            if (auto refreshed = RefreshBudgetObservations(); !refreshed) return refreshed;
+        local_admitted = !local_bytes || residency.CanAdmit(local_bytes, 10, ResidencySegment::Local);
+        nonlocal_admitted = !nonlocal_bytes || residency.CanAdmit(nonlocal_bytes, 10, ResidencySegment::NonLocal);
+        if (!need_cluster_slot && local_admitted && nonlocal_admitted) return Result::Success();
+    }
+    // Existing streamed allocations can free local native memory; an upload-only
+    // shortfall cannot be repaired by retiring local resident pages.
+    if (local_admitted && !nonlocal_admitted) return Result::Success();
     const auto completed = graph_queue_executor.Completed();
     std::uint32_t kind = UINT32_MAX, index{};
     std::tuple<std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t> best{};
@@ -499,13 +521,14 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
         const auto resident_bytes = device->GetResourceAllocationInfo(0, 1, &resident_description).SizeInBytes;
         const auto upload_description = BufferDescription(upload_bytes);
         const auto staging_bytes = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
-        std::uint64_t peak = resident_bytes;
-        if (staging_bytes == UINT64_MAX || !AddBytes(peak, staging_bytes))
+        if (staging_bytes == UINT64_MAX || resident_bytes == UINT64_MAX)
             return StreamFailure("Hierarchy upload admission overflow.");
-        ScopedGpuAdmission admission(residency, peak);
+        SampleAllocatorBudgetStats(false, false);
+        ScopedGpuAdmission admission(residency, resident_bytes, staging_bytes);
         if (!admission)
         {
-            if (auto result = TryRelieveStreamingPressure(peak, stream.priority, false, stream.hlod_admitted); !result) return result;
+            if (auto result = TryRelieveStreamingPressure(resident_bytes, staging_bytes, stream.priority,
+                    false, stream.hlod_admitted); !result) return result;
             continue; // Full decoded payload stays accounted until admission.
         }
         if (auto result = PrepareClusterPageUpload(stream.logical_slot, physical); !result) return result;

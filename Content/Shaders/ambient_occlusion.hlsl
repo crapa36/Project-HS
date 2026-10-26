@@ -96,6 +96,15 @@ AoGuide AoLoadGuide(int2 pixel)
     }
     return g;
 }
+bool AoLoadHorizonPosition(int2 pixel, out float3 position)
+{
+    float depth = AoDepth.Load(int3(pixel, 0));
+    uint2 material = AoMetadata.Load(int3(pixel, 0));
+    position = 0.0;
+    if (depth <= 0.0 || material.x == 0) return false;
+    position = AoViewPosition(pixel, depth);
+    return all(isfinite(position)) && position.z > 0.0;
+}
 AoGuide AoGuideForSample(uint2 aoPixel)
 {
     float2 rasterPixel = ((float2(aoPixel) + 0.5) * AoSize.zw + AoJitterUv.xy) * AoRenderSize.xy;
@@ -157,9 +166,9 @@ float AoHorizonVisibility(AoGuide g, uint2 pixel)
                 int2 samplePixel = int2(round(float2(g.pixel) + offset * (side == 0 ? -1.0 : 1.0)));
                 if (any(samplePixel < 0) || any(samplePixel >= int2(AoRenderSize.xy))) continue;
                 if (all(samplePixel == g.pixel)) continue;
-                AoGuide other = AoLoadGuide(samplePixel);
-                if (!other.valid) continue;
-                float3 delta = other.position - g.position;
+                float3 otherPosition;
+                if (!AoLoadHorizonPosition(samplePixel, otherPosition)) continue;
+                float3 delta = otherPosition - g.position;
                 float distanceSquared = dot(delta, delta);
                 if (distanceSquared < 1e-8 || distanceSquared >= radiusSquared) continue;
                 float distance = sqrt(distanceSquared);

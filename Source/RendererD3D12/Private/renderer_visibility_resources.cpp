@@ -69,10 +69,11 @@ Result D3D12Renderer::Impl::CreateVisibilityTargets()
 
 Result D3D12Renderer::Impl::WriteVisibilityDescriptors(std::uint32_t frame_slot,
     ID3D12Resource *static_scene, ID3D12Resource *dynamic_scene,
-    std::uint64_t static_ref_offset, std::uint32_t static_ref_count,
+    ID3D12Resource *static_refs, std::uint64_t static_ref_offset,
+    std::uint32_t static_ref_count,
     std::uint64_t dynamic_ref_offset, std::uint32_t dynamic_ref_count)
 {
-    if (frame_slot >= kFrameCount || !static_scene || !dynamic_scene)
+    if (frame_slot >= kFrameCount || !static_scene || !dynamic_scene || !static_refs)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Visibility descriptors have an invalid frame or scene.");
     auto &frame = frames[frame_slot];
@@ -118,7 +119,7 @@ Result D3D12Renderer::Impl::WriteVisibilityDescriptors(std::uint32_t frame_slot,
     structured_srv(frame.static_visible_refs.resource.Get());
     structured_srv(frame.dynamic_visible_refs.resource.Get());
     structured_srv(frame.static_retest_refs.resource.Get());
-    structured_srv(frame.upload.resource.Get(), static_ref_offset, static_ref_count);
+    structured_srv(static_refs, static_ref_offset, static_ref_count);
     structured_srv(frame.upload.resource.Get(), dynamic_ref_offset, dynamic_ref_count);
     texture_srv(visibility_ids.resource.Get());
     texture_srv(visibility_front_face.resource.Get());

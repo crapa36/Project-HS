@@ -67,7 +67,8 @@ class ActionResultSnapshot
     [[nodiscard]] std::size_t ProductCount() const;
     [[nodiscard]] std::vector<std::string_view> ProductIds() const;
     // On failure output may contain partial bytes; the caller must discard its staging output.
-    void CopyProductBytesTo(std::string_view product_id, std::ostream &output, UpstreamProduct &dependency) const;
+    void CopyProductBytesTo(std::string_view product_id, std::ostream &output,
+                            UpstreamProduct &dependency, std::span<char> scratch = {}) const;
     [[nodiscard]] bool HasProduct(std::string_view product_id) const;
     [[nodiscard]] const Json &ProductMetadata(std::string_view product_id) const;
     void ReadProduct(std::string_view product_id, UpstreamProduct &dependency,
@@ -90,6 +91,9 @@ class ActionResultSnapshot
 };
 
 void AtomicPublishFile(const fs::path &temporary, const fs::path &destination);
+// Failure can leave partial output; publish only after the whole staged write succeeds.
+void CopyFileBytesTo(const fs::path &path, std::ostream &output, std::uint64_t expected_size,
+                     std::string_view expected_digest, std::span<char> scratch);
 
 class Sha256Stream
 {

@@ -60,6 +60,7 @@ struct AudioStatus
 
 enum class AudioWorkId : std::uint8_t
 {
+    // Spatial measures actual X3DAudio calculations; NativeVoice includes matrix application.
     PrepareCue, Play, Stop, Listener, Reclaim, Evict, Admission, Spatial, NativeVoice, InitializeDevice, Count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(AudioWorkId::Count)> kAudioWorkNames{

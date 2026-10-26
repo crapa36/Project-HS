@@ -63,8 +63,11 @@ struct LocalProbeInputs
     CompletionSet completed;
     std::uint32_t max_cube_views{6}; // 1..6 per graph; zero pauses bake work.
     std::function<void(PassBuilder &)> declare_material_sampling;
+    std::array<std::byte, 32> capture_identity{};
+    bool capture_identity_valid{},capture_sources_ready{};
 };
 
+struct LocalProbeBakeStatus { bool sources_ready{}, capture_complete{}; };
 struct LocalProbeOutputs
 {
     ResourceVersion radiance, prefiltered, irradiance, first_hit_distance, records;
@@ -91,6 +94,8 @@ struct LocalProbeFramePlan
     bool draw_requested{},sampling_requested{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
+    std::array<std::byte, 32> capture_identity{};
+    bool capture_identity_valid{};
     std::shared_ptr<const StaticRenderScene> before_scene;
     render_data::SceneProbeRevisions before_revisions;
     std::uint64_t storage_generation{};
@@ -147,6 +152,8 @@ class LocalProbeSystem
     // actual capture can advance. Publication/pause frames need no such upload.
     [[nodiscard]] bool NativeCaptureRequired(const std::shared_ptr<const StaticRenderScene> &,
         render_data::SceneProbeRevisions, const CompletionSet &completed) const noexcept;
+    [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
+    [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
     // Submission success records completion requirements; it does not publish
     // new cubes. Register publishes only after those requirements are completed,
     // with exactly the retained scene and revisions still current. This also

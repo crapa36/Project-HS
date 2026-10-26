@@ -4,6 +4,7 @@
 #include <hs/core/cooked_format.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/gameplay/game_simulation_development.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/projector.hpp>
 #include <algorithm>
@@ -22,6 +23,7 @@
 namespace
 {
 void Check(bool value,const char *message) { if(!value) throw std::runtime_error(message); }
+void Check(const hs::Result &result, const char *message) { Check(result.Succeeded(), message); }
 std::uint32_t Hash32(std::string_view text)
 {
     std::uint32_t hash=2166136261u;
@@ -253,7 +255,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
     Check(found,"faster charge emitted no single decorated six-tick pulse");
     constexpr std::uint64_t player_render_id=1ull<<60;
     hs::GameReadModelStorage charging_model;
-    simulation.CopyReadModelForDevelopment(charging_model);
+    hs::CopyReadModelForDevelopment(simulation, charging_model);
     Check(pulse.upgrade_cast_id!=0 && pulse.upgrade_owner_id==player_render_id &&
           pulse.tick>charging_model.View().player.charge_start &&
           (pulse.tick+player_render_id)%6==0 &&
@@ -292,7 +294,7 @@ void SimulationChargedShotPulseProjectsAndDispatches()
     input.ordered_edges=std::span<const hs::ActionEdge>(release);
     (void)simulation.TickFixed(input,fixed_step);
     hs::GameReadModelStorage model;
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto projectile=std::find_if(model.View().projectiles.begin(),
                                        model.View().projectiles.end(),[](const auto &value) {
         return value.player_owned && value.skill==hs::SkillKind::ChargedShot && !value.dead;
@@ -916,7 +918,7 @@ void RealSlowAreaOwnersSelectAuthoredAliases()
         for(std::uint32_t step=0;step<450 && !found;++step)
         {
             model.Clear();
-            simulation.CopyReadModelForDevelopment(model);
+            hs::CopyReadModelForDevelopment(simulation, model);
             const auto view=model.View();
             snapshot.Clear();
             Check(hs::ProjectRenderSnapshot(view,presentation,ui,settings,snapshot),

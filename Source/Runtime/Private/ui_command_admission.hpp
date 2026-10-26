@@ -27,7 +27,7 @@ inline bool AdmitUiInteraction(UiInteraction &interaction, PresentationUiState &
 
 inline bool AdmitPresentedUiInteraction(UiInteraction &interaction,
     PresentationUiState &candidate, const PresentationUiState &previous,
-    const UiDrawPacketFacts &displayed,
+    const UiFrame &displayed,
     BoundedSpscQueue<UiActionEnvelope, 64> &actions,
     BoundedSpscQueue<UiCommand, 64> &commands, std::uint64_t &rejected) noexcept
 {

@@ -248,7 +248,7 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     ap::ActionSpec spec;
     spec.action_id = "render.texture." + std::string(texture.name);
     spec.recipe_id = "project-hs.render.texture.vfx-2d";
-    spec.recipe_version = 1;
+    spec.recipe_version = 2;
     spec.namespace_path = action_namespace;
     spec.upstream.push_back(upstream);
     if (Current(build_root, spec, description, source_id, product_id))

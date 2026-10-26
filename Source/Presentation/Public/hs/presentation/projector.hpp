@@ -2,6 +2,7 @@
 
 #include <hs/core/input.hpp>
 #include <hs/core/presentation_event.hpp>
+#include <hs/core/result.hpp>
 #include <hs/render_data/render_snapshot.hpp>
 #include <hs/core/settings.hpp>
 #include <hs/game_domain/domain_signal.hpp>
@@ -71,6 +72,20 @@ struct GraphicsSettingsUiModel
     bool pending{};
     std::optional<std::uint32_t> frame_generation_maximum;
 };
+
+// One immutable owner for the displayed models and the facts that interpret clicks.
+struct UiFrame
+{
+    Sequence generation{};
+    std::uint64_t session_id{}, selection_epoch{}, dynamic_pair_revision{};
+    SessionProbe session{};
+    PresentationUiState ui{};
+    SettingsData settings{};
+    std::shared_ptr<const GraphicsSettingsUiModel> graphics_model;
+    std::uint8_t modal_phase{}, pending_rebind_slot{0xFF};
+    bool input_rejected{};
+    std::vector<UiModel> draw_models;
+};
 inline constexpr std::size_t kGraphicsUiRowsPerPage = 10;
 // Main-menu title + panel + tabs + rows + telemetry + footer + display modal.
 inline constexpr std::size_t kGraphicsUiSnapshotReserve = 2 + 8 + 5 * kGraphicsUiRowsPerPage + 3 + 5 + 4;
@@ -91,6 +106,14 @@ inline constexpr std::size_t kCharacterUpgradesPerPage = 4, kCharacterRelicsPerP
 class EnemyAnimationState
 {
   public:
+    struct Sample
+    {
+        std::optional<Tick> recoil_start;
+        bool attack_recoil{};
+        std::optional<Tick> release_tick;
+        std::optional<Float3> release_direction;
+        std::optional<float> cancel_progress;
+    };
     struct DeathPose
     {
         std::uint64_t id{};
@@ -107,6 +130,7 @@ class EnemyAnimationState
     [[nodiscard]] std::optional<Tick> ReleaseTick(std::uint64_t id) const;
     [[nodiscard]] std::optional<Float3> ReleaseDirection(std::uint64_t id) const;
     [[nodiscard]] std::optional<float> CancelProgress(std::uint64_t id) const;
+    [[nodiscard]] Sample AnimationSample(std::uint64_t id) const;
     [[nodiscard]] std::span<const DeathPose> DeathPoses() const { return deaths_; }
     [[nodiscard]] Sequence PlayerMotionEpoch() const noexcept { return player_motion_epoch_; }
 
@@ -121,6 +145,21 @@ class EnemyAnimationState
     bool initialized_{};
 };
 
+// Advances only on actual simulation samples; render retries cannot emit audio.
+class PlayerFootstepTimeline
+{
+  public:
+    void Reset(const TickReadView &model, Sequence motion_epoch = 0) noexcept;
+    [[nodiscard]] std::optional<PresentationEvent> Advance(
+        const TickReadView &model, Sequence motion_epoch = 0) noexcept;
+
+  private:
+    Tick tick_{};
+    std::uint64_t session_id_{};
+    Sequence motion_epoch_{};
+    bool initialized_{};
+};
+
 [[nodiscard]] std::size_t ProjectDomainSignal(
     const DomainSignal &signal, std::span<PresentationEvent> output,
     float arena_half_extent = 0.0f) noexcept;
@@ -129,18 +168,18 @@ class EnemyAnimationState
                                                  const SettingsData &settings,
                                                  Float2 cursor_normalized,
                                                  const GraphicsSettingsUiModel *graphics_ui = nullptr);
-[[nodiscard]] bool ProjectDynamicTick(const TickReadView &model,
-                                      RenderSnapshotStorage &snapshot,
-                                      std::shared_ptr<const StaticRenderScene> environment_scene,
-                                      const EnemyAnimationState *enemy_animations = nullptr);
-[[nodiscard]] bool ProjectTickUi(const TickReadView &model,
-                                 const PresentationCatalog &presentation,
-                                 const PresentationUiState &ui,
-                                 const SettingsData &settings,
-                                 RenderSnapshotStorage &snapshot,
-                                 std::uint8_t pending_rebind_slot = 0xFF,
-                                 const GraphicsSettingsUiModel *graphics_ui = nullptr);
-[[nodiscard]] bool ProjectTick(const TickReadView &model,
+[[nodiscard]] Result ProjectDynamicTick(const TickReadView &model,
+                                        RenderSnapshotStorage &snapshot,
+                                        std::shared_ptr<const StaticRenderScene> environment_scene,
+                                        const EnemyAnimationState *enemy_animations = nullptr);
+void ProjectTickUi(const TickReadView &model,
+                   const PresentationCatalog &presentation,
+                   const PresentationUiState &ui,
+                   const SettingsData &settings,
+                   RenderSnapshotStorage &snapshot,
+                   std::uint8_t pending_rebind_slot = 0xFF,
+                   const GraphicsSettingsUiModel *graphics_ui = nullptr);
+[[nodiscard]] Result ProjectTick(const TickReadView &model,
                                          const PresentationCatalog &presentation,
                                          const PresentationUiState &ui,
                                          const SettingsData &settings,
@@ -151,7 +190,7 @@ class EnemyAnimationState
                                          const GraphicsSettingsUiModel *graphics_ui = nullptr);
 
 // Owned-format development fixture adapter; Runtime projects a scoped TickReadView.
-[[nodiscard]] bool ProjectRenderSnapshot(const GameReadModel &model,
+[[nodiscard]] Result ProjectRenderSnapshot(const GameReadModel &model,
                                          const PresentationCatalog &presentation,
                                          const PresentationUiState &ui,
                                          const SettingsData &settings,

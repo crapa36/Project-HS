@@ -184,6 +184,7 @@ class ActiveEffectStore
         std::uint64_t sequence{}, episode{}, owner{}, geometry_effect{};
         std::uint64_t event_tick{};
         std::uint32_t effect_handle{};
+        std::uint32_t geometry_sector_index{};
         bool operator==(const EventKey &) const = default;
     };
     struct EventKeyHash
@@ -196,7 +197,7 @@ class ActiveEffectStore
                     (hash << 6) + (hash >> 2);
             };
             mix(key.episode); mix(key.owner); mix(key.geometry_effect);
-            mix(key.event_tick); mix(key.effect_handle);
+            mix(key.event_tick); mix(key.effect_handle); mix(key.geometry_sector_index);
             return hash;
         }
     };
@@ -205,13 +206,13 @@ class ActiveEffectStore
     {
         return {input.sequence, input.status_episode_generation,
             input.geometry_owner_id, input.geometry_effect_id, input.event_tick,
-            input.effect_handle};
+            input.effect_handle, input.geometry_sector_index};
     }
     static bool SameEpisode(const VfxEventInput &a, const VfxEventInput &b) noexcept
     {
         return a.sequence == b.sequence && a.status_episode_generation == b.status_episode_generation &&
             a.geometry_owner_id == b.geometry_owner_id && a.geometry_effect_id == b.geometry_effect_id &&
-            a.event_tick == b.event_tick;
+            a.event_tick == b.event_tick && a.geometry_sector_index == b.geometry_sector_index;
     }
     std::vector<StoredRow> rows_;
     std::unordered_map<EventKey, Row, EventKeyHash> event_rows_;

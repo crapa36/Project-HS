@@ -3,8 +3,11 @@
 #include "renderer_resident_assets.hpp"
 
 #include <hs/render_data/geometry_hierarchy.hpp>
+#include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/scene_hlod.hpp>
 
+#include <algorithm>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -16,6 +19,25 @@ namespace
 Result ResidentFailure(std::string message)
 {
     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
+}
+
+Result ReadResidentPackageDirectory(const std::filesystem::path &path, std::uint64_t product_bytes,
+    AssetId asset, render_data::PackageDirectory &directory)
+{
+    constexpr std::size_t kMaxPrefix = 16 * 1024;
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() < 0 || static_cast<std::uint64_t>(input.tellg()) != product_bytes)
+        return ResidentFailure("Resident package changed before directory read: " + path.string());
+    std::vector<std::byte> prefix(static_cast<std::size_t>(std::min<std::uint64_t>(kMaxPrefix, product_bytes)));
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char *>(prefix.data()), static_cast<std::streamsize>(prefix.size())))
+        return ResidentFailure("Resident package directory read failed: " + path.string());
+    try { directory = render_data::ReadPackageDirectory(prefix, product_bytes, asset); }
+    catch (const std::exception &error)
+    {
+        return ResidentFailure("Invalid resident package directory " + path.string() + ": " + error.what());
+    }
+    return Result::Success();
 }
 
 // Resolve all actual resident/streaming dependencies before any GPU allocation.
@@ -117,36 +139,45 @@ Result ResolveResidentClosure(const RendererConfig &config,
             const auto file_bytes = std::filesystem::file_size(path, error);
             if (error || !file_bytes || file_bytes > accounting.host_staging_budget_bytes)
                 return ResidentFailure("Resident product exceeds the observed host staging budget: " + id);
-            std::vector<std::byte> bytes;
-            // Runtime has verified the complete immutable leased Generation.
-            // Bound the actual closure read, without repeating its SHA pass.
-            if (auto result = ReadBinary(path, bytes, file_bytes); !result) return result;
-            if (bytes.size() > UINT64_MAX - accounting.closure_payload_bytes)
+            if (file_bytes > UINT64_MAX - accounting.closure_payload_bytes)
                 return ResidentFailure("Resident closure payload size overflow.");
-            accounting.closure_payload_bytes += bytes.size();
-            accounting.largest_payload_bytes = std::max<std::uint64_t>(accounting.largest_payload_bytes, bytes.size());
+            accounting.closure_payload_bytes += file_bytes;
+            accounting.largest_payload_bytes = std::max(accounting.largest_payload_bytes, file_bytes);
             if (package)
             {
-                const auto value = render_data::ReadPackage(bytes, MakeAssetId(id));
-                pending.insert(pending.end(), value.dependencies.begin(), value.dependencies.end());
+                render_data::PackageDirectory directory;
+                if (auto result = ReadResidentPackageDirectory(path, file_bytes, MakeAssetId(id), directory); !result)
+                    return result;
+                pending.insert(pending.end(), directory.dependencies.begin(), directory.dependencies.end());
                 if (id == "render/character/archer.rpkg")
                 {
-                    const auto character = render_data::DecodeCharacterMetadataPackage(bytes, MakeAssetId(id), true);
-                    for (std::uint32_t material = 0; material < character.material_count; ++material)
+                    const auto bindings = std::ranges::find(directory.chunks,
+                        render_data::ChunkType::CharacterMaterialBindings, &render_data::PackageDirectoryChunk::type);
+                    if (bindings == directory.chunks.end() || !bindings->count)
+                        return ResidentFailure("Archer package lacks typed character material bindings.");
+                    for (std::uint64_t material = 0; material < bindings->count; ++material)
                     {
                         texture("archer_diffuse_" + std::to_string(material));
                         texture("archer_normal_" + std::to_string(material));
                     }
                 }
             }
-            else if (hierarchy)
-                for (const auto &page : render_data::DecodeGeometryHierarchy(bytes).pages)
-                    pending.push_back(page.logical_id);
-            else if (hlod)
+            else if (hierarchy || hlod)
             {
-                const auto value = render_data::DecodeSceneHlod(bytes);
-                pending.insert(pending.end(), value.dependencies.begin(), value.dependencies.end());
-                for (const auto &page : value.pages) pending.push_back(page.logical_id);
+                std::vector<std::byte> bytes;
+                // Runtime has verified the complete immutable leased Generation.
+                if (auto result = ReadBinary(path, bytes, file_bytes); !result) return result;
+                if (hierarchy)
+                {
+                    for (const auto &page : render_data::DecodeGeometryHierarchy(bytes).pages)
+                        pending.push_back(page.logical_id);
+                }
+                else
+                {
+                    const auto value = render_data::DecodeSceneHlod(bytes);
+                    pending.insert(pending.end(), value.dependencies.begin(), value.dependencies.end());
+                    for (const auto &page : value.pages) pending.push_back(page.logical_id);
+                }
             }
         }
         return Result::Success();
@@ -584,17 +615,25 @@ bool D3D12Renderer::Impl::HasUnresolvedResidentUtilityUploads() const noexcept
 }
 
 Result D3D12Renderer::Impl::AdmitResidentAllocation(const D3D12_RESOURCE_DESC &description,
-                                                D3D12_HEAP_TYPE type)
+    const D3D12MA::ALLOCATION_DESC &allocation)
 {
     if (!resident_preparation_accounting.enabled) return Result::Success();
     const auto size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
     if (size == UINT64_MAX || size > UINT64_MAX - resident_preparation_accounting.live_native_bytes)
         return ResidentFailure("Resident native allocation size overflow.");
-    DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
-    const auto segment = type == D3D12_HEAP_TYPE_DEFAULT || resident_preparation_accounting.unified_memory
-        ? DXGI_MEMORY_SEGMENT_GROUP_LOCAL : DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL;
-    const auto hr = adapter->QueryVideoMemoryInfo(0, segment, &memory);
+    auto segment = ResidencySegmentForHeap(allocation.HeapType);
+    if (allocation.CustomPool && !resident_preparation_accounting.unified_memory)
+    {
+        const auto properties = allocation.CustomPool->GetDesc().HeapProperties;
+        segment = properties.MemoryPoolPreference == D3D12_MEMORY_POOL_L1
+            ? ResidencySegment::Local : ResidencySegment::NonLocal;
+    }
+    if (auto refreshed = RefreshBudgetObservations(); !refreshed) return refreshed;
+    const auto &observation = segment == ResidencySegment::Local
+        ? local_budget_observation : nonlocal_budget_observation;
+    const auto hr = observation.last_result;
     if (FAILED(hr)) return HResultFailure("Query resident generation overlap budget", hr);
+    const auto &memory = observation.last_valid;
     // Match the renderer's established ten-percent device headroom. CurrentUsage
     // includes the old resident state, already prepared state and live SDK/view
     // allocations; do not add the old generation twice or evict it to prepare.

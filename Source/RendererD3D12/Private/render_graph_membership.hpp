@@ -10,7 +10,7 @@ namespace hs::render_graph
 {
 // The ordered list remains the authority for publication order. Most batches
 // have few resources; only large batches allocate a membership index. Both
-// containers live for one Execute attempt and are discarded if planning throws.
+// contents belong to one Execute attempt; their owner may retain capacity.
 template <typename Resource, typename Hash, typename Equal>
 bool AppendUniqueBatchResource(std::vector<Resource> &ordered,
     std::optional<std::unordered_set<Resource, Hash, Equal>> &membership, const Resource &resource)

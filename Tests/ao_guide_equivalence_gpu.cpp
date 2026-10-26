@@ -90,13 +90,18 @@ struct Gpu {
 };
 int main(int argc,char** argv)try{
  Check(argc>=2,"usage: ao_guide_equivalence_gpu <prototype root> [warp]");Gpu gpu(argv[1],argc>2&&std::string(argv[2])=="warp");
- UINT cases=0;UINT64 texels=0;bool saw_nonwhite=false,saw_fallback=false,saw_generic=false,saw_orthographic=false,saw_off_axis=false;
- UINT64 bit_differences=0;float max_difference=0;
- const std::array<const char*,12> names{"flat-density2","density0","density1","mixed-density","sky","invalid-material","material-edge","depth-below","depth-above","normal-below","normal-above","incompatible-raw"};
- for(auto extent:std::array<std::array<UINT,2>,4>{{{1,1},{7,9},{9,7},{17,17}}})for(UINT half=0;half<2;++half)for(UINT jitter=0;jitter<2;++jitter)for(UINT projection_mode=0;projection_mode<4;++projection_mode)for(UINT pattern=0;pattern<names.size();++pattern){
-  const UINT w=extent[0],h=extent[1],rw=w*(half+1),rh=h*(half+1),dw=(rw+7)/8,dh=(rh+7)/8;
+ UINT cases=0,reversed_cases=0;UINT64 texels=0;bool saw_nonwhite=false,saw_fallback=false,saw_generic=false,saw_orthographic=false,saw_off_axis=false;
+ bool reversed_near=false,reversed_middle=false,reversed_far=false,reversed_background=false,reversed_jitter=false,reversed_drs=false;
+ UINT64 bit_differences=0,reversed_bit_differences=0;float max_difference=0,reversed_max_difference=0;
+ const std::array<const char*,16> names{"flat-density2","density0","density1","mixed-density","sky","invalid-material","material-edge","depth-below","depth-above","normal-below","normal-above","incompatible-raw",
+  "production-reversed-near","production-reversed-middle","production-reversed-far","production-reversed-background"};
+ for(auto extent:std::array<std::array<UINT,2>,4>{{{1,1},{7,9},{9,7},{17,17}}})for(UINT half=0;half<2;++half)for(UINT jitter=0;jitter<2;++jitter)for(UINT projection_mode=0;projection_mode<5;++projection_mode)for(UINT pattern=0;pattern<names.size();++pattern){
+  if((projection_mode==4&&(extent!=std::array<UINT,2>{7,9}||half!=1||pattern<12))||
+     (projection_mode!=4&&pattern>=12))continue;
+  const UINT w=extent[0],h=extent[1],rw=projection_mode==4?w*3/4:w*(half+1),rh=projection_mode==4?h*3/4:h*(half+1),dw=(rw+7)/8,dh=(rh+7)/8;
   Constants c{};XMMATRIX projection{};
   if(projection_mode==0||projection_mode==3)projection=XMMatrixPerspectiveFovLH(1.05f,float(rw)/rh,0.1f,100.0f);
+  else if(projection_mode==4)projection=XMMatrixPerspectiveFovLH(1.05f,float(rw)/rh,100.0f,0.1f);
   else if(projection_mode==1)projection=XMMatrixPerspectiveOffCenterLH(-0.08f,0.12f,-0.07f,0.09f,0.1f,100.0f);
   else projection=XMMatrixOrthographicOffCenterLH(-10.0f,10.0f,-7.0f,7.0f,0.1f,100.0f);
   if(projection_mode==3){XMFLOAT4X4 sheared{};XMStoreFloat4x4(&sheared,projection);sheared._12=0.12f;projection=XMLoadFloat4x4(&sheared);}
@@ -107,15 +112,20 @@ int main(int argc,char** argv)try{
    <<" forbidden=["<<c.inverse._12<<","<<c.inverse._13<<","<<c.inverse._14<<","<<c.inverse._21<<","<<c.inverse._23<<","<<c.inverse._24<<","<<c.inverse._31<<","<<c.inverse._32<<"]\n";
   Check(fast_unprojection==(projection_mode!=3),"projection fixture fast-path classification");
   saw_off_axis|=projection_mode==1&&fast_unprojection;saw_orthographic|=projection_mode==2&&fast_unprojection;saw_generic|=projection_mode==3&&!fast_unprojection;
+  if(projection_mode==4){++reversed_cases;reversed_near|=pattern==12;reversed_middle|=pattern==13;reversed_far|=pattern==14;reversed_jitter|=jitter!=0;reversed_drs|=rw<w&&rh<h;}
+  if(projection_mode==4&&pattern==12){const auto zdepth=[&](float z){return XMVectorGetZ(XMVector3TransformCoord(XMVectorSet(0,0,z,1),projection));};
+   Check(zdepth(0.11f)>zdepth(10.0f)&&zdepth(10.0f)>zdepth(90.0f)&&zdepth(90.0f)>0&&zdepth(0.11f)<1,"production projection did not preserve reversed-Z near/mid/far ordering");}
   c.render={float(rw),float(rh),1.0f/rw,1.0f/rh};c.size={float(w),float(h),1.0f/w,1.0f/h};c.history=c.size;
   c.jitter={jitter?0.37f/rw:0,jitter?-0.29f/rh:0,0,0};c.parameters={2.0f,1.0f,0.8f,fast_unprojection?1.0f:0.0f};c.samples={4,4,0,0};c.frame={0,17,1,0};
   std::vector<float> depth(rw*rh);std::vector<std::array<int16_t,2>> normal(rw*rh,{32767,32767});
   std::vector<std::array<UINT,2>> metadata(rw*rh,{1,3});std::vector<uint8_t> density(dw*dh,2);
   for(UINT y=0;y<rh;++y)for(UINT x=0;x<rw;++x){const UINT i=y*rw+x;float z=2.0f;
+   if(pattern==12)z=0.11f;if(pattern==13)z=10.0f;if(pattern==14)z=90.0f;
    if(pattern==7&&x%2)z=2.0098f;if(pattern==8&&x%2)z=2.0102f;
    if(pattern==3)z=1.9f+0.02f*float((x*3+y)%7);
    depth[i]=XMVectorGetZ(XMVector3TransformCoord(XMVectorSet(0,0,z,1),projection));
-   if(pattern==4&&(x+y)%3==0)depth[i]=0;if(pattern==5&&(x+y)%3==0)metadata[i][0]=0;
+   if((pattern==4||pattern==15)&&(x+y)%3==0)depth[i]=0;if(pattern==5&&(x+y)%3==0)metadata[i][0]=0;
+   reversed_background|=projection_mode==4&&pattern==15&&depth[i]==0;
    if(pattern==6&&x%2)metadata[i][1]=4;
    if((pattern==9||pattern==10)&&x%2){const float a=pattern==9?0.099f:0.101f;const float nx=std::sin(a),nz=-std::cos(a);const float norm=std::abs(nx)+std::abs(nz);
     normal[i]={32767,int16_t(std::lround((1-nx/norm)*32767))};}}
@@ -156,10 +166,10 @@ int main(int argc,char** argv)try{
   for(UINT stage=0;stage<2;++stage)for(UINT y=0;y<h;++y)for(UINT x=0;x<w;++x){const auto* a=reinterpret_cast<const float*>(static_cast<const char*>(data[stage*2])+y*fp.Footprint.RowPitch)+x*4;
    const auto* b=reinterpret_cast<const float*>(static_cast<const char*>(data[stage*2+1])+y*fp.Footprint.RowPitch)+x*4;
    if(stage==0&&a[1]>0&&a[0]<0.99f)saw_nonwhite=true;if(stage==1&&pattern==11&&(x%2||y%2)&&a[1]>0&&a[0]!=0.125f)saw_fallback=true;
-   for(UINT k=0;k<4;++k){Check(std::isfinite(a[k])&&std::isfinite(b[k]),"nonfinite AO result");if(std::memcmp(a+k,b+k,4)!=0){++bit_differences;const float difference=std::abs(a[k]-b[k]);max_difference=std::max(max_difference,difference);
+   for(UINT k=0;k<4;++k){Check(std::isfinite(a[k])&&std::isfinite(b[k]),"nonfinite AO result");if(std::memcmp(a+k,b+k,4)!=0){++bit_differences;const float difference=std::abs(a[k]-b[k]);max_difference=std::max(max_difference,difference);if(projection_mode==4){++reversed_bit_differences;reversed_max_difference=std::max(reversed_max_difference,difference);}
     if(difference>2e-5f)std::cerr<<"Mismatch "<<names[pattern]<<" extent="<<w<<"x"<<h<<" half="<<half<<" jitter="<<jitter<<" projection="<<projection_mode<<" stage="<<stage<<" xy="<<x<<","<<y<<" component="<<k<<" before="<<a[k]<<" after="<<b[k]<<"\n";}}}
   for(UINT i=0;i<4;++i)readbacks[i]->Unmap(0,&none);++cases;texels+=UINT64(w)*h*2;
  }
- std::cout<<"AO comparisons: "<<cases<<" cases, "<<texels<<" texel pairs, bit differences="<<bit_differences<<", max absolute difference="<<max_difference<<", nonwhite="<<saw_nonwhite<<", incompatible fallback="<<saw_fallback<<", off-axis="<<saw_off_axis<<", orthographic="<<saw_orthographic<<", generic-fallback="<<saw_generic<<"\n";
- Check(saw_nonwhite&&saw_fallback&&saw_off_axis&&saw_orthographic&&saw_generic,"AO fixtures failed to exercise the selected paths");Check(max_difference<=2e-5f,"AO fast reconstruction exceeded numerical tolerance");return 0;
+ std::cout<<"AO comparisons: "<<cases<<" cases, "<<texels<<" texel pairs, bit differences="<<bit_differences<<", max absolute difference="<<max_difference<<", nonwhite="<<saw_nonwhite<<", incompatible fallback="<<saw_fallback<<", off-axis="<<saw_off_axis<<", orthographic="<<saw_orthographic<<", generic-fallback="<<saw_generic<<", production-reversed-z-cases="<<reversed_cases<<", reversed-z-bit-differences="<<reversed_bit_differences<<", reversed-z-max-difference="<<reversed_max_difference<<"\n";
+ Check(saw_nonwhite&&saw_fallback&&saw_off_axis&&saw_orthographic&&saw_generic,"AO fixtures failed to exercise the selected paths");Check(reversed_cases==8&&reversed_near&&reversed_middle&&reversed_far&&reversed_background&&reversed_jitter&&reversed_drs,"AO reversed-Z fixtures failed to exercise production depth inputs");Check(max_difference<=2e-5f,"AO fast reconstruction exceeded numerical tolerance");return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<"\n";return 1;}

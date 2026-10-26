@@ -264,6 +264,11 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 hs_configure_target(hs_gameplay)
 
+add_library(hs_gameplay_development STATIC EXCLUDE_FROM_ALL
+    Source/Gameplay/Private/game_simulation_development.cpp)
+target_link_libraries(hs_gameplay_development PUBLIC hs_gameplay)
+hs_configure_target(hs_gameplay_development)
+
 if(HS_BUILD_RUNTIME OR HS_BUILD_CONTENT_TOOLS OR HS_BUILD_RENDER_DATA_TESTS OR HS_BUILD_ASSET_PIPELINE_TESTS)
 add_library(hs_generation_lock STATIC
     Source/AssetManifest/Private/generation_lock.cpp)
@@ -719,9 +724,18 @@ if(MSVC)
     target_sources(hs_render_test_runner PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
 endif()
 if(HS_BUILD_CONTENT_TOOLS)
-    target_sources(hs_render_test_runner PRIVATE Source/Apps/RenderTestRunner/scene_probe_action.cpp)
-    target_link_libraries(hs_render_test_runner PRIVATE hs_asset_pipeline)
-    target_compile_definitions(hs_render_test_runner PRIVATE HS_SCENE_PROBE_ACTION_ENABLED=1)
+    add_executable(hs_scene_probe_bake
+        Source/Apps/SceneProbeBake/main.cpp
+        Source/Apps/SceneProbeBake/scene_probe_action.cpp
+        Source/Apps/Common/world_transport_scene.cpp)
+    target_link_libraries(hs_scene_probe_bake PRIVATE hs_asset_pipeline hs_renderer_d3d12 hs_render_data
+        hs_asset_manifest hs_jobs hs_game_rules_io hs_environment_layout nlohmann_json::nlohmann_json)
+    target_compile_definitions(hs_scene_probe_bake PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    hs_configure_target(hs_scene_probe_bake)
+    if(MSVC)
+        target_sources(hs_scene_probe_bake PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+    endif()
+    add_dependencies(hs_scene_probe_bake hs_runtime_assets)
     add_executable(hs_static_shadow_bake
         Source/Apps/StaticShadowBake/main.cpp
         Source/Apps/Common/world_transport_scene.cpp
@@ -827,7 +841,8 @@ add_library(hs_vfx_authoring STATIC
     Source/Apps/Content/vfx_program_cooker.cpp
     Source/Apps/Content/vfx_runtime_cooker.cpp
 )
-target_link_libraries(hs_vfx_authoring PRIVATE hs_render_data nlohmann_json::nlohmann_json DirectXTex)
+target_link_libraries(hs_vfx_authoring PUBLIC hs_render_data_values
+    PRIVATE hs_render_data nlohmann_json::nlohmann_json DirectXTex)
 target_include_directories(hs_vfx_authoring PUBLIC Source/RendererD3D12/Public)
 hs_configure_target(hs_vfx_authoring)
 add_executable(hs_vfx_prepare Source/Apps/Content/vfx_prepare_main.cpp)
@@ -1960,6 +1975,7 @@ if(TARGET hs_render_test_runner)
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/arena-static-shadow/result.json")
     endif()
 
+    if(TARGET hs_scene_probe_bake)
     # Bake from the layout-only selection. The output Action replaces that
     # product only in runtime-full, after static-shadow input has been formed.
     set(HS_SCENE_PROBE_BAKE_INPUT_LIST
@@ -1974,11 +1990,11 @@ if(TARGET hs_render_test_runner)
         COMMAND "$<TARGET_FILE:hs_generation>" --compose
             --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope scene-probe-bake-input
             --result-list "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
-        DEPENDS hs_generation "${HS_SCENE_PROBE_BAKE_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
+        DEPENDS hs_generation hs_scene_probe_bake "${HS_SCENE_PROBE_BAKE_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
         VERBATIM)
     set(HS_SCENE_PROBE_BAKED_RESULT
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/scene-probes-baked/result.json")
-    hs_add_asset_action(NAME hs_render_scene_probe_bake BUILDER hs_render_test_runner
+    hs_add_asset_action(NAME hs_render_scene_probe_bake BUILDER hs_scene_probe_bake
         RESULT "${HS_SCENE_PROBE_BAKED_RESULT}"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/scene-probes-baked/result.d"
         STATIC_INPUTS "${HS_SCENE_PROBE_BAKE_INPUT}" "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
@@ -1988,6 +2004,7 @@ if(TARGET hs_render_test_runner)
     add_dependencies(hs_render_scene_probe_bake hs_render_static_shadow_candidate)
     list(REMOVE_ITEM HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_RESULT}")
     list(APPEND HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_BAKED_RESULT}")
+    endif()
 endif()
 if(HS_BUILD_TESTS)
     # The full verify workflow builds ALL before running CTest directly.
@@ -2296,7 +2313,7 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_navigation_tests)
     add_test(NAME simulation.navigation COMMAND hs_navigation_tests)
     add_executable(hs_simulation_tests Tests/simulation_tests.cpp)
-    target_link_libraries(hs_simulation_tests PRIVATE hs_core hs_game_rules hs_gameplay)
+    target_link_libraries(hs_simulation_tests PRIVATE hs_core hs_game_rules hs_gameplay_development)
     hs_configure_target(hs_simulation_tests)
     add_test(NAME simulation.determinism-core COMMAND hs_simulation_tests)
     add_executable(hs_simulation_rules_serialization_tests
@@ -2312,6 +2329,7 @@ if(HS_BUILD_TESTS)
         target_include_directories(hs_render_graph_validation_tests PRIVATE
             Source/RendererD3D12/Private)
         target_link_libraries(hs_render_graph_validation_tests PRIVATE hs_core hs_render_data_values)
+        target_compile_definitions(hs_render_graph_validation_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
         hs_configure_target(hs_render_graph_validation_tests)
         add_test(NAME rendering.graph-range-validation
             COMMAND hs_render_graph_validation_tests)
@@ -2444,6 +2462,10 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS hs_content_generation)
     endif()
     if(HS_BUILD_RUNTIME)
+    set(HS_RENDER_TEST_VALIDATION_ARGS --validation)
+    if(HS_ENABLE_GPU_VALIDATION)
+        list(APPEND HS_RENDER_TEST_VALIDATION_ARGS --gpu-validation)
+    endif()
     add_test(
         NAME integration.render-smoke
         COMMAND
@@ -2481,7 +2503,7 @@ if(HS_BUILD_TESTS)
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/render-only
             --frames=60
             --barriers=enhanced
-            --validation
+            ${HS_RENDER_TEST_VALIDATION_ARGS}
             --persistent-scene-probe
             --require-multi-queue
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation
@@ -2492,7 +2514,7 @@ if(HS_BUILD_TESTS)
             --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/cluster-retest
             --frames=14 --surface=visibility --geometry=indexed
-            --barriers=enhanced --validation --persistent-scene-probe
+            --barriers=enhanced ${HS_RENDER_TEST_VALIDATION_ARGS} --persistent-scene-probe
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
     set_tests_properties(rendering.cluster-retest PROPERTIES TIMEOUT 120)
     add_test(NAME rendering.grass-history
@@ -2500,7 +2522,7 @@ if(HS_BUILD_TESTS)
             --generation=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json
             --artifacts=${CMAKE_CURRENT_BINARY_DIR}/Artifacts/grass-history
             --frames=16 --grass-history-probe=D --grass-cadence=144
-            --surface=visibility --geometry=indexed --barriers=enhanced --validation
+            --surface=visibility --geometry=indexed --barriers=enhanced ${HS_RENDER_TEST_VALIDATION_ARGS}
         BUILD_DEPENDS hs_render_test_runner hs_test_render_generation)
     set_tests_properties(rendering.grass-history PROPERTIES TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
     add_test(NAME rendering.local-probe-revisions
@@ -2653,7 +2675,7 @@ if(HS_BUILD_TESTS)
         Tests/gameplay_presentation_tests.cpp
         Tests/gameplay_determinism_tests.cpp
     )
-    target_link_libraries(hs_gameplay_tests PRIVATE hs_core hs_gameplay hs_game_rules_io hs_presentation hs_presentation_io hs_asset_manifest hs_render_data)
+    target_link_libraries(hs_gameplay_tests PRIVATE hs_core hs_gameplay_development hs_game_rules_io hs_presentation hs_presentation_io hs_asset_manifest hs_render_data)
     hs_configure_target(hs_gameplay_tests)
     add_test(NAME content.environment-assets COMMAND powershell -NoProfile -ExecutionPolicy Bypass
         -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_environment_assets.ps1"
@@ -2727,7 +2749,7 @@ if(HS_BUILD_TESTS)
         Tests/vfx_typed_light_commands_tests.cpp
         Tests/vfx_typed_mesh_commands_tests.cpp
         Tests/vfx_upgrade_dispatch_tests.cpp)
-    target_link_libraries(hs_vfx_synthetic_tests PRIVATE hs_runtime hs_vfx_image_io)
+    target_link_libraries(hs_vfx_synthetic_tests PRIVATE hs_runtime hs_vfx_image_io hs_gameplay_development)
     target_include_directories(hs_vfx_synthetic_tests PRIVATE
         Source/Runtime/Private Source/RendererD3D12/Public Source/Presentation/Public)
     hs_configure_target(hs_vfx_synthetic_tests)
@@ -2786,7 +2808,8 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_skin_cache_tests)
     add_test(NAME rendering.skin-cache COMMAND hs_skin_cache_tests)
     add_executable(hs_residency_streaming_tests Tests/residency_streaming_tests.cpp)
-    target_link_libraries(hs_residency_streaming_tests PRIVATE hs_renderer_d3d12)
+    target_link_libraries(hs_residency_streaming_tests PRIVATE hs_renderer_d3d12 D3D12MemoryAllocator)
+    target_compile_definitions(hs_residency_streaming_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_include_directories(hs_residency_streaming_tests PRIVATE
         Source/RendererD3D12/Private)
     hs_configure_target(hs_residency_streaming_tests)

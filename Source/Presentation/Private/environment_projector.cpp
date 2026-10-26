@@ -35,8 +35,7 @@ ProcessSceneLayout::ProcessSceneLayout(const TickReadView &model, std::string_vi
     data_.static_keys.reserve(data_.instances.size());
     for (auto &instance : data_.instances)
     {
-        PopulateRenderInstanceIdentity(instance);
-        instance.revisions = DeriveRenderInstanceRevisions(instance);
+        PopulateRenderInstanceRevisions(instance);
         if (!instance.stable_id) throw std::runtime_error("Process scene contains an anonymous static instance.");
         data_.static_keys.push_back(MakeRenderSceneInstanceKey(instance.stable_id, 0));
     }

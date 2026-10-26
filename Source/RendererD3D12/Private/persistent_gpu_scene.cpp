@@ -101,6 +101,7 @@ void PersistentGpuSceneSlots::BeginFrame(bool reset_scene)
     pending_content_revision_ = content_revision_;
     dirty_slots_.clear();
     dirty_ranges_.clear();
+    for (auto &ranges : dirty_channel_ranges_) ranges.clear();
     dirty_ranges_valid_ = true;
 }
 
@@ -112,9 +113,17 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
     if (key.stable_id == 0 && key.fallback_ordinal == 0)
         key.fallback_ordinal = 1;
 
-    if (const auto pending = pending_slots_.find(key); pending != pending_slots_.end())
+    const auto existing = reset_scene_ ? slots_.end() : slots_.find(key);
+    auto prepared_slot = std::numeric_limits<std::uint32_t>::max();
+    if (existing != slots_.end())
     {
-        const auto slot = pending->second;
+        if (pending_seen_[existing->second]) prepared_slot = existing->second;
+    }
+    else if (const auto pending = pending_new_slots_.find(key); pending != pending_new_slots_.end())
+        prepared_slot = pending->second;
+    if (prepared_slot != std::numeric_limits<std::uint32_t>::max())
+    {
+        const auto slot = prepared_slot;
         const auto &entry = pending_entries_.at(slot);
         metadata.generation = entry.generation;
         if (metadata.skin_flags != 0 &&
@@ -126,7 +135,6 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         return {slot, entry.generation, !same};
     }
 
-    const auto existing = reset_scene_ ? slots_.end() : slots_.find(key);
     std::uint32_t slot{};
     Entry next;
     if (existing == slots_.end())
@@ -213,10 +221,30 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         // unchanged instance bytes. Deformation has its own physical backing.
         if (payload_changed)
         {
+            std::uint8_t channels{};
+            const auto changed = [&](GpuSceneChannel channel, bool value) {
+                if (value) channels |= static_cast<std::uint8_t>(1u << static_cast<unsigned>(channel));
+            };
+            changed(GpuSceneChannel::Instance, binding.skin_index != metadata.skin_index ||
+                binding.generation != metadata.generation || binding.reserved != metadata.reserved);
+            changed(GpuSceneChannel::Transform,
+                std::memcmp(&before.position, &instance.position, sizeof(float) * 3) != 0 ||
+                std::memcmp(&before.scale, &instance.scale, sizeof(float) * 3) != 0 ||
+                std::bit_cast<std::uint32_t>(before.yaw) != std::bit_cast<std::uint32_t>(instance.yaw) ||
+                std::bit_cast<std::uint32_t>(before.padding) != std::bit_cast<std::uint32_t>(instance.padding));
+            changed(GpuSceneChannel::Mesh, before.mesh != instance.mesh || binding.asset_id != metadata.asset_id);
+            changed(GpuSceneChannel::Material, before.color != instance.color || binding.material_id != metadata.material_id);
+            changed(GpuSceneChannel::Bounds,
+                std::bit_cast<std::uint32_t>(before.position.w) != std::bit_cast<std::uint32_t>(instance.position.w));
+            changed(GpuSceneChannel::Skin, binding.skin_index != metadata.skin_index ||
+                binding.skin_flags != metadata.skin_flags || binding.skin_vertex_offset != metadata.skin_vertex_offset ||
+                binding.previous_skin_vertex_offset != metadata.previous_skin_vertex_offset ||
+                binding.skin_vertex_stride != metadata.skin_vertex_stride ||
+                binding.previous_skin_vertex_stride != metadata.previous_skin_vertex_stride);
             previous_payloads_.push_back({slot, instances_[slot], metadata_[slot]});
             instances_[slot] = instance;
             metadata_[slot] = metadata;
-            MarkDirty(slot);
+            MarkDirty(slot, channels);
         }
     }
     next.key = key;
@@ -224,7 +252,10 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
     next.active = true;
     if (pending_entries_.size() <= slot) pending_entries_.resize(std::size_t(slot) + 1);
     pending_entries_[slot] = next;
-    pending_slots_.emplace(key, slot);
+    if (existing == slots_.end()) pending_new_slots_.emplace(key, slot);
+    if (pending_seen_.size() <= slot) pending_seen_.resize(std::size_t(slot) + 1);
+    pending_active_slots_.push_back(slot);
+    pending_seen_[slot] = 1;
     ++active_count_;
     if (key.stable_id == 0) ++anonymous_count_;
     return {slot, next.generation, false};
@@ -234,11 +265,16 @@ void PersistentGpuSceneSlots::EndFrame()
 {
     changes_.destroyed = 0;
     if (!reset_scene_)
-        for (const auto &entry : entries_)
-            if (entry.active && !pending_slots_.contains(entry.key)) ++changes_.destroyed;
+        for (std::size_t slot = 0; slot < entries_.size(); ++slot)
+            if (entries_[slot].active && !pending_seen_[slot]) ++changes_.destroyed;
     pending_content_revision_ = content_revision_;
     if (content_changed_ || changes_.destroyed)
         if (++pending_content_revision_ == 0) ++pending_content_revision_;
+    // Native submission commits these owners; any allocation must fail before it.
+    entries_.reserve(instances_.size());
+    free_slots_.reserve(free_slots_.size() + changes_.destroyed);
+    if (!pending_new_slots_.empty())
+        slots_.reserve(reset_scene_ ? pending_new_slots_.size() : slots_.size() + pending_new_slots_.size());
     // Destruction and free-slot reuse are published only after submission.
 }
 
@@ -258,21 +294,20 @@ void PersistentGpuSceneSlots::Commit()
         for (std::uint32_t slot = 0; slot < entries_.size(); ++slot)
         {
             auto &entry = entries_[slot];
-            if (!entry.active || pending_slots_.contains(entry.key)) continue;
+            if (!entry.active || pending_seen_[slot]) continue;
             slots_.erase(entry.key);
             entry.active = false;
             free_slots_.push_back(slot);
         }
     }
     entries_.resize(instances_.size());
-    for (const auto &[key, slot] : pending_slots_)
-    {
-        static_cast<void>(key);
+    for (const auto slot : pending_active_slots_)
         entries_[slot] = pending_entries_[slot];
-    }
-    for (const auto &[key, slot] : pending_slots_) slots_.insert_or_assign(key, slot);
+    slots_.merge(pending_new_slots_);
     content_revision_ = pending_content_revision_;
-    pending_slots_.clear();
+    for (const auto slot : pending_active_slots_) pending_seen_[slot] = 0;
+    pending_active_slots_.clear();
+    pending_new_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -288,7 +323,9 @@ void PersistentGpuSceneSlots::Abort() noexcept
     }
     instances_.resize(entries_.size());
     metadata_.resize(entries_.size());
-    pending_slots_.clear();
+    for (const auto slot : pending_active_slots_) pending_seen_[slot] = 0;
+    pending_active_slots_.clear();
+    pending_new_slots_.clear();
     previous_payloads_.clear();
     pending_reused_slots_ = 0;
     pending_reset_slots_ = 0;
@@ -299,11 +336,7 @@ void PersistentGpuSceneSlots::MarkAllActiveDirty()
 {
     if (preparing_)
     {
-        for (const auto &[key, slot] : pending_slots_)
-        {
-            static_cast<void>(key);
-            MarkDirty(slot);
-        }
+        for (const auto slot : pending_active_slots_) MarkDirty(slot);
     }
     else
     {
@@ -318,17 +351,25 @@ const std::vector<PersistentGpuSceneRange> &PersistentGpuSceneSlots::DirtyRanges
     return dirty_ranges_;
 }
 
+const std::vector<PersistentGpuSceneRange> &PersistentGpuSceneSlots::DirtyRanges(GpuSceneChannel channel)
+{
+    if (!dirty_ranges_valid_) RebuildDirtyRanges();
+    return dirty_channel_ranges_.at(static_cast<std::size_t>(channel));
+}
+
 void PersistentGpuSceneSlots::Clear() noexcept
 {
     Abort();
     slots_.clear();
     entries_.clear();
     pending_entries_.clear();
+    pending_seen_.clear();
     instances_.clear();
     metadata_.clear();
     free_slots_.clear();
     dirty_slots_.clear();
     dirty_ranges_.clear();
+    for (auto &ranges : dirty_channel_ranges_) ranges.clear();
     active_count_ = 0;
     anonymous_count_ = 0;
     changes_ = {};
@@ -337,29 +378,36 @@ void PersistentGpuSceneSlots::Clear() noexcept
     dirty_ranges_valid_ = true;
 }
 
-void PersistentGpuSceneSlots::MarkDirty(std::uint32_t slot)
+void PersistentGpuSceneSlots::MarkDirty(std::uint32_t slot, std::uint8_t channels)
 {
-    dirty_slots_.push_back(slot);
+    if (channels == 0) return;
+    dirty_slots_.push_back({slot, channels});
     dirty_ranges_valid_ = false;
 }
 
 void PersistentGpuSceneSlots::RebuildDirtyRanges()
 {
-    std::ranges::sort(dirty_slots_);
-    const auto unique_end = std::ranges::unique(dirty_slots_).begin();
-    dirty_slots_.erase(unique_end, dirty_slots_.end());
-    dirty_ranges_.clear();
-    for (const auto slot : dirty_slots_)
+    std::ranges::sort(dirty_slots_, {}, &DirtySlot::slot);
+    std::size_t unique_count{};
+    for (const auto dirty : dirty_slots_)
     {
-        if (!dirty_ranges_.empty() &&
-            dirty_ranges_.back().begin + dirty_ranges_.back().count == slot)
-        {
-            ++dirty_ranges_.back().count;
-        }
-        else
-        {
-            dirty_ranges_.push_back({slot, 1});
-        }
+        if (unique_count != 0 && dirty_slots_[unique_count - 1].slot == dirty.slot)
+            dirty_slots_[unique_count - 1].channels |= dirty.channels;
+        else dirty_slots_[unique_count++] = dirty;
+    }
+    dirty_slots_.resize(unique_count);
+    dirty_ranges_.clear();
+    for (auto &ranges : dirty_channel_ranges_) ranges.clear();
+    const auto append = [](auto &ranges, std::uint32_t slot) {
+        if (!ranges.empty() && ranges.back().begin + ranges.back().count == slot)
+            ++ranges.back().count;
+        else ranges.push_back(PersistentGpuSceneRange{slot, 1});
+    };
+    for (const auto dirty : dirty_slots_)
+    {
+        append(dirty_ranges_, dirty.slot);
+        for (std::size_t channel = 0; channel < kGpuSceneChannelCount; ++channel)
+            if (dirty.channels & (1u << channel)) append(dirty_channel_ranges_[channel], dirty.slot);
     }
     dirty_ranges_valid_ = true;
 }

@@ -3,6 +3,7 @@
 #include <hs/render_data/texture_package.hpp>
 #include <hs/render_data/volume_texture_package.hpp>
 
+#include <array>
 #include <limits>
 
 namespace hs::render_data
@@ -20,6 +21,8 @@ struct TextureSubresourceLayout
     std::uint64_t offset{}; // Relative to the authenticated product bytes.
     std::uint32_t row_pitch{}, slice_pitch{};
     std::uint32_t byte_count{};
+    std::array<std::byte, 32> digest{}; // TXM2 2D subresource; volume descriptors have no range digest.
+    bool has_digest{};
 };
 
 // Generated constants refer to other generated arrays; object layouts are never serialized.

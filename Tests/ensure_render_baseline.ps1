@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $executablePath = [IO.Path]::GetFullPath($Executable)
 $pointerPath = [IO.Path]::GetFullPath($GenerationPointer)
 $artifactsPath = [IO.Path]::GetFullPath($ArtifactsRoot)
-$captureFlags = @('--smoke', '--smoke-render-lockstep', '--validation', '--ticks=180',
+$captureFlags = @('--smoke', '--smoke-render-lockstep', '--validation', '--capture-diagnostics', '--ticks=180',
     '--barriers=legacy', '--resize-test')
 $requiredFiles = @('result.json', 'spec.json', 'timeline.csv', 'gpu_passes.csv',
     'dynamic_instance_upload.csv', 'events.ndjson', 'render.json',

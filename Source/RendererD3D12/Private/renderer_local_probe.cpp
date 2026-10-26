@@ -111,7 +111,10 @@ struct LocalProbeStorage
     std::uint32_t mip_count{},srv_stride{},rtv_stride{},captured_views{};
     std::shared_ptr<const StaticRenderScene> scene;
     render_data::SceneProbeRevisions revisions;
+    std::array<std::byte,32> capture_identity{};
+    std::array<std::byte,32> finished_capture_identity{};
     CompletionSet completion,capture_completion,bake_completion;
+    bool capture_sources_ready{};
     bool capture_ready{},uploaded{},package_baked{},bake_submitted{},published{},current_request{},usable{true};
     D3D12_CPU_DESCRIPTOR_HANDLE Cpu(ID3D12DescriptorHeap *heap,std::uint32_t index,std::uint32_t stride) const
     { auto h=heap->GetCPUDescriptorHandleForHeapStart(); h.ptr+=SIZE_T(index)*stride; return h; }
@@ -128,6 +131,7 @@ struct LocalProbeSystem::Impl
         const RenderGraphBuilder *graph{}; std::shared_ptr<LocalProbeStorage> storage;
         std::vector<Import> imports; std::shared_ptr<const StaticRenderScene> scene;
         render_data::SceneProbeRevisions revisions;
+        std::array<std::byte,32> capture_identity{};
         std::uint32_t captured_views{}; bool upload{},finished_bake{};
     } pending;
 };
@@ -376,6 +380,7 @@ Result LocalProbeSystem::ExportBakedPackage(RenderGraphQueueExecutor &executor,T
 {
     package_bytes.clear(); auto s=impl_->storage;
     if(impl_->pending.graph || !s || !s->usable || !s->current_request || !s->bake_submitted ||
+        (!s->package_baked&&s->finished_capture_identity!=s->capture_identity) ||
         !s->scene || s->captured_views!=s->probes.size()*6)
         return Failure(ErrorCode::InvalidState,"Scene-probe export requires a complete current native capture (views=" +
             std::to_string(s ? s->captured_views : 0) + "/" + std::to_string(s ? s->probes.size()*6 : 0) +
@@ -571,7 +576,7 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
     plan.before_scene=s->scene;plan.before_revisions=s->revisions;
     plan.before_captured=s->captured_views;plan.before_uploaded=s->uploaded;
     plan.before_bake_submitted=s->bake_submitted;plan.before_published=s->published;
-    plan.scene=s->scene;plan.revisions=s->revisions;
+    plan.scene=s->scene;plan.revisions=s->revisions;plan.capture_identity=s->capture_identity;
     plan.capture_first=s->captured_views;plan.bake_submitted=s->bake_submitted;
     plan.published=s->published;
     if(!in.scene)
@@ -592,12 +597,20 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
                 plan.capture_first=static_cast<std::uint32_t>(s->probes.size()*6);
         }
     }
+    const bool package_sample_ready=s->package_baked&&!s->capture_ready&&s->description.revisions==in.revisions&&
+        plan.capture_first==s->probes.size()*6&&!plan.bake_submitted;
+    if(in.capture_identity_valid&&in.scene&&!package_sample_ready&&plan.scene==in.scene&&plan.revisions==in.revisions&&
+        plan.capture_identity!=in.capture_identity&&s->capture_completion.IsSatisfiedBy(in.completed))
+    {
+        plan.capture_identity=in.capture_identity;plan.capture_first=0;plan.bake_submitted=false;
+        plan.published=false;
+    }
     if(in.scene&&plan.bake_submitted&&plan.scene==in.scene&&plan.revisions==in.revisions&&
         s->bake_completion.IsSatisfiedBy(in.completed))plan.published=true;
     plan.current=plan.scene==in.scene&&plan.revisions==in.revisions;
     const auto total=static_cast<std::uint32_t>(s->probes.size()*6);
     if(plan.current&&!plan.published&&!plan.bake_submitted&&plan.capture_first<total&&
-        in.max_cube_views&&in.draw_static)
+        in.max_cube_views&&in.draw_static&&in.capture_identity_valid&&in.capture_sources_ready&&plan.capture_identity==in.capture_identity)
         plan.capture_count=std::min(in.max_cube_views,total-plan.capture_first);
     plan.integrate=plan.capture_count&&
         (plan.capture_first+plan.capture_count)/6>plan.capture_first/6;
@@ -607,6 +620,21 @@ Result LocalProbeSystem::PrepareFrameRecordData(const LocalProbeInputs &in,Local
         (plan.integrate&&plan.capture_first+plan.capture_count==total);
     plan.material_sampling=plan.capture_count&&bool(in.draw_static)&&bool(in.declare_material_sampling);
     plan.valid=true;return Result::Success();
+}
+LocalProbeBakeStatus LocalProbeSystem::BakeStatus(const CompletionSet &completed) const noexcept
+{
+    const auto &s=impl_->storage;
+    if(!s||!s->usable)return {};
+    const auto total=static_cast<std::uint32_t>(s->probes.size()*6);
+    return {s->capture_sources_ready,s->bake_submitted&&s->captured_views==total&&
+        (s->package_baked||s->finished_capture_identity==s->capture_identity)&&
+        s->bake_completion.IsSatisfiedBy(completed)};
+}
+bool LocalProbeSystem::CaptureIdentityPending(const CompletionSet &completed) const noexcept
+{
+    const auto &s=impl_->storage;
+    return s&&s->usable&&s->capture_ready&&s->current_request&&
+        (!s->bake_submitted||!s->bake_completion.IsSatisfiedBy(completed));
 }
 Result LocalProbeSystem::Register(RenderGraphBuilder &graph,const LocalProbeInputs &in,LocalProbeOutputs &out)
 {
@@ -702,7 +730,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         layout->scene_reads.assign(in.scene_reads.begin(),in.scene_reads.end());}
     Impl::Pending pending;pending.graph=&graph;pending.storage=s;
     pending.scene=plan.scene;pending.revisions=plan.revisions;
-    pending.captured_views=plan.capture_first;pending.upload=plan.upload;
+    pending.captured_views=plan.capture_first;pending.capture_identity=plan.capture_identity;pending.upload=plan.upload;
     for(auto *resource:{&s->disabled_records,&s->raw,&s->ggx,&s->sh,&s->distance,
             &s->records,&s->upload,&s->depth})
         if(resource->resource)
@@ -864,7 +892,8 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
     if(retained&&retained->outputs!=final_versions)
         return Failure(ErrorCode::InvalidState,"Local probe retained output versions changed.");
     if(layout){layout->pass_count=pass_index;layout->outputs=final_versions;}
-    s->scene=plan.scene;s->revisions=plan.revisions;s->captured_views=plan.capture_first;
+    s->scene=plan.scene;s->revisions=plan.revisions;s->capture_identity=plan.capture_identity;s->captured_views=plan.capture_first;
+    if(in.capture_identity_valid)s->capture_sources_ready=in.capture_sources_ready;
     s->bake_submitted=plan.bake_submitted;s->published=plan.published;
     s->current_request=current;
     impl_->pending=std::move(pending); return Result::Success();
@@ -900,10 +929,10 @@ Result LocalProbeSystem::CompleteSubmission(const RenderGraphBuilder &graph,cons
     if(success)
     {
         if(p.upload) s->uploaded=true;
-        if(p.scene==current_scene && p.revisions==current_revisions)
+        if(p.scene==current_scene && p.revisions==current_revisions && p.capture_identity==s->capture_identity)
         {
             s->captured_views=p.captured_views;
-            if(p.finished_bake) { s->bake_submitted=true; s->bake_completion=s->completion; }
+            if(p.finished_bake) { s->bake_submitted=true; s->finished_capture_identity=p.capture_identity; s->bake_completion=s->completion; }
         }
         else { s->published=false; s->bake_submitted=false; }
     }

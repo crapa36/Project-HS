@@ -130,7 +130,7 @@ void CheckSettingsTelemetry(hs::GameSimulation &simulation)
     for (const auto &descriptor : hs::GraphicsSettingDescriptors())
         receipt.resolved.push_back({descriptor.id, "fixture applied value", "Fixture native applied status"});
     hs::GameReadModelStorage model;
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     hs::RenderSnapshotStorage snapshot(16, 2, 2, hs::kGraphicsUiSnapshotReserve);
     auto ui = test_ui;
     ui.settings_group = 0;
@@ -236,7 +236,7 @@ void TestCursorMovement()
               std::abs(negative_edge.y) < 0.0001f,
           "new RMB click replaces destination and reaches it");
     hs::GameReadModelStorage movement_model;
-    simulation.CopyReadModelForDevelopment(movement_model);
+    hs::CopyReadModelForDevelopment(simulation, movement_model);
     Check(!movement_model.View().player.locomotion_moving &&
               movement_model.View().player.movement_stopped_tick != 0,
           "actual movement stop retains its presentation clock");
@@ -392,6 +392,7 @@ void TestCharacterInformationPage()
     const auto opened = TickEdge(simulation, hs::GameAction::CharacterPage,
                                  hs::EdgeKind::Pressed, sequence, held);
     Check(opened.phase == hs::SessionPhase::Paused && opened.tick == before &&
+              opened.world_changed &&
               test_ui.page == hs::UiPage::CharacterOverview,
           "Tab opens the character page and pauses simulation");
 
@@ -463,7 +464,7 @@ void TestCharacterInformationPage()
         hs::SettingsData remapped;
         remapped.skill_virtual_keys = {'Z', 'X', 0x71, '4'};
         hs::GameReadModelStorage model;
-        simulation.CopyReadModelForDevelopment(model);
+        hs::CopyReadModelForDevelopment(simulation, model);
         snapshot.Clear();
         Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation, test_ui,
                   remapped, snapshot), "remapped skill labels snapshot");
@@ -660,7 +661,7 @@ void TestSkillUpgradeCardsHaveDescriptions()
 
     hs::RenderSnapshotStorage snapshot(16, 2, 2, 128);
     hs::GameReadModelStorage exhausted;
-    simulation.CopyReadModelForDevelopment(exhausted);
+    hs::CopyReadModelForDevelopment(simulation, exhausted);
     exhausted.session.level_rerolls_remaining = 0;
     Check(hs::ProjectRenderSnapshot(exhausted.View(), DefaultContent().presentation, {}, {}, snapshot),
           "exhausted reroll snapshot");
@@ -861,8 +862,88 @@ void TestEnemyAnimationStateSignals()
     suicide_storage.tick = 1;
     suicide_state.Update(suicide_storage.View(), {});
     Check(suicide_state.DeathPoses().empty(), "suicide explosion without death signal has no corpse");
+    hs::EnemyView cancelling{};
+    cancelling.id = {8}; cancelling.kind = hs::EnemyKind::Suicide;
+    cancelling.health = cancelling.max_health = 100;
+    cancelling.attacking = true; cancelling.attack_started = 2; cancelling.attack_resolve = 12;
+    suicide_storage.Clear(); suicide_storage.AddEnemy(cancelling);
+    suicide_state.Update(suicide_storage.View(), {});
+    cancelling.attacking = false;
+    suicide_storage.Clear(); suicide_storage.AddEnemy(cancelling); suicide_storage.tick = 2;
+    suicide_state.Update(suicide_storage.View(), {});
+    const auto cancel_sample = suicide_state.AnimationSample(8);
+    Check(cancel_sample.cancel_progress.has_value() && *cancel_sample.cancel_progress == 0.0f,
+          "zero-progress cancel stays engaged in the per-actor animation sample");
     storage.tick = 49; state.Update(storage.View(), {});
     Check(state.DeathPoses().empty(), "corpse expires after 48 ticks");
+}
+
+void TestPlayerFootstepTimeline()
+{
+    hs::GameReadModelStorage storage;
+    storage.session_id = 23;
+    hs::PlayerFootstepTimeline timeline;
+    {
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        timeline.Reset(view);
+    }
+    for (hs::Tick tick = 1; tick <= 22; ++tick)
+    {
+        storage.tick = tick;
+        storage.player.locomotion_blend = 0.0f;
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        Check(!timeline.Advance(view),
+              "stopped secondary timeline advances without cue");
+    }
+    storage.tick = 23;
+    storage.player.position = {2.0f, -3.0f};
+    storage.player.locomotion_blend = 0.75f;
+    {
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        const auto first = timeline.Advance(view);
+        Check(first && first->tick == 23 && first->sequence == 23 && first->session_id == 23 &&
+                  first->asset.value == hs::MakeAssetId("audio.player.footstep_run").value &&
+                  first->position.x == 2.0f && first->position.z == -3.0f,
+              "tick 22 stopped to tick 23 moving emits the current run sample");
+        Check(!timeline.Advance(view),
+              "same-tick retry does not duplicate a footstep");
+    }
+
+    std::vector<hs::PresentationEvent> gap_events;
+    for (hs::Tick tick = 24; tick <= 70; ++tick)
+    {
+        storage.tick = tick;
+        storage.player.position = {static_cast<float>(tick), 1.0f};
+        storage.player.locomotion_blend = tick == 45 ? 0.25f : tick == 68 ? 0.75f : 0.0f;
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        if (auto event = timeline.Advance(view))
+            gap_events.push_back(*event);
+    }
+    Check(gap_events.size() == 2 && gap_events[0].tick == 45 && gap_events[0].sequence == 45 &&
+              gap_events[0].asset.value == hs::MakeAssetId("audio.player.footstep_walk").value &&
+              gap_events[1].tick == 68 && gap_events[1].sequence == 68 &&
+              gap_events[1].asset.value == hs::MakeAssetId("audio.player.footstep_run").value,
+          "crossings remain on tick 45 and 68 across a 40-to-70 render-consumption gap");
+    storage.session_id = 24;
+    storage.tick = 71;
+    storage.player.locomotion_blend = 1.0f;
+    {
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        Check(!timeline.Advance(view),
+              "new session resets the secondary timeline");
+    }
+    storage.tick = 72;
+    {
+        const auto sample = storage.View();
+        const auto view = hs::development::BorrowOwnedReadModel(sample);
+        Check(!timeline.Advance(view, 5),
+              "instant motion epoch resets the secondary timeline");
+    }
 }
 
 void TestPlayerInstantMotionSignal()
@@ -893,7 +974,10 @@ void TestPlayerInstantMotionSignal()
     state.Update(storage.View(), {});
     Check(state.PlayerMotionEpoch() == 5, "skipped publications retain the last movement epoch");
     hs::RenderSnapshotStorage snapshot(30000, 2048, 8, 2048);
-    Check(hs::ProjectDynamicTick(storage.View(), snapshot, {}, &state) &&
+    const auto owned = storage.View();
+    const auto read = hs::development::BorrowOwnedReadModel(owned);
+    Check(hs::ProjectDynamicTick(read, snapshot,
+              hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read, {})), &state) &&
               snapshot.View().camera.target_motion_epoch == 5 &&
               snapshot.View().instances.front().motion_epoch == 5,
           "player and camera publish the same movement boundary");
@@ -1705,7 +1789,7 @@ void TestSessionIdentityAcrossPresentationReset()
 
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::StartSession}).Succeeded(),
           "first session starts");
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto first_id = model.View().session_id;
     Check(first_id != 0, "first session receives a nonzero identity");
     Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
@@ -1723,7 +1807,7 @@ void TestSessionIdentityAcrossPresentationReset()
 
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::StartSession}).Succeeded(),
           "second session starts");
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto second_id = model.View().session_id;
     Check(second_id > first_id, "session identity increases across reset");
     snapshot.Clear();
@@ -2202,7 +2286,7 @@ void TestBorrowedProjectionOwnsPublication()
     hs::HeldInputState held{}; held.basic_attack_held = true; held.aim_world = {20, 0, 0};
     for (int frame = 0; frame < 18; ++frame) (void)Tick(simulation, held);
     hs::GameReadModelStorage legacy;
-    simulation.CopyReadModelForDevelopment(legacy);
+    hs::CopyReadModelForDevelopment(simulation, legacy);
     hs::RenderSnapshotStorage projected(64, 64, 8, 64), fixture(64, 64, 8, 64);
     {
         auto read = simulation.BorrowTickReadView();
@@ -2261,6 +2345,7 @@ void RunGameplayPresentationTests()
     TestProjectileProjectionCarriesAuthoritativeOwner();
     TestProjectileUpgradeAttachmentEpisodes();
     TestEnemyAnimationStateSignals();
+    TestPlayerFootstepTimeline();
     TestPlayerInstantMotionSignal();
     TestSlimeAttackPoseTransitions();
     TestAuthoredEnvironmentProjection();

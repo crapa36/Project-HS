@@ -1,6 +1,7 @@
 #include <hs/render_data/texture_package.hpp>
 #include <hs/render_data/texture_descriptor.hpp>
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/sha256.hpp>
 
 #include <algorithm>
 #include <array>
@@ -13,9 +14,9 @@ namespace hs::render_data
 namespace
 {
 constexpr std::uint32_t kMetadataMagic = 0x314d5854; // TXM1
-constexpr std::uint32_t kMetadataVersion = 1;
+constexpr std::uint32_t kMetadataVersion = 2;
 constexpr std::size_t kMetadataHeader = 40;
-constexpr std::size_t kRecordStride = 16;
+constexpr std::size_t kRecordStride = 48;
 constexpr std::uint64_t kMaxPayload = 32ull * 1024 * 1024;
 constexpr std::uint32_t kMaxSubresources = 4096;
 
@@ -123,6 +124,8 @@ std::vector<std::byte> BuildTexturePackage(
         Put(metadata, entry, layout[i].offset, 8);
         Put(metadata, entry + 8, layout[i].row_pitch, 4);
         Put(metadata, entry + 12, layout[i].slice_pitch, 4);
+        const auto digest = Sha256(payload.subspan(static_cast<std::size_t>(layout[i].offset), layout[i].slice_pitch));
+        std::copy(digest.begin(), digest.end(), metadata.begin() + static_cast<std::ptrdiff_t>(entry + 16));
     }
     const auto stride = description.format == kTextureFormatRgba8 ||
                         description.format == kTextureFormatRgba8Srgb ||
@@ -134,7 +137,7 @@ std::vector<std::byte> BuildTexturePackage(
                         description.format == kTextureFormatBc4 && payload.size() % 16 ?
                             8u : 16u;
     const std::array chunks{
-        ChunkSource{static_cast<std::uint32_t>(ChunkType::TextureMetadata), 1, true,
+        ChunkSource{static_cast<std::uint32_t>(ChunkType::TextureMetadata), 2, true,
                     metadata, 1, static_cast<std::uint32_t>(metadata.size())},
         ChunkSource{static_cast<std::uint32_t>(ChunkType::TextureSubresources), 1, true,
                     payload, payload.size() / stride, stride}};
@@ -151,6 +154,7 @@ TexturePackageView ReadTexturePackage(const PackageView &package)
 {
     Require(package.chunks.size() == 2 &&
             package.chunks[0].type == ChunkType::TextureMetadata &&
+            package.chunks[0].version == kMetadataVersion &&
             package.chunks[1].type == ChunkType::TextureSubresources &&
             package.chunks[0].required && package.chunks[1].required,
             "expected required texture metadata and subresource chunks");
@@ -178,9 +182,11 @@ TexturePackageView ReadTexturePackage(const PackageView &package)
     {
         const auto entry = kMetadataHeader + i * kRecordStride;
         const auto &record = layout[i];
+        const auto digest = Sha256(payload.subspan(static_cast<std::size_t>(record.offset), record.slice_pitch));
         Require(Get(metadata, entry, 8) == record.offset &&
                 Get(metadata, entry + 8, 4) == record.row_pitch &&
-                Get(metadata, entry + 12, 4) == record.slice_pitch,
+                Get(metadata, entry + 12, 4) == record.slice_pitch &&
+                std::equal(digest.begin(), digest.end(), metadata.begin() + static_cast<std::ptrdiff_t>(entry + 16)),
                 "texture subresource pitch or offset mismatch");
         view.subresources.push_back({record.array_slice, record.mip_level,
                                      record.width, record.height, record.row_pitch,
@@ -203,8 +209,12 @@ TextureDescriptorStorage CompileTextureDescriptor(
     const auto retain_layout = [&](const auto &view) {
         descriptor.subresources.reserve(view.subresources.size());
         for (const auto &subresource : view.subresources)
+        {
+            const bool has_digest = descriptor.dimension == TextureDimension::Texture2DArray;
             descriptor.subresources.push_back({static_cast<std::uint64_t>(subresource.bytes.data() - bytes.data()),
-                subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size())});
+                subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size()),
+                has_digest ? Sha256(subresource.bytes) : std::array<std::byte, 32>{}, has_digest});
+        }
     };
     if (magic == 0x31565854) // TXV1
     {
@@ -233,6 +243,7 @@ TextureDescriptorStorage CompileTextureMetadataDescriptor(const PackageDirectory
 {
     Require(directory.asset_id.value && directory.chunks.size() == 2 &&
         directory.chunks[0].type == ChunkType::TextureMetadata &&
+        directory.chunks[0].version == kMetadataVersion &&
         directory.chunks[1].type == ChunkType::TextureSubresources &&
         directory.chunks[0].required && directory.chunks[1].required &&
         metadata.size() == directory.chunks[0].byte_count && metadata.size() >= kMetadataHeader &&
@@ -257,12 +268,14 @@ TextureDescriptorStorage CompileTextureMetadataDescriptor(const PackageDirectory
     {
         const auto entry = kMetadataHeader + i * kRecordStride;
         const auto &record = layout[i];
+        std::array<std::byte, 32> digest{};
+        std::copy_n(metadata.begin() + static_cast<std::ptrdiff_t>(entry + 16), digest.size(), digest.begin());
         Require(Get(metadata, entry, 8) == record.offset &&
             Get(metadata, entry + 8, 4) == record.row_pitch &&
             Get(metadata, entry + 12, 4) == record.slice_pitch,
             "texture proof subresource layout mismatch");
         descriptor.subresources.push_back({payload.offset + record.offset,
-            record.row_pitch, record.slice_pitch, record.slice_pitch});
+            record.row_pitch, record.slice_pitch, record.slice_pitch, digest, true});
     }
     for (const auto &dependency : directory.dependencies)
         descriptor.dependencies.push_back(MakeAssetId(dependency));
@@ -287,7 +300,7 @@ void ValidateTextureDescriptor(const TextureDescriptor &descriptor, std::uint64_
                 "texture descriptor subresource exceeds product bounds");
         Require(record.offset >= base && record.offset - base == layout[i].offset &&
                 record.row_pitch == layout[i].row_pitch && record.slice_pitch == layout[i].slice_pitch &&
-                record.byte_count == layout[i].slice_pitch,
+                record.byte_count == layout[i].slice_pitch && record.has_digest,
                 "texture descriptor pitch or offset mismatch");
     }
 }
@@ -305,6 +318,8 @@ TexturePackageView BindTextureDescriptor(std::span<const std::byte> bytes, const
         const auto &record = descriptor.subresources[i];
         Require(record.offset <= bytes.size() && record.byte_count <= bytes.size() - record.offset,
                 "bound texture subresource exceeds bytes");
+        Require(Sha256(bytes.subspan(static_cast<std::size_t>(record.offset), record.byte_count)) == record.digest,
+                "bound texture subresource digest mismatch");
         const auto mip = static_cast<std::uint32_t>(i % view.description.mip_count);
         view.subresources.push_back({static_cast<std::uint32_t>(i / view.description.mip_count), mip,
             std::max(1u, view.description.width >> mip), std::max(1u, view.description.height >> mip),

@@ -39,7 +39,9 @@ struct NativeTransport
     ComPtr<IDStorageStatusArray> statuses;
     std::array<bool, 256> occupied{};
     std::uint64_t next_tag{1};
+    std::uint64_t submit_generation{};
     std::uint32_t chunk_bytes{}, staging_bytes{};
+    bool queued_any{};
     HRESULT last_error{S_OK};
     void ReadErrors() noexcept
     {
@@ -67,14 +69,21 @@ struct ReadOwner
     ComPtr<IDStorageFile> file;
     std::uint32_t status{};
     std::uint64_t tag{};
+    std::uint64_t transport_generation{};
 #endif
     ~ReadOwner()
     {
         // Release of the queue/file/destination/event is never cancellation.
         // This owner outlives every submitted native marker or async future.
 #if HS_WITH_DIRECTSTORAGE
-        if (transport && submitted)
+        if (transport && (submitted || transport_generation))
         {
+            if (transport_generation > transport->submit_generation)
+            {
+                transport->queue->Submit();
+                transport->submit_generation = transport_generation;
+                transport->queued_any = false;
+            }
             WaitForSingleObject(event.value, INFINITE);
             transport->occupied[status] = false;
         }
@@ -167,7 +176,8 @@ Result RendererAssetIo::ShareTransportFrom(const RendererAssetIo &other, Residen
     return Result::Success();
 }
 Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &streaming,
-                                ResidencyManager &residency, ResidencyTicket storage, bool &submitted)
+                                ResidencyManager &residency, ResidencyTicket storage, bool &submitted,
+                                bool defer_native_submit)
 {
     submitted = false;
     const auto *page = streaming.Find(input.request);
@@ -178,11 +188,25 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         input.expected_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
         !storage || !residency.Contains(storage) || impl_->reads.contains(input.request.value))
         return IoFailure("Immutable asset read identity, lease or reservation is invalid.");
-    if (input.source.range.byte_count)
+    if (input.ranges.empty() && input.source.range.byte_count)
     {
         std::uint64_t bytes{};
         if (auto result = input.source.ByteCount(bytes); !result) return result;
         if (bytes != input.expected_bytes) return IoFailure("Immutable pack range differs from its reservation.");
+    }
+    if (!input.ranges.empty())
+    {
+        std::uint64_t product_bytes{}, total{};
+        if (auto result = input.source.ByteCount(product_bytes); !result) return result;
+        for (const auto &range : input.ranges)
+        {
+            if (!range.byte_count || range.offset > product_bytes ||
+                range.byte_count > product_bytes - range.offset || total > UINT64_MAX - range.byte_count)
+                return IoFailure("Immutable asset subresource range exceeds its admitted product.");
+            total += range.byte_count;
+        }
+        if (total != input.expected_bytes)
+            return IoFailure("Immutable asset range total differs from its host reservation.");
     }
     auto read = std::make_unique<ReadOwner>();
     read->input = std::move(input);
@@ -192,7 +216,18 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     if (impl_->transport && !read->input.source.pack)
     {
         auto &transport = *impl_->transport;
-        const auto chunks = (read->input.expected_bytes - 1u) / transport.chunk_bytes + 1u;
+        std::uint64_t product_bytes{};
+        if (auto result = read->input.source.ByteCount(product_bytes); !result) return result;
+        if (read->input.ranges.empty() && product_bytes != read->input.expected_bytes)
+            return IoFailure("DirectStorage immutable file size differs from its read reservation.");
+        std::uint64_t chunks{};
+        if (read->input.ranges.empty()) chunks = (product_bytes - 1u) / transport.chunk_bytes + 1u;
+        else for (const auto &range : read->input.ranges)
+        {
+            const auto count = (static_cast<std::uint64_t>(range.byte_count) - 1u) / transport.chunk_bytes + 1u;
+            if (chunks > UINT64_MAX - count) return IoFailure("DirectStorage subresource request count overflow.");
+            chunks += count;
+        }
         DSTORAGE_QUEUE_INFO info{};
         transport.queue->Query(&info);
         if (chunks + 2u >= info.Desc.Capacity)
@@ -201,13 +236,14 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         if (free_status == transport.occupied.end() || chunks + 2u > info.EmptySlotCount)
             return Result::Success(); // Requested remains eligible for the next pump.
         if (transport.next_tag == UINT64_MAX) return IoFailure("DirectStorage cancellation tag exhausted.");
+        if (transport.submit_generation == UINT64_MAX) return IoFailure("DirectStorage batch generation exhausted.");
         auto hr = transport.factory->OpenFile(read->input.source.path.c_str(), IID_PPV_ARGS(&read->file));
         BY_HANDLE_FILE_INFORMATION file_info{};
         if (SUCCEEDED(hr)) hr = read->file->GetFileInformation(&file_info);
         const auto actual_size = (static_cast<std::uint64_t>(file_info.nFileSizeHigh) << 32u) | file_info.nFileSizeLow;
-        if (FAILED(hr) || actual_size != read->input.expected_bytes)
+        if (FAILED(hr) || actual_size != product_bytes)
             return IoFailure("DirectStorage immutable file size/open validation failed.");
-        read->bytes.resize(static_cast<std::size_t>(actual_size));
+        read->bytes.resize(static_cast<std::size_t>(read->input.expected_bytes));
         read->event.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!read->event.value) return IoFailure("DirectStorage read completion event creation failed.");
         read->status = static_cast<std::uint32_t>(free_status - transport.occupied.begin());
@@ -220,25 +256,40 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         if (!streaming.BeginRead({key}) || !streaming.SubmitRead({key}))
         { impl_->reads.erase(key); return IoFailure("DirectStorage request state transition failed."); }
         transport.occupied[retained->status] = true;
-        retained->submitted = true;
         submitted = true;
-        for (std::uint64_t offset = 0; offset < actual_size;)
+        const auto enqueue_range = [&](std::uint64_t source_offset, std::size_t destination_offset,
+                                       std::uint64_t range_bytes) {
+            for (std::uint64_t offset = 0; offset < range_bytes;)
+            {
+                const auto bytes = static_cast<UINT32>(std::min<std::uint64_t>(transport.chunk_bytes, range_bytes - offset));
+                DSTORAGE_REQUEST request{};
+                request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
+                request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_MEMORY;
+                request.Options.CompressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
+                request.Source.File = {retained->file.Get(), source_offset + offset, bytes};
+                request.Destination.Memory = {retained->bytes.data() + destination_offset + offset, bytes};
+                request.CancellationTag = retained->tag;
+                request.Name = retained->input.logical_id.c_str();
+                transport.queue->EnqueueRequest(&request);
+                offset += bytes;
+            }
+        };
+        if (retained->input.ranges.empty()) enqueue_range(0, 0, product_bytes);
+        else
         {
-            const auto bytes = static_cast<UINT32>(std::min<std::uint64_t>(transport.chunk_bytes, actual_size - offset));
-            DSTORAGE_REQUEST request{};
-            request.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-            request.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_MEMORY;
-            request.Options.CompressionFormat = DSTORAGE_COMPRESSION_FORMAT_NONE;
-            request.Source.File = {retained->file.Get(), offset, bytes};
-            request.Destination.Memory = {retained->bytes.data() + offset, bytes};
-            request.CancellationTag = retained->tag;
-            request.Name = retained->input.logical_id.c_str();
-            transport.queue->EnqueueRequest(&request);
-            offset += bytes;
+            std::size_t destination{};
+            for (const auto &range : retained->input.ranges)
+            {
+                enqueue_range(range.offset, destination, range.byte_count);
+                destination += range.byte_count;
+            }
         }
         transport.queue->EnqueueStatus(transport.statuses.Get(), retained->status);
         transport.queue->EnqueueSetEvent(retained->event.value);
-        transport.queue->Submit();
+        retained->transport_generation = transport.submit_generation + 1u;
+        transport.queued_any = true;
+        retained->submitted = !defer_native_submit;
+        if (!defer_native_submit) SubmitQueuedReads();
         return Result::Success();
     }
 #endif
@@ -252,11 +303,34 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     try
     {
         const auto prepare = retained->input.prepare;
+        const auto ranges = retained->input.ranges;
         const auto cancellation = retained->cancellation;
-        retained->future = std::async(std::launch::async, [source, expected, prepare, cancellation] {
+        retained->future = std::async(std::launch::async, [source, expected, prepare, ranges, cancellation] {
             std::vector<std::byte> bytes;
-            if (auto result = source.Read(bytes, expected); !result)
-                throw std::runtime_error(std::string(result.Message()));
+            if (ranges.empty())
+            {
+                if (auto result = source.Read(bytes, expected); !result)
+                    throw std::runtime_error(std::string(result.Message()));
+            }
+            else
+            {
+                // shortcut: authenticated packed ranges are read serially per owner; upgrade when the retained pack transport can batch discontiguous verified reads.
+                bytes.resize(static_cast<std::size_t>(expected));
+                const auto base = source.pack ? source.range.offset : 0;
+                std::size_t destination{};
+                for (const auto &range : ranges)
+                {
+                    if (cancellation->load(std::memory_order_acquire)) break;
+                    if (base > UINT64_MAX - range.offset)
+                        throw std::runtime_error("Immutable asset range offset overflow.");
+                    auto output = std::span<std::byte>(bytes).subspan(destination, range.byte_count);
+                    if (auto result = source.ReadRange(base + range.offset, output, range.digest); !result)
+                        throw std::runtime_error(std::string(result.Message()));
+                    destination += range.byte_count;
+                }
+                if (!cancellation->load(std::memory_order_acquire) && destination != bytes.size())
+                    throw std::runtime_error("Immutable asset ranges did not fill their admitted payload.");
+            }
             if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes);
             return bytes;
         });
@@ -271,6 +345,18 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     retained->submitted = true;
     submitted = true;
     return Result::Success();
+}
+void RendererAssetIo::SubmitQueuedReads() noexcept
+{
+#if HS_WITH_DIRECTSTORAGE
+    const auto &transport = impl_->transport;
+    if (transport && transport->queued_any)
+    {
+        transport->queue->Submit();
+        ++transport->submit_generation;
+        transport->queued_any = false;
+    }
+#endif
 }
 Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &streaming,
                              ResidencyManager &residency, AssetReadCompletion &output)
@@ -306,18 +392,32 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             if (event_result == WAIT_TIMEOUT) return Result::Success();
             if (event_result != WAIT_OBJECT_0) return IoFailure("DirectStorage completion event wait failed.");
         }
-        if (SUCCEEDED(hr) && !read.cancelled && read.input.source.range.byte_count &&
-            Sha256(read.bytes) != read.input.source.range.expected_digest)
-            hr = E_FAIL;
-        if (SUCCEEDED(hr) && !read.cancelled && read.input.prepare)
+        if (SUCCEEDED(hr) && !read.cancelled)
         {
             if (!read.prepare_future.valid())
             {
                 const auto prepare = read.input.prepare;
+                const auto ranges = read.input.ranges;
+                const auto source_range = read.input.source.range;
                 const auto cancellation = read.cancellation;
                 auto *bytes = &read.bytes;
-                read.prepare_future = std::async(std::launch::async, [prepare, cancellation, bytes] {
-                    if (!cancellation->load(std::memory_order_acquire)) prepare(*bytes);
+                read.prepare_future = std::async(std::launch::async, [prepare, ranges, source_range, cancellation, bytes] {
+                    if (cancellation->load(std::memory_order_acquire)) return;
+                    if (ranges.empty() && source_range.byte_count && Sha256(*bytes) != source_range.expected_digest)
+                        throw std::runtime_error("Immutable file digest mismatch.");
+                    if (!ranges.empty())
+                    {
+                        std::size_t offset{};
+                        for (const auto &range : ranges)
+                        {
+                            if (range.byte_count > bytes->size() - offset ||
+                                Sha256(std::span<const std::byte>(*bytes).subspan(offset, range.byte_count)) != range.digest)
+                                throw std::runtime_error("Immutable subresource range digest mismatch.");
+                            offset += range.byte_count;
+                        }
+                        if (offset != bytes->size()) throw std::runtime_error("Immutable subresource ranges are incomplete.");
+                    }
+                    if (!cancellation->load(std::memory_order_acquire) && prepare) prepare(*bytes);
                 });
             }
         }
@@ -335,7 +435,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                     static_cast<void>(streaming.Cancel(request));
                     static_cast<void>(residency.ReleaseNow(read.storage));
                     impl_->reads.erase(found);
-                    return IoFailure("Immutable asset preparation failed: " + std::string(error.what()));
+                    return IoFailure("Immutable asset verification or preparation failed: " + std::string(error.what()));
                 }
             }
         }
@@ -377,8 +477,9 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         output.bytes = std::move(read.bytes);
         output.storage = read.storage;
     }
+    const bool failed = FAILED(hr) && !(read.cancelled && hr == HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
     impl_->reads.erase(found);
-    return FAILED(hr) ? IoFailure("DirectStorage read failed: " + std::to_string(hr)) : Result::Success();
+    return failed ? IoFailure("DirectStorage read failed: " + std::to_string(hr)) : Result::Success();
 }
 void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &streaming) noexcept
 {
@@ -389,7 +490,10 @@ void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &strea
     found->second->cancellation->store(true, std::memory_order_release);
 #if HS_WITH_DIRECTSTORAGE
     if (found->second->transport)
+    {
+        SubmitQueuedReads(); // Make a deferred owner visible to native cancellation/status tracking.
         found->second->transport->queue->CancelRequestsWithTag(UINT64_MAX, found->second->tag);
+    }
 #endif
 }
 void RendererAssetIo::CancelAll(StreamingManager &streaming) noexcept
@@ -416,6 +520,7 @@ Result RendererAssetIo::CollectCancelled(StreamingManager &streaming, ResidencyM
 Result RendererAssetIo::DrainSubmitted(StreamingManager &streaming, ResidencyManager &residency)
 {
     CancelAll(streaming);
+    SubmitQueuedReads();
     while (!impl_->reads.empty())
     {
         auto &read = *impl_->reads.begin()->second;

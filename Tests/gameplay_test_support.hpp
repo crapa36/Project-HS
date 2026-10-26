@@ -1,6 +1,7 @@
 #pragma once
 
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/gameplay/game_simulation_development.hpp>
 #include <hs/presentation/projector.hpp>
 
 #include <array>
@@ -16,6 +17,7 @@ namespace gameplay_test
 inline constexpr auto kFixedStep = std::chrono::nanoseconds{16'666'667};
 
 void Check(bool condition, std::string_view message);
+void Check(const hs::Result &result, std::string_view message);
 
 struct TestContent
 {

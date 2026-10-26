@@ -1,4 +1,5 @@
 #include <hs/presentation/projector.hpp>
+#include <hs/core/result.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/presentation/process_scene.hpp>
@@ -154,8 +155,59 @@ std::optional<float> EnemyAnimationState::CancelProgress(std::uint64_t id) const
 {
     const auto it = living_.find(id);
     if (it == living_.end() || !it->second.cancel_started) return std::nullopt;
+    if (tick_ < *it->second.cancel_started) return std::nullopt;
     return it->second.cancel_progress * std::clamp(
         1.0f - static_cast<float>(tick_ - *it->second.cancel_started) / 36.0f, 0.0f, 1.0f);
+}
+
+EnemyAnimationState::Sample EnemyAnimationState::AnimationSample(std::uint64_t id) const
+{
+    const auto it = living_.find(id);
+    if (it == living_.end()) return {};
+    const auto &pose = it->second;
+    Sample sample{pose.recoil, pose.attack_recoil, pose.release,
+                  (pose.release || pose.cancel_started)
+                      ? std::optional<Float3>{pose.release_direction} : std::nullopt,
+                  std::nullopt};
+    if (pose.cancel_started && tick_ >= *pose.cancel_started)
+        sample.cancel_progress = pose.cancel_progress * std::clamp(
+            1.0f - static_cast<float>(tick_ - *pose.cancel_started) / 36.0f, 0.0f, 1.0f);
+    return sample;
+}
+
+void PlayerFootstepTimeline::Reset(const TickReadView &model, Sequence motion_epoch) noexcept
+{
+    tick_ = model.tick;
+    session_id_ = model.session_id;
+    motion_epoch_ = motion_epoch;
+    initialized_ = true;
+}
+
+std::optional<PresentationEvent> PlayerFootstepTimeline::Advance(
+    const TickReadView &model, Sequence motion_epoch) noexcept
+{
+    if (!initialized_ || model.session_id != session_id_ || motion_epoch != motion_epoch_ ||
+        tick_ == std::numeric_limits<Tick>::max() ||
+        model.tick != tick_ + 1)
+    {
+        Reset(model, motion_epoch);
+        return std::nullopt;
+    }
+    tick_ = model.tick;
+    const auto crossing = model.tick % 45 == 0 || model.tick % 45 == 23;
+    if (!crossing || model.player.locomotion_blend <= 0.01f) return std::nullopt;
+    PresentationEvent event;
+    event.sequence = model.tick;
+    event.tick = model.tick;
+    event.kind = PresentationKind::Audio;
+    event.session_id = model.session_id;
+    event.position = {model.player.position.x, 0.0f, model.player.position.y};
+    if (model.arena_half_extent >= 14.0f)
+        event.position.y = MeadowGroundHeight({event.position.x, event.position.z});
+    event.asset = MakeAssetId(model.player.locomotion_blend >= 0.5f
+                                  ? "audio.player.footstep_run"
+                                  : "audio.player.footstep_walk");
+    return event;
 }
 
 namespace
@@ -191,13 +243,15 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
         status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Slow);
     if (enemy.status_flags & static_cast<std::uint8_t>(StatusFlag::Mark))
         status_visual_mask |= static_cast<std::uint32_t>(StatusVisual::Mark);
-    const auto release_tick = enemy_animations ? enemy_animations->ReleaseTick(enemy.id.value) : std::nullopt;
-    const auto release_direction = enemy_animations ? enemy_animations->ReleaseDirection(enemy.id.value) : std::nullopt;
-    const auto cancel_progress = enemy_animations ? enemy_animations->CancelProgress(enemy.id.value) : std::nullopt;
+    const auto animation = enemy_animations ? enemy_animations->AnimationSample(enemy.id.value)
+                                            : EnemyAnimationState::Sample{};
+    const auto release_tick = animation.release_tick;
+    const auto release_direction = animation.release_direction;
+    const auto cancel_progress = animation.cancel_progress;
     const auto facing = enemy.attacking && LengthSquared(enemy.locked_aim) > 0.0001f
                             ? enemy.locked_aim
                             : ((cancel_progress || (release_tick && *release_tick == tick) ||
-                                 (enemy_animations && enemy_animations->IsAttackRecoil(enemy.id.value))) && release_direction
+                                 animation.attack_recoil) && release_direction
                                    ? Float2{release_direction->x, release_direction->z} : enemy.velocity);
     RenderInstance instance
         {{enemy.position.x, 0.0f, enemy.position.y},
@@ -205,10 +259,10 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
          kEnemyRenderId | enemy.id.value, status_visual_mask};
     AnimationPoseRef enemy_pose;
 
-    const auto boss_action = std::ranges::find_if(
+    const auto boss_action = enemy.boss ? std::ranges::find_if(
         actions, [&](const BossActionView &action) {
             return action.boss_id == enemy.id.value;
-        });
+        }) : actions.end();
     const auto boss_release_frame = enemy.boss_action_until == tick &&
                                     enemy.boss_action_until > enemy.boss_action_started;
     if (enemy.attacking || boss_action != actions.end() || boss_release_frame ||
@@ -241,12 +295,12 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
         enemy_pose.clip = CharacterAnimationClip::Draw;
         enemy_pose.normalized_time = *cancel_progress;
     }
-    else if (!enemy.boss && enemy_animations &&
-             enemy_animations->RecoilStart(enemy.id.value))
+    else if (!enemy.boss && enemy_animations && animation.recoil_start &&
+             tick >= *animation.recoil_start)
     {
         enemy_pose.clip = CharacterAnimationClip::Recoil;
         enemy_pose.normalized_time = std::clamp(
-            static_cast<float>(tick - *enemy_animations->RecoilStart(enemy.id.value)) /
+            static_cast<float>(tick - *animation.recoil_start) /
                 18.0f, 0.0f, 1.0f);
     }
     else if (LengthSquared(enemy.velocity) > 0.0001f)
@@ -266,17 +320,21 @@ EnemyProjection ProjectEnemy(const EnemyView &enemy, Tick tick,
 }
 } // namespace
 
-bool ProjectDynamicTick(const TickReadView &model,
+Result ProjectDynamicTick(const TickReadView &model,
                         RenderSnapshotStorage &snapshot,
                         std::shared_ptr<const StaticRenderScene> environment_scene,
                         const EnemyAnimationState *enemy_animations)
 {
+    if (!environment_scene)
+        return Result::Failure(ErrorCode::InvalidState, "hs_presentation",
+                               "dynamic snapshot projection requires a static scene");
     snapshot.header.tick = model.tick;
     snapshot.header.simulation_time = std::chrono::nanoseconds(16'666'667) * model.tick;
     snapshot.header.checksum = model.checksum;
     snapshot.header.session_id = model.session_id;
     snapshot.camera.target = {model.player.position.x, 0.0f, model.player.position.y};
     snapshot.camera.target_motion_epoch = enemy_animations ? enemy_animations->PlayerMotionEpoch() : 0;
+    snapshot.SetStaticScene(std::move(environment_scene));
 
     const auto grounded = [&](Float3 position) {
         if (model.arena_half_extent >= 14.0f)
@@ -287,7 +345,7 @@ bool ProjectDynamicTick(const TickReadView &model,
     const auto add_instance = [&](RenderInstance instance) {
         instance.position = grounded(instance.position);
         PopulateRenderInstanceIdentity(instance);
-        return snapshot.AppendInstance(instance);
+        snapshot.AddInstance(instance);
     };
     const auto add_visual = [&](PersistentVfxVisual visual) {
         const bool body_trail = visual.projectile_owner_id != 0 &&
@@ -317,11 +375,10 @@ bool ProjectDynamicTick(const TickReadView &model,
         if (visual.kind == PersistentVfxKind::BasicArrowReturn ||
             visual.kind == PersistentVfxKind::RicochetReturnLink)
             visual.return_start_position = grounded(visual.return_start_position);
-        return snapshot.AddPersistentVfx(visual);
+        snapshot.AddPersistentVfx(visual);
     };
     snapshot.camera.target = grounded(snapshot.camera.target);
 
-    bool complete = true;
     if (model.player.revive_invulnerable_until > model.tick)
     {
         PersistentVfxVisual invulnerable{};
@@ -333,7 +390,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         invulnerable.radius = 1.0f;
         invulnerable.entity_render_id = kPlayerRenderId;
         invulnerable.effect_asset = MakeAssetId("particle.player.invulnerable_loop");
-        complete &= add_visual(invulnerable);
+        add_visual(invulnerable);
     }
     if (model.player.max_health > 0 &&
         static_cast<float>(std::max(model.player.health, 0)) /
@@ -349,7 +406,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             static_cast<float>(std::max(model.player.health, 0)) /
                 static_cast<float>(model.player.max_health), 0.0f, 1.0f);
         vignette.entity_render_id = kPlayerRenderId;
-        complete &= add_visual(vignette);
+        add_visual(vignette);
     }
     const auto add_player_attachment = [&](PersistentVfxKind kind,
                                            std::string_view asset,
@@ -382,7 +439,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         visual.charge_ratio = charge_ratio;
         visual.entity_render_id = kPlayerRenderId;
         visual.effect_asset = MakeAssetId(asset);
-        complete &= add_visual(visual);
+        add_visual(visual);
     };
     if (model.player.basic_attack_cast_id != 0 &&
         model.player.basic_attack_animation_start <= model.tick &&
@@ -469,7 +526,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         // The authenticated non-looping clip clamps at its authored final pose;
         // there is no guessed duration or render-clock state transition here.
     }
-    complete &= add_instance(player_instance);
+    add_instance(player_instance);
     AnimationPoseRef pose;
     pose.instance_index = 0;
     pose.clip = CharacterAnimationClip::Idle;
@@ -545,7 +602,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                                         static_cast<float>(kAnimationBlendOutTicks);
         pose.upper_body_weight = std::clamp(std::min(fade_in, fade_out), 0.0f, 1.0f);
     }
-    complete &= snapshot.AppendPose(pose);
+    snapshot.AddPose(pose);
 
     if (model.player.charging &&
         model.player.charging_skill == SkillKind::ChargedShot)
@@ -554,7 +611,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         const auto guide_length = range;
         const auto center = Add(model.player.position,
                                 Multiply(model.player.aim, guide_length * 0.5f));
-        complete &= add_visual(
+        add_visual(
             {{center.x, 0.025f, center.y},
              std::atan2(model.player.aim.x, model.player.aim.y),
              model.charge_radius, guide_length,
@@ -563,15 +620,18 @@ bool ProjectDynamicTick(const TickReadView &model,
              model.player.charge_start});
     }
 
-    if (!environment_scene) return false;
-    snapshot.SetStaticScene(std::move(environment_scene));
+    struct BossProjectionFacts { std::uint64_t id{}; Float2 position{}; };
+    std::vector<BossProjectionFacts> boss_facts;
+    if (!model.boss_actions.empty()) boss_facts.reserve(model.boss_actions.size());
     for (const auto &enemy : model.enemies)
     {
         if (enemy.dead) continue;
         const auto projected = ProjectEnemy(enemy, model.tick, model.boss_actions, enemy_animations);
+        if (enemy.boss && !model.boss_actions.empty())
+            boss_facts.push_back({enemy.id.value, enemy.position});
         const auto facing = projected.facing;
         const auto instance_index = snapshot.InstanceCount();
-        complete &= add_instance(projected.instance);
+        add_instance(projected.instance);
         constexpr std::array status_kinds{PersistentVfxKind::EnemyBleedStatus, PersistentVfxKind::EnemyBurnStatus,
             PersistentVfxKind::EnemySlowStatus, PersistentVfxKind::EnemyMarkStatus};
         constexpr std::array status_names{"persistent.status.bleed", "persistent.status.burn", "persistent.status.slow", "persistent.status.mark"};
@@ -590,7 +650,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             status.entity_health_fraction=enemy.max_health>0?std::clamp(static_cast<float>(enemy.health)/enemy.max_health,0.0f,1.0f):0.0f;
             status.entity_state_flags=1u<<i;
             status.entity_render_id=kEnemyRenderId | enemy.id.value;
-            complete &= add_visual(status);
+            add_visual(status);
         }
         if (enemy.boss && enemy.footprint_radius > 0.0f)
         {
@@ -624,7 +684,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                     wake.expires = enemy.dash_until;
                     wake.stable_id = identity(0xD451u, enemy.dash_started);
                     wake.effect_asset = MakeAssetId("persistent.boss.dash_wake");
-                    complete &= add_visual(wake);
+                    add_visual(wake);
                 }
             }
             if (enemy.boss == BossKind::Final && enemy.final_phase == 2 &&
@@ -644,7 +704,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                                  0.0f, 1.0f) : 0.0f;
                 aura.entity_state_flags = 2;
                 aura.entity_render_id = kEnemyRenderId | enemy.id.value;
-                complete &= add_visual(aura);
+                add_visual(aura);
                 if (model.tick < enemy.invulnerable_until)
                 {
                     auto transition = aura;
@@ -653,20 +713,20 @@ bool ProjectDynamicTick(const TickReadView &model,
                     transition.stable_id = identity(0xA3u, enemy.phase2_started);
                     transition.effect_asset = MakeAssetId("persistent.boss.phase_transition_invulnerable");
                     transition.entity_state_flags = 3;
-                    complete &= add_visual(transition);
+                    add_visual(transition);
                 }
             }
         }
         auto enemy_pose = projected.pose;
         enemy_pose.instance_index = static_cast<std::uint32_t>(instance_index);
-        complete &= snapshot.AppendPose(enemy_pose);
+        snapshot.AddPose(enemy_pose);
         if (!enemy.boss && enemy.kind == EnemyKind::Ranged && enemy.attacking &&
             model.tick < enemy.attack_resolve)
         {
             const auto range = enemy.warning_extent;
             const auto center = Add(enemy.position,
                                     Multiply(enemy.locked_aim, range * 0.5f));
-            complete &= add_instance(
+            add_instance(
                 {{center.x, 0.025f, center.y},
                  std::atan2(enemy.locked_aim.x, enemy.locked_aim.y),
                  {enemy.warning_half_width * 2.0f, 0.03f, range}, 0xA03030FFu,
@@ -682,13 +742,13 @@ bool ProjectDynamicTick(const TickReadView &model,
                 warning.stable_id = enemy.warning_sequence;
                 warning.active_tick = enemy.attack_started;
                 warning.expires = enemy.attack_resolve;
-                complete &= add_visual(warning);
+                add_visual(warning);
             }
         }
         if (!enemy.boss && enemy.kind == EnemyKind::Suicide && enemy.attacking)
         {
             const auto radius = enemy.warning_extent;
-            complete &= add_instance(
+            add_instance(
                 {{enemy.position.x, 0.025f, enemy.position.y}, 0.0f,
                  {radius, 0.03f, radius}, 0x803030FFu, RenderMesh::Area, 0, 0, 0, 0, enemy.warning_sequence});
             if (enemy.warning_sequence != 0 && model.tick < enemy.attack_resolve)
@@ -700,7 +760,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 warning.stable_id = enemy.warning_sequence;
                 warning.active_tick = enemy.attack_started;
                 warning.expires = enemy.attack_resolve;
-                complete &= add_visual(warning);
+                add_visual(warning);
                 PersistentVfxVisual countdown{};
                 countdown.kind = PersistentVfxKind::SuicideCountdownLoop;
                 countdown.effect_asset = MakeAssetId("particle.enemy.suicide.countdown_loop");
@@ -719,7 +779,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 countdown.active_tick = enemy.attack_started;
                 countdown.expires = enemy.attack_resolve;
                 countdown.entity_render_id = kEnemyRenderId | enemy.id.value;
-                complete &= add_visual(countdown);
+                add_visual(countdown);
             }
         }
     }
@@ -730,7 +790,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         // Same mesh, transform and pose path even without a prior live snapshot.
         auto projected = ProjectEnemy(death.enemy, death.tick, actions, nullptr);
         projected.instance.position = grounded(projected.instance.position);
-        complete &= snapshot.AppendCapturedInstance({model.session_id, death.enemy.id.value,
+        snapshot.AddCapturedInstance({model.session_id, death.enemy.id.value,
             death.sequence, death.tick, projected.instance, projected.pose});
     }
     if (enemy_animations)
@@ -745,7 +805,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             const auto scale_value = death.kind == EnemyKind::Ranged ? 1.40625f :
                                       death.kind == EnemyKind::Suicide ? 1.5625f : 1.25f;
             const auto index = snapshot.InstanceCount();
-            complete &= add_instance(
+            add_instance(
                 {death.position, std::atan2(death.direction.x, death.direction.z),
                  {scale_value, scale_value, scale_value}, 0xFF5D66E8u, mesh,
                  kEnemyRenderId | death.id});
@@ -753,7 +813,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             pose.instance_index = static_cast<std::uint32_t>(index);
             pose.clip = CharacterAnimationClip::Death;
             pose.normalized_time = std::clamp(static_cast<float>(elapsed) / 48.0f, 0.0f, 1.0f);
-            complete &= snapshot.AppendPose(pose);
+            snapshot.AddPose(pose);
         }
     }
     for (const auto &delivery : model.scheduled_area_deliveries)
@@ -786,7 +846,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         visual.source_upgrade = delivery.source_upgrade;
         visual.projectile_owner_id = delivery.owner_id;
         visual.effect_asset = MakeAssetId("particle.upgrade.arrow_rain.incoming_arrow");
-        complete &= add_visual(visual);
+        add_visual(visual);
     }
     for (const auto &projectile : model.projectiles)
     {
@@ -829,7 +889,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             }
         }
         const auto render_position = projectile.position;
-        complete &= add_instance(
+        add_instance(
             {{render_position.x,
               projectile.player_owned ? 1.05f : 0.45f,
               render_position.y},
@@ -863,7 +923,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         head.projectile_owner_id = owner_id;
         head.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                       (projectile.homing ? 2u : 0u);
-        complete &= add_visual(head);
+        add_visual(head);
         const auto projectile_effect_id = [&](std::uint64_t effect_tag,
                                               std::uint64_t episode) {
             std::uint64_t identity = 14695981039346656037ull;
@@ -891,7 +951,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             retarget.skill = static_cast<std::uint8_t>(SkillKind::MultiShot);
             retarget.source_upgrade = 7;
             retarget.effect_asset = MakeAssetId("particle.upgrade.retarget");
-            complete &= add_visual(retarget);
+            add_visual(retarget);
         }
         if (projectile.skill == SkillKind::BasicAttack && projectile.returning &&
             projectile.source_upgrade == 6 &&
@@ -909,7 +969,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             returning.return_start_position =
                 {projectile.return_start_position.x, render_height,
                  projectile.return_start_position.y};
-            complete &= add_visual(returning);
+            add_visual(returning);
         }
         if (projectile.skill == SkillKind::RicochetArrow)
         {
@@ -937,7 +997,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 extend.projectile_owner_id = owner_id;
                 extend.projectile_state_flags = head.projectile_state_flags;
                 extend.entity_render_id = kProjectileRenderId | owner_id;
-                complete &= add_visual(extend);
+                add_visual(extend);
             }
         }
         if (projectile.player_owned)
@@ -981,7 +1041,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             trail.projectile_owner_id = owner_id;
             trail.projectile_state_flags = (projectile.returning ? 1u : 0u) |
                                             (projectile.homing ? 2u : 0u);
-            complete &= add_visual(trail);
+            add_visual(trail);
             if (projectile.skill == SkillKind::RicochetArrow && projectile.returning &&
                 (projectile.upgrade_mask & std::uint8_t{1}) != 0)
             {
@@ -1008,7 +1068,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                     {projectile.return_start_position.x, render_height,
                      projectile.return_start_position.y};
                 returning_link.link_width = std::max(0.01f, projectile.radius);
-                complete &= add_visual(returning_link);
+                add_visual(returning_link);
             }
             if (projectile.skill == SkillKind::ChargedShot)
             {
@@ -1025,7 +1085,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 outer.projectile_spawned_tick = projectile.spawned_tick;
                 outer.projectile_owner_id = owner_id;
                 outer.projectile_state_flags = trail.projectile_state_flags;
-                complete &= add_visual(outer);
+                add_visual(outer);
             }
         }
     }
@@ -1057,7 +1117,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             const auto pending_kind = model.tick < area.active_tick
                                         ? PersistentVfxKind::TrapPending
                                         : PersistentVfxKind::TrapArmed;
-            complete &= add_area_visual({area.position.x, 0.025f, area.position.y},
+            add_area_visual({area.position.x, 0.025f, area.position.y},
                                         0.0f, area.radius, 0.0f, pending_kind);
         }
         const auto fire_area = area.applies_burn ||
@@ -1066,7 +1126,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             (area.skill == SkillKind::ArrowRain && area.source_upgrade == 3);
         if (fire_area && model.tick >= area.active_tick)
         {
-            complete &= add_area_visual({area.position.x, 0.02f, area.position.y},
+            add_area_visual({area.position.x, 0.02f, area.position.y},
                                         0.0f, area.radius, 0.0f,
                                         PersistentVfxKind::FireArea);
         }
@@ -1078,21 +1138,21 @@ bool ProjectDynamicTick(const TickReadView &model,
                 (area.skill == SkillKind::ArrowRain &&
                  ((area.upgrade_mask & (1u << 5)) != 0 || area.source_upgrade == 7)) ||
                 (area.skill == SkillKind::Trap && area.source_upgrade == 1);
-            complete &= add_area_visual({area.position.x, 0.018f, area.position.y},
+            add_area_visual({area.position.x, 0.018f, area.position.y},
                                         0.0f, area.radius, 0.0f,
                                         upgrade_slow ? PersistentVfxKind::UpgradeSlowArea
                                                      : PersistentVfxKind::SlowArea);
         }
         if (area.skill == SkillKind::ArrowRain)
         {
-            complete &= add_area_visual({area.position.x, 0.016f, area.position.y},
+            add_area_visual({area.position.x, 0.016f, area.position.y},
                                         0.0f, area.radius, 0.0f,
                                         PersistentVfxKind::ArrowRainArea);
         }
         if (area.kind == AreaViewKind::Slow && area.half_length > 0.0f &&
             model.tick >= area.active_tick)
         {
-            complete &= add_area_visual(
+            add_area_visual(
                 {area.position.x, 0.014f, area.position.y},
                 std::atan2(area.direction.x, area.direction.y), area.radius,
                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail);
@@ -1103,14 +1163,14 @@ bool ProjectDynamicTick(const TickReadView &model,
         if (area.kind == AreaViewKind::EnemyDamage &&
             area.ring_outer_radius <= 0.0f && area.safe_gap_count == 0)
         {
-            complete &= add_area_visual({area.position.x, 0.025f, area.position.y},
+            add_area_visual({area.position.x, 0.025f, area.position.y},
                                         0.0f, area.radius, 0.0f,
                                         PersistentVfxKind::BossAreaActive);
         }
         if (area.half_length > 0.0f && area.kind == AreaViewKind::Damage &&
             model.tick >= area.active_tick)
         {
-            complete &= add_area_visual(
+            add_area_visual(
                 {area.position.x, 0.014f, area.position.y},
                 std::atan2(area.direction.x, area.direction.y), area.radius,
                 area.half_length * 2.0f, PersistentVfxKind::DamageTrail);
@@ -1143,7 +1203,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 wavefront.gap_count = area.safe_gap_count;
                 wavefront.gap_half_angle_degrees = area.safe_gap_degrees * 0.5f;
                 wavefront.gap_offset_degrees = static_cast<float>(area.cast_id % 360);
-                complete &= add_visual(wavefront);
+                add_visual(wavefront);
             }
             constexpr std::uint32_t kSegments = 64;
             for (std::uint32_t index = 0; index < kSegments; ++index)
@@ -1162,7 +1222,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 }
                 const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(area.position, Multiply(direction, radius));
-                complete &= add_instance(
+                add_instance(
                     {{position.x, 0.03f, position.y}, -degrees * kPi / 180.0f,
                      {0.24f, 0.04f, std::max(0.35f, radius * 0.05f)},
                      0xB04040FFu, RenderMesh::Area, 0, 0, 0, 0,
@@ -1172,7 +1232,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         else
         {
             const auto trail = area.half_length > 0.0f;
-            complete &= add_instance(
+            add_instance(
                 {{area.position.x, 0.01f, area.position.y},
                  trail ? std::atan2(area.direction.x, area.direction.y) : 0.0f,
                  trail ? Float3{area.radius * 2.0f, 0.04f,
@@ -1193,7 +1253,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         warning.stable_id = spawn.owner_id;
         warning.active_tick = spawn.started;
         warning.expires = spawn.expires;
-        complete &= add_visual(warning);
+        add_visual(warning);
     }
     for (const auto &bomb : model.mini_bombs)
     {
@@ -1204,7 +1264,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         warning.position = {bomb.position.x, .025f, bomb.position.y};
         warning.radius = bomb.radius; warning.active_tick = bomb.started; warning.expires = bomb.expires;
         warning.skill = static_cast<std::uint8_t>(SkillKind::ExplosiveArrow); warning.source_upgrade = 1;
-        complete &= add_visual(warning);
+        add_visual(warning);
     }
     for (const auto &link : model.visual_links)
     {
@@ -1225,15 +1285,15 @@ bool ProjectDynamicTick(const TickReadView &model,
         visual.cast_id = link.cast_id;
         visual.skill = static_cast<std::uint8_t>(link.skill);
         visual.source_upgrade = link.source_upgrade;
-        complete &= add_visual(visual);
+        add_visual(visual);
     }
     for (const auto &action : model.boss_actions)
     {
         const auto boss = std::ranges::find_if(
-            model.enemies, [&](const EnemyView &enemy) {
-                return enemy.id.value == action.boss_id && !enemy.dead;
+            boss_facts, [&](const BossProjectionFacts &facts) {
+                return facts.id == action.boss_id;
             });
-        if (boss == model.enemies.end())
+        if (boss == boss_facts.end())
             continue;
 
         if (action.warning_sequence != 0 && model.tick < action.execute_tick &&
@@ -1258,7 +1318,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             warning.active_tick = action.warning_started;
             warning.expires = action.execute_tick;
             warning.cone_half_angle_degrees = action.arc_degrees * 0.5f;
-            complete &= add_visual(warning);
+            add_visual(warning);
         }
         if (action.kind == BossActionViewKind::Area && action.warning_sequence != 0 &&
             model.tick < action.execute_tick)
@@ -1270,7 +1330,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             warning.stable_id = action.warning_sequence;
             warning.active_tick = action.warning_started;
             warning.expires = action.execute_tick;
-            complete &= add_visual(warning);
+            add_visual(warning);
         }
         if (action.kind == BossActionViewKind::Shockwave && action.warning_sequence != 0 &&
             model.tick < action.execute_tick)
@@ -1287,7 +1347,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             warning.gap_count = action.safe_gap_count;
             warning.gap_half_angle_degrees = action.safe_gap_degrees * 0.5f;
             warning.gap_offset_degrees = static_cast<float>(action.cast_id % 360);
-            complete &= add_visual(warning);
+            add_visual(warning);
         }
         const auto warning_color = 0xA03030FFu;
         if (action.kind == BossActionViewKind::Dash)
@@ -1302,7 +1362,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                     boss->position,
                     Multiply(direction, action.distance * static_cast<float>(index) /
                                             static_cast<float>(kMarkers)));
-                complete &= add_instance(
+                add_instance(
                     {{position.x, 0.025f, position.y}, 0.0f,
                      {0.28f, 0.03f, 0.28f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
             }
@@ -1323,7 +1383,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 {
                     const auto position = Add(boss->position,
                         Multiply(edge, range * static_cast<float>(index) / 12.0f));
-                    complete &= add_instance(
+                    add_instance(
                         {{position.x, 0.025f, position.y}, 0.0f,
                          {0.22f, 0.03f, 0.22f}, warning_color, RenderMesh::Area, 0, 0, 0, 0, action.warning_sequence});
                 }
@@ -1353,7 +1413,7 @@ bool ProjectDynamicTick(const TickReadView &model,
                 }
                 const auto direction = Rotate({1.0f, 0.0f}, degrees * kPi / 180.0f);
                 const auto position = Add(center, Multiply(direction, radius));
-                complete &= add_instance(
+                add_instance(
                     {{position.x, 0.025f, position.y}, 0.0f,
                      {0.24f, 0.03f, 0.24f}, warning_color, RenderMesh::Area, 0, 0, 0, 0,
                      action.warning_sequence});
@@ -1374,7 +1434,7 @@ bool ProjectDynamicTick(const TickReadView &model,
              pickup.kind == PickupKind::Heal ? 0xFF40E060u :
              pickup.kind == PickupKind::Magnet ? 0xFFFF3030u : 0xFFE080FFu,
              RenderMesh::Pickup, kPickupRenderId | pickup.id.value};
-        complete &= add_instance(instance);
+        add_instance(instance);
         constexpr std::array idle_kinds{
             PersistentVfxKind::PickupXpIdle, PersistentVfxKind::PickupHealIdle,
             PersistentVfxKind::PickupMagnetIdle, PersistentVfxKind::PickupRelicIdle};
@@ -1400,7 +1460,7 @@ bool ProjectDynamicTick(const TickReadView &model,
         idle.expires = 0;
         idle.effect_asset = MakeAssetId(idle_assets[kind_index]);
         idle.entity_render_id = instance.stable_id;
-        complete &= add_visual(idle);
+        add_visual(idle);
         if (pickup.kind == PickupKind::Experience && pickup.moving_to_player &&
             pickup.motion_started <= model.tick)
         {
@@ -1419,7 +1479,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             trail.active_tick = pickup.motion_started;
             trail.expires = model.tick + 1; // Only actually moving owners survive.
             trail.effect_asset = MakeAssetId("particle.pickup.xp.magnet_trail");
-            complete &= add_visual(trail);
+            add_visual(trail);
         }
     }
     if (model.session.phase == SessionPhase::Playing && !model.session.final_boss_spawned)
@@ -1435,7 +1495,7 @@ bool ProjectDynamicTick(const TickReadView &model,
             timer.active_tick = model.tick;
             timer.source_horizon_tick = model.tick + wave.start - model.session.growth_ticks;
             timer.effect_asset = MakeAssetId("particle.session.wave_warning");
-            complete &= add_visual(timer);
+            add_visual(timer);
         }
     LightView sun{};
     sun.direction = kEnvironmentSunDirection;
@@ -1445,11 +1505,11 @@ bool ProjectDynamicTick(const TickReadView &model,
     sun.type = LightType::Directional;
     sun.unit = LightUnit::Lux;
     sun.shadow_flags = kLightShadowRequested;
-    complete &= snapshot.AddLight(sun);
-    return complete;
+    snapshot.AddLight(sun);
+    return Result::Success();
 }
 
-bool ProjectTickUi(const TickReadView &model,
+void ProjectTickUi(const TickReadView &model,
                    const PresentationCatalog &presentation,
                    const PresentationUiState &ui,
                    const SettingsData &settings,
@@ -1457,7 +1517,6 @@ bool ProjectTickUi(const TickReadView &model,
                    std::uint8_t pending_rebind_slot,
                    const GraphicsSettingsUiModel *graphics_ui)
 {
-    bool complete = true;
     const auto &probe = model.session;
     const auto add_ui = [&](UiModel::Kind kind, Float2 anchor, Float2 size,
                             std::uint32_t color, std::string_view text,
@@ -1474,7 +1533,7 @@ bool ProjectTickUi(const TickReadView &model,
                (static_cast<unsigned char>(text[byte_count]) & 0xC0u) == 0x80u)
             --byte_count;
         std::memcpy(model.utf8_text.data(), text.data(), byte_count);
-        complete &= snapshot.AddUi(model);
+        snapshot.AddUi(model);
     };
     constexpr std::array<std::string_view, kCombatSkillCount> skill_names{
         "기본 공격", "관통 사격", "다중 사격", "충전 사격", "폭발 화살",
@@ -2243,10 +2302,10 @@ bool ProjectTickUi(const TickReadView &model,
         add_ui(UiModel::Kind::Text, {550, 900}, {820, 50}, 0xFFFFFFFFu,
                "클릭: 메인 메뉴", 1.0f, 26);
     }
-    return complete;
+    return;
 }
 
-bool ProjectTick(const TickReadView &model,
+Result ProjectTick(const TickReadView &model,
                  const PresentationCatalog &presentation,
                  const PresentationUiState &ui,
                  const SettingsData &settings,
@@ -2256,16 +2315,13 @@ bool ProjectTick(const TickReadView &model,
                  const EnemyAnimationState *enemy_animations,
                  const GraphicsSettingsUiModel *graphics_ui)
 {
-    const bool has_scene = static_cast<bool>(environment_scene);
-    const bool dynamic_complete = ProjectDynamicTick(model, snapshot,
-        std::move(environment_scene), enemy_animations);
-    if (!has_scene) return false;
-    const bool ui_complete = ProjectTickUi(model, presentation, ui, settings,
-        snapshot, pending_rebind_slot, graphics_ui);
-    return dynamic_complete && ui_complete;
+    auto result = ProjectDynamicTick(model, snapshot, std::move(environment_scene), enemy_animations);
+    if (!result) return result;
+    ProjectTickUi(model, presentation, ui, settings, snapshot, pending_rebind_slot, graphics_ui);
+    return Result::Success();
 }
 
-bool ProjectRenderSnapshot(const GameReadModel &model,
+Result ProjectRenderSnapshot(const GameReadModel &model,
     const PresentationCatalog &presentation, const PresentationUiState &ui,
     const SettingsData &settings, RenderSnapshotStorage &snapshot,
     std::uint8_t pending_rebind_slot, const EnemyAnimationState *enemy_animations,

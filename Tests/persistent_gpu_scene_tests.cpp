@@ -3,6 +3,7 @@
 #include "renderer_geometry.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 
 namespace
@@ -18,12 +19,93 @@ hs::GpuInstance Instance(float x, std::uint32_t mesh = 1)
             {1.0f, 1.0f, 1.0f, 1.0f},
             0xffffffffu, mesh, 0.0f, 0.0f};
 }
+
+void ChannelUploadsPreserveTables()
+{
+    using Channel = hs::GpuSceneChannel;
+    hs::PersistentGpuSceneSlots scene;
+    std::array inputs{Instance(1), Instance(2), Instance(3)};
+    std::array<hs::GpuSceneMetadata, 3> metadata{};
+    metadata[0].skin_flags = 1;
+    std::array<hs::GpuSceneSerializedSlot, 3> gpu{};
+    const auto prepare = [&] {
+        scene.BeginFrame();
+        for (std::size_t index = 0; index < inputs.size(); ++index)
+            Check(!scene.Upsert({101 + index, 0}, inputs[index], metadata[index]).conflict,
+                  "channel fixture retains stable slots");
+        scene.EndFrame();
+    };
+    const auto upload = [&] {
+        std::size_t bytes{};
+        const auto copy = [&](Channel channel, auto member) {
+            for (const auto &range : scene.DirtyRanges(channel))
+                for (std::size_t index = range.begin; index < range.begin + range.count; ++index)
+                {
+                    const auto expected = hs::SerializeGpuSceneSlot(static_cast<std::uint32_t>(index),
+                        scene.Instances()[index], scene.Metadata()[index]);
+                    gpu[index].*member = expected.*member;
+                    bytes += sizeof(expected.*member);
+                }
+        };
+        copy(Channel::Instance, &hs::GpuSceneSerializedSlot::instance);
+        copy(Channel::Transform, &hs::GpuSceneSerializedSlot::transform);
+        copy(Channel::Mesh, &hs::GpuSceneSerializedSlot::mesh);
+        copy(Channel::Material, &hs::GpuSceneSerializedSlot::material);
+        copy(Channel::Bounds, &hs::GpuSceneSerializedSlot::bounds);
+        copy(Channel::Skin, &hs::GpuSceneSerializedSlot::skin);
+        for (std::size_t index = 0; index < gpu.size(); ++index)
+        {
+            const auto expected = hs::SerializeGpuSceneSlot(static_cast<std::uint32_t>(index),
+                scene.Instances()[index], scene.Metadata()[index]);
+            Check(std::memcmp(&gpu[index], &expected, sizeof(expected)) == 0,
+                  "channel patches must equal a complete current table rebuild");
+        }
+        scene.Commit();
+        return bytes;
+    };
+    prepare();
+    Check(upload() == 3 * hs::kGpuSceneSlotPayloadBytes, "new slots initialize every GPU channel");
+
+    inputs[0].position.x = 10;
+    inputs[1].color = 0x12345678;
+    inputs[2].position.w = 4;
+    prepare();
+    Check(scene.DirtyRanges(Channel::Instance).empty() && scene.DirtyRanges(Channel::Mesh).empty() &&
+          scene.DirtyRanges(Channel::Skin).empty(), "movement/color/bounds do not rewrite stable identity or skin");
+    Check(upload() == sizeof(hs::GpuSceneTransformEntry) + sizeof(hs::GpuSceneMaterialEntry) +
+          sizeof(hs::GpuSceneBoundsEntry), "independent changed channels replace six-array uploads");
+
+    metadata[0].previous_skin_vertex_stride = 12;
+    metadata[1].asset_id = 42;
+    metadata[2].reserved = 7;
+    prepare();
+    Check(scene.DirtyRanges(Channel::Transform).empty() && scene.DirtyRanges(Channel::Material).empty(),
+          "view history and entity surface edits cannot rewrite transform/material tables");
+    Check(upload() == sizeof(hs::GpuSceneSkinEntry) + sizeof(hs::GpuSceneMeshEntry) +
+          sizeof(hs::GpuSceneInstanceEntry), "history stride, geometry and entity payload map to their actual channels");
+
+    inputs[0].scale.w = 9;
+    prepare();
+    Check(scene.DirtyRanges().empty() && upload() == 0, "unserialized padding does not create GPU work");
+    inputs[0].position.x = 20;
+    prepare();
+    scene.Abort();
+    inputs[0].position.x = 10;
+    prepare();
+    Check(upload() == 0, "an aborted channel edit does not publish bytes or retain a dirty revision");
+
+    prepare();
+    scene.MarkAllActiveDirty();
+    Check(upload() == 3 * hs::kGpuSceneSlotPayloadBytes,
+          "fresh native backing initializes all channels even without semantic changes");
+}
 } // namespace
 
 int main()
 {
     try
     {
+        ChannelUploadsPreserveTables();
         hs::PersistentGpuSceneSlots scene;
 
         scene.BeginFrame();

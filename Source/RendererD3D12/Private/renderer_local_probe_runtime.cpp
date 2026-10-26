@@ -81,6 +81,21 @@ class Identity
   private:
     hs::Sha256Stream hash_;
 };
+std::array<std::byte,32> CaptureTextureIdentity(std::span<const LocalProbeTextureFact> facts)
+{
+    std::vector<const LocalProbeTextureFact *> sorted; sorted.reserve(facts.size());
+    for(const auto &fact:facts) sorted.push_back(&fact);
+    std::ranges::sort(sorted,{},[](const auto *fact){return fact->logical_id;});
+    Identity identity; identity.Text("local-probe.sampled-texture-bindings.v1");
+    for(const auto *fact:sorted) { identity.Text(fact->logical_id); identity.Integer(fact->sampled_mip,4); }
+    const auto digest=identity.Finish(); std::array<std::byte,32> result{};
+    const auto digit=[](char c)->unsigned { return c<='9'?unsigned(c-'0'):unsigned(c-'a'+10); };
+    for(std::size_t i=0;i<result.size();++i)
+        result[i]=std::byte((digit(digest[7+i*2])<<4)|digit(digest[8+i*2]));
+    return result;
+}
+bool CaptureTexturesReady(std::span<const LocalProbeTextureFact> facts)
+{ return std::ranges::all_of(facts,[](const auto &fact){return !fact.logical_id.empty()&&fact.ready;}); }
 using Identities=std::map<std::string,std::string>;
 std::uint64_t Revision(rd::SceneProbeRevisionDomain domain,const Identities &values)
 {
@@ -134,8 +149,9 @@ struct StaticShadowBakeBounds
 {
     DirectX::XMFLOAT3 minimum{}, maximum{};
 };
+template<class Page>
 StaticShadowView MakeStaticShadowView(const std::shared_ptr<const StaticRenderScene> &scene,
-    std::span<const LocalProbeCapturePage> pages,std::span<const LightView> lights,
+    std::span<const Page> pages,std::span<const LightView> lights,
     UINT edge=kShadowEdge, StaticShadowBakeBounds *bake_bounds=nullptr)
 {
     using namespace DirectX;
@@ -259,8 +275,55 @@ struct LocalProbeCaptureState
     std::string layout_identity,shadow_identity;
     StaticShadowView revision_shadow;
     std::string material_revision_identity, light_revision_identity, layout_revision_identity;
+    std::string derived_material_identity, derived_light_identity;
+    Identity light_identity_prefix;
     rd::SceneProbeRevisions derived_revisions;
+    std::vector<LocalProbePageRevision> revision_pages;
+    std::vector<LightView> revision_lights;
+    std::uint64_t revision_material_parameter{}, revision_pipeline{};
+    std::array<std::uint32_t,3> revision_material_quality{};
+    std::array<std::uint32_t,8> revision_frame_lighting{};
+    bool material_revision_facts_valid{}, light_revision_facts_valid{};
 };
+
+namespace
+{
+bool SameFloat(float a,float b) noexcept
+{ return std::bit_cast<std::uint32_t>(a)==std::bit_cast<std::uint32_t>(b); }
+bool SamePageRevision(const LocalProbePageRevision &a,const LocalProbePageRevision &b) noexcept
+{
+    if(a.page_slot!=b.page_slot||a.generation!=b.generation||a.index_count!=b.index_count||
+        a.source_digest!=b.source_digest)return false;
+    for(std::size_t i=0;i<a.bounds.minimum.size();++i)
+        if(!SameFloat(a.bounds.minimum[i],b.bounds.minimum[i])||!SameFloat(a.bounds.maximum[i],b.bounds.maximum[i]))return false;
+    for(std::size_t i=0;i<a.bounds.sphere.size();++i)
+        if(!SameFloat(a.bounds.sphere[i],b.bounds.sphere[i]))return false;
+    return true;
+}
+bool SameLightRevision(const LightView &a,const LightView &b) noexcept
+{
+    return a.stable_id==b.stable_id&&a.generation==b.generation&&a.revision==b.revision&&
+        a.type==b.type&&a.unit==b.unit&&a.shadow_flags==b.shadow_flags&&
+        a.legacy_attenuation==b.legacy_attenuation&&a.two_sided==b.two_sided&&
+        SameFloat(a.direction.x,b.direction.x)&&SameFloat(a.direction.y,b.direction.y)&&SameFloat(a.direction.z,b.direction.z)&&
+        SameFloat(a.color.x,b.color.x)&&SameFloat(a.color.y,b.color.y)&&SameFloat(a.color.z,b.color.z)&&
+        SameFloat(a.position.x,b.position.x)&&SameFloat(a.position.y,b.position.y)&&SameFloat(a.position.z,b.position.z)&&
+        SameFloat(a.quantity,b.quantity)&&SameFloat(a.range,b.range)&&SameFloat(a.shape.x,b.shape.x)&&SameFloat(a.shape.y,b.shape.y)&&
+        SameFloat(a.emitter_radius,b.emitter_radius)&&SameFloat(a.inner_cone_radians,b.inner_cone_radians)&&
+        SameFloat(a.outer_cone_radians,b.outer_cone_radians)&&SameFloat(a.area_tangent.x,b.area_tangent.x)&&
+        SameFloat(a.area_tangent.y,b.area_tangent.y)&&SameFloat(a.area_tangent.z,b.area_tangent.z);
+}
+bool SamePageRevisions(std::span<const LocalProbePageRevision> a,
+    std::span<const LocalProbePageRevision> b) noexcept
+{
+    return a.size()==b.size()&&std::equal(a.begin(),a.end(),b.begin(),SamePageRevision);
+}
+bool SameLightRevisions(std::span<const LightView> a,std::span<const LightView> b) noexcept
+{
+    return a.size()==b.size()&&std::equal(a.begin(),a.end(),b.begin(),SameLightRevision);
+}
+}
+
 struct LocalProbeCaptureFrame
 {
     std::shared_ptr<LocalProbeCaptureState> capture;
@@ -382,9 +445,43 @@ struct LocalProbeRuntime::Impl
     const RenderGraphBuilder *pending_graph{};
     std::shared_ptr<LocalProbeCaptureFrame> pending_frame;
     std::vector<std::shared_ptr<LocalProbeCaptureFrame>> retired_frames;
+    std::weak_ptr<const StaticRenderScene> material_scene;
+    std::uint32_t material_foliage_density_bits{};
+    std::vector<std::uint32_t> material_ordinals;
 };
 LocalProbeRuntime::LocalProbeRuntime():impl_(std::make_unique<Impl>()) {}
 LocalProbeRuntime::~LocalProbeRuntime()=default;
+Result LocalProbeRuntime::PrepareCaptureMaterialOrdinals(const std::shared_ptr<const StaticRenderScene> &scene,
+    float foliage_density)
+{
+    const auto density_bits=std::bit_cast<std::uint32_t>(foliage_density);
+    if(impl_->material_scene.lock()==scene&&impl_->material_foliage_density_bits==density_bits)return Result::Success();
+    if(!scene)
+    { impl_->material_scene.reset();impl_->material_foliage_density_bits=density_bits;impl_->material_ordinals.clear();return Result::Success(); }
+    try
+    {
+        std::vector<bool> used(rd::kAuthoredMaterialNames.size());
+        std::vector<std::uint32_t> ordinals;
+        for(std::size_t index=0;index<scene->instances.size();++index)
+        {
+            const auto &instance=scene->instances[index];
+            if(RetainDecorativeFoliage(instance,index,foliage_density))used[MaterialOrdinal(instance)]=true;
+        }
+        for(std::uint32_t ordinal=0;ordinal<used.size();++ordinal)if(used[ordinal])ordinals.push_back(ordinal);
+        impl_->material_scene=scene;impl_->material_foliage_density_bits=density_bits;
+        impl_->material_ordinals=std::move(ordinals);
+        return Result::Success();
+    }
+    catch(const std::exception &error){return Failure(error.what());}
+}
+std::span<const std::uint32_t> LocalProbeRuntime::CachedCaptureMaterialOrdinals(
+    const std::shared_ptr<const StaticRenderScene> &scene,float foliage_density) const noexcept
+{
+    return impl_->material_scene.lock()==scene&&impl_->material_foliage_density_bits==std::bit_cast<std::uint32_t>(foliage_density)
+        ?std::span<const std::uint32_t>(impl_->material_ordinals):std::span<const std::uint32_t>{};
+}
+bool LocalProbeRuntime::CaptureIdentityPending(const CompletionSet &completed) const noexcept
+{ return impl_->service.CaptureIdentityPending(completed); }
 
 namespace
 {
@@ -543,11 +640,39 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     out={}; const auto capture=impl_->capture; if(!capture || !in.scene) return Result::Success();
     try
     {
-        Require(in.scene && in.frame_constants && in.scene->content_generation_id==capture->scene_generation && in.static_instance_generation &&
-            in.pages.size()==rd::kEnvironmentMaterialNames.size()+1,"Native local-probe scene/page generation does not match adoption");
+        Require(in.scene && in.frame_constants && in.scene->content_generation_id==capture->scene_generation && in.static_instance_generation,
+            "Native local-probe scene generation does not match adoption");
+        std::vector<LocalProbePageRevision> owned_page_facts;
+        std::span<const LocalProbePageRevision> page_facts=in.page_revisions;
+        if(page_facts.empty()&&!in.pages.empty())
+        {
+            owned_page_facts.reserve(in.pages.size());
+            for(const auto &page:in.pages)
+                owned_page_facts.push_back({page.page_slot,page.generation,page.index_count,page.source_digest,page.bounds});
+            page_facts=owned_page_facts;
+        }
+        Require(page_facts.size()==rd::kEnvironmentMaterialNames.size()+1,
+            "Native local-probe revision facts do not match the complete page catalog");
+        if(!in.pages.empty())
+        {
+            Require(in.pages.size()==page_facts.size(),"Native local-probe capture pages do not match revision facts");
+            for(std::size_t i=0;i<in.pages.size();++i)
+            {
+                const auto &page=in.pages[i];
+                Require(page.complete&&page.generation&&page.index_count,
+                    "Capture geometry is not an actual complete page");
+                Require(std::ranges::any_of(page.source_digest,[](std::byte value) { return value!=std::byte{}; }),
+                    "Capture geometry is missing its decoded source digest");
+                ValidateBounds(page.bounds);
+                const LocalProbePageRevision actual{page.page_slot,page.generation,page.index_count,page.source_digest,page.bounds};
+                Require(SamePageRevision(actual,page_facts[i]),"Capture geometry changed after revision qualification");
+            }
+        }
         // The retained scene is immutable; revalidate its layout only when its adoption or density changes.
-        if(capture->revision_scene!=in.scene || capture->revision_instance_generation!=in.static_instance_generation ||
-            capture->revision_foliage_density!=in.foliage_density)
+        const bool layout_owner_changed=capture->revision_scene!=in.scene ||
+            capture->revision_instance_generation!=in.static_instance_generation ||
+            capture->revision_foliage_density!=in.foliage_density;
+        if(layout_owner_changed)
         {
             // Native Generation/instance ids validate resource compatibility but
             // are not inputs to the sampled static layout. The baked package is
@@ -569,67 +694,102 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             capture->revision_instance_generation=in.static_instance_generation;
             capture->revision_foliage_density=in.foliage_density;
         }
-        Identity material; material.Text("local-probe.actual-material-state.v2");
-        material.Integer(in.material_parameter_revision); material.Integer(in.pipeline_revision);
-        for(const auto &page:in.pages)
+        const auto &quality=in.frame_constants->material_quality_options;
+        const std::array material_quality{std::bit_cast<std::uint32_t>(quality.x),
+            std::bit_cast<std::uint32_t>(quality.y),std::bit_cast<std::uint32_t>(quality.z)};
+        const bool material_inputs_changed=!capture->material_revision_facts_valid||
+            capture->revision_material_parameter!=in.material_parameter_revision||
+            capture->revision_pipeline!=in.pipeline_revision||capture->revision_material_quality!=material_quality||
+            !SamePageRevisions(capture->revision_pages,page_facts);
+        if(material_inputs_changed)
         {
-            Require(page.complete && page.generation && page.index_count,"Capture geometry is not an actual complete page");
-            // Selected page content changes capture; native repacking and adoption ids do not.
-            Require(std::ranges::any_of(page.source_digest,[](std::byte value) { return value!=std::byte{}; }),
-                "Capture geometry is missing its decoded source digest");
-            material.Text(Hex(page.source_digest)); material.Integer(page.index_count,4);
-            ValidateBounds(page.bounds);
-            for(float value:page.bounds.minimum) material.Float(value);
-            for(float value:page.bounds.maximum) material.Float(value);
-            for(float value:page.bounds.sphere) material.Float(value);
-        }
-        Identity lights; lights.Text("local-probe.actual-light-view.v1"); lights.Integer(in.lights.size());
-        for(const auto &light:in.lights)
-        {
-            lights.Integer(light.stable_id); lights.Integer(light.generation,4); lights.Integer(light.revision);
-            lights.Integer(static_cast<std::uint32_t>(light.type),4); lights.Integer(static_cast<std::uint32_t>(light.unit),4);
-            lights.Vector(light.direction); lights.Vector(light.color); lights.Vector(light.position); lights.Float(light.quantity);
-            lights.Float(light.range); lights.Float(light.shape.x); lights.Float(light.shape.y); lights.Float(light.emitter_radius);
-            lights.Float(light.inner_cone_radians); lights.Float(light.outer_cone_radians); lights.Vector(light.area_tangent);
-            lights.Integer(light.shadow_flags,4); lights.Integer(light.legacy_attenuation,1); lights.Integer(light.two_sided,1);
-        }
-        if(in.frame_constants)
-        {
-            const auto &quality=in.frame_constants->material_quality_options;
+            Identity material; material.Text("local-probe.actual-material-state.v2");
+            material.Integer(in.material_parameter_revision); material.Integer(in.pipeline_revision);
+            for(const auto &page:page_facts)
+            {
+                Require(page.generation&&page.index_count,"Capture geometry is not an actual complete page");
+                Require(std::ranges::any_of(page.source_digest,[](std::byte value) { return value!=std::byte{}; }),
+                    "Capture geometry is missing its decoded source digest");
+                material.Text(Hex(page.source_digest)); material.Integer(page.index_count,4);
+                ValidateBounds(page.bounds);
+                for(float value:page.bounds.minimum) material.Float(value);
+                for(float value:page.bounds.maximum) material.Float(value);
+                for(float value:page.bounds.sphere) material.Float(value);
+            }
             // Static capture evaluates surface lighting, never screen-space refraction (w).
             material.Float(quality.x); material.Float(quality.y); material.Float(quality.z);
-            lights.Vector(in.frame_constants->light_direction_intensity); lights.Vector(in.frame_constants->light_color);
+            capture->material_revision_identity=material.Finish();
+            capture->revision_pages.assign(page_facts.begin(),page_facts.end());
+            capture->revision_material_parameter=in.material_parameter_revision;
+            capture->revision_pipeline=in.pipeline_revision;
+            capture->revision_material_quality=material_quality;
+            capture->material_revision_facts_valid=true;
         }
-        const auto material_identity=material.Finish();
-        auto shadow_key=lights;
-        shadow_key.Text(capture->layout_identity); shadow_key.Text(material_identity);
-        const auto shadow_identity=shadow_key.Finish();
-        if(capture->shadow_identity!=shadow_identity)
+        const auto &light_direction=in.frame_constants->light_direction_intensity;
+        const auto &light_color=in.frame_constants->light_color;
+        const std::array frame_lighting{std::bit_cast<std::uint32_t>(light_direction.x),
+            std::bit_cast<std::uint32_t>(light_direction.y),std::bit_cast<std::uint32_t>(light_direction.z),
+            std::bit_cast<std::uint32_t>(light_direction.w),
+            std::bit_cast<std::uint32_t>(light_color.x),std::bit_cast<std::uint32_t>(light_color.y),
+            std::bit_cast<std::uint32_t>(light_color.z),std::bit_cast<std::uint32_t>(light_color.w)};
+        const bool light_inputs_changed=!capture->light_revision_facts_valid||
+            capture->revision_frame_lighting!=frame_lighting||!SameLightRevisions(capture->revision_lights,in.lights);
+        if(light_inputs_changed)
         {
-            const auto shadow=MakeStaticShadowView(in.scene,in.pages,in.lights);
-            capture->revision_shadow=shadow;
-            capture->shadow_identity=shadow_identity;
+            Identity input_lights; input_lights.Text("local-probe.actual-light-view.v1"); input_lights.Integer(in.lights.size());
+            for(const auto &light:in.lights)
+            {
+                input_lights.Integer(light.stable_id); input_lights.Integer(light.generation,4); input_lights.Integer(light.revision);
+                input_lights.Integer(static_cast<std::uint32_t>(light.type),4); input_lights.Integer(static_cast<std::uint32_t>(light.unit),4);
+                input_lights.Vector(light.direction); input_lights.Vector(light.color); input_lights.Vector(light.position); input_lights.Float(light.quantity);
+                input_lights.Float(light.range); input_lights.Float(light.shape.x); input_lights.Float(light.shape.y); input_lights.Float(light.emitter_radius);
+                input_lights.Float(light.inner_cone_radians); input_lights.Float(light.outer_cone_radians); input_lights.Vector(light.area_tangent);
+                input_lights.Integer(light.shadow_flags,4); input_lights.Integer(light.legacy_attenuation,1); input_lights.Integer(light.two_sided,1);
+            }
+            input_lights.Vector(in.frame_constants->light_direction_intensity); input_lights.Vector(in.frame_constants->light_color);
+            capture->light_identity_prefix=input_lights;
+            capture->revision_lights.assign(in.lights.begin(),in.lights.end());
+            capture->revision_frame_lighting=frame_lighting;
+            capture->light_revision_facts_valid=true;
         }
-        const auto &shadow=capture->revision_shadow;
-        lights.Text("local-probe.pure-static-directional-shadow.v1"); lights.Integer(kShadowEdge,4);
-        lights.Integer(shadow.enabled,1); lights.Integer(shadow.light_id); lights.Integer(shadow.light_generation,4);
-        lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
-        if(shadow.enabled)
-            for(const auto &row:shadow.view.view_projection.m) for(float value:row) lights.Float(value);
+        const auto material_identity=capture->material_revision_identity;
+        const bool shadow_inputs_changed=layout_owner_changed||light_inputs_changed||material_inputs_changed||
+            capture->shadow_identity.empty();
+        if(shadow_inputs_changed)
+        {
+            auto shadow_key=capture->light_identity_prefix;
+            shadow_key.Text(capture->layout_identity); shadow_key.Text(material_identity);
+            const auto shadow_identity=shadow_key.Finish();
+            if(capture->shadow_identity!=shadow_identity)
+            {
+                const auto shadow=MakeStaticShadowView(in.scene,
+                    std::span<const LocalProbePageRevision>(page_facts),in.lights);
+                capture->revision_shadow=shadow;
+                capture->shadow_identity=shadow_identity;
+            }
+            auto lights=capture->light_identity_prefix;
+            const auto &shadow=capture->revision_shadow;
+            lights.Text("local-probe.pure-static-directional-shadow.v1"); lights.Integer(kShadowEdge,4);
+            lights.Integer(shadow.enabled,1); lights.Integer(shadow.light_id); lights.Integer(shadow.light_generation,4);
+            lights.Integer(std::bit_cast<std::uint32_t>(std::int32_t(-800)),4); lights.Float(-1.5f);
+            if(shadow.enabled)
+                for(const auto &row:shadow.view.view_projection.m) for(float value:row) lights.Float(value);
+            capture->light_revision_identity=lights.Finish();
+        }
         // Generation products are immutable; fold them again only when actual native inputs change.
-        if(capture->material_revision_identity!=material_identity)
+        if(capture->derived_material_identity!=material_identity)
         {
             auto materials=capture->material_products; materials["native/material-and-complete-page-state"]=material_identity;
             capture->derived_revisions.material=Revision(rd::SceneProbeRevisionDomain::Material,materials);
-            capture->material_revision_identity=material_identity;
+            capture->derived_material_identity=material_identity;
         }
-        const auto light_identity=lights.Finish();
-        if(capture->light_revision_identity!=light_identity)
+        const auto light_identity=capture->light_revision_identity;
+        if(capture->derived_light_identity!=light_identity)
         {
             const Identities light_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
                 {"native/authoritative-light-view",light_identity}};
             capture->derived_revisions.light=Revision(rd::SceneProbeRevisionDomain::Light,light_inputs);
-            capture->light_revision_identity=light_identity;
+            capture->derived_light_identity=light_identity;
         }
         if(capture->layout_revision_identity!=capture->layout_identity)
         {
@@ -644,8 +804,8 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
-Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
-    LocalProbeRuntimeFramePlan &plan)
+Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameInputs &in,
+    LocalProbeRuntimeFramePlan &plan) const
 {
     plan={};plan.source=&in;plan.scene=in.scene;
     plan.static_instance_generation=in.static_instance_generation;
@@ -653,14 +813,27 @@ Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInp
     plan.pipeline_revision=in.pipeline_revision;
     plan.light_count=in.lights.size();plan.page_count=in.pages.size();
     plan.scene_read_count=in.scene_reads.size();plan.max_cube_views=in.max_cube_views;
+    plan.capture_identity_valid=in.texture_facts_valid;
+    if(plan.capture_identity_valid)
+    {
+        plan.capture_identity=CaptureTextureIdentity(in.texture_facts);
+        plan.capture_sources_ready=CaptureTexturesReady(in.texture_facts);
+    }
     if(!impl_->capture)return Result::Success();
-    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
-    std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
     plan.active=true;
     if(!in.scene)return Result::Success();
     if(auto qualified=CurrentRevisions(in,plan.revisions);!qualified)return qualified;
     if(in.max_cube_views>6)return Failure("Capture cube-view budget exceeds six");
+    plan.shadow=impl_->capture->revision_shadow.enabled;
     plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed);
+    return Result::Success();
+}
+Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
+    LocalProbeRuntimeFramePlan &plan)
+{
+    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
+    std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
+    if(auto decided=PrepareFrameDecisionData(in,plan);!decided)return decided;
     if(!plan.capture)return Result::Success();
     try
     {
@@ -697,6 +870,9 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
         plan.material_parameter_revision!=in.material_parameter_revision||
         plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
+        plan.capture_identity_valid!=in.texture_facts_valid||
+        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureTextureIdentity(in.texture_facts)||
+            plan.capture_sources_ready!=CaptureTexturesReady(in.texture_facts)))||
         plan.max_cube_views!=in.max_cube_views||layout.scene_reads.size()!=in.scene_reads.size()||
         layout.shadow_sampling!=(plan.shadow&&bool(in.declare_shadow_sampling)))return false;
     for(std::size_t i=0;i<in.scene_reads.size();++i)
@@ -705,7 +881,7 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
     if(!plan.active)return true;
     if(!plan.capture)
     {
-        const LocalProbeInputs service_input{in.scene,plan.revisions,{},{},in.completed,0};
+        const LocalProbeInputs service_input{in.scene,plan.revisions,{},{},in.completed,0,{},plan.capture_identity,plan.capture_identity_valid,plan.capture_sources_ready};
         LocalProbeFramePlan service_plan;
         return bool(impl_->service.PrepareFrameRecordData(service_input,service_plan))&&
             impl_->service.MatchesLayout(service_input,service_plan,layout.service);
@@ -723,7 +899,7 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
     if(plan.shadow)reads.push_back({layout.shadow_output,Access::ShaderRead});
     const LocalProbeInputs service_input{in.scene,plan.revisions,reads,
         [](RenderPassContext &,const LocalProbeCaptureView &){return Result::Success();},
-        in.completed,in.max_cube_views,in.declare_material_sampling};
+        in.completed,in.max_cube_views,in.declare_material_sampling,plan.capture_identity,plan.capture_identity_valid,plan.capture_sources_ready};
     LocalProbeFramePlan service_plan;
     return bool(impl_->service.PrepareFrameRecordData(service_input,service_plan))&&
         impl_->service.MatchesLayout(service_input,service_plan,layout.service);
@@ -737,6 +913,9 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         plan.material_parameter_revision!=in.material_parameter_revision||
         plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
+        plan.capture_identity_valid!=in.texture_facts_valid||
+        (plan.capture_identity_valid&&(plan.capture_identity!=CaptureTextureIdentity(in.texture_facts)||
+            plan.capture_sources_ready!=CaptureTexturesReady(in.texture_facts)))||
         plan.max_cube_views!=in.max_cube_views)
         return Failure("Local-probe frame record input changed before graph registration");
     if(layout){*layout={};layout->active=plan.active;layout->capture=plan.capture;layout->shadow=plan.shadow;
@@ -749,7 +928,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
     {
         // No substitute scene or revisions. The service uploads/exports its
         // real zero-count metadata and rejects prior scene publication.
-        const LocalProbeInputs absent{nullptr,{}, {},{},in.completed,0};
+        const LocalProbeInputs absent{nullptr,{}, {},{},in.completed,0,{},plan.capture_identity,plan.capture_identity_valid,plan.capture_sources_ready};
         LocalProbeFramePlan service_plan;
         if(auto prepared=impl_->service.PrepareFrameRecordData(absent,service_plan);!prepared)return prepared;
         const auto registered=retained?impl_->service.BindRetained(graph,absent,service_plan,retained->service,out):
@@ -760,7 +939,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
     const auto revisions=plan.revisions;
     if(!plan.capture)
     {
-        const LocalProbeInputs publication{in.scene,revisions,{}, {},in.completed,0};
+        const LocalProbeInputs publication{in.scene,revisions,{}, {},in.completed,0,{},plan.capture_identity,plan.capture_identity_valid,plan.capture_sources_ready};
         LocalProbeFramePlan service_plan;
         if(auto prepared=impl_->service.PrepareFrameRecordData(publication,service_plan);!prepared)return prepared;
         const auto registered=retained?impl_->service.BindRetained(graph,publication,service_plan,retained->service,out):
@@ -920,7 +1099,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
         }
         const LocalProbeInputs input{in.scene,revisions,reads,[frame](RenderPassContext &context,const LocalProbeCaptureView &view) {
             return frame->Draw(context,view);
-        },in.completed,in.max_cube_views,in.declare_material_sampling};
+        },in.completed,in.max_cube_views,in.declare_material_sampling,plan.capture_identity,plan.capture_identity_valid,plan.capture_sources_ready};
         LocalProbeFramePlan service_plan;
         if(auto prepared=impl_->service.PrepareFrameRecordData(input,service_plan);!prepared)return prepared;
         const auto registered=retained?impl_->service.BindRetained(graph,input,service_plan,retained->service,out):
@@ -961,6 +1140,8 @@ std::span<const rd::SceneProbeRecord> LocalProbeRuntime::Probes() const noexcept
 { return impl_->capture?std::span<const rd::SceneProbeRecord>(impl_->capture->probes):std::span<const rd::SceneProbeRecord>{}; }
 rd::SceneProbeRevisions LocalProbeRuntime::BaselineRevisions() const noexcept
 { return impl_->capture?impl_->capture->baseline:rd::SceneProbeRevisions{}; }
+LocalProbeBakeStatus LocalProbeRuntime::BakeStatus(const CompletionSet &completed) const noexcept
+{ return impl_->service.BakeStatus(completed); }
 std::uint64_t LocalProbeRuntime::AllocatedBytes() const noexcept
 {
     auto bytes=impl_->service.AllocatedBytes();
@@ -1049,7 +1230,8 @@ Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRe
             capture.complete=page->storage.resource && page->index_count;
         }
         StaticShadowBakeBounds bounds;
-        frame->shadow=MakeStaticShadowView(scene,frame->pages,std::span(&light,1),edge,&bounds);
+        frame->shadow=MakeStaticShadowView(scene,
+            std::span<const LocalProbeCapturePage>(frame->pages),std::span(&light,1),edge,&bounds);
         Require(frame->shadow.enabled,"Static shadow bake requires a valid shadow-requested directional light");
         rd::StaticShadowArchiveDescription archive;
         {

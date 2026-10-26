@@ -17,6 +17,7 @@
 #include <hs/renderer/renderer.hpp>
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
+#include "runtime_diagnostics.hpp"
 #include "session_music.hpp"
 #include "audio_session.hpp"
 #include "audio_native.hpp"
@@ -46,6 +47,7 @@
 
 #include <array>
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cmath>
 #include <filesystem>
@@ -58,6 +60,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace
@@ -1029,7 +1032,7 @@ void TestAudioDeliverySessions()
         seen.emplace_back(packet.kind == hs::QueuedAudioEvent::Kind::Tick,
             packet.kind == hs::QueuedAudioEvent::Kind::Tick ? packet.tick_info.tick : packet.event.sequence);
     };
-    const auto observe = [](const auto &, std::size_t) {};
+    const auto observe = [](const auto &) {};
     const auto event = [](std::uint64_t session, hs::Sequence sequence, hs::Tick tick) {
         hs::PresentationEvent result;
         result.kind = hs::PresentationKind::Audio; result.session_id = session;
@@ -1041,43 +1044,28 @@ void TestAudioDeliverySessions()
     simulation.PublishAudioTick({2, 1, hs::SessionPhase::Playing, {}});
     Check(channels->sim_audio_events.TryPush(event(2, 2, 1)) && channels->sim_audio_events.TryPush(event(2, 3, 1)),
           "queue ordered first sounds of restarted session");
-    Check(channels->render_audio_events.TryPush(event(1, 4, 90)) && channels->render_audio_events.TryPush(event(2, 5, 1)),
-          "render origin keeps a separate producer FIFO");
-    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
-    const std::vector<std::pair<bool, hs::Sequence>> expected{{true, 1}, {false, 2}, {false, 3}, {false, 5}};
-    Check(seen == expected && delivery->Stats().discarded_old_session == 2,
-          "batch discards old sessions before execution, then keeps boundary/first-signal/same-tick FIFO and sim-before-render merge");
+    delivery->Drain(channels->sim_audio_events, consume, observe);
+    const std::vector<std::pair<bool, hs::Sequence>> expected{{true, 1}, {false, 2}, {false, 3}};
+    Check(seen == expected && delivery->Stats().discarded_old_session == 1,
+          "one FIFO preserves session boundary and same-tick domain-event order");
 
     seen.clear();
     for (std::size_t i = 0; i < 1023; ++i)
         Check(channels->sim_audio_events.TryPush(event(2, 100 + i, 1)), "fill final old-session batch");
     simulation.PublishAudioTick({3, 1, hs::SessionPhase::Playing, {}});
-    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    delivery->Drain(channels->sim_audio_events, consume, observe);
     Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 1}},
           "boundary at the final capacity slot closes every older queued event");
     seen.clear();
     Check(channels->sim_audio_events.TryPush(event(3, 5000, 1)), "new first sound arrives in next batch");
-    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    delivery->Drain(channels->sim_audio_events, consume, observe);
     Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{false, 5000}},
           "first sound after a batch-final session boundary is never lost or reset again");
 
-    seen.clear(); bool published_late = false;
-    Check(channels->render_audio_events.TryPush(event(4, 6000, 1)), "future rendered session becomes visible");
-    const auto racing_observe = [&](const hs::QueuedAudioEvent &, std::size_t source) {
-        if (source == 1 && !published_late)
-        {
-            published_late = true;
-            simulation.PublishAudioTick({4, 1, hs::SessionPhase::Playing, {}});
-            Check(channels->sim_audio_events.TryPush(event(4, 5999, 1)), "publish preceding sim boundary after initial empty pop");
-        }
-    };
-    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, racing_observe);
-    Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 1}, {false, 5999}, {false, 6000}},
-          "late observation refreshes the preceding simulation boundary before admitting new-session render sound");
     seen.clear();
     simulation.PublishAudioTick({4, 7, hs::SessionPhase::Paused, {}});
     Check(channels->sim_audio_events.TryPush(event(4, 6001, 5)), "queue same-session delayed audio");
-    delivery->Drain(channels->sim_audio_events, channels->render_audio_events, consume, observe);
+    delivery->Drain(channels->sim_audio_events, consume, observe);
     Check(seen == std::vector<std::pair<bool, hs::Sequence>>{{true, 7}, {false, 6001}} &&
               delivery->Stats().maximum_event_age_ticks == 2,
           "same-session FIFO observes actual event age without inventing an arbitrary expiry cutoff");
@@ -1252,7 +1240,7 @@ void TestPreparedNonLoopTransition(const std::filesystem::path &root)
     simulation.PublishAudioTick({1, 1, hs::SessionPhase::Defeat, {}});
     event.session_id = 1; event.tick = 1;
     Check(channels->sim_audio_events.TryPush({event, 0}), "queue same-tick projected defeat stinger");
-    owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+    owner->Drain(channels->sim_audio_events, [](const auto &) {});
     Check(owner->HasPendingMusic(), "Main retains a nonloop transition intent while complete PCM prepares");
     const auto deadline = GetTickCount64() + 1000;
     while (owner->HasPendingMusic() && GetTickCount64() < deadline)
@@ -1270,7 +1258,7 @@ void TestPreparedNonLoopTransition(const std::filesystem::path &root)
     auto stop = event;
     stop.parameters = hs::EncodeAudioAction(hs::AudioEventAction::Stop);
     Check(channels->sim_audio_events.TryPush({stop, 0}), "queue transition-track stop");
-    owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+    owner->Drain(channels->sim_audio_events, [](const auto &) {});
     Check(owner->ActiveMusic().value == 0 && !owner->HasPendingMusic(),
           "Stop clears the matching active music intent as well as pending intent");
     owner->RequestMusic(event);
@@ -1331,7 +1319,7 @@ void TestPreparedSessionAmbience(const std::filesystem::path &root)
         const auto boundary = [&](std::uint64_t session, hs::Tick tick, hs::SessionPhase phase) {
             simulation.PublishAudioTick({session, tick, phase, {}});
             Check(channels->dropped_presentation_events.load() == 0, "publish ambience session boundary");
-            owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+            owner->Drain(channels->sim_audio_events, [](const auto &) {});
         };
         const auto pump = [&](const auto &done) {
             const auto deadline = GetTickCount64() + 1000;
@@ -1504,9 +1492,14 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
       {"id":"audio.spatial","asset_id":"audio.spatial","submix":"SFX","spatial":true,"preload":true,"streaming":false,"encoding":"PCM","loop":true,"priority":"Other","max_simultaneous":2,"minimum_retrigger_ms":0,"files":["spatial.wav"]},
       {"id":"audio.pickup.xp_collect","asset_id":"audio.pickup.xp_collect","submix":"UI","spatial":false,"preload":true,"streaming":false,"encoding":"PCM","loop":true,"priority":"UI","max_simultaneous":4,"minimum_retrigger_ms":60000,"files":["xp.wav"]}
     ]})";
+    engine.SetCaptureTimings(true);
     Check(engine.Initialize(settings, directory).Succeeded(), "spatial admission catalog initializes");
     if (engine.Status().device_state == hs::AudioDeviceState::Ready)
     {
+        const auto spatial_calls = [&] {
+            return engine.CaptureTimings().scopes[static_cast<std::size_t>(hs::AudioWorkId::Spatial)].calls;
+        };
+        const auto before_spatial = spatial_calls();
         event.asset = hs::MakeAssetId("audio.spatial");
         event.position = {3.0f, 0.0f, 1.0f};
         engine.Play(event);
@@ -1514,9 +1507,13 @@ void TestAudioPayloadLazyLoad(const std::filesystem::path &root)
         engine.Play(event);
         Check(engine.Status().played_count == 2 && engine.Status().active_source_voices == 2,
               "single admission scan retains the per-cue voice cap");
+        Check(spatial_calls() == before_spatial + 1,
+              "identical emitter inputs must share one calculation across separate native voices");
         engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
         engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
         engine.UpdateListener({1, 0, 0}, {1, 0, 0}, {0, 1, 0});
+        Check(spatial_calls() == before_spatial + 2,
+              "listener movement invalidates the matrix once for identical active emitters");
         Check(engine.Status().active_source_voices == 2 && engine.Status().native_error == 0,
               "unchanged and moved listeners retain spatial voice routing");
         const auto wait_for_native_drain = [&] {
@@ -1783,6 +1780,23 @@ void TestRecordingFileFinalization(const std::filesystem::path &root)
     }
 }
 
+void TestCsvAppendPreservesNumericValues()
+{
+    constexpr std::uint64_t wide = 18'446'744'073'709'551'615ull;
+    constexpr double precise = 1.2345678901234567;
+    std::string row;
+    hs::runtime_detail::AppendCsvValues(row, wide, precise);
+    hs::runtime_detail::AppendCsvText(row, "pass,\"quoted\"");
+    Check(row.starts_with("18446744073709551615,") && row.ends_with(",\"pass,\"\"quoted\"\"\""),
+          "CSV appender preserves 64-bit integer digits and quotes text fields");
+    const auto begin = row.find(',', 1) + 1;
+    const auto end = row.find(',', begin);
+    double parsed{};
+    const auto converted = std::from_chars(row.data() + begin, row.data() + end, parsed);
+    Check(converted.ec == std::errc{} && converted.ptr == row.data() + end && parsed == precise,
+          "CSV appender emits a round-trip floating-point value");
+}
+
 void TestPlaytestFinalizationFailures(const std::filesystem::path &root)
 {
     // An occupied report path is a real file-open failure, independent of ACLs.
@@ -1904,34 +1918,59 @@ void TestVfxActiveEffectStoreOwnsPayloadOnce()
 
 void TestUiPacketReceiptFollowsExactPresentedFrame()
 {
-    auto channel_storage = std::make_unique<hs::RuntimeChannels>();
-    auto &channels = *channel_storage;
-    auto simulation = channels.ForSimulation();
-    auto rendering = channels.ForRender();
-    hs::runtime_detail::UiDrawPacketFacts older;
-    older.generation = 10; older.session_id = 7;
-    older.session.phase = hs::SessionPhase::CardSelection;
-    older.session.card_count = 1;
-    older.session.cards[0] = {hs::CardKind::LearnSkill, 1, 0};
-    older.selection_epoch = hs::runtime_detail::UiSelectionEpoch(older.session);
-    auto newer = older;
-    newer.generation = 11; newer.session.cards[0].subject = 2;
-    newer.selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer.session);
-    simulation.ui_packets.StageUiPacket(0, older);
-    simulation.ui_packets.StageUiPacket(1, newer);
-    const std::array layout{hs::UiModel{hs::UiModel::Kind::Button, {360, 300}, {360, 420}}};
-    Check(rendering.ui_packets.AcceptPresentedUiPacket(10, 10, 7, layout, {1920, 1080}),
-          "accepted older frame resolves its own staged UI facts despite a newer pending snapshot");
-    auto shown = channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire);
-    Check(shown && shown->generation == 10 && shown->session.cards[0].subject == 1 &&
-          shown->draw_models.size() == 1 && shown->presented_extent == hs::ViewExtent{1920, 1080},
-          "present receipt owns the exact frame's layout, choice facts and extent");
-    Check(!channels.ui_packets.AcceptPresentedUiPacket(11, 10, 7, layout, {1920, 1080}) &&
-          channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
-          "mismatched or stale receipt cannot replace the last accepted UI packet");
-    Check(channels.ui_packets.AcceptPresentedUiPacket(11, 11, 7, layout, {1280, 720}) &&
-          channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire)->generation == 11,
-          "new accepted resized frame replaces the bounded latest receipt");
+    hs::runtime_detail::UiDrawPackets packets;
+    hs::RenderSnapshotExchange exchange(0, 0, 0, 0);
+    hs::RenderSnapshotExchange::Consumer consumer(exchange);
+    auto older = std::make_shared<hs::UiFrame>();
+    older->generation = 10; older->session_id = 7;
+    older->session.phase = hs::SessionPhase::CardSelection;
+    older->session.card_count = 1;
+    older->session.cards[0] = {hs::CardKind::LearnSkill, 1, 0};
+    older->selection_epoch = hs::runtime_detail::UiSelectionEpoch(older->session);
+    older->draw_models.push_back({hs::UiModel::Kind::Button, {360, 300}, {360, 420}});
+    auto newer = std::make_shared<hs::UiFrame>(*older);
+    newer->generation = 11; newer->session.cards[0].subject = 2;
+    newer->selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer->session);
+    auto first = exchange.TryBeginWrite();
+    Check(first.has_value(), "first UI publication slot");
+    exchange.Publish(*first, 10, nullptr, older);
+    auto rendered = consumer.AcquireLatest();
+    auto second = exchange.TryBeginWrite();
+    Check(second.has_value(), "new UI can publish while old UI is rendered");
+    exchange.Publish(*second, 11, nullptr, newer);
+    Check(rendered.ui_frame == older && rendered.current.ui.data() == older->draw_models.data(),
+          "draw span and interaction facts retain the same immutable UI owner");
+    Check(packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {1920, 1080}),
+          "older submitted UI retains its exact facts despite a newer pending publication");
+    auto shown = packets.presented_ui_packet.load(std::memory_order_acquire);
+    Check(shown && shown->frame == older && shown->frame->session.cards[0].subject == 1 &&
+          shown->presented_extent == hs::ViewExtent{1920, 1080},
+          "Present receipt retains UI without copying draw models or interaction facts");
+    Check(packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {1920, 1080}) &&
+          packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "repeated successful Present retains the same receipt owner");
+    Check(!packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 8, {1920, 1080}) &&
+          !packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {}) &&
+          !packets.AcceptPresentedUiPacket(11, rendered.ui_frame, 7, {1920, 1080}) &&
+          packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "invalid session, extent or generation preserves accepted UI");
+    Check(packets.AcceptPresentedUiPacket(10, rendered.ui_frame, 7, {1280, 720}) &&
+          packets.presented_ui_packet.load(std::memory_order_acquire)->frame == older,
+          "resize updates receipt extent while preserving the immutable UI owner");
+    rendered = consumer.AcquireLatest();
+    Check(packets.AcceptPresentedUiPacket(11, rendered.ui_frame, 7, {1280, 720}) &&
+          !packets.AcceptPresentedUiPacket(10, older, 7, {1280, 720}) &&
+          packets.presented_ui_packet.load(std::memory_order_acquire)->frame == newer,
+          "new frame supersedes old receipts without accepting stale UI");
+    Check(hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
+              newer->graphics_model, 0, 0xFF, false) &&
+          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 1, newer->ui, newer->settings,
+              newer->graphics_model, 0, 0xFF, false) &&
+          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
+              newer->graphics_model, 0, 0, false) &&
+          !hs::runtime_detail::SameUiFrameInputs(*newer, 7, 0, newer->ui, newer->settings,
+              newer->graphics_model, 0, 0xFF, true),
+          "UI reuse depends on world projection, key rebind and input feedback before building draws");
 }
 
 void TestVfxSessionReset()
@@ -2056,7 +2095,7 @@ void TestSimulationSignalFanout()
                   "normal render destination contains each visual once");
     }
     Check(channels.presentation_events.Size() == 0 && channels.sim_audio_events.Size() == 0 &&
-              channels.render_audio_events.Size() == 0 && channels.dropped_presentation_events.load() == 0,
+              channels.dropped_presentation_events.load() == 0,
           "normal fanout has no duplicate audio or borrowed queue payload");
     simulation.capture_clock = +[]() noexcept -> std::uint64_t { return 1234; };
 
@@ -2064,8 +2103,8 @@ void TestSimulationSignalFanout()
     footstep.kind = hs::PresentationKind::Audio;
     footstep.sequence = 900;
     footstep.asset = hs::MakeAssetId("audio.player.footstep_walk");
-    Check(rendering.render_audio_events.TryPush({footstep, 17}), "render keeps its own audio producer queue");
     simulation.ProjectDomainSignalsOnce(signals, 12.0f, true, &recorded);
+    simulation.PublishAudioEvent(footstep);
     for (const auto &wanted : expected)
         Check(channels.presentation_events.TryPop(event) && same(event, wanted),
               "explicit capture preserves the original mixed diagnostic trace order");
@@ -2073,9 +2112,8 @@ void TestSimulationSignalFanout()
         if (wanted.kind == hs::PresentationKind::Audio)
             Check(channels.sim_audio_events.TryPop(queued) && same(queued.event, wanted) && queued.enqueued_qpc == 1234,
                   "diagnostic trace copies do not delay or duplicate live simulation audio");
-    Check(channels.render_audio_events.TryPop(queued) && same(queued.event, footstep) && queued.enqueued_qpc == 17 &&
-              !channels.render_audio_events.TryPop(queued),
-          "simulation fanout cannot write or reorder render footsteps");
+    Check(channels.sim_audio_events.TryPop(queued) && same(queued.event, footstep) && queued.enqueued_qpc == 1234,
+          "tick-generated footsteps append to the simulation-owned audio FIFO");
 
     for (std::size_t row = 0; row < 1024; ++row)
         Check(channels.sim_audio_events.TryPush({footstep, 0}), "fill simulation audio destination");
@@ -2224,7 +2262,7 @@ void TestCharacterDetailsTextFit()
     hs::PresentationUiState ui;
     const auto project = [&] {
         snapshot.Clear();
-        Check(hs::ProjectRenderSnapshot(model.View(), catalog, ui, {}, snapshot), "project text-fit fixture");
+        Check(hs::ProjectRenderSnapshot(model.View(), catalog, ui, {}, snapshot).Succeeded(), "project text-fit fixture");
     };
     for (std::size_t skill = 0; skill < hs::kCombatSkillCount; ++skill)
     {
@@ -2629,6 +2667,7 @@ int main(int argc, char **argv)
         TestExperimentSpecRoundTrip(root);
         TestPlaytestRecordAndReplay(root);
         TestRecordingFileFinalization(root);
+        TestCsvAppendPreservesNumericValues();
         TestPlaytestFinalizationFailures(root);
         TestSessionMusicTransitions();
         TestSessionProbeUiBridge();

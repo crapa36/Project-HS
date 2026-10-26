@@ -4,6 +4,7 @@
 #include <array>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 namespace hs
 {
@@ -242,71 +243,41 @@ void RenderSnapshotStorage::CopyDynamicFrom(const RenderSnapshot &sample)
     ui_.clear();
 }
 
-bool RenderSnapshotStorage::AddInstance(const RenderInstance &instance)
-{
-    auto stored = instance;
-    PopulateRenderInstanceRevisions(stored);
-    instances_.push_back(stored);
-    return true;
-}
-
-bool RenderSnapshotStorage::AddPose(const AnimationPoseRef &pose)
-{
-    auto stored = pose;
-    const auto named_revision = stored.instance_index < instances_.size()
-        ? DeriveNamedAnimationPoseRevision(instances_[stored.instance_index]) : 0;
-    if (named_revision != 0) stored.revision = named_revision;
-    else if (stored.revision == 0) stored.revision = DeriveAnimationPoseRevision(stored);
-    poses_.push_back(stored);
-    if (stored.instance_index < instances_.size())
-        instances_[stored.instance_index].revisions.pose = stored.revision;
-    return true;
-}
-
-bool RenderSnapshotStorage::AddCapturedInstance(const CapturedRenderInstance &capture)
-{
-    auto stored = capture;
-    PopulateRenderInstanceRevisions(stored.instance);
-    stored.animation_pose.revision = DeriveAnimationPoseRevision(stored.animation_pose);
-    stored.instance.revisions.pose = stored.animation_pose.revision;
-    captured_instances_.push_back(stored);
-    return true;
-}
-
-bool RenderSnapshotStorage::AppendInstance(const RenderInstance &instance)
+void RenderSnapshotStorage::AddInstance(const RenderInstance &instance)
 {
     instances_.push_back(instance);
-    return true;
 }
 
-bool RenderSnapshotStorage::AppendPose(const AnimationPoseRef &pose)
+void RenderSnapshotStorage::AddPose(const AnimationPoseRef &pose)
 {
     poses_.push_back(pose);
-    return true;
 }
 
-bool RenderSnapshotStorage::AppendCapturedInstance(const CapturedRenderInstance &capture)
+void RenderSnapshotStorage::AddCapturedInstance(const CapturedRenderInstance &capture)
 {
     captured_instances_.push_back(capture);
-    return true;
 }
 
-bool RenderSnapshotStorage::AddLight(const LightView &light)
+void RenderSnapshotStorage::AddLight(const LightView &light)
 {
     lights_.push_back(light);
-    return true;
 }
 
-bool RenderSnapshotStorage::AddUi(const UiModel &ui)
+void RenderSnapshotStorage::AddUi(const UiModel &ui)
 {
     ui_.push_back(ui);
-    return true;
 }
 
-bool RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
+void RenderSnapshotStorage::AddPersistentVfx(const PersistentVfxVisual &visual)
 {
     persistent_vfx_.push_back(visual);
-    return true;
+}
+
+std::vector<UiModel> RenderSnapshotStorage::TakeUiModels()
+{
+    auto models = std::move(ui_);
+    ui_.reserve(models.capacity());
+    return models;
 }
 
 std::size_t RenderSnapshotStorage::InstanceCount() const noexcept

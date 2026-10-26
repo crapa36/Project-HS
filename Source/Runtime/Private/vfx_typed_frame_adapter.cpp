@@ -1011,6 +1011,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
             input.current_transform = input.previous_transform = Transform(visual.position, 0);
             input.elapsed_seconds = static_cast<float>(display_tick - start) / 60.0f;
+            input.elapsed_ticks = display_tick - start;
             input.normalized_age = input.elapsed_seconds / effect->seconds;
             if (input.normalized_age >= 1) continue;
             input.source_duration_seconds = effect->seconds;
@@ -1065,6 +1066,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             input.current_transform = Transform(position, 0);
             input.previous_transform = Transform(previous_position, 0);
             input.elapsed_seconds = static_cast<float>(display_tick - started) / 60.0f;
+            input.elapsed_ticks = display_tick - started;
             input.normalized_age = std::clamp(input.elapsed_seconds / effect->seconds, 0.0f, 1.0f);
             input.stable_seed = PersistentSeed(visual.projectile_owner_id, effect->handle);
             input.source_visual_kind = static_cast<std::uint8_t>(visual.kind);
@@ -1117,6 +1119,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             input.elapsed_seconds = static_cast<float>(display_tick -
                                                        visual.projectile_spawned_tick) /
                                     60.0f;
+            input.elapsed_ticks = display_tick - visual.projectile_spawned_tick;
             input.normalized_age = 0.0f;
             input.state_flags = visual.projectile_state_flags;
             input.stable_seed = PersistentSeed(visual.projectile_owner_id,
@@ -1313,6 +1316,9 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             ? static_cast<float>(display_tick - visual.projectile_spawned_tick) / 60.0f
             : static_cast<float>(display_tick > visual.active_tick
                                     ? display_tick - visual.active_tick : 0) / 60.0f;
+        input.elapsed_ticks = visual.projectile_owner_id != 0 && !fixed_status_stamp
+            ? display_tick - visual.projectile_spawned_tick
+            : std::max(0.0, display_tick - static_cast<double>(visual.active_tick));
         input.normalized_age = *age;
         if (fixed_status_stamp)
         {
@@ -1402,6 +1408,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
             // Low-health presence is renewed each snapshot. Its pulse follows
             // the advancing simulation phase, not that one-tick presence start.
             input.elapsed_seconds = static_cast<float>(display_tick) / 60.0f;
+            input.elapsed_ticks = display_tick;
         }
         else if (binding.payload_kind == kCirclePayload)
             geometry_ok = MakeCircle(visual, *age, input.payload);
@@ -1508,6 +1515,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
                 ? display_tick - visual.active_tick : 0;
             supplemental_input.elapsed_seconds =
                 static_cast<float>(elapsed_ticks) / 60.0f;
+            supplemental_input.elapsed_ticks = elapsed_ticks;
             if (supplemental_input.elapsed_seconds >= supplement_effect->seconds)
                 continue;
             supplemental_input.normalized_age = std::clamp(
@@ -1550,8 +1558,9 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
     std::erase_if(owners_, [current_tick, display_tick](const Owner &owner) {
+        const double duration_ticks = static_cast<double>(owner.seconds * 60.0f);
         return current_tick < owner.started || (display_tick >= owner.started &&
-            (display_tick - owner.started) / 60.0 >= owner.seconds);
+            display_tick - owner.started >= duration_ticks);
     });
     for (const auto &event : dispatched_events)
     {
@@ -1572,7 +1581,8 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
             effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
             !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
             !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
-            (display_tick >= event.tick && (display_tick - event.tick) / 60.0 >= effect->seconds))
+            (display_tick >= event.tick && display_tick - event.tick >=
+                static_cast<double>(effect->seconds * 60.0f)))
             continue;
         const auto end = event.geometry.end_position;
         const Float3 delta{end.x - event.position.x, end.y - event.position.y,
@@ -1612,7 +1622,8 @@ std::vector<VfxPersistentInput> VfxUpgradeMovementState::Emit(
     {
         if (display_tick < owner.started) continue;
         auto input = owner.input;
-        input.elapsed_seconds = static_cast<float>((display_tick - owner.started) / 60.0);
+        input.elapsed_ticks = display_tick - owner.started;
+        input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
         input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
         if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
             line->lifetime01 = input.normalized_age;

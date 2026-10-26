@@ -1,5 +1,6 @@
 #include <hs/core/fixed_step_clock.hpp>
 #include <hs/gameplay/game_simulation.hpp>
+#include <hs/gameplay/game_simulation_development.hpp>
 
 #include <array>
 #include <algorithm>
@@ -96,7 +97,7 @@ void TestOptionalChecksums()
               actual.checksum == 0, "ordinary tick omits checksum only");
         Check(ordinary.ComputeChecksum() == expected.checksum, "capture mode preserves gameplay state");
         hs::GameReadModelStorage model;
-        ordinary.CopyReadModelForDevelopment(model);
+        hs::CopyReadModelForDevelopment(ordinary, model);
         Check(model.checksum == 0, "explicit checksum does not enable read-model capture");
     }
     for (const auto action : {hs::UiActionKind::ReturnToMainMenu, hs::UiActionKind::StartSession})
@@ -546,7 +547,7 @@ hs::GameplayChecksum RunMovementEchoHistory(hs::Tick age, bool forced_move)
     {
         (void)Advance(simulation);
         hs::GameReadModelStorage model;
-        simulation.CopyReadModelForDevelopment(model);
+        hs::CopyReadModelForDevelopment(simulation, model);
         for (const auto &projectile : model.View().projectiles)
             if (projectile.source_relic == static_cast<std::uint8_t>(hs::RelicKind::MovementEcho))
             {
@@ -649,8 +650,8 @@ void TestNavigationRulesReload()
         CheckPosition(reloaded.GetSessionProbe().player_position, fresh.GetSessionProbe().player_position,
                       "reloaded player navigation matches a fresh rules initialization");
         hs::GameReadModelStorage actual, expected;
-        reloaded.CopyReadModelForDevelopment(actual);
-        fresh.CopyReadModelForDevelopment(expected);
+        hs::CopyReadModelForDevelopment(reloaded, actual);
+        hs::CopyReadModelForDevelopment(fresh, expected);
         Check(actual.View().enemies.size() == 2 && expected.View().enemies.size() == 2,
               "navigation reload keeps both normal enemy and boss alive");
         for (std::size_t index = 0; index < 2; ++index)

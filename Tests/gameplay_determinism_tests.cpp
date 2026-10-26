@@ -1,5 +1,7 @@
 #include "gameplay_test_support.hpp"
 
+#include <hs/core/fixed_step_clock.hpp>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -54,8 +56,17 @@ void TestPauseStopsTicks()
     hs::Sequence sequence{};
     const auto paused = TickEdge(simulation, hs::GameAction::Pause,
                                  hs::EdgeKind::Pressed, sequence);
-    Check(paused.phase == hs::SessionPhase::Paused && paused.tick == before_pause.tick,
+    Check(paused.phase == hs::SessionPhase::Paused && paused.tick == before_pause.tick &&
+              paused.world_changed,
           "pause edge stops current tick");
+    const std::array no_op_reroll{hs::UiAction{hs::UiActionKind::Reroll}};
+    hs::HeldInputState steady_aim;
+    steady_aim.aim_world = {before_pause.player_position.x, 0.0f,
+                            before_pause.player_position.y};
+    const auto no_op = simulation.TickFixed(
+        {before_pause.tick, steady_aim, {}, no_op_reroll}, hs::FixedStepClock::kFixedStep);
+    Check(!no_op.world_changed && no_op.tick == before_pause.tick,
+          "a rejected paused UI action does not report a world change");
     for (std::uint32_t attempt = 0; attempt < 3; ++attempt)
     {
         (void)Tick(simulation);
@@ -67,7 +78,7 @@ void TestPauseStopsTicks()
 
     const auto resumed = TickEdge(simulation, hs::GameAction::Pause,
                                   hs::EdgeKind::Pressed, sequence);
-    Check(resumed.phase == hs::SessionPhase::Playing &&
+    Check(resumed.phase == hs::SessionPhase::Playing && resumed.world_changed &&
               resumed.tick == before_pause.tick + 1,
           "resume advances exactly one tick");
     Check(simulation.Shutdown().Succeeded(), "pause shutdown");
@@ -204,7 +215,7 @@ void TestSemanticReadModel()
     Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 1, 0, {3.0f, 4.0f});
     (void)Tick(simulation);
     hs::GameReadModelStorage storage;
-    simulation.CopyReadModelForDevelopment(storage);
+    hs::CopyReadModelForDevelopment(simulation, storage);
     const auto model = storage.View();
     Check(model.tick == simulation.GetObservation().tick, "read model tick");
     Check(model.checksum == simulation.ComputeChecksum(), "read model checksum");

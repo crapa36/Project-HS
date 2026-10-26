@@ -35,6 +35,21 @@ struct LocalProbeCapturePage
     std::array<std::byte, 32> source_digest{}; // Actual decoded complete geometry page bytes.
 };
 
+// Value-only revision facts from the geometry catalog. They let a sample-ready
+// probe check source ownership without constructing native capture pages/leases.
+struct LocalProbePageRevision
+{
+    std::uint32_t page_slot{}, generation{}, index_count{};
+    std::array<std::byte, 32> source_digest{};
+    render_data::GeometryBounds bounds;
+};
+struct LocalProbeTextureFact
+{
+    std::string_view logical_id;
+    std::uint32_t sampled_mip{};
+    bool ready{};
+};
+
 struct LocalProbeRuntimeFrameInputs
 {
     const RendererConfig *config{};
@@ -45,6 +60,9 @@ struct LocalProbeRuntimeFrameInputs
     std::uint64_t material_parameter_revision{}, pipeline_revision{};
     float foliage_density{};
     const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
+    std::span<const LocalProbePageRevision> page_revisions;
+    std::span<const LocalProbeTextureFact> texture_facts;
+    bool texture_facts_valid{};
     Microsoft::WRL::ComPtr<ID3D12Resource> static_instances;
     Microsoft::WRL::ComPtr<D3D12MA::Allocation> static_allocation;
     ResourceVersion static_version;
@@ -80,6 +98,8 @@ struct LocalProbeRuntimeFramePlan
     std::uint64_t static_instance_generation{},material_parameter_revision{},pipeline_revision{};
     std::size_t light_count{},page_count{},scene_read_count{};
     std::uint32_t max_cube_views{};
+    std::array<std::byte,32> capture_identity{};
+    bool capture_identity_valid{},capture_sources_ready{};
     bool active{},capture{},shadow{};
 };
 struct LocalProbeRuntimeLayout
@@ -106,6 +126,11 @@ class LocalProbeRuntimeCandidate
 class LocalProbeRuntime
 {
   public:
+    [[nodiscard]] Result PrepareCaptureMaterialOrdinals(const std::shared_ptr<const StaticRenderScene> &,
+        float foliage_density);
+    [[nodiscard]] std::span<const std::uint32_t> CachedCaptureMaterialOrdinals(
+        const std::shared_ptr<const StaticRenderScene> &, float foliage_density) const noexcept;
+    [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
     LocalProbeRuntime();
     ~LocalProbeRuntime();
     LocalProbeRuntime(const LocalProbeRuntime &) = delete;
@@ -116,6 +141,10 @@ class LocalProbeRuntime
     [[nodiscard]] Result Commit(LocalProbeRuntimeCandidate &&, const CompletionSet &completed);
     [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
         render_data::SceneProbeRevisions &) const;
+    // Current-revision decision only. Capture bindings, pipelines and service
+    // preparation are deferred until PrepareFrameRecordData receives them.
+    [[nodiscard]] Result PrepareFrameDecisionData(const LocalProbeRuntimeFrameInputs &,
+        LocalProbeRuntimeFramePlan &) const;
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeRuntimeFrameInputs &, LocalProbeOutputs &);
     [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &,
         LocalProbeRuntimeFramePlan &);
@@ -132,6 +161,7 @@ class LocalProbeRuntime
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
     [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
+    [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
     void SwapState(LocalProbeRuntime &other) noexcept { impl_.swap(other.impl_); }

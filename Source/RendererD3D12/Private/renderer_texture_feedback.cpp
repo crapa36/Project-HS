@@ -52,8 +52,18 @@ struct RendererTextureFeedback::Impl
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12Device8> device8;
     D3D12MA::Allocator *allocator{};
-    bool hardware{};
+    bool hardware{}, unified_memory{};
     std::vector<std::shared_ptr<FeedbackFrame>> frames;
+    void SampleAllocatorStats(ResidencyManager &residency)
+    { static_cast<void>(residency.SampleAllocatorStats(allocator)); }
+    [[nodiscard]] ResidencyTicket RegisterNativeAllocation(ResidencyManager &residency,
+        ResidencyCategory category, std::uint64_t bytes, bool pinned, D3D12_HEAP_TYPE heap)
+    {
+        SampleAllocatorStats(residency);
+        const auto segment = unified_memory || heap == D3D12_HEAP_TYPE_DEFAULT ||
+            heap == D3D12_HEAP_TYPE_GPU_UPLOAD ? ResidencySegment::Local : ResidencySegment::NonLocal;
+        return residency.Register(category, bytes, pinned, ResidencyStorage::GpuAllocation, segment);
+    }
     Result Allocate(AllocationResource &resource, const D3D12_RESOURCE_DESC &description,
                     D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state)
     {
@@ -101,10 +111,10 @@ struct RendererTextureFeedback::Impl
         const auto decoded_info = device->GetResourceAllocationInfo(0, 1, &decoded);
         const auto readback_info = device->GetResourceAllocationInfo(0, 1, &readback);
         if (!info.SizeInBytes || info.SizeInBytes == UINT64_MAX || decoded_info.SizeInBytes == UINT64_MAX ||
-            readback_info.SizeInBytes == UINT64_MAX || info.SizeInBytes > UINT64_MAX - decoded_info.SizeInBytes ||
-            info.SizeInBytes + decoded_info.SizeInBytes > UINT64_MAX - readback_info.SizeInBytes)
+            readback_info.SizeInBytes == UINT64_MAX || info.SizeInBytes > UINT64_MAX - decoded_info.SizeInBytes)
             return FeedbackFailure("Sampler feedback native allocation size is invalid.");
-        ScopedGpuAdmission admission(residency, info.SizeInBytes + decoded_info.SizeInBytes + readback_info.SizeInBytes);
+        SampleAllocatorStats(residency);
+        ScopedGpuAdmission admission(residency, info.SizeInBytes + decoded_info.SizeInBytes, readback_info.SizeInBytes);
         if (!admission) return FeedbackFailure("Sampler feedback exceeds the shared GPU budget.");
         D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
         auto hr = allocator->CreateResource2(&allocation, &feedback, D3D12_RESOURCE_STATE_COMMON,
@@ -115,8 +125,10 @@ struct RendererTextureFeedback::Impl
         owner.tickets.reserve(3);
         for (const auto *resource : {&owner.feedback, &owner.decoded, &owner.readback})
         {
-            const auto ticket = residency.Register(resource == &owner.readback ? ResidencyCategory::Staging : ResidencyCategory::Texture,
-                resource->allocation->GetSize(), false);
+            const auto ticket = RegisterNativeAllocation(residency,
+                resource == &owner.readback ? ResidencyCategory::Staging : ResidencyCategory::Texture,
+                resource->allocation->GetSize(), false,
+                resource == &owner.readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT);
             if (!ticket) return FeedbackFailure("Could not account native sampler feedback storage.");
             owner.tickets.push_back(ticket);
         }
@@ -142,6 +154,17 @@ Result RendererTextureFeedback::Initialize(ID3D12Device *device, D3D12MA::Alloca
         if (FAILED(hr)) return NativeFailure("Query native sampler feedback device", hr);
     }
     impl_->device = device; impl_->allocator = allocator; impl_->hardware = hardware;
+    D3D12_FEATURE_DATA_ARCHITECTURE1 architecture{};
+    architecture.NodeIndex = 0;
+    if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &architecture, sizeof(architecture))))
+        impl_->unified_memory = architecture.UMA != FALSE;
+    else
+    {
+        D3D12_FEATURE_DATA_ARCHITECTURE legacy{};
+        legacy.NodeIndex = 0;
+        if (SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &legacy, sizeof(legacy))))
+            impl_->unified_memory = legacy.UMA != FALSE;
+    }
     impl_->frames.resize(frame_count); return Result::Success();
 }
 Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const CompletionSet &completed,
@@ -216,11 +239,14 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
         }
         const auto description = Buffer(sizeof(metadata));
         const auto info = impl_->device->GetResourceAllocationInfo(0, 1, &description);
-        ScopedGpuAdmission admission(residency, info.SizeInBytes);
+        impl_->SampleAllocatorStats(residency);
+        ScopedGpuAdmission admission(residency, info.SizeInBytes,
+            impl_->unified_memory ? ResidencySegment::Local : ResidencySegment::NonLocal);
         if (!admission) { Impl::ReleaseAccounting(*candidate, residency); return FeedbackFailure("Texture metadata exceeds the shared budget."); }
         if (auto result = impl_->Allocate(candidate->metadata, description, D3D12_HEAP_TYPE_UPLOAD,
             D3D12_RESOURCE_STATE_GENERIC_READ); !result) { Impl::ReleaseAccounting(*candidate, residency); return result; }
-        candidate->metadata_ticket = residency.Register(ResidencyCategory::Staging, candidate->metadata.allocation->GetSize(), true);
+        candidate->metadata_ticket = impl_->RegisterNativeAllocation(residency, ResidencyCategory::Staging,
+            candidate->metadata.allocation->GetSize(), true, D3D12_HEAP_TYPE_UPLOAD);
         if (!candidate->metadata_ticket) { Impl::ReleaseAccounting(*candidate, residency); return FeedbackFailure("Could not account texture mip metadata."); }
         void *mapped{}; D3D12_RANGE no_read{};
         const auto hr = candidate->metadata.resource->Map(0, &no_read, &mapped);

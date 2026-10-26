@@ -155,12 +155,18 @@ bool Known(std::uint32_t type)
            type <= kLastKnownChunk && (type < 41 || type > 42);
 }
 
+bool SupportedVersion(std::uint32_t type, std::uint16_t version)
+{
+    return type == static_cast<std::uint32_t>(ChunkType::TextureMetadata)
+                ? (version == 1 || version == 2)
+                : version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
+                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1);
+}
+
 void ValidateKnown(std::uint32_t type, std::uint16_t version,
                    std::uint64_t size, std::uint64_t count, std::uint32_t stride)
 {
-    Require(version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
-                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1),
-            "unsupported known chunk version");
+    Require(SupportedVersion(type, version), "unsupported known chunk version");
     if (type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices))
         Require(stride == kExpandedVertexStride && count > 0 && count <= 3'000'000 &&
                 count % 3 == 0 && size == CheckedMul(count, stride), "invalid vertex chunk");
@@ -199,7 +205,9 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
         Require(stride == kCharacterAnimationSocketStride && count > 0 && count <= 128 &&
                 size == CheckedMul(count, stride), "invalid character animation sockets chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::TextureMetadata))
-        Require(count == 1 && stride == size && size >= 56 && size <= 40 + 4096 * 16,
+        Require(count == 1 && stride == size &&
+                size >= (version == 2 ? 40 + 48 : 56) &&
+                size <= 40 + 4096 * (version == 2 ? 48 : 16),
                 "invalid texture metadata chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::TextureSubresources))
         Require((stride == 1 || stride == 8 || stride == 16) &&
@@ -467,8 +475,7 @@ PackageDirectory ReadPackageDirectory(std::span<const std::byte> prefix,
                 CheckedAdd(offset, stored_size) <= product_bytes,
                 "invalid directory chunk range");
         previous_end = CheckedAdd(offset, stored_size);
-        if (!Known(type) || version != (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
-                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1))
+        if (!Known(type) || !SupportedVersion(type, version))
         {
             Require(flags == 0, "unsupported required directory chunk");
             continue;
@@ -554,8 +561,7 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
         const auto chunk_hash = Sha256(chunk_bytes);
         Require(std::equal(chunk_hash.begin(), chunk_hash.end(), bytes.begin() + entry + 48),
                 "chunk hash mismatch");
-        if (!Known(type) || version != (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
-                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1))
+        if (!Known(type) || !SupportedVersion(type, version))
         {
             Require(flags == 0, Known(type) ? "unsupported required chunk version" : "unknown required chunk");
             continue;

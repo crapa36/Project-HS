@@ -98,10 +98,14 @@ void TestFixedStepClock()
     Check(clock.Advance(start).tick_count == 0, "first advance");
 
     const auto catch_up = clock.Advance(start + hs::FixedStepClock::kFixedStep * 6);
-    Check(catch_up.tick_count == 4, "catch-up cap");
+    Check(catch_up.tick_count == 4 &&
+              catch_up.first_tick_boundary == start + hs::FixedStepClock::kFixedStep,
+          "catch-up boundaries retain the scheduled tick positions");
     Check(catch_up.debt == hs::FixedStepClock::kFixedStep * 2, "debt preserved");
-    Check(clock.Advance(start + hs::FixedStepClock::kFixedStep * 6).tick_count == 2,
-          "debt drained");
+    const auto drained = clock.Advance(start + hs::FixedStepClock::kFixedStep * 6);
+    Check(drained.tick_count == 2 &&
+              drained.first_tick_boundary == start + hs::FixedStepClock::kFixedStep * 5,
+          "debt drains from the remaining scheduled boundaries");
 
     hs::FixedStepClock debt_clock;
     (void)debt_clock.Advance(start);

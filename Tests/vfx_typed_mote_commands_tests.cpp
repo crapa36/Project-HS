@@ -193,6 +193,7 @@ hs::VfxPersistentInput PersistentMoteOwner(std::uint32_t elapsed_tick)
     owner.stable_seed = 0xabcdefu;
     owner.quality = hs::VfxQuality::Medium;
     owner.elapsed_seconds = static_cast<float>(elapsed_tick) / 60.0f;
+    owner.elapsed_ticks = elapsed_tick;
     owner.current_transform[12] = 4.0f;
     owner.current_transform[13] = .25f;
     owner.current_transform[14] = -2.0f;
@@ -224,6 +225,7 @@ void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
             "retained birth window accumulated or changed births");
     auto fractional_owner = owner;
     fractional_owner.elapsed_seconds = 20.5f / 60.0f;
+    fractional_owner.elapsed_ticks = 20.5;
     fractional_owner.normalized_age = 20.5f / 120.0f;
     std::get<hs::VfxEntityPayload>(fractional_owner.payload).lifetime01 = fractional_owner.normalized_age;
     const auto fractional = hs::runtime_detail::BuildVfxPersistentMoteCommands(
@@ -298,7 +300,11 @@ void PersistentMotesRejectMalformedOwners()
     owner.current_transform[12] = std::numeric_limits<float>::quiet_NaN();
     Require(PersistentMotes(program, owner).empty(), "nonfinite owner transform accepted");
     owner = PersistentMoteOwner(20);
+    program.effect_lookup[0].effect_id = Hash64("particle.pickup.xp.idle");
+    owner.normalized_age = 0.0f;
+    std::get<hs::VfxEntityPayload>(owner.payload).lifetime01 = 0.0f;
     owner.elapsed_seconds = 2.0e9f;
+    owner.elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60.0;
     Require(PersistentMotes(program, owner).empty(),
             "persistent mote ordinal overflow was narrowed into a repeated seed");
     program = PersistentMoteProgram();
@@ -558,6 +564,7 @@ void CookedPersistentTrapMotesConvert()
     owner.effect_handle = identity->handle;
     owner.source_visual_kind = static_cast<std::uint8_t>(hs::PersistentVfxKind::TrapArmed);
     owner.elapsed_seconds = 20.0f / 60.0f;
+    owner.elapsed_ticks = 20.0;
     owner.normalized_age = 0.25f;
     owner.quality = hs::VfxQuality::Medium;
     owner.payload = hs::VfxCirclePayload{
@@ -688,6 +695,7 @@ hs::VfxPersistentInput SparkOwner(std::uint32_t elapsed_tick)
     owner.quality = hs::VfxQuality::Medium;
     owner.stable_seed = 0xabcdefu;
     owner.elapsed_seconds = static_cast<float>(elapsed_tick) / 60.0f;
+    owner.elapsed_ticks = elapsed_tick;
     owner.current_transform[12] = 4.0f + static_cast<float>(elapsed_tick);
     owner.current_transform[13] = .35f;
     owner.current_transform[14] = -2.0f;

@@ -67,6 +67,39 @@ void CheckActiveEffectRetention()
     Check(effects.Size() == 0 && !effects.Get(0), "last effect retirement clears rows");
     Check(effects.Intern(b) == 0, "row storage is reusable after retirement");
 }
+
+void CheckGeometrySectorIdentity()
+{
+    using Store = hs::runtime_detail::ActiveEffectStore;
+    Store effects;
+    std::array<hs::VfxEventInput, 4> sectors{};
+    for (std::uint32_t i = 0; i < sectors.size(); ++i)
+    {
+        sectors[i].sequence = 10;
+        sectors[i].event_tick = 20;
+        sectors[i].geometry_owner_id = 30;
+        sectors[i].geometry_effect_id = 40;
+        sectors[i].status_episode_generation = 50;
+        sectors[i].geometry_sector_index = i;
+        const auto row = effects.Intern(sectors[i]);
+        Check(row == i && effects.Add(Store::Profile::Ground, row),
+              "safe sectors with shared episode identity need distinct rows");
+    }
+
+    auto rebound = sectors;
+    for (auto &sector : rebound) sector.stable_seed = 99;
+    effects.RebindProfile(Store::Profile::Ground, rebound);
+    for (std::uint32_t i = 0; i < rebound.size(); ++i)
+        Check(effects.Get(i)->stable_seed == 99 && effects.Find(sectors[i]) == i,
+              "profile rebind must preserve each sector's row identity");
+
+    effects.Commit(Store::Profile::Ground, std::span<const hs::VfxEventInput>(rebound).subspan(1, 2));
+    effects.Compact();
+    Check(effects.Size() == 2 && effects.Get(0)->geometry_sector_index == 1 &&
+          effects.Get(1)->geometry_sector_index == 2 &&
+          effects.Find(sectors[1]) == 0 && effects.Find(sectors[2]) == 1,
+          "profile commit and compaction must retain distinct sector rows");
+}
 }
 
 int main()
@@ -74,6 +107,7 @@ int main()
     try
     {
         CheckActiveEffectRetention();
+        CheckGeometrySectorIdentity();
         static_assert(noexcept(std::declval<hs::runtime_detail::VfxSessionState &>().SwapDecoded(
             std::declval<hs::runtime_detail::DecodedVfxState &>())));
         using hs::SessionPhase;

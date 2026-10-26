@@ -2,6 +2,7 @@
 
 #include "render_graph.hpp"
 #include "renderer_geometry.hpp"
+#include "persistent_gpu_scene.hpp"
 #include <hs/renderer/renderer.hpp>
 
 #include <D3D12MemAlloc.h>
@@ -12,6 +13,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -107,8 +109,10 @@ struct FrameContext
     AllocationResource geometry_draw_records;
     AllocationResource geometry_draw_records_upload;
     std::vector<renderer_detail::GpuGeometryDrawRecord> geometry_draw_records_cpu;
-    std::uint64_t static_input_ref_offset{}, dynamic_input_ref_offset{};
+    std::uint64_t dynamic_input_ref_offset{};
     std::uint32_t static_input_ref_count{}, dynamic_input_ref_count{};
+    std::shared_ptr<const std::vector<GpuStaticDrawRef>> static_input_refs;
+    std::vector<GpuSceneSerializedSlot> scene_serialization_scratch;
     AllocationResource skin_cache_vertices;
     AllocationResource skin_cache_bounds;
     std::size_t static_visible_capacity{};
@@ -126,6 +130,9 @@ struct FrameContext
     CompletionSet completion{};
     CompletionSet skin_cache_use_completion{};
     bool timestamps_recorded{};
+    GpuTimingMode timing_mode{GpuTimingMode::Off};
+    std::uint64_t timing_layout_generation{};
+    std::uint32_t timing_layout_capacity{};
     std::uint64_t submitted_frame_id{};
     std::uint32_t submitted_view_id{};
     GpuFrameTimingKind timing_kind{GpuFrameTimingKind::Unavailable};
@@ -154,6 +161,8 @@ struct FrameContext
     std::uint32_t timestamp_capacity{};
     std::vector<GpuPassTiming> timestamp_passes;
     std::vector<std::uint64_t> timestamp_frequencies;
+    std::vector<std::uint32_t> timestamp_pass_query_slots;
+    std::vector<std::uint32_t> timestamp_query_slots;
     bool ui_initialized{};
 };
 

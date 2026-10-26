@@ -91,7 +91,7 @@ void TestBasicKillTrackerHitExclusion()
         Check(tracked && simulation.GetObservation().kills == 1,
               "basic tracker fixture produces the original attack kill");
         hs::GameReadModelStorage model;
-        simulation.CopyReadModelForDevelopment(model);
+        hs::CopyReadModelForDevelopment(simulation, model);
         const auto durable = std::ranges::find_if(model.View().enemies, [](const hs::EnemyView &enemy) {
             return enemy.position.x == 6.0f && enemy.position.y == 0.0f;
         });

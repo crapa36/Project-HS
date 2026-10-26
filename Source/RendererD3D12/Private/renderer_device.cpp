@@ -7,8 +7,10 @@ namespace hs
 Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
 {
     config = configuration;
-    graphics_capabilities = {};
-    graphics_capabilities_key.clear();
+    validation_status = {};
+    validation_status.debug_layer_requested = configuration.validation;
+    validation_status.gpu_validation_requested = configuration.gpu_validation;
+    native_graphics_capabilities = {};
     width = std::max(configuration.width, 1u);
     height = std::max(configuration.height, 1u);
     ViewExtent capacity;
@@ -32,25 +34,32 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
         return HResultFailure("CoInitializeEx", com_result);
     }
 
-    if (configuration.validation)
+    if (configuration.validation || configuration.gpu_validation)
     {
         ComPtr<ID3D12Debug> debug;
-        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug))))
+        validation_status.debug_interface_acquisition_attempted = true;
+        const auto debug_result = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+        validation_status.debug_interface_acquired = SUCCEEDED(debug_result);
+        if (FAILED(debug_result))
+            return HResultFailure(configuration.gpu_validation
+                ? "D3D12GetDebugInterface required for GPU-based validation"
+                : "D3D12GetDebugInterface required for debug layer", debug_result);
+        debug->EnableDebugLayer();
+        validation_status.debug_layer_enable_called_before_device = true;
+        if (configuration.gpu_validation)
         {
-            debug->EnableDebugLayer();
-            if (configuration.gpu_validation)
-            {
-                ComPtr<ID3D12Debug1> debug1;
-                if (SUCCEEDED(debug.As(&debug1)))
-                {
-                    debug1->SetEnableGPUBasedValidation(TRUE);
-                }
-            }
+            ComPtr<ID3D12Debug1> debug1;
+            const auto query_result = debug.As(&debug1);
+            validation_status.gpu_validation_interface_queried = SUCCEEDED(query_result);
+            if (FAILED(query_result))
+                return HResultFailure("ID3D12Debug1 required for GPU-based validation", query_result);
+            debug1->SetEnableGPUBasedValidation(TRUE);
+            validation_status.gpu_validation_enable_called_before_device = true;
         }
     }
 
     ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred_settings;
-    const bool diagnostic_device = configuration.validation || configuration.capture_timing_stream;
+    const bool diagnostic_device = configuration.validation || configuration.gpu_validation || configuration.capture_timing_stream;
     dred_enabled = false;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred_settings))))
     {
@@ -70,7 +79,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
                dred_enabled ? "true" : "false", dred_enabled ? "true" : "false",
                diagnostic_device ? "false" : "true");
 
-    const auto factory_flags = configuration.validation ? DXGI_CREATE_FACTORY_DEBUG : 0u;
+    const auto factory_flags = configuration.validation || configuration.gpu_validation ? DXGI_CREATE_FACTORY_DEBUG : 0u;
     auto result = CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&factory));
     if (FAILED(result))
     {
@@ -127,6 +136,13 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
         << '\n';
 
     result = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device));
+    validation_status.device_creation_attempted = true;
+    validation_status.device_creation_hresult = static_cast<std::int32_t>(result);
+    validation_status.device_creation_succeeded = SUCCEEDED(result);
+    validation_status.device_created_after_requested_enable_calls =
+        (configuration.validation || configuration.gpu_validation) && SUCCEEDED(result) &&
+        validation_status.debug_layer_enable_called_before_device &&
+        (!configuration.gpu_validation || validation_status.gpu_validation_enable_called_before_device);
     if (FAILED(result))
     {
         return HResultFailure("D3D12CreateDevice FL12_0", result);
@@ -197,7 +213,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     render_height = capacity.height;
     (void)UpdateViewState(view_state, {width, height}, capacity, reconstruction_plan.render_active);
 
-    if (configuration.validation)
+    if (configuration.validation || configuration.gpu_validation)
     {
         ComPtr<ID3D12InfoQueue> info_queue;
         if (SUCCEEDED(device.As(&info_queue)))
@@ -379,6 +395,108 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     return Result::Success();
 }
 
+ResidencySegment D3D12Renderer::Impl::ResidencySegmentForHeap(D3D12_HEAP_TYPE type) const noexcept
+{
+    return adapter_unified_memory || type == D3D12_HEAP_TYPE_DEFAULT || type == D3D12_HEAP_TYPE_GPU_UPLOAD
+        ? ResidencySegment::Local : ResidencySegment::NonLocal;
+}
+
+void D3D12Renderer::Impl::SampleAllocatorBudgetStats(bool local_absorbed,
+    bool nonlocal_absorbed) noexcept
+{
+    static_cast<void>(residency.SampleAllocatorStats(allocator, local_absorbed, nonlocal_absorbed));
+}
+
+ResidencyTicket D3D12Renderer::Impl::RegisterNativeAllocation(ResidencyCategory category,
+    std::uint64_t bytes, bool pinned, ResidencySegment segment)
+{
+    SampleAllocatorBudgetStats(false, false);
+    return residency.Register(category, bytes, pinned, ResidencyStorage::GpuAllocation, segment);
+}
+
+Result D3D12Renderer::Impl::RefreshBudgetObservations()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (!adapter_architecture_observed)
+    {
+        D3D12_FEATURE_DATA_ARCHITECTURE1 architecture{};
+        architecture.NodeIndex = 0;
+        if (device && SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1,
+            &architecture, sizeof(architecture))))
+            adapter_unified_memory = architecture.UMA != FALSE;
+        else
+        {
+            D3D12_FEATURE_DATA_ARCHITECTURE legacy_architecture{};
+            legacy_architecture.NodeIndex = 0;
+            if (device && SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE,
+                &legacy_architecture, sizeof(legacy_architecture))))
+                adapter_unified_memory = legacy_architecture.UMA != FALSE;
+        }
+        adapter_architecture_observed = true;
+    }
+    texture_streaming_capabilities.unified_memory = adapter_unified_memory;
+
+    ResidencyBudgetSnapshot snapshot;
+    snapshot.unified_memory = adapter_unified_memory;
+    const auto observe = [&](NativeBudgetObservation &observation, DXGI_MEMORY_SEGMENT_GROUP group,
+                             bool supported) {
+        observation.supported = supported;
+        if (!supported) return;
+        observation.attempted_at = now;
+        DXGI_QUERY_VIDEO_MEMORY_INFO current{};
+        observation.last_result = adapter
+            ? adapter->QueryVideoMemoryInfo(0, group, &current) : E_POINTER;
+        if (SUCCEEDED(observation.last_result))
+        {
+            observation.last_valid = current;
+            observation.valid = true;
+            observation.observed_at = now;
+            if (observation.success_sequence != UINT64_MAX) ++observation.success_sequence;
+        }
+    };
+    observe(local_budget_observation, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, true);
+    observe(nonlocal_budget_observation, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, !adapter_unified_memory);
+    if (SUCCEEDED(local_budget_observation.last_result))
+    {
+        snapshot.valid = true;
+        snapshot.local_budget = local_budget_observation.last_valid.Budget;
+        snapshot.local_usage = local_budget_observation.last_valid.CurrentUsage;
+    }
+    if (nonlocal_budget_observation.supported && SUCCEEDED(nonlocal_budget_observation.last_result))
+    {
+        snapshot.nonlocal_valid = true;
+        snapshot.nonlocal_budget = nonlocal_budget_observation.last_valid.Budget;
+        snapshot.nonlocal_usage = nonlocal_budget_observation.last_valid.CurrentUsage;
+    }
+    MEMORYSTATUSEX host{};
+    host.dwLength = sizeof(host);
+    host_budget_observation.attempted_at = now;
+    if (GlobalMemoryStatusEx(&host))
+    {
+        host_budget_observation.last_valid = host;
+        host_budget_observation.valid = true;
+        host_budget_observation.last_error = ERROR_SUCCESS;
+        host_budget_observation.last_attempt_succeeded = true;
+        host_budget_observation.observed_at = now;
+        if (host_budget_observation.success_sequence != UINT64_MAX) ++host_budget_observation.success_sequence;
+    }
+    else
+    {
+        host_budget_observation.last_error = GetLastError();
+        host_budget_observation.last_attempt_succeeded = false;
+    }
+    if (host_budget_observation.last_attempt_succeeded)
+    {
+        snapshot.host_budget_valid = true;
+        snapshot.host_staging_budget = std::min<std::uint64_t>(
+            host_budget_observation.last_valid.ullAvailPhys / 8u, 512ull * 1024u * 1024u);
+    }
+    SampleAllocatorBudgetStats(SUCCEEDED(local_budget_observation.last_result),
+        nonlocal_budget_observation.supported && SUCCEEDED(nonlocal_budget_observation.last_result));
+    residency.UpdateBudget(snapshot);
+    return Result::Success();
+}
+
 Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uint32_t pass_count)
 {
     // Render has already waited this slot's complete producer/reader requirements.
@@ -418,7 +536,8 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
 GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &frame) const
 {
     GpuPassTimings timings;
-    if (!frame.mapped_timestamps || !frame.timestamps_recorded ||
+    if (!frame.mapped_timestamps || !frame.timestamps_recorded || frame.timing_mode == GpuTimingMode::Off ||
+        frame.timing_layout_generation == 0 || frame.timing_layout_capacity > frame.timestamp_capacity ||
         !frame.completion.IsSatisfiedBy(graph_queue_executor.Completed()))
         return timings;
 
@@ -446,7 +565,9 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     timings.source_frame_sequence = frame.timing_source_sequence;
     timings.view_id = frame.submitted_view_id;
     timings.metric_kind = frame.timing_kind;
+    timings.mode = frame.timing_mode;
     timings.metric_generation = frame.timing_generation;
+    timings.timing_layout_generation = frame.timing_layout_generation;
     timings.resize_epoch = frame.timing_resize_epoch;
     timings.render_active = frame.timing_render_active;
     timings.quality_generation = frame.timing_quality_generation;
@@ -458,7 +579,8 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         std::isfinite(frame.cpu_recording_ms) && frame.cpu_recording_ms >= 0.0f;
     timings.passes = frame.timestamp_passes;
     if (timings.passes.empty() || timings.passes.size() > frame.timestamp_capacity ||
-        frame.timestamp_frequencies.size() != timings.passes.size())
+        frame.timestamp_frequencies.size() != timings.passes.size() ||
+        frame.timestamp_pass_query_slots.size() != timings.passes.size())
     {
         for (auto &pass : timings.passes) pass.measured = false;
         return publish();
@@ -476,7 +598,8 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     };
     std::array<ClockCalibration, 3> calibrations{};
     LARGE_INTEGER qpc_frequency{};
-    const bool qpc_available = QueryPerformanceFrequency(&qpc_frequency) && qpc_frequency.QuadPart > 0;
+    const bool qpc_available = frame.timing_mode == GpuTimingMode::Full &&
+        QueryPerformanceFrequency(&qpc_frequency) && qpc_frequency.QuadPart > 0;
     // GetClockCalibration samples CPU/GPU counters together. No timestamps from
     // separate queue clocks are aligned without this actual native calibration.
     if (qpc_available)
@@ -500,8 +623,15 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             end_slot = slot;
         }
         if (!pass.measured) continue; // Copy queue timestamps are unsupported.
-        const auto begin = frame.mapped_timestamps[slot * 2];
-        const auto end = frame.mapped_timestamps[slot * 2 + 1];
+        const auto query_slot = frame.timestamp_pass_query_slots[slot];
+        if (query_slot >= frame.timing_layout_capacity)
+        {
+            pass.measured = false;
+            pass_timings_valid = false;
+            continue;
+        }
+        const auto begin = frame.mapped_timestamps[query_slot * 2];
+        const auto end = frame.mapped_timestamps[query_slot * 2 + 1];
         const auto frequency = frame.timestamp_frequencies[slot];
         pass.begin_ticks = begin;
         pass.end_ticks = end;
@@ -545,7 +675,8 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     }
     // Preserve independent pass diagnostics even when the critical-path sample
     // is unavailable. DRS requires critical_path_valid as well as completion.
-    timings.valid = pass_timings_valid;
+    timings.pass_timings_valid = frame.timing_mode == GpuTimingMode::Full && pass_timings_valid;
+    timings.valid = frame.timing_mode == GpuTimingMode::Full && pass_timings_valid;
     if (timings.metric_kind == GpuFrameTimingKind::SourceOutputReady)
     {
         if (!duplicate_endpoint && end_slot != timings.passes.size())
@@ -610,8 +741,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         {
             std::sort(closure_intervals.begin(), closure_intervals.end());
             const auto first = closure_intervals.front().first;
-            if (first < timings.output_ready_qpc && timings.output_ready_qpc_frequency &&
-                frame.timing_execute_begin_qpc && frame.timing_execute_end_qpc >= frame.timing_execute_begin_qpc)
+            if (first < timings.output_ready_qpc && timings.output_ready_qpc_frequency)
             {
                 timings.output_dependency_span_ms = static_cast<double>(
                     static_cast<long double>(timings.output_ready_qpc - first) * 1000.0L /
@@ -621,7 +751,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
                 timings.span_valid = timings.closure_gap_checked;
                 const auto tolerance = std::max<std::uint64_t>(1, timings.output_ready_qpc_frequency / 20'000);
                 auto covered_until = closure_intervals.front().second;
-                timings.closure_span_gap = frame.timing_execute_end_qpc > first;
+                timings.closure_span_gap = false;
                 for (std::size_t index = 1; index < closure_intervals.size(); ++index)
                 {
                     const auto [begin, end] = closure_intervals[index];
@@ -702,7 +832,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         return publish();
     }
     if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan) return publish();
-    if (!timings.valid || duplicate_endpoint || begin_slot == timings.passes.size() ||
+    if (!pass_timings_valid || duplicate_endpoint || begin_slot == timings.passes.size() ||
         end_slot == timings.passes.size())
         return publish();
 
@@ -712,6 +842,8 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         !begin_pass.measured || !end_pass.measured)
         return publish();
     UINT64 direct_frequency{};
+    const auto begin_query_slot = frame.timestamp_pass_query_slots[begin_slot];
+    const auto end_query_slot = frame.timestamp_pass_query_slots[end_slot];
     if (!queue || FAILED(queue->GetTimestampFrequency(&direct_frequency)) || direct_frequency == 0 ||
         frame.timestamp_frequencies[begin_slot] != direct_frequency ||
         frame.timestamp_frequencies[end_slot] != direct_frequency)
@@ -719,8 +851,10 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
 
     // These endpoints share the Direct queue clock. Explicit graph edges bracket
     // every render queue, so this interval includes cross-queue overlap and waits.
-    const auto begin = frame.mapped_timestamps[begin_slot * 2];
-    const auto end = frame.mapped_timestamps[end_slot * 2 + 1];
+    if (begin_query_slot >= frame.timing_layout_capacity || end_query_slot >= frame.timing_layout_capacity)
+        return publish();
+    const auto begin = frame.mapped_timestamps[begin_query_slot * 2];
+    const auto end = frame.mapped_timestamps[end_query_slot * 2 + 1];
     if (end <= begin) return publish();
     timings.critical_path_ms = static_cast<double>(
         static_cast<long double>(end - begin) * 1000.0L / direct_frequency);
@@ -728,6 +862,8 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         timings.critical_path_ms > 0.0;
     timings.gpu_limited = timings.critical_path_valid && timings.cpu_recording_valid &&
         timings.critical_path_ms >= timings.cpu_recording_ms;
+    if (frame.timing_mode == GpuTimingMode::Critical)
+        timings.valid = timings.critical_path_valid;
     return publish();
 }
 

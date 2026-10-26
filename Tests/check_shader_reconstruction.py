@@ -234,7 +234,9 @@ class ShaderContracts(unittest.TestCase):
             producer = re.search(r"(?:const auto|float) " + name + r" = source.mesh == RenderMesh::Ground(.*?);", frame, re.S).group(1)
             self.assertIn("source.mesh == RenderMesh::MeadowSurface", producer)
             self.assertIn("std::bit_cast<float>(source.environment_seed)", producer)
-        self.assertIn("environment && source.mesh != RenderMesh::MeadowSurface ? 0.0f : std::bit_cast<float>(source.environment_seed)", frame)
+        self.assertIsNotNone(re.search(r"environment && source\.mesh != RenderMesh::MeadowSurface\s*"
+                                      r"\? 0\.0f : std::bit_cast<float>\(source.environment_seed\)", frame),
+                             "environment seed selection must preserve meadow and outer-ground identity")
         visibility = (SHADERS / "visibility_buffer.hlsl").read_text(encoding="utf-8-sig")
         self.assertIn("output.EnvironmentSeed = a.EnvironmentSeed", visibility)
         self.assertIn("ctx.seed = input.EnvironmentSeed", shader)
@@ -769,11 +771,11 @@ class ShaderContracts(unittest.TestCase):
         renderer = SHADERS.parents[1] / "Source" / "RendererD3D12" / "Private"
         graph = (renderer / "renderer_cluster_graph.cpp").read_text(encoding="utf-8")
         shader = (SHADERS / "cluster_refinement.hlsl").read_text(encoding="utf-8")
-        declarations = graph.split('auto count = graph.AddPass(40u,', 1)[1].split("count.SetExecute(", 1)[0]
-        metadata = declarations.split("for (auto *buffer : {&cut.offsets", 1)[1].split("count.Read(buffer->version, Access::UnorderedRead);", 1)[0]
+        declarations = graph.split('auto count=make_pass(40u,', 1)[1].split("count->SetExecute(", 1)[0]
+        metadata = declarations.split("for (auto *buffer : {&cut.offsets", 1)[1].split("count->Read(buffer->version, Access::UnorderedRead);", 1)[0]
         self.assertEqual(re.findall(r"&cut\.([a-z_]+)", "&cut.offsets" + metadata),
                          ["offsets", "block_sums", "block_offsets", "draw_commands", "mesh_commands"])
-        execute = graph.split("count.SetExecute(", 1)[1].split("for (std::uint32_t stage", 1)[0]
+        execute = graph.split("count->SetExecute(", 1)[1].split("for (std::uint32_t stage", 1)[0]
         resources = re.search(r"const std::array resources\{(.*?)\};", execute, re.S).group(1)
         initialized = ["counts", "demand", "status", "command_counts", "history_bits", "history_generations",
                        "selected_bounds", "previous_rejected", "retest_draw_commands", "retest_mesh_commands"]
@@ -786,11 +788,11 @@ class ShaderContracts(unittest.TestCase):
         prefix_graph = graph.split("for (std::uint32_t stage = 0; stage < 3; ++stage)", 1)[1]
         first = prefix_graph.split("if (stage == 0)", 1)[1].split("else if (stage == 1)", 1)[0]
         second = prefix_graph.split("else if (stage == 1)", 1)[1].split("else", 1)[0]
-        self.assertIn("prefix.Write(cut.offsets.version, Access::UnorderedWrite)", first)
-        self.assertIn("prefix.Write(cut.block_sums.version, Access::UnorderedWrite)", first)
-        self.assertIn("prefix.Write(cut.block_offsets.version, Access::UnorderedWrite)", second)
-        self.assertIn("prefix.ReadWrite(cut.offsets.version, Access::UnorderedWrite)", prefix_graph)
-        self.assertIn("prefix.ReadWrite(cut.draw_commands.version, Access::UnorderedWrite)", prefix_graph)
+        self.assertIn("prefix->Write(cut.offsets.version, Access::UnorderedWrite)", first)
+        self.assertIn("prefix->Write(cut.block_sums.version, Access::UnorderedWrite)", first)
+        self.assertIn("prefix->Write(cut.block_offsets.version, Access::UnorderedWrite)", second)
+        self.assertIn("prefix->ReadWrite(cut.offsets.version, Access::UnorderedWrite)", prefix_graph)
+        self.assertIn("prefix->ReadWrite(cut.draw_commands.version, Access::UnorderedWrite)", prefix_graph)
         constants = shader.split("bool ConstantsValid()", 1)[1].split("bool CandidateValid(", 1)[0]
         for resource in ("CutOffsets", "BlockSums", "BlockOffsets"):
             self.assertIn(resource + ".GetDimensions(count, stride)", constants)
@@ -881,11 +883,11 @@ class ShaderContracts(unittest.TestCase):
         self.assertRegex(interpolate, r"output.Position = float4\(\(float2\)pixel \+ 0.5,\s*"
                                      r"SurfaceDepth.Load\(int3\(pixel, 0\)\), rcp\(sample.clipW\)\)")
         frame = (SHADERS.parents[1] / "Source/RendererD3D12/Private/renderer_frame.cpp").read_text(encoding="utf-8-sig")
-        resolve = frame.split('auto resolve = impl_->graph.AddPass(30, "SurfaceResolve"', 1)[1].split(
+        resolve = frame.split('resolve = impl_->graph.AddPass(30, "SurfaceResolve"', 1)[1].split(
             "// Every successful feature registration", 1)[0]
-        self.assertIn("resolve.Read(depth_version, Access::ComputeRead)", resolve)
-        self.assertLess(frame.index("gbuffer_retest_pass.ReadWrite(depth_version, Access::DepthWrite)"),
-                        frame.index('auto resolve = impl_->graph.AddPass(30, "SurfaceResolve"'))
+        self.assertIn("resolve->Read(depth_version, Access::ComputeRead)", resolve)
+        self.assertLess(frame.index("gbuffer_retest_pass->ReadWrite(depth_version, Access::DepthWrite)"),
+                        frame.index('resolve = impl_->graph.AddPass(30, "SurfaceResolve"'))
     def test_visibility_entity_surface_identity_and_binding(self):
         source = (SHADERS / "visibility_buffer.hlsl").read_text(encoding="utf-8-sig")
         context = source.split("HsSceneVertexContext HsResolveVertexContext(", 1)[1].split(
@@ -894,17 +896,17 @@ class ShaderContracts(unittest.TestCase):
         interpolate = source.split("SceneOutput HsInterpolateSceneOutput(", 1)[1].split("return output;", 1)[0]
         self.assertIn("output.InstanceKey = a.InstanceKey", interpolate)
         frame = (SHADERS.parents[1] / "Source/RendererD3D12/Private/renderer_frame.cpp").read_text(encoding="utf-8-sig")
-        resolve = frame.split('auto resolve = impl_->graph.AddPass(30, "SurfaceResolve"', 1)[1].split(
+        resolve = frame.split('resolve = impl_->graph.AddPass(30, "SurfaceResolve"', 1)[1].split(
             "// Every successful feature registration", 1)[0]
         self.assertRegex(resolve, r"SetComputeRootShaderResourceView\(\s*34,\s*dynamic_instance_base\)")
-        self.assertIn("resolve.Read(dynamic_instances_version, Access::ComputeRead)", resolve)
+        self.assertIn("resolve->Read(dynamic_instances_version, Access::ComputeRead)", resolve)
         self.assertIn("bind_surface_compute(list)", resolve)
         surface_compute = frame.split("const auto bind_surface_compute =", 1)[1].split(
             "const auto draw_fullscreen_with_table =", 1)[0]
         self.assertIn("bind_compute(list)", surface_compute)
         self.assertIn("SetComputeRootDescriptorTable(13, character_table)", surface_compute)
         self.assertIn("SetComputeRootDescriptorTable(26, distortion_table)", surface_compute)
-        self.assertIn("read_material_sampling(resolve, has_authored_material_draw, Access::ComputeRead)", resolve)
+        self.assertIn("read_material_sampling(*resolve, has_authored_material_draw, Access::ComputeRead)", resolve)
         sampling = frame.split("const auto read_material_sampling =", 1)[1].split(
             "const auto authored_source =", 1)[0]
         for resource in ("entity_surface_noise_version", "entity_surface_gradient_version", "entity_surface_stbn_version"):

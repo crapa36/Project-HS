@@ -155,7 +155,7 @@ function Test-LockstepTimeline([string]$Directory) {
     }
 }
 
-& $Executable --smoke --smoke-render-lockstep --validation --ticks=180 --barriers=enhanced --resize-test `
+& $Executable --smoke --smoke-render-lockstep --validation --capture-diagnostics --ticks=180 --barriers=enhanced --resize-test `
     $generationArgument --artifacts=$enhanced
 if ($LASTEXITCODE -ne 0) {
     throw "Enhanced barrier smoke failed."
@@ -303,7 +303,7 @@ if ($legacyOnly.Count -ne 0 -or $enhancedOnly.Count -ne 0) {
     throw "Legacy and enhanced GPU pass sets differ: legacy_only=$($legacyOnly -join ', '); enhanced_only=$($enhancedOnly -join ', ')."
 }
 
-& $Executable --smoke --smoke-render-lockstep --validation --ticks=180 --barriers=enhanced --resize-test `
+& $Executable --smoke --smoke-render-lockstep --validation --capture-diagnostics --ticks=180 --barriers=enhanced --resize-test `
     --render-scale=75 --shadow=2048 --particles=50 --no-bloom --no-outline `
     $generationArgument --artifacts=$options
 if ($LASTEXITCODE -ne 0) {

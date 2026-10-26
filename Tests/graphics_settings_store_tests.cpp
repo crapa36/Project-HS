@@ -169,12 +169,19 @@ void TestStartupGraphicsRendererProjection()
     config.frame_cap = 0;
     const auto effective = hs::PrepareStartupGraphicsSettings(requested, config);
     const auto renderer = hs::ProjectRendererConfig(effective, requested.graphics);
-    Check(renderer.width == 1920 && renderer.height == 1080 && !renderer.vsync &&
-              renderer.presentation_request.frame_limit_fps == 0 &&
+    Check(renderer.width == 1920 && renderer.height == 1080 &&
+              renderer.render_scale_percent == effective.render_scale_percent &&
+              renderer.screen_overlay_intensity == effective.screen_overlay_intensity &&
               renderer.requested_graphics &&
+              !renderer.requested_graphics->vsync &&
+              renderer.requested_graphics->frame_limit_fps == 0 &&
               renderer.requested_graphics->output_extent == requested.graphics.output_extent &&
               renderer.requested_graphics->display_mode == hs::GraphicsDisplayMode::Windowed,
           "startup CLI intent reaches renderer and window display snapshot");
+    auto fallback = effective;
+    fallback.render_scale_percent = 83;
+    Check(hs::ProjectRendererConfig(fallback, requested.graphics).render_scale_percent == 83,
+          "startup carrier preserves the native non-manual scale fallback");
 
     hs::GraphicsSettingsCommit controller(requested, effective, false);
     Check(controller.EditGraphics({hs::UiCommandKind::SetBloom, 0}), "later startup settings edit");
@@ -184,9 +191,10 @@ void TestStartupGraphicsRendererProjection()
               hs::GraphicsSettingsCommit::AckOutcome::Applied,
           "later startup settings acknowledgment");
     const auto after = hs::ProjectRendererConfig(controller.Effective(), controller.Committed().graphics);
-    Check(after.width == 1920 && after.height == 1080 && !after.vsync && !after.bloom &&
-              after.presentation_request.frame_limit_fps == 0 &&
+    Check(after.width == 1920 && after.height == 1080 &&
               after.requested_graphics &&
+              !after.requested_graphics->vsync && !after.requested_graphics->bloom &&
+              after.requested_graphics->frame_limit_fps == 0 &&
               after.requested_graphics->output_extent == requested.graphics.output_extent,
           "unrelated settings commit does not restore saved display overrides");
 }

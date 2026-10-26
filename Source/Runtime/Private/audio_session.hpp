@@ -20,7 +20,7 @@ class AudioDelivery
   public:
     explicit AudioDelivery(DiagnosticClock clock = nullptr) : clock_(clock) {}
     template<class Consume, class Observe>
-    void DrainSimulation(BoundedSpscQueue<QueuedAudioEvent, 1024> &queue, Consume &&consume, Observe &&observe)
+    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &queue, Consume &&consume, Observe &&observe)
     {
         std::size_t count{};
         auto newest = session_id_;
@@ -29,7 +29,7 @@ class AudioDelivery
         {
             batch_[count].dequeued_qpc = clock_ ? clock_() : 0;
             const auto &packet = batch_[count++];
-            observe(packet, 0);
+            observe(packet);
             if (packet.kind == QueuedAudioEvent::Kind::Tick)
             { newest = packet.tick_info.session_id; saw_boundary = true; }
         }
@@ -57,26 +57,6 @@ class AudioDelivery
         }
     }
 
-    template<class Consume, class Observe>
-    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &simulation,
-               BoundedSpscQueue<QueuedAudioEvent, 1024> &render, Consume &&consume, Observe &&observe)
-    {
-        DrainSimulation(simulation, consume, observe);
-        QueuedAudioEvent packet;
-        for (std::size_t i = 0; i < 1024 && render.TryPop(packet); ++i)
-        {
-            packet.dequeued_qpc = clock_ ? clock_() : 0;
-            observe(packet, 1);
-            // A rendered snapshot is published after its sim audio boundary. If
-            // that boundary arrived after our first empty pop, consume it now.
-            if (!initialized_ || packet.event.session_id != session_id_)
-                DrainSimulation(simulation, consume, observe);
-            if (!initialized_ || packet.event.session_id != session_id_)
-            { ++stats_.discarded_old_session; continue; }
-            ObserveAge(packet.event);
-            consume(packet);
-        }
-    }
     const AudioDeliveryStats &Stats() const noexcept { return stats_; }
   private:
     void ObserveAge(const PresentationEvent &event) noexcept
@@ -114,10 +94,9 @@ class MainAudioSession
     { RequestMusic(Event("audio.bgm.main_menu")); }
 
     template<class Observe>
-    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &simulation,
-               BoundedSpscQueue<QueuedAudioEvent, 1024> &render, Observe &&observe)
+    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &simulation, Observe &&observe)
     {
-        delivery_.Drain(simulation, render, [&](const QueuedAudioEvent &packet) {
+        delivery_.Drain(simulation, [&](const QueuedAudioEvent &packet) {
             if (failure_ != MainAudioFailure::None) return;
             if (packet.kind == QueuedAudioEvent::Kind::Tick) ApplyTick(packet.tick_info);
             else Consume(packet.event, packet.dequeued_qpc);

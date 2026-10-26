@@ -53,7 +53,7 @@ int main()
     Check(hs::runtime_detail::AdmitUiInteraction(setting,candidate,previous,actions,commands,rejected));
     Check(commands.TryPop(command) && !commands.TryPop(command));
 
-    hs::runtime_detail::UiDrawPacketFacts displayed;
+    hs::UiFrame displayed;
     displayed.generation=91; displayed.session_id=7;
     displayed.session.phase=hs::SessionPhase::CardSelection;
     displayed.session.card_count=2;

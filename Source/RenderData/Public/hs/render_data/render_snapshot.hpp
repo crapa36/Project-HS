@@ -388,8 +388,11 @@ struct StaticRenderSceneStorage final
     candidate->static_keys.clear();
     candidate->static_keys.reserve(candidate->instances.size());
     for (std::size_t index = 0; index < candidate->instances.size(); ++index)
+    {
+        PopulateRenderInstanceRevisions(candidate->instances[index]);
         candidate->static_keys.push_back(MakeRenderSceneInstanceKey(
             candidate->instances[index].stable_id, static_cast<std::uint32_t>(index)));
+    }
     std::ranges::sort(candidate->static_keys, [](const auto &left, const auto &right) {
         return std::pair{left.stable_id, left.fallback_ordinal} <
                std::pair{right.stable_id, right.fallback_ordinal};
@@ -433,17 +436,13 @@ class RenderSnapshotStorage
     void Clear() noexcept;
     // Copies a different retained sample; UI belongs only to the current packet.
     void CopyDynamicFrom(const RenderSnapshot &sample);
-    [[nodiscard]] bool AddInstance(const RenderInstance &instance);
-    [[nodiscard]] bool AddPose(const AnimationPoseRef &pose);
-    [[nodiscard]] bool AddCapturedInstance(const CapturedRenderInstance &capture);
-    // Complete-packet producers append final operands without deriving a
-    // producer revision history. Add* retains the development adapter rules.
-    [[nodiscard]] bool AppendInstance(const RenderInstance &instance);
-    [[nodiscard]] bool AppendPose(const AnimationPoseRef &pose);
-    [[nodiscard]] bool AppendCapturedInstance(const CapturedRenderInstance &capture);
-    [[nodiscard]] bool AddLight(const LightView &light);
-    [[nodiscard]] bool AddUi(const UiModel &ui);
-    [[nodiscard]] bool AddPersistentVfx(const PersistentVfxVisual &visual);
+    void AddInstance(const RenderInstance &instance);
+    void AddPose(const AnimationPoseRef &pose);
+    void AddCapturedInstance(const CapturedRenderInstance &capture);
+    void AddLight(const LightView &light);
+    void AddUi(const UiModel &ui);
+    void AddPersistentVfx(const PersistentVfxVisual &visual);
+    [[nodiscard]] std::vector<UiModel> TakeUiModels();
     [[nodiscard]] std::size_t InstanceCount() const noexcept;
     [[nodiscard]] RenderSnapshot View() const noexcept;
     void SetStaticScene(std::shared_ptr<const StaticRenderScene> scene) noexcept;

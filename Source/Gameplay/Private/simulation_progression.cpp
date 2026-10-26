@@ -289,13 +289,13 @@ bool GameSimulation::SimulationWorld::SelectCard(std::size_t index)
     return true;
 }
 
-void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
+bool GameSimulation::SimulationWorld::AssignStat(StatKind stat)
 {
     const auto index = static_cast<std::size_t>(stat);
     if (actors->player.pending_stat_points == 0 ||
         actors->player.stats[index] >= rules.stats.maximum_points_per_stat)
     {
-        return;
+        return false;
     }
     ++actors->player.stats[index];
     --actors->player.pending_stat_points;
@@ -326,6 +326,7 @@ void GameSimulation::SimulationWorld::AssignStat(StatKind stat)
             session_phase = SessionPhase::Playing;
         }
     }
+    return true;
 }
 
 void GameSimulation::SimulationWorld::AssignAutomaticStats()

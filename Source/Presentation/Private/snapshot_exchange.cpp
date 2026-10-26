@@ -1,4 +1,5 @@
 #include <hs/presentation/snapshot_exchange.hpp>
+#include <hs/presentation/projector.hpp>
 
 #include <limits>
 
@@ -24,6 +25,7 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
                                                         std::memory_order_acquire))
         {
             slots_[index].storage.Clear();
+            slots_[index].ui_frame.reset();
             return WriteSlot{index, &slots_[index].storage};
         }
     }
@@ -50,6 +52,7 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
                                                           std::memory_order_acquire))
         {
             slots_[*oldest].storage.Clear();
+            slots_[*oldest].ui_frame.reset();
             return WriteSlot{*oldest, &slots_[*oldest].storage};
         }
     }
@@ -59,7 +62,8 @@ std::optional<RenderSnapshotExchange::WriteSlot> RenderSnapshotExchange::TryBegi
 }
 
 void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
-                                     const RenderSnapshot *previous_sample)
+                                     const RenderSnapshot *previous_sample,
+                                     std::shared_ptr<const UiFrame> ui_frame)
 {
     auto &packet = slots_[slot.index];
     const auto &current = packet.storage.header;
@@ -69,12 +73,14 @@ void RenderSnapshotExchange::Publish(WriteSlot slot, Sequence publish_sequence,
         current.tick - previous_sample->header.tick == 1;
     if (packet.has_previous) packet.previous.CopyDynamicFrom(*previous_sample);
     else packet.previous.Clear();
+    packet.ui_frame = std::move(ui_frame);
     slots_[slot.index].publish_sequence.store(publish_sequence, std::memory_order_relaxed);
     slots_[slot.index].state.store(SlotState::Ready, std::memory_order_release);
 }
 
 void RenderSnapshotExchange::Abandon(WriteSlot slot) noexcept
 {
+    slots_[slot.index].ui_frame.reset();
     slots_[slot.index].state.store(SlotState::Free, std::memory_order_release);
 }
 
@@ -158,6 +164,8 @@ RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest
     {
         const auto &packet = exchange_->slots_[*current_];
         pair.current = packet.storage.View();
+        pair.ui_frame = packet.ui_frame;
+        if (pair.ui_frame) pair.current.ui = pair.ui_frame->draw_models;
         pair.has_previous = packet.has_previous;
         if (pair.has_previous) pair.previous = packet.previous.View();
         pair.current_publication_sequence =

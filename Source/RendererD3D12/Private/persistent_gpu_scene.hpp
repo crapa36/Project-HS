@@ -5,6 +5,7 @@
 
 #include <DirectXMath.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -186,6 +187,13 @@ struct PersistentGpuSceneRange
     std::size_t count{};
 };
 
+enum class GpuSceneChannel : std::uint8_t
+{
+    Instance, Transform, Mesh, Material, Bounds, Skin, Count
+};
+constexpr std::size_t kGpuSceneChannelCount = static_cast<std::size_t>(GpuSceneChannel::Count);
+constexpr std::uint8_t kGpuSceneAllChannels = (1u << kGpuSceneChannelCount) - 1u;
+
 struct GpuSceneCanonicalInputs
 {
     RenderPoseKey pose{};
@@ -226,6 +234,7 @@ class PersistentGpuSceneSlots
         return {metadata_.data(), SlotCount()};
     }
     [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges();
+    [[nodiscard]] const std::vector<PersistentGpuSceneRange> &DirtyRanges(GpuSceneChannel channel);
     [[nodiscard]] std::size_t ActiveCount() const noexcept { return active_count_; }
     [[nodiscard]] std::size_t SlotCount() const noexcept
     {
@@ -254,7 +263,7 @@ class PersistentGpuSceneSlots
         bool active{};
     };
 
-    void MarkDirty(std::uint32_t slot);
+    void MarkDirty(std::uint32_t slot, std::uint8_t channels = kGpuSceneAllChannels);
     void RebuildDirtyRanges();
 
     std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> slots_;
@@ -264,8 +273,10 @@ class PersistentGpuSceneSlots
     std::vector<std::uint32_t> free_slots_;
     // Only touched payloads need an undo record. Retained slot identity is
     // unchanged until Commit, while Instances exposes the prepared upload.
-    std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> pending_slots_;
-    // Reused by slot; only keys present in pending_slots_ may read this staging.
+    std::unordered_map<PersistentGpuSceneKey, std::uint32_t, KeyHash> pending_new_slots_;
+    std::vector<std::uint32_t> pending_active_slots_;
+    std::vector<std::uint8_t> pending_seen_;
+    // Retained slots reuse their authoritative lookup and frame-local staging.
     std::vector<Entry> pending_entries_;
     struct PreviousPayload
     {
@@ -278,8 +289,10 @@ class PersistentGpuSceneSlots
     std::size_t pending_reset_slots_{};
     bool preparing_{};
     bool reset_scene_{};
-    std::vector<std::uint32_t> dirty_slots_;
+    struct DirtySlot { std::uint32_t slot{}; std::uint8_t channels{}; };
+    std::vector<DirtySlot> dirty_slots_;
     std::vector<PersistentGpuSceneRange> dirty_ranges_;
+    std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> dirty_channel_ranges_;
     std::size_t active_count_{};
     std::size_t anonymous_count_{};
     GpuSceneChanges changes_{};

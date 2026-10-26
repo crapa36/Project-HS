@@ -121,7 +121,7 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input)
     return ValidateFramePayload(input);
 }
 
-Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_input) const
+Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_input)
 {
     const auto &input = frame_input;
     std::unordered_set<std::uint64_t> fresnel_ids;
@@ -980,6 +980,7 @@ Result D3D12Renderer::Impl::ResetOwnedViewsAfterCompletion()
         if (auto r = ResetOwnedViewAfterCompletion(*candidate); !r) return r;
     unresolved_view_candidates.clear();
     owned_views.clear();
+    timing_previous_source_endpoints.clear();
     return Result::Success();
 }
 
@@ -1316,6 +1317,7 @@ Result D3D12Renderer::ReleaseView(ViewId id)
         if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(0); !r) return r;
     if (impl_->fsr_session)
         if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(0); !r) return r;
+    impl_->timing_previous_source_endpoints.erase(id.value);
     impl_->owned_views.erase(found);
     return Result::Success();
 }

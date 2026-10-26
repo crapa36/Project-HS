@@ -104,8 +104,7 @@ Result ResetHlodView(HlodViewRuntime &view, ResidencyManager &residency, const C
             return HlodFailure("HLOD view reset requires completed frame/demand leases.");
     if (auto result = view.system.ResetAfterCompletion(completed); !result) return result;
     for (const auto &frame : view.frames)
-        for (const auto ticket : {frame.refs_residency, frame.readback_residency})
-            static_cast<void>(residency.ReleaseNow(ticket));
+        static_cast<void>(residency.ReleaseNow(frame.readback_residency));
     static_cast<void>(residency.ReleaseNow(view.residency));
     return Result::Success();
 }
@@ -339,9 +338,11 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
             runtime.content_generation, runtime.generation, static_cast<std::uint32_t>(total),
             kFrameCount, reader, candidate); !result) return result;
         const auto bytes = candidate.AllocatedBytes();
+        SampleAllocatorBudgetStats(false, false);
         ScopedGpuAdmission admission(residency, bytes);
         if (!admission) return HlodFailure("HLOD selection tables cannot fit the shared residency budget.");
-        const auto ticket = residency.Register(ResidencyCategory::Geometry, bytes, true);
+        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Geometry, bytes, true,
+            ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
         if (!ticket) return HlodFailure("Could not account HLOD selection allocations.");
         if (auto result = view.system.Commit(std::move(candidate), graph_queue_executor.Completed()); !result)
         { static_cast<void>(residency.ReleaseNow(ticket)); return result; }
@@ -355,11 +356,16 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
 }
 
 Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
-                                           std::vector<GpuStaticDrawRef> &refs)
+                                           std::vector<GpuStaticDrawRef> &refs, bool &refs_changed)
 {
+    refs_changed = false;
     NullHlodExports(device.Get(), srv_cpu_heap.Get(), srv_stride, frame_slot);
     const auto disabled = [&]() {
-        if (static_gpu_scene) refs.resize(static_gpu_scene->draws.leaf_count);
+        if (static_gpu_scene && &refs == &static_gpu_scene->draws.refs)
+        {
+            refs_changed = refs.size() != static_gpu_scene->draws.leaf_count;
+            refs.resize(static_gpu_scene->draws.leaf_count);
+        }
         return Result::Success();
     };
     if (!hlod_runtime || frame_slot >= kFrameCount) return disabled();
@@ -374,10 +380,28 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     const auto generation = static_gpu_scene->instance_generation;
     const auto leaf_count = static_gpu_scene->draws.leaf_count;
     const auto &order = runtime.prepared_scene.proxy_order;
-    const bool refs_changed = refs.size() != leaf_count + order.size();
+    refs_changed = refs.size() != leaf_count + order.size();
     refs.resize(leaf_count + order.size());
+    for (std::uint32_t command = 0; command < order.size(); ++command)
+    {
+        const auto index = order[command];
+        const auto &proxy = runtime.scene.proxies[index];
+        const GpuStaticDrawRef expected{view.proxy_slot_base + index,
+            proxy.mesh_semantic, 1.0f, generation};
+        auto &ref = refs[leaf_count + command];
+        if (refs_changed || ref.instance_index != expected.instance_index ||
+            ref.mesh_flags != expected.mesh_flags ||
+            ref.lod_threshold != expected.lod_threshold ||
+            ref.instance_generation != expected.instance_generation)
+        {
+            ref = expected;
+            refs_changed = true;
+        }
+    }
     const bool rebuild_bindings = native.prepared_source != view.matching_scene ||
         native.prepared_generation != generation || native.prepared_leaf_count != leaf_count ||
+        native.prepared_hlod_generation != runtime.generation ||
+        native.bindings.size() != order.size() || refs_changed ||
         native.prepared_pipeline_revision != pipeline_revision;
     if (rebuild_bindings)
     {
@@ -395,7 +419,6 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
         const auto material = runtime.proxy_material_ordinals[index];
         const auto ref_index = static_cast<std::uint32_t>(leaf_count + command);
         const auto slot = view.proxy_slot_base + index;
-        if (refs_changed) refs[ref_index] = {slot, proxy.mesh_semantic, 1.0f, generation};
         auto &binding = native.bindings[index];
         if (rebuild_bindings)
         {
@@ -435,36 +458,31 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     }
     native.prepared_source = view.matching_scene;
     native.prepared_generation = generation;
+    native.prepared_hlod_generation = runtime.generation;
     native.prepared_leaf_count = leaf_count;
     native.prepared_pipeline_revision = pipeline_revision;
-    const auto refs_bytes = std::max<std::uint64_t>(16u, refs.size() * sizeof(GpuStaticDrawRef));
     const auto readback_bytes = std::max<std::uint64_t>(4u, runtime.scene.pages.size() * 4u) + 64u;
     const auto ensure = [&](AllocationResource &resource, ResidencyTicket &ticket, std::uint64_t bytes,
                             D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) -> Result {
         if (resource.resource && resource.resource->GetDesc().Width >= bytes) return Result::Success();
         const auto description = BufferDescription(bytes);
         const auto allocated = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
-        ScopedGpuAdmission admission(residency, allocated);
+        SampleAllocatorBudgetStats(false, false);
+        ScopedGpuAdmission admission(residency, allocated, ResidencySegmentForHeap(heap));
         if (allocated == UINT64_MAX || !admission) return HlodFailure("HLOD frame staging exceeds shared residency budget.");
         AllocationResource next;
         D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = heap;
         if (auto result = CreateAllocation(next, allocation, description, state); !result) return result;
-        const auto next_ticket = residency.Register(ResidencyCategory::Staging, next.allocation->GetSize(), false);
+        const auto next_ticket = RegisterNativeAllocation(ResidencyCategory::Staging,
+            next.allocation->GetSize(), false, ResidencySegmentForHeap(heap));
         if (!next_ticket) return HlodFailure("Could not account HLOD frame staging.");
         static_cast<void>(residency.ReleaseNow(ticket));
         next.graph_access = heap == D3D12_HEAP_TYPE_UPLOAD ? Access::ShaderRead : Access::CopyDest;
         resource = std::move(next); ticket = next_ticket; admission.Complete();
         return Result::Success();
     };
-    if (auto result = ensure(native.refs, native.refs_residency, refs_bytes, D3D12_HEAP_TYPE_UPLOAD,
-        D3D12_RESOURCE_STATE_GENERIC_READ); !result) return result;
     if (auto result = ensure(native.readback, native.readback_residency, readback_bytes, D3D12_HEAP_TYPE_READBACK,
         D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
-    void *mapped{}; const D3D12_RANGE no_read{};
-    const auto hr = native.refs.resource->Map(0, &no_read, &mapped);
-    if (FAILED(hr)) return HResultFailure("Map HLOD static refs", hr);
-    std::memcpy(mapped, refs.data(), refs.size() * sizeof(GpuStaticDrawRef));
-    native.refs.resource->Unmap(0, nullptr);
     native.enabled = true; native.frame_id = frame_number + 1u;
     native.qualification_epoch = view.qualification_epoch;
     return Result::Success();
@@ -496,7 +514,8 @@ Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(std::uint32_t frame_slot,
     inputs.members = native.members; inputs.proxies = native.bindings; inputs.buckets = native.buckets; inputs.views = native.views;
     inputs.static_scene = {static_gpu_scene->instances.resource.Get(), static_scene,static_gpu_scene->instances.NativeContract()};
     inputs.geometry_records = {frames[frame_slot].geometry_draw_records.resource.Get(), geometry_records,frames[frame_slot].geometry_draw_records.NativeContract()};
-    inputs.proxy_refs = {native.refs.resource.Get(), proxy_refs,native.refs.NativeContract()};
+    auto &refs = static_gpu_scene->refs->storage;
+    inputs.proxy_refs = {refs.resource.Get(), proxy_refs, refs.NativeContract()};
     return view.system.PrepareFrameRecordData(inputs,record.selection);
 }
 
@@ -507,7 +526,7 @@ bool D3D12Renderer::Impl::MatchesHlodFrameLayout(const HlodRuntimeFrameRecordDat
     if(!layout.valid||layout.active!=bool(record.view))return false;
     if(!record.view)return !view||!view->frames[record.inputs.frame_slot].enabled;
     return record.view==view&&view->frames[record.inputs.frame_slot].enabled&&
-        record.inputs.proxy_refs.version==ResourceVersion{layout.refs,0}&&
+        record.inputs.proxy_refs.version==layout.selection.guides[2]&&
         view->system.MatchesLayout(record.inputs,record.selection,layout.selection);
 }
 
@@ -516,7 +535,7 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uin
     HlodFrameGraph &state,HlodRuntimeFrameLayout *capture,HlodRuntimeFrameRecordData *prepared,
     const HlodRuntimeFrameLayout *retained)
 {
-    static_cast<void>(static_refs);state={};if(capture)*capture={};
+    state={};if(capture)*capture={};
     if(active_view_mask!=1u&&active_view_mask!=15u)
         return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","HLOD active view mask must select camera or all shadow views.");
     auto *context=ActiveHlodView();
@@ -525,23 +544,21 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uin
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained active topology changed.");
     if(!active){if(capture)capture->valid=true;return Result::Success();}
     auto &view=*context;auto &native=view.frames[frame_slot];state.view=context;
-    if(auto checked=native.refs.EnsureNativeContract(device.Get());!checked)return checked;
-    state.refs=retained?retained->refs:graph.ImportBuffer({native.refs.resource.Get(),native.refs.graph_completion,
-        native.refs.graph_queue,{},native.refs.NativeContract()},native.refs.graph_access,"HlodImmutableStaticRefs");
-    if(retained&&!graph.BindBuffer(state.refs,{native.refs.resource.Get(),native.refs.graph_completion,
-        native.refs.graph_queue,{},native.refs.NativeContract()},native.refs.graph_access))
-        return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained static refs binding failed.");
+    if (!static_gpu_scene || !static_gpu_scene->refs || !static_refs.resource ||
+        (retained && retained->refs != static_refs.resource))
+        return HlodFailure("HLOD static refs do not match the scene-owned graph import.");
+    state.refs = static_refs.resource;
     HlodRuntimeFrameRecordData local;
     if(!prepared)
     {
-        if(auto result=PrepareHlodFrameRecordData(frame_slot,active_view_mask,geometry_records,static_scene,graph.Version(state.refs),local);!result)return result;
+        if(auto result=PrepareHlodFrameRecordData(frame_slot,active_view_mask,geometry_records,static_scene,static_refs,local);!result)return result;
         prepared=&local;
     }
     if(prepared->view!=context||prepared->inputs.frame_slot!=frame_slot||prepared->inputs.active_view_mask!=active_view_mask)
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD prepared runtime frame changed.");
     // Logical slots can be assigned cold after the CPU plan was prepared.
     prepared->inputs.geometry_records.version=geometry_records;prepared->inputs.static_scene.version=static_scene;
-    prepared->inputs.proxy_refs.version=graph.Version(state.refs);
+    prepared->inputs.proxy_refs.version=static_refs;
     if(retained&&!MatchesHlodFrameLayout(*prepared,*retained))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","HLOD retained runtime layout changed.");
     auto result=retained?view.system.BindRetained(graph,prepared->inputs,prepared->selection,retained->selection,state.outputs):
@@ -590,7 +607,7 @@ void D3D12Renderer::Impl::ReadHlodFrame(PassBuilder &pass, const HlodFrameGraph 
         pass.Read(state.outputs.indexed_commands, Access::IndirectArgs);
         pass.Read(state.outputs.mesh_commands, Access::IndirectArgs);
         pass.Read(state.outputs.command_counts, Access::IndirectArgs);
-        pass.Read(graph.Version(state.refs), Access::ShaderRead);
+        // The owning pass declares shared scene refs once with its ordinary static draws.
     }
 }
 
@@ -602,7 +619,8 @@ Result D3D12Renderer::Impl::DrawHlodGeometry(ID3D12GraphicsCommandList *list,
     if (!list || view >= 4u) return HlodFailure("HLOD draw has an invalid native list/view.");
     const auto &native = context->frames[frame_slot];
     list->SetGraphicsRootShaderResourceView(34, static_gpu_scene->instances.resource->GetGPUVirtualAddress());
-    list->SetGraphicsRootShaderResourceView(35, native.refs.resource->GetGPUVirtualAddress());
+    list->SetGraphicsRootShaderResourceView(35,
+        static_gpu_scene->refs->storage.resource->GetGPUVirtualAddress());
     for (std::uint32_t index = 0; index < native.buckets.size(); ++index)
     {
         const auto &bucket = native.buckets[index]; const auto material = native.material_ordinals[index];
@@ -643,11 +661,9 @@ Result D3D12Renderer::Impl::CommitHlodFrameGraph(std::uint32_t frame_slot,
     auto &view = *state.view; auto &native = view.frames.at(frame_slot);
     if (auto result = view.system.CompleteSubmission(graph, completion, true); !result) return result;
     native.completion = completion;
-    for (const auto [buffer, handle] : {std::pair{&native.refs, state.refs}, std::pair{&native.readback, state.readback}})
-    {
-        buffer->graph_access = graph.FinalAccess(handle); buffer->graph_queue = graph.FinalQueue(handle);
-        buffer->graph_completion = graph.ResourceCompletion(handle);
-    }
+    native.readback.graph_access = graph.FinalAccess(state.readback);
+    native.readback.graph_queue = graph.FinalQueue(state.readback);
+    native.readback.graph_completion = graph.ResourceCompletion(state.readback);
     native.readback_pending = true; native.readback_completion = native.readback.graph_completion;
     for (std::uint32_t slot = 0; slot < kFrameCount; ++slot)
     {

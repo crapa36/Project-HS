@@ -230,11 +230,7 @@ void AddOption(GraphicsCapabilitiesView &view, GraphicsModeId option,
     }
 }
 
-struct CapabilityAdmission
-{
-    bool available{};
-    GraphicsCapabilityReason reason{GraphicsCapabilityReason::Unavailable};
-};
+using CapabilityAdmission = NativeGraphicsCapabilitySnapshot::Admission;
 CapabilityAdmission Admission(ReconstructionAvailability availability, std::string_view reason)
 {
     if (availability == ReconstructionAvailability::Available) return {true, GraphicsCapabilityReason::None};
@@ -513,21 +509,18 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
     const auto sr_selected = sr_requested == "auto" ? impl_->reconstruction_plan.effective_provider.value : sr_requested;
     const auto &fg_requested = cfg.presentation_request.provider.value;
     const ViewExtent output{impl_->width, impl_->height};
-    const auto key = sr_requested + "|" + sr_selected + "|" + fg_requested + "|" +
-        std::to_string(output.width) + "x" + std::to_string(output.height) + "|" +
-        std::string(GraphicsEnumToken(cfg.presentation_request.mode)) + "|" +
-        std::string(GraphicsEnumToken(cfg.presentation_request.low_latency)) + "|" +
-        (cfg.vsync ? "vsync" : "immediate");
-    if (impl_->graphics_capabilities_key != key)
+    constexpr CapabilityAdmission available{true, GraphicsCapabilityReason::None};
+    constexpr CapabilityAdmission unsupported{false, GraphicsCapabilityReason::Unsupported};
+    constexpr CapabilityAdmission incompatible{false, GraphicsCapabilityReason::Incompatible};
+    constexpr std::array<std::string_view, 7> qualities{
+        "native", "ultra_quality_plus", "ultra_quality", "quality", "balanced", "performance", "ultra_performance"};
+    auto &native = impl_->native_graphics_capabilities;
+    if (!native.valid || native.output.width != output.width || native.output.height != output.height)
     {
-        // SDK discovery is CPU/device-only and copied into an immutable catalog.
-        // Repeated UI reads create no SDK objects. A changed output/provider
-        // queries the real quality/mode domain again without dummy evaluations.
-        constexpr CapabilityAdmission available{true, GraphicsCapabilityReason::None};
-        constexpr CapabilityAdmission unsupported{false, GraphicsCapabilityReason::Unsupported};
-        constexpr CapabilityAdmission incompatible{false, GraphicsCapabilityReason::Incompatible};
-        constexpr std::array<std::string_view, 7> qualities{
-            "native", "ultra_quality_plus", "ultra_quality", "quality", "balanced", "performance", "ultra_performance"};
+        // Discovery only depends on the device and output extent. Keep all
+        // admissions as values so policy edits never create SDK objects.
+        NativeGraphicsCapabilitySnapshot discovered;
+        discovered.output = output;
         std::array<CapabilityAdmission, qualities.size()> dlss_quality{}, fsr_quality{}, xess_quality{}, dsr_quality{};
         auto &sl = impl_->streamline_session;
         const auto sl_admission = [&](StreamlineFeature feature) {
@@ -620,11 +613,8 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         {
             const auto result = sl->QueryFrameGenerationCapabilities(sl_fg_cap);
             dlss_fg = QueryAdmission(result, sl->Availability(StreamlineFeature::FrameGeneration), sl->FailureReason(StreamlineFeature::FrameGeneration));
-            if (dlss_fg.available && (!impl_->streamline_queue_proxy || sl_fg_cap.maximum_multiplier < 2))
+            if (dlss_fg.available && sl_fg_cap.maximum_multiplier < 2)
                 dlss_fg = {false, GraphicsCapabilityReason::Unavailable};
-            if (dlss_fg.available && (output.width < sl_fg_cap.minimum_dimension || output.height < sl_fg_cap.minimum_dimension ||
-                (cfg.vsync && !sl_fg_cap.vsync_supported))) dlss_fg = incompatible;
-            dlss_fg = Both(dlss_fg, reflex);
         }
         XellLatency xell;
         const auto xell_probe = xell.Initialize(impl_->device.Get());
@@ -639,85 +629,133 @@ GraphicsCapabilitiesView D3D12Renderer::GetGraphicsCapabilities() const
         const auto fg_probe = xess_fg.Probe(impl_->device.Get(), 1, xess_fg_cap);
         auto intel_fg = Both(QueryAdmission(fg_probe, xess_fg.Availability(), xess_fg.FailureReason()), xell_fg);
 
-        const auto provider = [&](std::string_view category, std::string_view token, CapabilityAdmission admission) {
-            AddOption(view, GraphicsModeId{std::string(category) + ":" + std::string(token)}, admission.available, admission.reason);
-            AddProvider(view, GraphicsProviderId{std::string(token)}, admission.available, admission.reason);
-        };
-        for (const auto token : {"auto", "off", "native_taa", "internal_taau"}) provider("sr_provider", token, available);
-        for (const auto token : {"dlss", "dlss_sr"}) provider("sr_provider", token, dlss_sr);
-        for (const auto token : {"fsr", "fsr_sr"}) provider("sr_provider", token, fsr_sr);
-        for (const auto token : {"xess", "xess_sr"}) provider("sr_provider", token, xess_sr);
-        provider("sr_provider", "directsr", directsr);
-        provider("fg_provider", "off", available);
-        provider("fg_provider", "auto", available);
-        provider("fg_provider", "dlss", dlss_fg);
-        provider("fg_provider", "fsr", fsr_fg);
-        provider("fg_provider", "xess", intel_fg);
-        AddProvider(view, GraphicsProviderId{"reflex"}, reflex.available, reflex.reason);
-        AddProvider(view, GraphicsProviderId{"xell"}, xell_fg.available, xell_fg.reason);
-
-        const auto option = [&](std::string_view category, std::string_view token, CapabilityAdmission admission) {
-            AddOption(view, GraphicsModeId{std::string(category) + ":" + std::string(token)}, admission.available, admission.reason);
-        };
-        for (std::size_t index = 0; index < qualities.size(); ++index)
-        {
-            CapabilityAdmission admission = unsupported;
-            if (sr_selected == "dlss" || sr_selected == "dlss_sr") admission = dlss_quality[index];
-            else if (sr_selected == "fsr" || sr_selected == "fsr_sr") admission = fsr_quality[index];
-            else if (sr_selected == "xess" || sr_selected == "xess_sr") admission = xess_quality[index];
-            else if (sr_selected == "directsr") admission = dsr_quality[index];
-            else if (sr_selected == "off" || sr_selected == "native_taa") admission = qualities[index] == "native" ? available : incompatible;
-            else if (sr_selected == "internal_taau") admission = qualities[index] == "native" || qualities[index] == "quality" ||
-                qualities[index] == "balanced" || qualities[index] == "performance" ? available : unsupported;
-            option("reconstruction", qualities[index], admission);
-        }
-        const auto selected_fg = [&](CapabilityAdmission dlss, CapabilityAdmission intel, CapabilityAdmission amd) {
-            return fg_requested == "auto" ? Either(Either(dlss, intel), amd) : fg_requested == "dlss" ? dlss :
-                fg_requested == "xess" ? intel : fg_requested == "fsr" ? amd : incompatible;
-        };
-        option("frame_generation", "off", available);
-        option("frame_generation", "auto", selected_fg(dlss_fg, intel_fg, fsr_fg));
-        option("frame_generation", "fixed", selected_fg(dlss_fg, intel_fg, incompatible));
-        option("frame_generation", "dynamic", selected_fg(Both(dlss_fg,
-            sl_fg_cap.dynamic_supported ? available : incompatible), incompatible, incompatible));
-        // These are queried SDK limits even when generation is currently Off.
-        // FSR has no maximum/requested-multiplier ABI, so no limit is invented.
-        const auto maximum_multiplier = fg_requested == "dlss" ? sl_fg_cap.maximum_multiplier :
-            fg_requested == "xess" ? xess_fg_cap.maximum_generated_frames + (xess_fg_cap.maximum_generated_frames ? 1u : 0u) :
-            fg_requested == "auto" ? std::max(sl_fg_cap.maximum_multiplier,
-                xess_fg_cap.maximum_generated_frames + (xess_fg_cap.maximum_generated_frames ? 1u : 0u)) : 0u;
-        for (std::uint32_t multiplier = 2; multiplier && multiplier <= maximum_multiplier; ++multiplier)
-            option("frame_generation_multiplier", std::to_string(multiplier), selected_fg(
-                multiplier <= sl_fg_cap.maximum_multiplier ? dlss_fg : incompatible,
-                multiplier - 1 <= xess_fg_cap.maximum_generated_frames ? intel_fg : incompatible, incompatible));
-        option("latency", "off", available);
-        option("latency", "auto", available);
-        option("latency", "on", fg_requested == "xess" ?
-            cfg.presentation_request.mode == GraphicsFrameGenerationMode::Off ? xell_standalone : xell_fg :
-            fg_requested == "auto" ? Either(reflex, xell_standalone) : reflex);
-        for (const auto token : {"off", "auto", "gtao"}) option("ao", token, available);
-        for (const auto token : {"off", "probe"}) option("gi", token, available);
         const auto brixelizer = QueryBrixelizerNativeSupport(impl_->device.Get());
         const auto software_gi = brixelizer.supported ? available :
             brixelizer.compiled ? unsupported : CapabilityAdmission{false, GraphicsCapabilityReason::Unavailable};
-        option("gi", "software_hybrid", software_gi);
-        AddProvider(view, GraphicsProviderId{"brixelizer"}, software_gi.available, software_gi.reason);
-        for (const auto token : {"off", "probe", "screen_space"}) option("reflection", token, available);
-        option("shadow", "raster", available);
-        option("adaptive_shading", "off", available);
-        option("adaptive_shading", "auto", available);
-        option("adaptive_shading", "on", ((impl_->feature_capabilities.hardware.vrs_tier >= 2 &&
-            impl_->feature_capabilities.hardware.vrs_tile_size && impl_->feature_capabilities.adaptive_raster_consumer) ||
-            (impl_->feature_capabilities.hardware.compute_shader60 && impl_->feature_capabilities.adaptive_compute_consumer)) ? available : unsupported);
-        // Preserve unknown persisted selections as explicitly unavailable choices.
-        for (const auto &[category, token] : {std::pair<std::string_view, std::string_view>{"sr_provider", sr_requested},
-            {"fg_provider", fg_requested}})
-            provider(category, token, {false, GraphicsCapabilityReason::MissingProvider});
-        impl_->graphics_capabilities = view;
-        impl_->graphics_capabilities_key = key;
+        discovered.dlss_quality = dlss_quality;
+        discovered.fsr_quality = fsr_quality;
+        discovered.xess_quality = xess_quality;
+        discovered.dsr_quality = dsr_quality;
+        discovered.dlss_sr = dlss_sr;
+        discovered.fsr_sr = fsr_sr;
+        discovered.xess_sr = xess_sr;
+        discovered.directsr = directsr;
+        discovered.fsr_fg = fsr_fg;
+        discovered.dlss_fg = dlss_fg;
+        discovered.reflex = reflex;
+        discovered.xell_fg = xell_fg;
+        discovered.xell_standalone = xell_standalone;
+        discovered.intel_fg = intel_fg;
+        discovered.software_gi = software_gi;
+        discovered.dlss_fg_maximum_multiplier = sl_fg_cap.maximum_multiplier;
+        discovered.dlss_fg_minimum_dimension = sl_fg_cap.minimum_dimension;
+        discovered.dlss_fg_vsync_supported = sl_fg_cap.vsync_supported;
+        discovered.dlss_fg_dynamic_supported = sl_fg_cap.dynamic_supported;
+        discovered.xess_fg_maximum_generated_frames = xess_fg_cap.maximum_generated_frames;
+        discovered.valid = true;
+        native = std::move(discovered);
     }
-    else view = impl_->graphics_capabilities;
 
+    const auto &dlss_quality = native.dlss_quality;
+    const auto &fsr_quality = native.fsr_quality;
+    const auto &xess_quality = native.xess_quality;
+    const auto &dsr_quality = native.dsr_quality;
+    // Streamline can invalidate a feature after discovery when a native call
+    // fails. Read its current CPU-side status without repeating SDK queries.
+    const auto current_sl_admission = [&](StreamlineFeature feature) {
+        const auto &sl = impl_->streamline_session;
+        return sl ? Admission(sl->Availability(feature), sl->FailureReason(feature)) :
+            CapabilityAdmission{false, GraphicsCapabilityReason::MissingProvider};
+    };
+    const auto current_dlss_sr = current_sl_admission(StreamlineFeature::SuperResolution);
+    const auto dlss_sr = Both(current_dlss_sr, native.dlss_sr);
+    const auto fsr_sr = native.fsr_sr;
+    const auto xess_sr = native.xess_sr;
+    const auto directsr = native.directsr;
+    const auto fsr_fg = native.fsr_fg;
+    const auto reflex = Both(current_sl_admission(StreamlineFeature::Reflex), native.reflex);
+    const auto xell_fg = native.xell_fg;
+    const auto xell_standalone = native.xell_standalone;
+    const auto intel_fg = native.intel_fg;
+    auto dlss_fg = Both(current_sl_admission(StreamlineFeature::FrameGeneration), native.dlss_fg);
+    if (dlss_fg.available && !impl_->streamline_queue_proxy)
+        dlss_fg = {false, GraphicsCapabilityReason::Unavailable};
+    if (dlss_fg.available && (output.width < native.dlss_fg_minimum_dimension ||
+        output.height < native.dlss_fg_minimum_dimension ||
+        (cfg.vsync && !native.dlss_fg_vsync_supported))) dlss_fg = incompatible;
+    dlss_fg = Both(dlss_fg, reflex);
+
+    const auto provider = [&](std::string_view category, std::string_view token, CapabilityAdmission admission) {
+        AddOption(view, GraphicsModeId{std::string(category) + ":" + std::string(token)}, admission.available, admission.reason);
+        AddProvider(view, GraphicsProviderId{std::string(token)}, admission.available, admission.reason);
+    };
+    for (const auto token : {"auto", "off", "native_taa", "internal_taau"}) provider("sr_provider", token, available);
+    for (const auto token : {"dlss", "dlss_sr"}) provider("sr_provider", token, dlss_sr);
+    for (const auto token : {"fsr", "fsr_sr"}) provider("sr_provider", token, fsr_sr);
+    for (const auto token : {"xess", "xess_sr"}) provider("sr_provider", token, xess_sr);
+    provider("sr_provider", "directsr", directsr);
+    provider("fg_provider", "off", available);
+    provider("fg_provider", "auto", available);
+    provider("fg_provider", "dlss", dlss_fg);
+    provider("fg_provider", "fsr", fsr_fg);
+    provider("fg_provider", "xess", intel_fg);
+    AddProvider(view, GraphicsProviderId{"reflex"}, reflex.available, reflex.reason);
+    AddProvider(view, GraphicsProviderId{"xell"}, xell_fg.available, xell_fg.reason);
+
+    const auto option = [&](std::string_view category, std::string_view token, CapabilityAdmission admission) {
+        AddOption(view, GraphicsModeId{std::string(category) + ":" + std::string(token)}, admission.available, admission.reason);
+    };
+    for (std::size_t index = 0; index < qualities.size(); ++index)
+    {
+        CapabilityAdmission admission = unsupported;
+        if (sr_selected == "dlss" || sr_selected == "dlss_sr") admission = Both(current_dlss_sr, dlss_quality[index]);
+        else if (sr_selected == "fsr" || sr_selected == "fsr_sr") admission = fsr_quality[index];
+        else if (sr_selected == "xess" || sr_selected == "xess_sr") admission = xess_quality[index];
+        else if (sr_selected == "directsr") admission = dsr_quality[index];
+        else if (sr_selected == "off" || sr_selected == "native_taa") admission = qualities[index] == "native" ? available : incompatible;
+        else if (sr_selected == "internal_taau") admission = qualities[index] == "native" || qualities[index] == "quality" ||
+            qualities[index] == "balanced" || qualities[index] == "performance" ? available : unsupported;
+        option("reconstruction", qualities[index], admission);
+    }
+    const auto selected_fg = [&](CapabilityAdmission dlss, CapabilityAdmission intel, CapabilityAdmission amd) {
+        return fg_requested == "auto" ? Either(Either(dlss, intel), amd) : fg_requested == "dlss" ? dlss :
+            fg_requested == "xess" ? intel : fg_requested == "fsr" ? amd : incompatible;
+    };
+    option("frame_generation", "off", available);
+    option("frame_generation", "auto", selected_fg(dlss_fg, intel_fg, fsr_fg));
+    option("frame_generation", "fixed", selected_fg(dlss_fg, intel_fg, incompatible));
+    option("frame_generation", "dynamic", selected_fg(Both(dlss_fg,
+        native.dlss_fg_dynamic_supported ? available : incompatible), incompatible, incompatible));
+    // These are queried SDK limits even when generation is currently Off.
+    // FSR has no maximum/requested-multiplier ABI, so no limit is invented.
+    const auto maximum_multiplier = fg_requested == "dlss" ? native.dlss_fg_maximum_multiplier :
+        fg_requested == "xess" ? native.xess_fg_maximum_generated_frames + (native.xess_fg_maximum_generated_frames ? 1u : 0u) :
+        fg_requested == "auto" ? std::max(native.dlss_fg_maximum_multiplier,
+            native.xess_fg_maximum_generated_frames + (native.xess_fg_maximum_generated_frames ? 1u : 0u)) : 0u;
+    for (std::uint32_t multiplier = 2; multiplier && multiplier <= maximum_multiplier; ++multiplier)
+        option("frame_generation_multiplier", std::to_string(multiplier), selected_fg(
+            multiplier <= native.dlss_fg_maximum_multiplier ? dlss_fg : incompatible,
+            multiplier - 1 <= native.xess_fg_maximum_generated_frames ? intel_fg : incompatible, incompatible));
+    option("latency", "off", available);
+    option("latency", "auto", available);
+    option("latency", "on", fg_requested == "xess" ?
+        cfg.presentation_request.mode == GraphicsFrameGenerationMode::Off ? xell_standalone : xell_fg :
+        fg_requested == "auto" ? Either(reflex, xell_standalone) : reflex);
+    for (const auto token : {"off", "auto", "gtao"}) option("ao", token, available);
+    for (const auto token : {"off", "probe"}) option("gi", token, available);
+    option("gi", "software_hybrid", native.software_gi);
+    AddProvider(view, GraphicsProviderId{"brixelizer"}, native.software_gi.available, native.software_gi.reason);
+    for (const auto token : {"off", "probe", "screen_space"}) option("reflection", token, available);
+    option("shadow", "raster", available);
+    option("adaptive_shading", "off", available);
+    option("adaptive_shading", "auto", available);
+    option("adaptive_shading", "on", ((impl_->feature_capabilities.hardware.vrs_tier >= 2 &&
+        impl_->feature_capabilities.hardware.vrs_tile_size && impl_->feature_capabilities.adaptive_raster_consumer) ||
+        (impl_->feature_capabilities.hardware.compute_shader60 && impl_->feature_capabilities.adaptive_compute_consumer)) ? available : unsupported);
+    // Preserve unknown persisted selections as explicitly unavailable choices.
+    for (const auto &[category, token] : {std::pair<std::string_view, std::string_view>{"sr_provider", sr_requested},
+        {"fg_provider", fg_requested}})
+        provider(category, token, {false, GraphicsCapabilityReason::MissingProvider});
     // Display/HDR admission may change without a device or provider change.
     AddOption(view, GraphicsModeId{"hdr:off"}, true, GraphicsCapabilityReason::None);
     AddOption(view, GraphicsModeId{"hdr:auto"}, true, GraphicsCapabilityReason::None);

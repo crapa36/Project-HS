@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <string_view>
 
 namespace hs
 {
@@ -48,6 +49,13 @@ class RendererPipelineCache
         std::filesystem::path cache_directory,bool capture_timings=false);
     [[nodiscard]] Result RegisterRootSignature(ID3D12RootSignature *root,
         std::span<const std::byte> serialized);
+    // Registers a checked, immutable shader owner for the current pipeline build.
+    // Its address is only a temporary lookup; the semantic key stores the digest.
+    // Set bytes_already_verified only when the selected asset reader checked this
+    // same product digest while reading the bytes.
+    [[nodiscard]] Result RegisterShaderOwner(std::span<const std::byte> shader,
+        std::string_view expected_digest,bool bytes_already_verified);
+    void ClearShaderOwners() noexcept;
     [[nodiscard]] HRESULT CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,
         REFIID iid,void **output);
     [[nodiscard]] HRESULT CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_DESC *description,

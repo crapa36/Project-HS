@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -45,7 +46,7 @@ struct CacheDuration
 };
 
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSchema=1;
+constexpr std::uint32_t kSchema=2;
 constexpr std::uint64_t kMaximumFileBytes=256ull*1024*1024;
 constexpr std::size_t kHeaderBytes=128;
 constexpr std::array<std::byte,8> kMagic{std::byte{'H'},std::byte{'S'},std::byte{'P'},std::byte{'S'},
@@ -63,6 +64,25 @@ Result NativeFailure(std::string_view operation,HRESULT native)
         std::to_string(std::int32_t(native))+").");
 }
 struct KeyError {};
+enum class ShaderStage : std::uint32_t
+{
+    Vertex=1, Pixel=2, Domain=3, Hull=4, Geometry=5, Compute=6, Mesh=7
+};
+struct ShaderOwnerKey
+{
+    std::uintptr_t address{};
+    std::size_t size{};
+    friend bool operator==(const ShaderOwnerKey &,const ShaderOwnerKey &)=default;
+};
+struct ShaderOwnerKeyHash
+{
+    std::size_t operator()(ShaderOwnerKey key) const noexcept
+    {
+        auto value=std::hash<std::uintptr_t>{}(key.address);
+        value^=std::hash<std::size_t>{}(key.size)+0x9e3779b9+(value<<6)+(value>>2);
+        return value;
+    }
+};
 // Explicit little-endian field serialization into SHA256: no object padding,
 // descriptor/string addresses or COM identities participate in persistent keys.
 class Key
@@ -82,10 +102,11 @@ class Key
         U32(text?1u:0u);
         if(text) Bytes(std::as_bytes(std::span(text,std::strlen(text))));
     }
-    void Shader(D3D12_SHADER_BYTECODE shader)
+    void Shader(D3D12_SHADER_BYTECODE shader,ShaderStage stage,
+        const std::array<std::byte,32> &digest)
     {
         if(shader.BytecodeLength && !shader.pShaderBytecode) throw KeyError{};
-        Bytes({static_cast<const std::byte *>(shader.pShaderBytecode),shader.BytecodeLength});
+        U64(shader.BytecodeLength); U32(static_cast<std::uint32_t>(stage)); hash_.Add(digest);
     }
     std::array<std::byte,32> Finish() { return hash_.Finish(); }
   private:
@@ -174,15 +195,21 @@ void StreamOutput(Key &key,const D3D12_STREAM_OUTPUT_DESC &stream)
     for(UINT i=0;i<stream.NumStrides;++i) key.U32(stream.pBufferStrides[i]);
     key.U32(stream.RasterizedStream);
 }
+template<class DigestShader>
 std::wstring GraphicsName(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &description,
-    std::span<const std::byte> root,bool mesh,D3D12_SHADER_BYTECODE mesh_shader={})
+    std::span<const std::byte> root,bool mesh,D3D12_SHADER_BYTECODE mesh_shader,DigestShader &&digest_shader)
 {
     Key key; key.U32(kSchema); key.U32(mesh?3:1); key.Bytes(root);
-    if(mesh) { key.Shader(mesh_shader); key.Shader(description.PS); }
+    if(mesh) { key.Shader(mesh_shader,ShaderStage::Mesh,digest_shader(mesh_shader));
+        key.Shader(description.PS,ShaderStage::Pixel,digest_shader(description.PS)); }
     else
     {
-        key.Shader(description.VS); key.Shader(description.PS); key.Shader(description.DS);
-        key.Shader(description.HS); key.Shader(description.GS); StreamOutput(key,description.StreamOutput);
+        key.Shader(description.VS,ShaderStage::Vertex,digest_shader(description.VS));
+        key.Shader(description.PS,ShaderStage::Pixel,digest_shader(description.PS));
+        key.Shader(description.DS,ShaderStage::Domain,digest_shader(description.DS));
+        key.Shader(description.HS,ShaderStage::Hull,digest_shader(description.HS));
+        key.Shader(description.GS,ShaderStage::Geometry,digest_shader(description.GS));
+        StreamOutput(key,description.StreamOutput);
         Inputs(key,description.InputLayout); key.U32(description.IBStripCutValue);
     }
     OutputState(key,description);
@@ -190,9 +217,12 @@ std::wstring GraphicsName(const D3D12_GRAPHICS_PIPELINE_STATE_DESC &description,
     // excluded from identity; the unchanged native creation descriptor honors it.
     return Hex(key.Finish());
 }
-std::wstring ComputeName(const D3D12_COMPUTE_PIPELINE_STATE_DESC &description,std::span<const std::byte> root)
+template<class DigestShader>
+std::wstring ComputeName(const D3D12_COMPUTE_PIPELINE_STATE_DESC &description,
+    std::span<const std::byte> root,DigestShader &&digest_shader)
 {
-    Key key; key.U32(kSchema); key.U32(2); key.Bytes(root); key.Shader(description.CS);
+    Key key; key.U32(kSchema); key.U32(2); key.Bytes(root);
+    key.Shader(description.CS,ShaderStage::Compute,digest_shader(description.CS));
     key.U32(description.NodeMask); key.U32(description.Flags); return Hex(key.Finish());
 }
 template<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Type,class Value>
@@ -253,13 +283,22 @@ struct RendererPipelineCache::Impl
     std::vector<std::byte> loaded_blob;
     ComPtr<ID3D12PipelineLibrary> library;
     ComPtr<ID3D12PipelineLibrary1> library1;
+    std::unordered_map<ShaderOwnerKey,std::array<std::byte,32>,ShaderOwnerKeyHash> shader_owners;
     std::filesystem::path file;
     std::array<std::byte,32> identity{};
     RendererPipelineCacheStats stats;
     bool dirty{};
+    std::array<std::byte,32> ShaderDigest(D3D12_SHADER_BYTECODE shader) const
+    {
+        if(shader.BytecodeLength && !shader.pShaderBytecode) throw KeyError{};
+        const auto *data=static_cast<const std::byte *>(shader.pShaderBytecode);
+        const ShaderOwnerKey owner{reinterpret_cast<std::uintptr_t>(data),shader.BytecodeLength};
+        if(const auto found=shader_owners.find(owner);found!=shader_owners.end()) return found->second;
+        return Sha256(std::span<const std::byte>(data,shader.BytecodeLength));
+    }
     void Clear(bool clear_stats) noexcept
     {
-        library1.Reset(); library.Reset(); loaded_blob.clear(); device.Reset(); file.clear();
+        library1.Reset(); library.Reset(); loaded_blob.clear(); shader_owners.clear(); device.Reset(); file.clear();
         identity={}; dirty=false; timing_enabled.store(false, std::memory_order_relaxed);
         if(clear_stats) stats={};
         else
@@ -364,7 +403,7 @@ Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adap
                 // identity and driver here; the native blob validates the exact
                 // adapter compatibility before any cached PSO can be loaded.
                 identity.U64(std::bit_cast<std::uint64_t>(driver.QuadPart)); impl_->identity=identity.Finish();
-                impl_->file=directory/(L"renderer-pso-v1-"+Hex(impl_->identity)+L".bin");
+                impl_->file=directory/(L"renderer-pso-v2-"+Hex(impl_->identity)+L".bin");
                 impl_->stats.persistence_enabled=true; impl_->ReadFile();
             }
         }
@@ -405,6 +444,45 @@ Result RendererPipelineCache::RegisterRootSignature(ID3D12RootSignature *root,st
     catch(const std::bad_alloc &) { return NativeFailure("Allocate root digest",E_OUTOFMEMORY); }
     catch(const std::exception &error) { return Failure(ErrorCode::TaskFailed,error.what()); }
 }
+Result RendererPipelineCache::RegisterShaderOwner(std::span<const std::byte> shader,
+    std::string_view expected_digest,bool bytes_already_verified)
+{
+    std::lock_guard lock(impl_->mutex);
+    if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Register shader digest before initializing pipeline cache.");
+    if(!impl_->library) return Result::Success();
+    if(shader.empty() || expected_digest.size()!=71 || !expected_digest.starts_with("sha256:"))
+        return Failure(ErrorCode::InvalidArgument,"Checked shader owner requires bytes and a SHA-256 product digest.");
+    const auto hex=[](char value)->int {
+        if(value>='0'&&value<='9') return value-'0';
+        if(value>='a'&&value<='f') return value-'a'+10;
+        if(value>='A'&&value<='F') return value-'A'+10;
+        return -1;
+    };
+    std::array<std::byte,32> expected{};
+    for(std::size_t i=0;i<expected.size();++i)
+    {
+        const auto high=hex(expected_digest[7+i*2]),low=hex(expected_digest[8+i*2]);
+        if(high<0 || low<0) return Failure(ErrorCode::InvalidArgument,"Shader product digest is not hexadecimal SHA-256.");
+        expected[i]=std::byte((high<<4)|low);
+    }
+    try
+    {
+        const auto actual=bytes_already_verified ? expected : Sha256(shader);
+        if(!bytes_already_verified && actual!=expected)
+            return Failure(ErrorCode::InvalidState,"Checked shader bytes differ from the selected product digest.");
+        const ShaderOwnerKey owner{reinterpret_cast<std::uintptr_t>(shader.data()),shader.size()};
+        const auto [entry,inserted]=impl_->shader_owners.emplace(owner,actual);
+        if(!inserted && entry->second!=actual)
+            return Failure(ErrorCode::InvalidState,"Shader owner address was reused with different checked bytes.");
+        return Result::Success();
+    }
+    catch(const std::bad_alloc &) { return NativeFailure("Allocate shader digest registration",E_OUTOFMEMORY); }
+    catch(const std::exception &error) { return Failure(ErrorCode::TaskFailed,error.what()); }
+}
+void RendererPipelineCache::ClearShaderOwners() noexcept
+{
+    std::lock_guard lock(impl_->mutex); impl_->shader_owners.clear();
+}
 HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
     const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
@@ -417,7 +495,8 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library && output?GraphicsName(*description,root,false):std::wstring{};
+        const auto name=impl_->library && output?GraphicsName(*description,root,false,{},
+            [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         if(impl_->library && output)
         {
@@ -453,7 +532,8 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library && output?ComputeName(*description,root):std::wstring{};
+        const auto name=impl_->library && output?ComputeName(*description,root,
+            [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         if(impl_->library && output)
         {
@@ -498,7 +578,8 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
     try
     {
         const auto key_start=CacheStart(impl_->stats.capture_timings);
-        const auto name=impl_->library1 && output?GraphicsName(graphics,root,true,mesh_shader):std::wstring{};
+        const auto name=impl_->library1 && output?GraphicsName(graphics,root,true,mesh_shader,
+            [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
         RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
         MeshStream stream(graphics,mesh_shader);
         const D3D12_PIPELINE_STATE_STREAM_DESC description{sizeof(stream),&stream};

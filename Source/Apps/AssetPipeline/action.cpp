@@ -839,29 +839,38 @@ std::vector<std::string_view> ActionResultSnapshot::ProductIds() const
     return ids;
 }
 void ActionResultSnapshot::CopyProductBytesTo(std::string_view product_id, std::ostream &output,
-                                             UpstreamProduct &dependency) const
+                                             UpstreamProduct &dependency, std::span<char> scratch) const
 {
     fs::path path;
     ResolveProduct(product_id, dependency, path);
+    std::vector<char> local;
+    if (scratch.empty()) { local.resize(1024 * 1024); scratch = local; }
+    CopyFileBytesTo(path, output, dependency.size, dependency.digest, scratch);
+}
+
+void CopyFileBytesTo(const fs::path &path, std::ostream &output, std::uint64_t expected_size,
+                     std::string_view expected_digest, std::span<char> scratch)
+{
+    Require(!scratch.empty() && scratch.size() <= static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()),
+            "invalid streaming copy scratch extent");
     RequireRegularFile(path);
     std::ifstream input(NativeFilePath(path), std::ios::binary);
     Require(input.is_open(), "cannot read product: " + path.string());
     Sha256 hash;
-    std::vector<char> buffer(1024 * 1024);
     std::uint64_t size{};
     while (input)
     {
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        input.read(scratch.data(), static_cast<std::streamsize>(scratch.size()));
         const auto count = input.gcount();
         if (count <= 0) break;
         size = AddSize(size, static_cast<std::size_t>(count));
-        Require(size <= dependency.size, "upstream product exceeds declared size");
-        hash.Add(buffer.data(), static_cast<std::size_t>(count));
-        output.write(buffer.data(), count);
+        Require(size <= expected_size, "upstream product exceeds declared size");
+        hash.Add(scratch.data(), static_cast<std::size_t>(count));
+        output.write(scratch.data(), count);
         Require(static_cast<bool>(output), "cannot write streamed product");
     }
-    Require(input.eof() && !input.bad() && size == dependency.size && hash.Finish() == dependency.digest,
-            "upstream product is missing or corrupt: " + std::string(product_id));
+    Require(input.eof() && !input.bad() && size == expected_size && hash.Finish() == expected_digest,
+            "upstream product is missing or corrupt: " + path.string());
 }
 
 void AtomicPublishFile(const fs::path &temporary, const fs::path &destination)

@@ -116,15 +116,49 @@ void FlushFeedbackRequests(uint lane)
         Requests.InterlockedOr(lane * 4u, mask, ignored);
     }
 }
+float2 PageAxisBounds(int key, float side, float guard)
+{
+    const float lower = float(key) * side - guard;
+    return float2(lower, lower + side + 2.0 * guard);
+}
 bool SphereOverlaps(float4 sphere, PageEntry page)
 {
     const float3 light = LightPosition(sphere.xyz);
     const float guard = Clipmaps[page.level].y * 2.0;
-    const float2 lower = float2(page.x, page.y) * Clipmaps[page.level].x - guard;
-    const float2 upper = lower + Clipmaps[page.level].x + 2.0 * guard;
-    return sphere.w >= 0.0 && all(light.xy + sphere.w >= lower) &&
-        all(light.xy - sphere.w <= upper) && light.z + sphere.w >= Depth.x &&
+    const float2 x = PageAxisBounds(page.x, Clipmaps[page.level].x, guard);
+    const float2 y = PageAxisBounds(page.y, Clipmaps[page.level].x, guard);
+    return sphere.w >= 0.0 && light.x + sphere.w >= x.x && light.y + sphere.w >= y.x &&
+        light.x - sphere.w <= x.y && light.y - sphere.w <= y.y && light.z + sphere.w >= Depth.x &&
         light.z - sphere.w <= Depth.x + Depth.w;
+}
+// Binary searches use the same inclusive float boundaries as SphereOverlaps.
+bool CandidateAxisRange(float minimum, float maximum, int origin, int side, float page_side,
+    float guard, out int first, out int last)
+{
+    first = 0; last = side - 1;
+    const float2 first_bounds = PageAxisBounds(origin, page_side, guard);
+    const float2 last_bounds = PageAxisBounds(origin + side - 1, page_side, guard);
+    if (!isfinite(minimum) || !isfinite(maximum) || !isfinite(page_side) ||
+        !isfinite(guard) || page_side <= 0.0 ||
+        !all(isfinite(first_bounds)) || !all(isfinite(last_bounds))) return true;
+    if (maximum < first_bounds.x || minimum > last_bounds.y) return false;
+    int lo = 0, hi = side;
+    while (lo < hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (minimum <= PageAxisBounds(origin + mid, page_side, guard).y) hi = mid;
+        else lo = mid + 1;
+    }
+    first = lo;
+    lo = 0; hi = side;
+    while (lo < hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (maximum >= PageAxisBounds(origin + mid, page_side, guard).x) lo = mid + 1;
+        else hi = mid;
+    }
+    last = lo - 1;
+    return first <= last;
 }
 uint PageDrawCountOffset(uint entry, uint segment)
 {
@@ -366,6 +400,41 @@ void CullPageCaster(uint entry, uint caster_index)
     else MeshCommands.Store4(record_index * 16u,
         uint4(0x80000000u | record_index, caster.properties.y, 1u, 1u));
 }
+void CullCasterCandidates(uint caster_index)
+{
+    const Caster caster = Casters[caster_index];
+    if ((caster.properties.x & 1u) == 0u || caster.current_bounds.w < 0.0) return;
+    const float3 light = LightPosition(caster.current_bounds.xyz);
+    const float radius = caster.current_bounds.w;
+    if (!(light.z + radius >= Depth.x && light.z - radius <= Depth.x + Depth.w)) return;
+    [unroll] for (uint level = 0u; level < 3u; ++level)
+    {
+        const int side = Windows[level].z;
+        const float page_side = Clipmaps[level].x, guard = Clipmaps[level].y * 2.0;
+        int first_x, last_x, first_y, last_y;
+        if (!CandidateAxisRange(light.x - radius, light.x + radius, Windows[level].x,
+            side, page_side, guard, first_x, last_x) ||
+            !CandidateAxisRange(light.y - radius, light.y + radius, Windows[level].y,
+            side, page_side, guard, first_y, last_y)) continue;
+        for (int y = first_y; y <= last_y; ++y)
+        {
+            const uint first_entry = uint(Windows[level].w + y * side + first_x);
+            const uint last_entry = uint(Windows[level].w + y * side + last_x);
+            const uint first_word = first_entry >> 5u, last_word = last_entry >> 5u;
+            for (uint word = first_word; word <= last_word; ++word)
+            {
+                uint mask = Requests.Load(word * 4u);
+                if (word == first_word) mask &= 0xffffffffu << (first_entry & 31u);
+                if (word == last_word) mask &= 0xffffffffu >> (31u - (last_entry & 31u));
+                while (mask != 0u)
+                {
+                    const uint entry = PopRequestedEntry(word, mask);
+                    if (entry < Counts.z) CullPageCaster(entry, caster_index);
+                }
+            }
+        }
+    }
+}
 [numthreads(64, 1, 1)]
 void CullCS(uint3 tid : SV_DispatchThreadID)
 {
@@ -447,14 +516,7 @@ void CullCS(uint3 tid : SV_DispatchThreadID)
         // decisions depend only on its counts and ascending entry order.
         return;
     }
-    if (tid.x >= Counts.x || tid.y >= Frame.z) return;
-    // Skip unrequested pages without scheduling a caster grid for each page.
-    uint mask = Requests.Load(tid.y * 4u);
-    while (mask != 0u)
-    {
-        const uint entry = PopRequestedEntry(tid.y, mask);
-        if (entry < Counts.z) CullPageCaster(entry, tid.x);
-    }
+    if (tid.x < Counts.x) CullCasterCandidates(tid.x);
 }
 [numthreads(64, 1, 1)]
 void PublishCS(uint3 tid : SV_DispatchThreadID)

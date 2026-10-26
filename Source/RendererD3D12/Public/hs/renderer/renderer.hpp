@@ -205,6 +205,7 @@ struct RendererTextureProductStatus
     std::uint64_t requests{}, uploads{}, publications{}, reclaims{}, revision{};
     std::uint32_t actual_resident_mip{}, effective_desired_mip{}, target_mip{};
 };
+struct RendererSceneProbeBakeStatus { bool sources_ready{}, capture_complete{}; };
 
 struct RendererPsoCacheStats
 {
@@ -308,7 +309,7 @@ struct RendererConfig
     bool gpu_validation{};
     // Opt in to CPU timing capture and the optional completed GPU timing stream.
     bool capture_timing_stream{};
-    bool capture_gpu_timings{true}; // Active DRS always retains its required reference samples.
+    bool capture_gpu_timings{true}; // Full pass timing requires capture_timing_stream too.
     // Intrusive per-contributor native queries/readbacks. Keep false for normal A/B.
     bool capture_hero_work{};
     HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
@@ -420,6 +421,19 @@ struct RendererConfig
         path = found->second;
         return Result::Success();
     }
+};
+
+// Reports requested settings and the native setup calls/results actually observed.
+// D3D12 exposes no getter for SetEnableGPUBasedValidation's void setting.
+struct RendererValidationStatus
+{
+    bool debug_layer_requested{}, gpu_validation_requested{};
+    bool debug_interface_acquisition_attempted{};
+    bool debug_interface_acquired{}, gpu_validation_interface_queried{};
+    bool debug_layer_enable_called_before_device{}, gpu_validation_enable_called_before_device{};
+    bool device_creation_attempted{}, device_creation_succeeded{};
+    std::int32_t device_creation_hresult{};
+    bool device_created_after_requested_enable_calls{};
 };
 
 struct RenderViewFrameResult
@@ -540,10 +554,14 @@ enum class GpuFrameTimingKind : std::uint8_t
     SourceOutputReady,
 };
 
+enum class GpuTimingMode : std::uint8_t { Off, Critical, Full };
+
 struct GpuPassTimings
 {
     std::vector<GpuPassTiming> passes;
+    GpuTimingMode mode{GpuTimingMode::Off};
     bool valid{};
+    bool pass_timings_valid{};
     std::uint64_t completed_frame_id{};
     std::uint32_t view_id{};
     double critical_path_ms{};
@@ -554,7 +572,7 @@ struct GpuPassTimings
     bool fence_completed{};
     std::uint64_t cpu_qpc_frequency{};
     GpuFrameTimingKind metric_kind{GpuFrameTimingKind::Unavailable};
-    std::uint64_t metric_generation{}, resize_epoch{};
+    std::uint64_t metric_generation{}, timing_layout_generation{}, resize_epoch{};
     ViewExtent render_active;
     bool main_view{}, frame_generation_enabled{}, generated_frame{};
     // A source-output endpoint, not a cadence or a measured dependency span.
@@ -619,16 +637,30 @@ enum class RendererDiagnosticsMemoryCategory : std::uint8_t
 };
 struct RendererDiagnosticsMemory
 {
+    enum class ObservationStatus : std::uint8_t { Unavailable, Fresh, Cached, Failed, Unsupported };
     bool budget_available{}, nonlocal_budget_available{}, host_budget_available{};
     std::uint64_t local_usage_bytes{}, local_budget_bytes{}, nonlocal_usage_bytes{}, nonlocal_budget_bytes{};
+    std::uint64_t local_success_sequence{}, nonlocal_success_sequence{}, host_success_sequence{};
+    std::uint64_t local_observed_age_ms{}, nonlocal_observed_age_ms{}, host_observed_age_ms{};
+    std::int32_t local_last_error{}, nonlocal_last_error{}, host_last_error{};
+    ObservationStatus local_status{ObservationStatus::Unavailable};
+    ObservationStatus nonlocal_status{ObservationStatus::Unavailable};
+    ObservationStatus host_status{ObservationStatus::Unavailable};
     std::array<std::uint64_t, static_cast<std::size_t>(RendererDiagnosticsMemoryCategory::Count)> live_bytes{}, retiring_bytes{};
+    std::array<std::uint64_t, static_cast<std::size_t>(RendererDiagnosticsMemoryCategory::Count)> local_live_bytes{}, local_retiring_bytes{}, nonlocal_live_bytes{}, nonlocal_retiring_bytes{};
     std::uint64_t tracked_live_bytes{}, tracked_retiring_bytes{}, tracked_reclaimed_bytes{}, tracked_gpu_bytes{};
     std::uint64_t host_staging_bytes{}, host_reserved_bytes{}, gpu_reserved_bytes{}, gpu_growth_since_budget_bytes{};
+    std::uint64_t local_gpu_reserved_bytes{}, nonlocal_gpu_reserved_bytes{};
+    std::uint64_t local_growth_since_budget_bytes{}, nonlocal_growth_since_budget_bytes{};
     std::uint64_t host_staging_budget_bytes{}, texture_physical_bytes{};
+    std::uint64_t allocator_local_block_bytes{}, allocator_nonlocal_block_bytes{};
+    std::uint64_t allocator_local_usage_estimate_bytes{}, allocator_nonlocal_usage_estimate_bytes{};
+    bool allocator_stats_available{};
     // Known provider allocations and renderer-owned guide resources are separate;
     // opaque native SR/SDK allocations are not claimed to be fully accounted.
     std::uint64_t presentation_provider_bytes{}, reconstruction_guide_bytes{};
     std::uint64_t renderer_view_bytes{}, shared_deformation_bytes{};
+    bool renderer_view_bytes_available{}, shared_deformation_bytes_available{};
 };
 struct RendererDiagnosticsFrame
 {
@@ -767,6 +799,7 @@ class D3D12Renderer
     [[nodiscard]] Result Shutdown();
     [[nodiscard]] bool UsesEnhancedBarriers() const noexcept;
     [[nodiscard]] std::uint64_t ValidationErrorCount() const noexcept;
+    [[nodiscard]] RendererValidationStatus ValidationStatus() const noexcept;
     [[nodiscard]] std::uint32_t LastParticleCount() const noexcept;
     [[nodiscard]] float DecorativeParticleFraction() const noexcept;
     // Latest collected sample; ordinary rendering without capture/DRS may have none.
@@ -799,6 +832,7 @@ class D3D12Renderer
     [[nodiscard]] RendererLightingStatus GetLightingStatus() const;
     [[nodiscard]] RendererTextureStreamingStatus GetTextureStreamingStatus() const;
     [[nodiscard]] RendererTextureProductStatus GetTextureStreamingStatus(std::string_view logical_id) const noexcept;
+    [[nodiscard]] RendererSceneProbeBakeStatus GetSceneProbeBakeStatus() const noexcept;
     [[nodiscard]] std::vector<RendererCharacterAnimationClip> GetCharacterAnimationClips() const;
     [[nodiscard]] RendererPsoCacheStats GetPipelineCacheStats() const;
     [[nodiscard]] RendererStartupTimings GetStartupTimings() const noexcept;

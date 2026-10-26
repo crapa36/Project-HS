@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <sstream>
+#include <array>
 
 void TestAssetActionSnapshot()
 {
@@ -35,6 +36,12 @@ void TestAssetActionSnapshot()
             throw std::runtime_error("verified snapshot bytes or identity differ");
         fs::path path;
         snapshot.ReadProduct("fixture/payload", dependency, path);
+        std::array<char, 3> scratch{};
+        std::ostringstream chunked, input_copy;
+        snapshot.CopyProductBytesTo("fixture/payload", chunked, dependency, scratch);
+        ap::CopyFileBytesTo(path, input_copy, dependency.size, dependency.digest, scratch);
+        if (chunked.str() != original || input_copy.str() != original)
+            throw std::runtime_error("reused partial-chunk scratch changed streamed bytes");
         ap::WriteBytes(path, bytes("corrupt! bytes")); // Equal size must not count as a hit.
         if (owned != original) throw std::runtime_error("snapshot owner changed with file");
         const auto rejects = [](auto operation) {
@@ -43,10 +50,13 @@ void TestAssetActionSnapshot()
         };
         rejects([&] { (void)snapshot.ReadProductBytes("fixture/payload", dependency); });
         rejects([&] { std::ostringstream out; snapshot.CopyProductBytesTo("fixture/payload",out,dependency); });
+        rejects([&] { std::ostringstream out; ap::CopyFileBytesTo(path,out,original.size(),ap::Sha256Bytes(bytes(original)),scratch); });
         rejects([&] { std::ostringstream out; snapshot.CopyProductBytesTo("fixture/other",out,dependency); });
         rejects([&] { snapshot.ReadProduct("fixture/payload", dependency, path); });
         rejects([&] { (void)snapshot.ReadProductBytes("fixture/other", dependency); });
         ap::WriteBytes(path, bytes(original));
+        rejects([&] { std::ostringstream out; ap::CopyFileBytesTo(path,out,original.size()+1,ap::Sha256Bytes(bytes(original)),scratch); });
+        rejects([&] { std::ostringstream out; ap::CopyFileBytesTo(path,out,original.size(),ap::Sha256Bytes(bytes(original)),{}); });
         rejects([&] { std::ostringstream out; out.setstate(std::ios::badbit); snapshot.CopyProductBytesTo("fixture/payload",out,dependency); });
         if (snapshot.ReadProductBytes("fixture/payload", dependency) != original)
             throw std::runtime_error("repaired product did not reopen");

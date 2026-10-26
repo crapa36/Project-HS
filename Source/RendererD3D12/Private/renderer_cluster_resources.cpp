@@ -134,8 +134,10 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
         copied += chunks[i].size();
     }
     upload.resource->Unmap(0, nullptr);
-    const auto page_ticket = residency.Register(ResidencyCategory::Geometry, resident_size, stream.pinned);
-    const auto upload_ticket = residency.Register(ResidencyCategory::Staging, upload.allocation->GetSize(), false);
+    const auto page_ticket = RegisterNativeAllocation(ResidencyCategory::Geometry, resident_size, stream.pinned,
+        ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
+    const auto upload_ticket = RegisterNativeAllocation(ResidencyCategory::Staging,
+        upload.allocation->GetSize(), false, ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
     if (!page_ticket || !upload_ticket)
     {
         if (page_ticket) static_cast<void>(residency.ReleaseNow(page_ticket));
@@ -290,7 +292,8 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         const auto staging_bytes = device->GetResourceAllocationInfo(0, 1, &upload_description).SizeInBytes;
         if (staging_bytes == UINT64_MAX || resident_bytes > UINT64_MAX - staging_bytes)
             return ClusterFailure("Pinned root staging estimate overflow.");
-        ScopedGpuAdmission admission(residency, resident_bytes + staging_bytes);
+        SampleAllocatorBudgetStats(false, false);
+        ScopedGpuAdmission admission(residency, resident_bytes, staging_bytes);
         if (!admission)
             return ClusterFailure("Required pinned hierarchy roots cannot fit the current residency budget.");
         if (auto result = PrepareClusterPageUpload(stream.logical_slot, physical++); !result) return result;
@@ -320,7 +323,8 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         const auto allocation_size = device->GetResourceAllocationInfo(0, 1, &description).SizeInBytes;
         if (allocation_size == UINT64_MAX || allocation_size > UINT64_MAX / 2u)
             return ClusterFailure("Cluster catalog table allocation estimate overflow.");
-        ScopedGpuAdmission admission(residency, allocation_size * 2u);
+        SampleAllocatorBudgetStats(false, false);
+        ScopedGpuAdmission admission(residency, allocation_size, allocation_size);
         if (!admission)
             return ClusterFailure("Required cluster catalog tables cannot fit the residency budget.");
         allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -343,8 +347,10 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
             D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
         list->ResourceBarrier(1, &barrier);
         target.graph_access = Access::ComputeRead;
-        target_ticket = residency.Register(ResidencyCategory::Geometry, target.allocation->GetSize(), true);
-        const auto ticket = residency.Register(ResidencyCategory::Staging, upload.allocation->GetSize(), false);
+        target_ticket = RegisterNativeAllocation(ResidencyCategory::Geometry, target.allocation->GetSize(), true,
+            ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
+        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Staging, upload.allocation->GetSize(), false,
+            ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
         if (!ticket || !target_ticket) return ClusterFailure("Could not account cluster table allocations.");
         admission.Complete();
         runtime.initial_upload_residency.push_back(ticket);
@@ -394,20 +400,22 @@ Result D3D12Renderer::Impl::CreateClusterViewResources(ClusterViewRuntime &targe
             return ClusterFailure("Cluster view page snapshot allocation estimate overflow.");
         for (auto &frame : next.frames)
         {
-            ScopedGpuAdmission admission(residency, size * 2u);
+            SampleAllocatorBudgetStats(false, false);
+            ScopedGpuAdmission admission(residency, size, size);
             if (!admission) return ClusterFailure("Required cluster view snapshots cannot fit the residency budget.");
             D3D12MA::ALLOCATION_DESC allocation{};
             allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
             if (auto result = CreateAllocation(frame.pages, allocation, description,
                     D3D12_RESOURCE_STATE_COPY_DEST); !result) return result;
             frame.pages.graph_access = Access::CopyDest;
-            frame.pages_residency = residency.Register(ResidencyCategory::Geometry, frame.pages.allocation->GetSize(), true);
+            frame.pages_residency = RegisterNativeAllocation(ResidencyCategory::Geometry,
+                frame.pages.allocation->GetSize(), true, ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
             if (!frame.pages_residency) return ClusterFailure("Could not account cluster view page snapshot.");
             allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
             if (auto result = CreateAllocation(frame.page_upload, allocation, description,
                     D3D12_RESOURCE_STATE_GENERIC_READ); !result) return result;
-            frame.page_upload_residency = residency.Register(ResidencyCategory::Staging,
-                frame.page_upload.allocation->GetSize(), true);
+            frame.page_upload_residency = RegisterNativeAllocation(ResidencyCategory::Staging,
+                frame.page_upload.allocation->GetSize(), true, ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD));
             if (!frame.page_upload_residency) return ClusterFailure("Could not account cluster view page upload.");
             admission.Complete();
             frame.snapshot = pages;
@@ -571,7 +579,8 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
     {
         AllocationResource refs;
         if (auto result = create(refs, output_bytes(total * 16u), D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
-        const auto ticket = residency.Register(ResidencyCategory::Geometry, refs.allocation->GetSize(), false);
+        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Geometry,
+            refs.allocation->GetSize(), false, ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
         if (!ticket) return ClusterFailure("Could not account shared cluster references.");
         if (native.refs_residency) static_cast<void>(residency.ReleaseNow(native.refs_residency));
         native.refs = std::move(refs); native.refs_residency = ticket;
@@ -586,7 +595,8 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         const auto capacity = std::min<UINT64>((geometry_bytes + 65535u) & ~UINT64(65535u),
             (UINT64(UINT32_MAX) / sizeof(GpuGeometryDrawRecord)) * sizeof(GpuGeometryDrawRecord));
         if (auto result = create(records, capacity, D3D12_HEAP_TYPE_DEFAULT, true); !result) return result;
-        const auto ticket = residency.Register(ResidencyCategory::Geometry, records.allocation->GetSize(), false);
+        const auto ticket = RegisterNativeAllocation(ResidencyCategory::Geometry,
+            records.allocation->GetSize(), false, ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
         if (!ticket) return ClusterFailure("Could not account shared cluster geometry records.");
         if (runtime.geometry_records_residency[frame_slot])
             static_cast<void>(residency.ReleaseNow(runtime.geometry_records_residency[frame_slot]));
@@ -671,8 +681,10 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
                 &next.retest_draw_commands, &next.retest_mesh_commands}) gpu_bytes += buffer->allocation->GetSize();
             for (const auto *buffer : {&next.candidates, &next.constants, &next.occlusion_constants,
                 &next.readback}) staging_bytes += buffer->allocation->GetSize();
-            next.residency = residency.Register(ResidencyCategory::Geometry, gpu_bytes, false);
-            next.staging_residency = residency.Register(ResidencyCategory::Staging, staging_bytes, false);
+            next.residency = RegisterNativeAllocation(ResidencyCategory::Geometry, gpu_bytes, false,
+                ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
+            next.staging_residency = RegisterNativeAllocation(ResidencyCategory::Staging, staging_bytes, false,
+                ResidencySegmentForHeap(D3D12_HEAP_TYPE_READBACK));
             if (!next.residency || !next.staging_residency)
             {
                 if (next.residency) static_cast<void>(residency.ReleaseNow(next.residency));

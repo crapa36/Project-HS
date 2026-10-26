@@ -5,6 +5,7 @@
 #include "renderer_asset_source.hpp"
 
 #include <filesystem>
+#include <array>
 #include <functional>
 #include <memory>
 #include <span>
@@ -13,6 +14,12 @@
 
 namespace hs
 {
+struct ImmutableAssetRange
+{
+    std::uint64_t offset{}; // Relative to the product range in the source.
+    std::uint32_t byte_count{};
+    std::array<std::byte, 32> digest{};
+};
 struct ImmutableAssetRead
 {
     StreamingRequestId request;
@@ -21,6 +28,7 @@ struct ImmutableAssetRead
     std::uint64_t expected_bytes{};
     std::shared_ptr<const void> generation_lease;
     std::function<void(std::span<const std::byte>)> prepare;
+    std::vector<ImmutableAssetRange> ranges;
 };
 struct AssetReadCompletion
 {
@@ -44,7 +52,9 @@ class RendererAssetIo
     // request IDs, tickets and Generation leases remain independent.
     [[nodiscard]] Result ShareTransportFrom(const RendererAssetIo &, ResidencyManager &);
     [[nodiscard]] Result Enqueue(ImmutableAssetRead, StreamingManager &, ResidencyManager &,
-                                 ResidencyTicket existing_storage_reservation, bool &submitted);
+                                 ResidencyTicket existing_storage_reservation, bool &submitted,
+                                 bool defer_native_submit = false);
+    void SubmitQueuedReads() noexcept;
     [[nodiscard]] Result Poll(StreamingRequestId, StreamingManager &, ResidencyManager &,
                               AssetReadCompletion &);
     void Cancel(StreamingRequestId, StreamingManager &) noexcept;

@@ -249,7 +249,7 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
     }
         if(!requests.empty()) hs::content::CookEnvironmentTextureRoles(texture_source,requests,device.Get());
         for(auto& action:actions) if(action.needs_cook&&action.spec.action_id=="environment.histogram")
-            hs::content::CookEnvironmentHistogram(texture_source,action.stage,device.Get(),false);
+            hs::content::CookEnvironmentHistogram(texture_source,action.stage,device.Get());
         for(auto& action:actions) if(action.needs_cook) {
             std::vector<ap::Product> products;
             for(const auto& name:action.names)
@@ -341,12 +341,12 @@ void Produce(std::string_view mode, const fs::path& source_root,
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try {
         if (mode == "histogram")
-            hs::content::CookEnvironmentHistogram(texture_source, stage, device.Get(), false);
+            hs::content::CookEnvironmentHistogram(texture_source, stage, device.Get());
         else if (mode == "texture-role")
             hs::content::CookEnvironmentTextureRole(texture_source, stage, group, role,
                                                     device.Get());
         else if (mode == "textures")
-            hs::content::CookEnvironmentTextures(texture_source, stage, device.Get(), false);
+            hs::content::CookEnvironmentTextures(texture_source, stage, device.Get());
         else
             hs::content::CookEnvironmentMeshes(mesh_source, stage);
 

@@ -285,18 +285,22 @@ void RunBakedProbePreparation(Fixture &fixture)
             "prepare recapture fixture");
         Check(service.Commit(std::move(candidate), fixture.executor.Completed()).Succeeded(), "commit recapture fixture");
         auto capture_inputs = inputs;
-        for (std::uint32_t step = 0; step < 4; ++step)
+        capture_inputs.capture_identity_valid = true;
+        capture_inputs.capture_sources_ready = true;
+        for (std::uint32_t step = 0; step < 5; ++step)
         {
             graph.Reset();
             capture_inputs.completed = fixture.executor.Completed();
             if (step == 1)
             {
                 ++capture_inputs.revisions.light;
+                capture_inputs.capture_identity[0] = std::byte{1};
                 Check(service.NativeCaptureRequired(scene, capture_inputs.revisions, capture_inputs.completed),
                     "stale baked probe did not request capture");
                 Check(service.PrepareCapture(state_shader, capture_inputs.completed).Succeeded(), "upgrade baked probe for capture");
             }
-            capture_inputs.max_cube_views = step == 1 ? 1 : step == 2 ? 5 : 0;
+            if (step == 2) capture_inputs.capture_identity[0] = std::byte{2};
+            capture_inputs.max_cube_views = step == 1 ? 1 : step == 2 ? 5 : step == 3 ? 1 : 0;
             if (capture_inputs.max_cube_views)
             {
                 const auto dependency = graph.ImportBuffer({scene_dependency.Get()}, hs::Access::AllShaderRead,
@@ -306,10 +310,21 @@ void RunBakedProbePreparation(Fixture &fixture)
                 capture_inputs.draw_static = [](hs::RenderPassContext &, const hs::LocalProbeCaptureView &) {
                     return hs::Result::Success();
                 };
+                if (step == 1)
+                {
+                    capture_inputs.capture_sources_ready = false;
+                    hs::LocalProbeFramePlan waiting_plan;
+                    Check(service.PrepareFrameRecordData(capture_inputs, waiting_plan).Succeeded() &&
+                        waiting_plan.capture_count == 0,
+                        "native capture must wait until its sampled texture bindings are ready");
+                    capture_inputs.capture_sources_ready = true;
+                }
                 Check(service.Register(graph, capture_inputs, output).Succeeded(), "register bounded stale capture");
                 capture_inputs.scene_reads = {};
             }
             else Check(service.Register(graph, capture_inputs, output).Succeeded(), "register recapture publication");
+            if (step == 2) Check(output.captured_cube_views == 5,
+                "texture promotion must discard the earlier one-face partial bake");
             Check(graph.Prepare(pool).Succeeded(), "prepare recapture state transitions");
             fixture.Execute(graph, 0, mode, completion, "submit recapture state transitions");
             Check(service.CompleteSubmission(graph, completion, true, scene, capture_inputs.revisions).Succeeded(),
@@ -318,6 +333,31 @@ void RunBakedProbePreparation(Fixture &fixture)
             fixture.CheckValidation();
         }
         Check(output.enabled && output.captured_cube_views == 6, "bounded stale recapture did not publish");
+        const auto completed_before_sample = fixture.executor.Completed();
+        Check(service.BakeStatus(completed_before_sample).capture_complete,
+            "completed native bake status was not ready before later sampling");
+        graph.Reset();
+        capture_inputs.completed = completed_before_sample;
+        capture_inputs.max_cube_views = 0;
+        capture_inputs.scene_reads = {};
+        capture_inputs.draw_static = {};
+        Check(service.Register(graph, capture_inputs, output).Succeeded() && output.enabled,
+            "register post-bake sample-only reader");
+        auto sample_pass = graph.AddPass(189, "ProbeFixture.LaterSampleReader", hs::QueueHint::Direct);
+        sample_pass.Read(output.radiance, hs::Access::ComputeRead);
+        sample_pass.Read(output.prefiltered, hs::Access::ComputeRead);
+        sample_pass.Read(output.irradiance, hs::Access::ComputeRead);
+        sample_pass.Read(output.first_hit_distance, hs::Access::ComputeRead);
+        sample_pass.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
+        Check(graph.Prepare(pool).Succeeded(), "prepare post-bake sample-only reader");
+        fixture.Execute(graph, 0, mode, completion, "submit post-bake sample-only reader");
+        Check(service.CompleteSubmission(graph, completion, true, scene, capture_inputs.revisions).Succeeded(),
+            "complete post-bake sample-only reader");
+        Check(service.BakeStatus(completed_before_sample).capture_complete,
+            "later sampling lease incorrectly revoked fixed native bake completion");
+        Check(!service.ResetAfterCompletion(completed_before_sample).Succeeded(),
+            "reset ignored a post-bake sampling lease newer than the supplied completion snapshot");
+        Check(fixture.executor.Wait(completion).Succeeded(), "wait post-bake sample-only reader");
         Check(service.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(), "reset recapture fixture");
     }
     fixture.CheckValidation();
@@ -459,6 +499,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
 {
     for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
     for (const bool timestamps_enabled : {false, true})
+    for (const bool query_subset : {false, true})
     for (const bool fail_middle : {false, true})
     {
         hs::TransientResourcePool pool;
@@ -485,16 +526,29 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                 std::string(graph.CompiledPassName(position)),
                 static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
         ComPtr<ID3D12QueryHeap> queries;
-        const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, 12, 0};
+        const auto query_count = query_subset ? 4u : 12u;
+        const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
         Hr(fixture.device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(&queries)), "independent timestamp heap");
         ComPtr<ID3D12Resource> timestamps;
         const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-        const auto description = BufferDescription(12 * sizeof(std::uint64_t));
+        const auto description = BufferDescription(query_count * sizeof(std::uint64_t));
         Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamps)), "independent timestamp readback");
         hs::GraphExecutionOptions options;
         options.timestamp_query_heap = timestamps_enabled ? queries.Get() : nullptr;
         options.timestamp_readback = timestamps_enabled ? timestamps.Get() : nullptr;
+        std::array<std::uint32_t, 6> query_slots{UINT32_MAX, UINT32_MAX, UINT32_MAX,
+                                                 UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        if (query_subset)
+        {
+            query_slots[1] = 0;
+            query_slots[4] = 1;
+        }
+        if (timestamps_enabled && query_subset)
+        {
+            options.timestamp_query_slots = query_slots.data();
+            options.timestamp_query_slot_count = query_slots.size();
+        }
         options.task_executor = &tasks;
         options.cpu_pass_timings = cpu_passes.data();
         options.cpu_pass_timing_count = cpu_passes.size();
@@ -523,12 +577,15 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             if (timestamps_enabled)
             {
             std::uint64_t *values{};
-            D3D12_RANGE range{0, 12 * sizeof(std::uint64_t)};
+            D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
             Hr(timestamps->Map(0, &range, reinterpret_cast<void **>(&values)),
                "map independent timestamps");
-            for (std::size_t index = 0; index < 12; index += 2)
+            for (std::size_t pair = 0; pair < (query_subset ? 2u : 6u); ++pair)
+            {
+                const auto index = pair * 2;
                 Check(values[index] != 0 && values[index + 1] >= values[index],
                       "independent lists preserve every GPU timestamp pair");
+            }
             D3D12_RANGE no_write{};
             timestamps->Unmap(0, &no_write);
             }
@@ -702,8 +759,8 @@ void RunFinalExports(Fixture &fixture, hs::BarrierMode barriers)
     Check(fixture.executor.Execute(graph, 0, barriers, completion, &options).Succeeded(),
         "execute grouped final exports");
     const auto stats = fixture.executor.LastExecutionStats();
-    Check(stats.record_jobs == count / 2 + 1 && stats.direct_batches == 1,
-        "independent exports share one destination list without merging source releases");
+    Check(stats.record_jobs == 2 && stats.direct_batches == 1 && stats.compute_batches == 1,
+        "independent exports share one source-release list and one destination list");
     Check(fixture.executor.Wait(completion).Succeeded(), "wait grouped final exports");
     std::array<hs::CompletionSet, count> prior;
     for (std::size_t index = 0; index < count; ++index)
@@ -1415,8 +1472,8 @@ void RunVirtualShadowFeedbackOracle(Fixture &fixture, hs::BarrierMode barriers, 
             }
         }
         Check(walked == reference, "VSM requested-entry order or tail-bit filtering changed");
-        // Dense/sparse masks, partial final words, and a partial caster group
-        // must enumerate every requested page/caster pair exactly once.
+        // Dense/sparse masks and partial final words supply the admission
+        // reference counts independently of the shader's candidate pruning.
         const UINT caster_count = test % 4u == 0u ? 0u : test % 4u == 1u ? 1u : test % 4u == 2u ? 64u : 65u;
         std::vector<UINT> expected_counts(count), actual_counts(count);
         const auto candidate = [](UINT entry, UINT caster) { return (entry * 17u + caster * 13u) % 7u < 3u; };
@@ -1435,7 +1492,7 @@ void RunVirtualShadowFeedbackOracle(Fixture &fixture, hs::BarrierMode barriers, 
                     if (entry < count) actual_counts[entry] += candidate(entry, caster);
                 }
             }
-        Check(actual_counts == expected_counts, "VSM word dispatch duplicated or lost page/caster candidates");
+        Check(actual_counts == expected_counts, "VSM requested-bit reference duplicated or lost page/caster pairs");
         for (const UINT capacity : {0u, 1u, 31u, 4096u})
         {
             std::vector<UINT> expected_rejected(count), actual_rejected(count);
@@ -1770,7 +1827,8 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
     ComPtr<IDxcBlobEncoding> source;
     Hr(utils->LoadFile(shader_path.c_str(), nullptr, &source), "load production virtual shadow source");
     const DxcBuffer input{source->GetBufferPointer(), source->GetBufferSize(), DXC_CP_UTF8};
-    const wchar_t *arguments[]{shader_path.c_str(), L"-E", L"CullCS", L"-T", L"cs_6_0", L"-O3", L"-Ges", L"-WX"};
+    const wchar_t *arguments[]{shader_path.c_str(), L"-E", L"CullCS", L"-T", L"cs_6_0", L"-O3", L"-Ges", L"-WX",
+        L"-Zi", L"-Qembed_debug"};
     ComPtr<IDxcResult> compiled;
     Hr(compiler->Compile(&input, arguments, static_cast<UINT32>(std::size(arguments)), nullptr,
         IID_PPV_ARGS(&compiled)), "invoke production shadow DXC");
@@ -1984,6 +2042,9 @@ void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barrier
         });
         Check(graph.Prepare(pool).Succeeded(), "prepare production CullCS root oracle");
         hs::CompletionSet completion;
+        std::printf("Virtual shadow root case=%s groups=%u counter_base=%u counter_bytes=%u.\n",
+            test.name, test.group_count, root_counter_base, counters_bytes);
+        std::fflush(stdout);
         fixture.Execute(graph, frame_slot, barriers, completion, "execute production CullCS root oracle");
         Check(fixture.executor.Wait(completion).Succeeded(), "wait production CullCS root oracle");
 

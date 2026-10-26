@@ -6,10 +6,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 namespace hs
 {
+
+struct UiFrame;
 
 // Single producer and single consumer; slots retain snapshot storage for readers.
 class RenderSnapshotExchange
@@ -21,7 +24,10 @@ class RenderSnapshotExchange
         RenderSnapshotStorage *storage{};
     };
 
-    using ReadPair = RenderSnapshotPair;
+    struct ReadPair : RenderSnapshotPair
+    {
+        std::shared_ptr<const UiFrame> ui_frame;
+    };
 
     class Consumer
     {
@@ -48,7 +54,8 @@ class RenderSnapshotExchange
     // One producer supplies increasing publication sequences independently of
     // simulation ticks. Reset/wrap requires a new exchange and consumer.
     void Publish(WriteSlot slot, Sequence publish_sequence,
-                 const RenderSnapshot *previous_sample = nullptr);
+                 const RenderSnapshot *previous_sample = nullptr,
+                 std::shared_ptr<const UiFrame> ui_frame = {});
     void Abandon(WriteSlot slot) noexcept;
     [[nodiscard]] std::uint64_t DroppedPublishes() const noexcept;
 
@@ -72,6 +79,7 @@ class RenderSnapshotExchange
 
         RenderSnapshotStorage storage;
         RenderSnapshotStorage previous;
+        std::shared_ptr<const UiFrame> ui_frame;
         bool has_previous{};
         std::atomic<SlotState> state{SlotState::Free};
         std::atomic<Sequence> publish_sequence{};

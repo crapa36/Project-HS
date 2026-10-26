@@ -1253,13 +1253,14 @@ Result D3D12Renderer::CaptureGeometryDiagnostics(const std::filesystem::path &pa
             return false;
         return true;
     };
-    if (!input_ref_range_valid(frame.static_input_ref_offset,
-                               frame.static_input_ref_count) ||
+    if ((frame.static_input_ref_count != 0 &&
+         (!frame.static_input_refs ||
+          frame.static_input_refs->size() != frame.static_input_ref_count)) ||
         !input_ref_range_valid(frame.dynamic_input_ref_offset,
                                frame.dynamic_input_ref_count))
         return fail_mapped("Built-in geometry ref upload range is invalid.");
     const auto *static_input_ref_bytes = frame.static_input_ref_count == 0
-        ? nullptr : frame.mapped + frame.static_input_ref_offset;
+        ? nullptr : reinterpret_cast<const std::byte *>(frame.static_input_refs->data());
     const auto *dynamic_input_ref_bytes = frame.dynamic_input_ref_count == 0
         ? nullptr : frame.mapped + frame.dynamic_input_ref_offset;
     const auto read_u32_at = [](const std::byte *bytes, std::size_t offset) {

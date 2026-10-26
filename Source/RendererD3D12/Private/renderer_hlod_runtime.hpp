@@ -17,8 +17,8 @@ namespace hs
 {
 struct HlodRuntimeFrame
 {
-    AllocationResource refs, readback;
-    ResidencyTicket refs_residency, readback_residency;
+    AllocationResource readback;
+    ResidencyTicket readback_residency;
     std::vector<HlodMemberBinding> members;
     std::vector<GpuHlodProxyBinding> bindings;
     std::vector<GpuHlodBucket> buckets;
@@ -29,6 +29,7 @@ struct HlodRuntimeFrame
     std::uint64_t frame_id{}, qualification_epoch{};
     std::shared_ptr<const StaticRenderScene> prepared_source;
     std::uint32_t prepared_generation{};
+    std::uint32_t prepared_hlod_generation{};
     std::size_t prepared_leaf_count{};
     std::uint64_t prepared_pipeline_revision{};
     bool enabled{}, registered{}, readback_pending{};

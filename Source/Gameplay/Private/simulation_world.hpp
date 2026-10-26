@@ -567,7 +567,7 @@ struct GameSimulation::SimulationWorld
     BalanceTelemetry &Metrics() noexcept { return telemetry->Metrics(); }
     const BalanceTelemetry &Metrics() const noexcept { return telemetry->Metrics(); }
     void InitializePlayerState();
-    void ApplyUiAction(const UiAction &action);
+    bool ApplyUiAction(const UiAction &action);
     void RebuildNavigation();
     std::span<const ArenaObstacle2D> ArenaObstacles() const noexcept
     {
@@ -662,7 +662,7 @@ struct GameSimulation::SimulationWorld
                     std::uint8_t source_relic = kNoTelemetrySource,
                     std::uint64_t originating_area_id = 0);
     void StartSession();
-    void ProcessInput();
+    bool ProcessInput();
     void CastBasicAttack();
     bool CastSkill(SkillKind skill);
     bool TryBeginSkill(SkillKind skill);
@@ -712,7 +712,7 @@ struct GameSimulation::SimulationWorld
     void GuardSelectionInput();
     void GenerateRelicCards(bool exclude_current = false);
     bool SelectCard(std::size_t index);
-    void AssignStat(StatKind stat);
+    bool AssignStat(StatKind stat);
     void AssignAutomaticStats();
     void XpCardPhase();
     void CommitSpawnBarrier();

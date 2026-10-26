@@ -49,9 +49,10 @@ struct TexturePackageView
     std::vector<TextureSubresourceView> subresources;
 };
 
-// TextureMetadata v1: 40 little-endian bytes (TXM1, version, width, height,
+// TextureMetadata v2: 40 little-endian bytes (TXM1, version, width, height,
 // DXGI format, array size, mip count, record count, payload byte count), then
-// 16 bytes per record (uint64 offset, uint32 row pitch, uint32 slice pitch).
+// 48 bytes per record (uint64 offset, uint32 row pitch, uint32 slice pitch,
+// SHA-256 of that exact subresource).
 // TextureSubresources is tightly packed BC4, BC5, BC7, RGBA8, R8, RG8_SNORM,
 // R16_FLOAT, RGBA16_FLOAT, or RGBA32_FLOAT texels in
 // array-slice-major, mip-minor order. No DDS header is stored. The returned pitches are source

@@ -210,8 +210,18 @@ void TestChargedShotCancelsForLevelSelection()
     hs::HeldInputState held;
     held.aim_world = {20.0f, 0.0f, 0.0f};
     hs::Sequence sequence{};
-    (void)TickEdge(simulation, hs::GameAction::SkillQ, hs::EdgeKind::Pressed,
-                   sequence, held);
+    const auto charge_started = TickEdge(simulation, hs::GameAction::SkillQ,
+                                         hs::EdgeKind::Pressed, sequence, held);
+    const auto paused = TickEdge(simulation, hs::GameAction::Pause,
+                                 hs::EdgeKind::Pressed, sequence, held);
+    Check(paused.phase == hs::SessionPhase::Paused && paused.tick == charge_started.tick &&
+              paused.world_changed &&
+              HasVfx(simulation, hs::DomainSignalKind::ChargedShotCancelled),
+          "same-tick pause publishes charge cancellation without advancing time");
+    const auto resumed = TickEdge(simulation, hs::GameAction::Pause,
+                                  hs::EdgeKind::Pressed, sequence, held);
+    Check(resumed.phase == hs::SessionPhase::Playing && resumed.tick == paused.tick + 1,
+          "resume advances from the held canceled-charge sample");
     Debug(simulation, hs::DebugCommandKind::GrantExperience, 20);
     (void)Tick(simulation, held);
     Check(simulation.GetObservation().phase == hs::SessionPhase::CardSelection &&
@@ -279,7 +289,7 @@ void TestCombatPresentationContracts()
             return instance.mesh == hs::RenderMesh::PlayerProjectile;
         });
     hs::GameReadModelStorage release_model;
-    simulation.CopyReadModelForDevelopment(release_model);
+    hs::CopyReadModelForDevelopment(simulation, release_model);
     Check(arrow != snapshot.View().instances.end() &&
               !release_model.View().projectiles.empty() &&
               std::abs(arrow->position.x -
@@ -398,7 +408,7 @@ void TestAttackSpeedAnimationRate()
     hs::RenderSnapshotStorage snapshot(128, 4, 2, 64);
     Check(WriteSnapshot(simulation, snapshot), "level-ten attack snapshot");
     hs::GameReadModelStorage model;
-    simulation.CopyReadModelForDevelopment(model);
+    hs::CopyReadModelForDevelopment(simulation, model);
     const auto attack_interval = static_cast<std::uint32_t>(
         std::floor(60.0f / model.View().effective_attack_speed + 0.5f));
     Check(std::abs(snapshot.View().poses.front().upper_body_playback_rate -
@@ -585,7 +595,7 @@ void TestArrowRainTrackingProjectileMoves()
                std::abs(moved->position.z - first_position.z) > 0.1f),
           "arrow rain tracking arrow advances instead of standing still");
     hs::GameReadModelStorage second_model;
-    simulation.CopyReadModelForDevelopment(second_model);
+    hs::CopyReadModelForDevelopment(simulation, second_model);
     const auto current_projectile = std::ranges::find_if(
         second_model.View().projectiles, [](const hs::ProjectileView &projectile) {
             return projectile.player_owned;
@@ -868,7 +878,7 @@ void TestMultiShotCastVfxIsPerFan()
               signal.geometry.end_tick == signal.tick,
           "multishot cone geometry follows the effective fan and skill range");
     hs::GameReadModelStorage release_model;
-    simulation.CopyReadModelForDevelopment(release_model);
+    hs::CopyReadModelForDevelopment(simulation, release_model);
     const auto has_outer_angle = [&release_model](float expected) {
         return std::ranges::any_of(release_model.View().projectiles,
                                    [expected](const hs::ProjectileView &projectile) {

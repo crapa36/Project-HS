@@ -68,7 +68,7 @@ ClusterFrameRecordData D3D12Renderer::Impl::PrepareClusterFrameRecordData(
         record.previous_slots[ordinal]=cut.previous_history_slot;
         record.output_capacities[ordinal]=cut.output_capacity;
         record.frontend_flags[ordinal]=cut.geometry_frontend_flags;
-        if(cut.candidate_count) record.active_mask|=1u<<ordinal;
+        if(cut.candidate_count) record.active_mask|=std::uint64_t{1}<<ordinal;
     }
     record.pages.reserve(runtime.streams.size());
     for(const auto &stream:runtime.streams)
@@ -203,7 +203,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         native.page_upload_pending!=record.page_upload || current_hlod_leaf!=record.hlod_leaf)
         return GraphFailure("Cluster graph current record changed after topology preflight.");
     for(std::uint32_t ordinal=0;ordinal<kClusterRuntimeCatalogs;++ordinal)
-        if(state.cuts[ordinal].active!=((record.active_mask&(1u<<ordinal))!=0) ||
+        if(state.cuts[ordinal].active!=((record.active_mask&(std::uint64_t{1}<<ordinal))!=0) ||
             native.cuts[ordinal].previous_history_slot!=record.previous_slots[ordinal] ||
             native.cuts[ordinal].output_capacity!=record.output_capacities[ordinal] ||
             native.cuts[ordinal].geometry_frontend_flags!=record.frontend_flags[ordinal])

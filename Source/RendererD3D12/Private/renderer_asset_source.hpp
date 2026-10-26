@@ -73,7 +73,7 @@ struct RendererAssetSource
         std::uint64_t product_bytes{};
         if (auto result = ByteCount(product_bytes); !result) return result;
         const auto begin = pack ? range.offset : 0;
-        if (!range.byte_count || product_bytes != range.byte_count || offset < begin ||
+        if ((pack && (!range.byte_count || product_bytes != range.byte_count)) || offset < begin ||
             offset - begin > product_bytes || output.size() > product_bytes - (offset - begin))
             return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample range exceeds its admitted product.");
         if (pack) return pack->ReadVerified(offset, output, digest);
@@ -82,12 +82,10 @@ struct RendererAssetSource
             offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()) ||
             output.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
             return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Loose sample file changed after admission.");
-        std::vector<std::byte> bytes(output.size());
         stream.seekg(static_cast<std::streamoff>(offset));
-        stream.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        if (!stream || stream.gcount() != static_cast<std::streamsize>(bytes.size()) || Sha256(bytes) != digest)
+        stream.read(reinterpret_cast<char *>(output.data()), static_cast<std::streamsize>(output.size()));
+        if (!stream || stream.gcount() != static_cast<std::streamsize>(output.size()) || Sha256(output) != digest)
             return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Loose sample range digest or read failed.");
-        std::copy(bytes.begin(), bytes.end(), output.begin());
         return Result::Success();
     }
 };

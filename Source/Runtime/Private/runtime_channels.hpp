@@ -56,7 +56,6 @@ struct RenderPorts
     BoundedSpscQueue<ActionEdge, 256> &action_edges;
     RenderSnapshotExchange &snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
-    BoundedSpscQueue<QueuedAudioEvent, 1024> &render_audio_events;
     BoundedSpscQueue<ResizeCommand, 64> &resize_commands;
     BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> &renderer_settings;
     BoundedSpscQueue<GraphicsSettingsAck, 8> &renderer_settings_acks;
@@ -113,7 +112,6 @@ struct SimulationPorts
     std::atomic<bool> &ui_input_rejected;
     std::atomic<std::uint64_t> &current_session_id;
     std::atomic<std::uint64_t> &stale_ui_action_drops;
-    runtime_detail::UiDrawPackets &ui_packets;
     runtime_detail::DiagnosticClock capture_clock{};
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
@@ -125,6 +123,13 @@ struct SimulationPorts
         packet.tick_info = tick;
         packet.enqueued_qpc = capture_clock ? capture_clock() : 0;
         if (!sim_audio_events.TryPush(packet))
+            dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
+        else NotifyMain();
+    }
+
+    void PublishAudioEvent(const PresentationEvent &event)
+    {
+        if (!sim_audio_events.TryPush({event, capture_clock ? capture_clock() : 0}))
             dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
         else NotifyMain();
     }
@@ -143,11 +148,9 @@ struct SimulationPorts
                 if (record_events) record_events->push_back(event);
                 if (event.kind == PresentationKind::Audio)
                 {
-                    if (!sim_audio_events.TryPush({event, capture_clock ? capture_clock() : 0}))
-                        dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
-                    else NotifyMain();
-                    // Explicit capture retains the original ordered render-owned trace.
-                    // The renderer logs this copy but never forwards or plays it.
+                    PublishAudioEvent(event);
+                    // Explicit capture retains the original ordered diagnostic trace.
+                    // Runtime's renderer logs this copy but never plays it.
                     if (!capture_trace) continue;
                 }
                 if (!presentation_events.TryPush(event))
@@ -183,7 +186,6 @@ struct RuntimeChannels
     RenderSnapshotExchange snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
     BoundedSpscQueue<QueuedAudioEvent, 1024> sim_audio_events;
-    BoundedSpscQueue<QueuedAudioEvent, 1024> render_audio_events;
     runtime_detail::DiagnosticClock capture_clock{}; // Assigned before worker publication.
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
@@ -247,7 +249,7 @@ struct RuntimeChannels
     [[nodiscard]] RenderPorts ForRender() noexcept
     {
         return {stop_requested, simulation_done, completed_tick, render_ready, action_edges, snapshots,
-                presentation_events, render_audio_events, resize_commands, renderer_settings,
+                presentation_events, resize_commands, renderer_settings,
                 renderer_settings_acks, window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
                 devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, ui_packets, main_wake};
@@ -265,7 +267,7 @@ struct RuntimeChannels
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
                 settings_group, settings_page, character_details_page, presentation_graphics_ui,
-                ui_input_rejected, current_session_id, stale_ui_action_drops, ui_packets, capture_clock, main_wake};
+                ui_input_rejected, current_session_id, stale_ui_action_drops, capture_clock, main_wake};
     }
 };
 

@@ -35,6 +35,7 @@ struct SimulationConfig
     bool capture_timings{false};
     // Session-start switch for optional upgrade/relic synergy detail. Fixed balance
     // aggregates and gameplay state are collected identically in either mode.
+    // False leaves unique hit-cast and enemy-hit counts unavailable in BalanceTelemetry.
     bool capture_detailed_balance{true};
 };
 
@@ -44,6 +45,7 @@ struct TickResult
     // Zero when automatic checksum capture is disabled.
     GameplayChecksum checksum{};
     SessionPhase phase{SessionPhase::MainMenu};
+    bool world_changed{};
 };
 
 class GameSimulation
@@ -86,8 +88,6 @@ class GameSimulation
     [[nodiscard]] SimulationTimingDiagnostics GetTimingDiagnostics() const;
     [[nodiscard]] SimulationObservation GetObservation() const;
     [[nodiscard]] ScopedTickReadView BorrowTickReadView() const;
-    // Owned-format export for development fixtures; ordinary consumers borrow instead.
-    void CopyReadModelForDevelopment(GameReadModelStorage &model) const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);
     void ApplyUiAction(const UiAction &action);
     [[nodiscard]] Result ApplySimulationRules(const SimulationRules &rules);

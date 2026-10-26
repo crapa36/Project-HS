@@ -100,7 +100,7 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
                                             D3D12_RESOURCE_STATES initial_state,
                                             const D3D12_CLEAR_VALUE *clear)
 {
-    if (auto admitted = AdmitResidentAllocation(resource, allocation.HeapType); !admitted)
+    if (auto admitted = AdmitResidentAllocation(resource, allocation); !admitted)
         return admitted;
     const auto effective_state =
         enhanced && resource.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER

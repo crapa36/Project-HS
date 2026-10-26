@@ -2,6 +2,7 @@
 
 #include <hs/renderer/renderer.hpp>
 #include <hs/core/sha256.hpp>
+#include <hs/core/cooked_format.hpp>
 #include "checked_binary_read.hpp"
 
 #include <algorithm>
@@ -132,7 +133,8 @@ public:
                 {
                     const auto &left = expected.subresources[i], &right = actual.subresources[i];
                     if (left.offset != right.offset || left.row_pitch != right.row_pitch ||
-                        left.slice_pitch != right.slice_pitch || left.byte_count != right.byte_count)
+                        left.slice_pitch != right.slice_pitch || left.byte_count != right.byte_count ||
+                        left.has_digest != right.has_digest || left.digest != right.digest)
                         throw std::runtime_error("Developer texture subresource differs from its metadata proof");
                 }
             }
@@ -245,7 +247,7 @@ public:
             throw std::runtime_error("Developer geometry proof references a non-page product");
         auto &slot = geometry_slots_[index];
         std::scoped_lock lock(slot.mutex);
-        if (!bone_limit || bone_limit > render_data::kMaxCharacterBones)
+        if (!bone_limit || bone_limit > kMaxCharacterBones)
             throw std::runtime_error("Developer geometry proof has invalid bone limit");
         slot.bone_limit = std::min(slot.bone_limit, bone_limit);
         if (slot.value)

@@ -164,9 +164,10 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid geometry raster index suffix.");
     }
     next_upload.resource->Unmap(0, nullptr);
-    next.residency = residency.Register(ResidencyCategory::Geometry, resident_size,
+    next.residency = RegisterNativeAllocation(ResidencyCategory::Geometry, resident_size,
         metadata.lod != 0 ||
-            metadata.fallback_dependency_index == render_data::kNoGeometryDependency);
+            metadata.fallback_dependency_index == render_data::kNoGeometryDependency,
+        ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT));
     if (!next.residency)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Could not account geometry page allocations.");

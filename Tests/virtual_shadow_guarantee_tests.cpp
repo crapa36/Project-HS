@@ -1,6 +1,7 @@
 #include "../Source/RendererD3D12/Private/renderer_shadow_guarantee.hpp"
 
 #include <array>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -67,6 +68,51 @@ std::string ReadShaderSource(const char *name)
 void TestVirtualShadowGuarantees()
 {
     using Reason = hs::VirtualShadowCsmReason;
+    {
+        const auto bounds=[](int key,float side,float guard) {
+            const float lower=float(key)*side-guard;
+            return std::array{lower,lower+side+2.0f*guard};
+        };
+        const auto range=[&](float center,float radius,int origin,int side,float page_side,float guard) {
+            const float minimum=center-radius,maximum=center+radius;
+            const auto first_bounds=bounds(origin,page_side,guard);
+            const auto last_bounds=bounds(origin+side-1,page_side,guard);
+            if(!std::isfinite(minimum)||!std::isfinite(maximum)||!std::isfinite(page_side)||
+               !std::isfinite(guard)||page_side<=0||!std::isfinite(first_bounds[0])||
+               !std::isfinite(first_bounds[1])||!std::isfinite(last_bounds[0])||
+               !std::isfinite(last_bounds[1])) return std::array{0,side-1};
+            if(maximum<first_bounds[0]||minimum>last_bounds[1]) return std::array{side,-1};
+            int lo=0,hi=side;
+            while(lo<hi) { const int mid=(lo+hi)/2;
+                if(minimum<=bounds(origin+mid,page_side,guard)[1]) hi=mid; else lo=mid+1; }
+            const int first=lo;
+            lo=0;hi=side;
+            while(lo<hi) { const int mid=(lo+hi)/2;
+                if(maximum>=bounds(origin+mid,page_side,guard)[0]) lo=mid+1; else hi=mid; }
+            return std::array{first,lo-1};
+        };
+        struct AxisCase { int origin,side; float page_side,guard,center,radius; };
+        const std::array cases{
+            AxisCase{-17,32,4.0f,0.0625f,-64.0625f,0.0f},
+            AxisCase{-17,32,4.0f,0.0625f,-59.9375f,0.0f},
+            AxisCase{-17,32,4.0f,0.0625f,-64.0625f-2.0f,2.0f},
+            AxisCase{-17,32,4.0f,0.0625f,10000.0f,1.0f},
+            AxisCase{-4,8,16.0f,0.25f,-0.25f,0.0f},
+            AxisCase{10000000,8,0.0001f,0.0000015625f,1000.0f,0.0f},
+            AxisCase{-4,8,16.0f,0.25f,1.0e38f,1.0e38f}
+        };
+        for(const auto &test:cases)
+        {
+            const auto selected=range(test.center,test.radius,test.origin,test.side,test.page_side,test.guard);
+            for(int local=0;local<test.side;++local)
+            {
+                const auto page=bounds(test.origin+local,test.page_side,test.guard);
+                const bool overlaps=test.center+test.radius>=page[0]&&test.center-test.radius<=page[1];
+                Require(!overlaps||(local>=selected[0]&&local<=selected[1]),
+                    "VSM sparse candidate range must retain touching, negative, guard, and precision-edge pages");
+            }
+        }
+    }
     const auto surface_shadow_shader=ReadShaderSource("project_hs.hlsl");
     const auto volume_shadow_shader=ReadShaderSource("volumetrics.hlsl");
     const auto probe_capture_shader=ReadShaderSource("local_probe_capture.hlsl");

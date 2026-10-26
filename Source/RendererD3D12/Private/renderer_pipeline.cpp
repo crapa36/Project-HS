@@ -54,6 +54,12 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
 }
 Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
 {
+    pipeline_cache.ClearShaderOwners();
+    struct ShaderOwnerScope
+    {
+        RendererPipelineCache &cache;
+        ~ShaderOwnerScope() { cache.ClearShaderOwners(); }
+    } shader_owner_scope{pipeline_cache};
     RendererConfig pipeline_config;
     if (auto selected = SelectTextureFeedbackShaders(request, pipeline_config); !selected) return selected;
     mesh_pipeline_pairs.clear();
@@ -479,11 +485,19 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
             {static_cast<const std::byte *>(root_blob->GetBufferPointer()), root_blob->GetBufferSize()});
         !registered) return registered;
 
+    const auto register_shader_owner = [&](std::string_view logical_id,
+        const std::vector<std::byte> &bytes,bool bytes_already_verified) -> Result {
+        const auto expected = RendererProductDigest(pipeline_config, logical_id);
+        return pipeline_cache.RegisterShaderOwner(bytes, expected, bytes_already_verified);
+    };
     const auto read_shader = [&](std::string_view name, std::vector<std::byte> &bytes) {
         RendererAssetSource path;
-        if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/" + std::string(name), path);
+        const auto logical_id = "render/shader/" + std::string(name);
+        if (auto resolved = ResolveRendererAsset(pipeline_config, logical_id, path);
             !resolved) return resolved;
-        return ReadBinary(path, bytes);
+        const bool bytes_already_verified = bool(path.pack) || path.range.byte_count != 0;
+        if (auto read = ReadBinary(path, bytes); !read) return read;
+        return register_shader_owner(logical_id, bytes, bytes_already_verified);
     };
     const auto read_material_shader = [&](std::string_view material_id, render_data::MaterialProgramKind kind,
         std::string_view loose_name, std::vector<std::byte> &bytes) {
@@ -502,7 +516,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
             return read_shader(loose_name, bytes);
         }
         StartupOperationScope timing(RendererStartupOperation::CheckedBinaryRead);
-        return ReadRendererMaterialProgram(pipeline_config, *program, bytes);
+        if (auto read = ReadRendererMaterialProgram(pipeline_config, *program, bytes); !read) return read;
+        return register_shader_owner(program->product_id, bytes, true);
     };
     std::vector<std::byte> scene_vertex;
     std::vector<std::byte> cluster_vertex, cluster_shadow_vertex;
@@ -625,7 +640,11 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     RendererAssetSource deferred_path;
     if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/deferred_ps.dxil", deferred_path);
         !resolved) return resolved;
+    const bool deferred_bytes_verified = bool(deferred_path.pack) || deferred_path.range.byte_count != 0;
     if (auto read = ReadBinary(deferred_path, deferred_pixel); !read) return read;
+    if (auto registered = register_shader_owner("render/shader/deferred_ps.dxil", deferred_pixel,
+        deferred_bytes_verified); !registered)
+        return registered;
     if (auto read = read_material_shader("render/material/archer_skin/material.rpkg",
         render_data::MaterialProgramKind::HeroShadowPS, "archer_skin_shadow.dxil", hero_shadow_pixel); !read) return read;
     if (auto read = read_material_shader("render/material/slime_body/material.rpkg",
@@ -673,8 +692,12 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
                 RendererAssetSource shader_path;
                 if (auto resolved = ResolveRendererAsset(pipeline_config, logical_id, shader_path); !resolved)
                     return resolved;
+                const bool shader_bytes_verified = bool(shader_path.pack) || shader_path.range.byte_count != 0;
                 if (auto read = ReadBinary(shader_path, *bytes); !read)
                     return read;
+                if (auto registered = register_shader_owner(logical_id, *bytes,
+                    shader_bytes_verified); !registered)
+                    return registered;
             }
         }
     }

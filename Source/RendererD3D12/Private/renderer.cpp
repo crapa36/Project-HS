@@ -1634,6 +1634,11 @@ std::uint64_t D3D12Renderer::ValidationErrorCount() const noexcept
     return impl_->validation_errors;
 }
 
+RendererValidationStatus D3D12Renderer::ValidationStatus() const noexcept
+{
+    return impl_ ? impl_->validation_status : RendererValidationStatus{};
+}
+
 std::uint32_t D3D12Renderer::LastParticleCount() const noexcept
 {
     return impl_->last_particle_count;
@@ -1844,6 +1849,11 @@ RendererTextureProductStatus D3D12Renderer::GetTextureStreamingStatus(std::strin
     return {status.registered, status.pending, status.publication_complete,
         status.requests, status.uploads, status.publications, status.reclaims, status.revision,
         status.actual_resident_mip, status.effective_desired_mip, status.target_mip};
+}
+RendererSceneProbeBakeStatus D3D12Renderer::GetSceneProbeBakeStatus() const noexcept
+{
+    const auto status=impl_->local_probes.BakeStatus(impl_->graph_queue_executor.Completed());
+    return {status.sources_ready,status.capture_complete};
 }
 
 

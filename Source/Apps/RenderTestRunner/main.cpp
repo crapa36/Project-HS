@@ -19,9 +19,6 @@
 #include "static_shadow_bake_probe.hpp"
 #include "../Common/world_transport_scene.hpp"
 #include "../Common/renderer_geometry_catalog.hpp"
-#if defined(HS_SCENE_PROBE_ACTION_ENABLED)
-#include "scene_probe_action.hpp"
-#endif
 #include <hs/jobs/task_system.hpp>
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -620,26 +617,64 @@ Json DiagnosticsMemoryReceipt(const hs::RendererDiagnosticsMemory &memory)
     Json categories = Json::object();
     for (std::size_t index = 0; index < names.size(); ++index)
         categories[names[index]] = {{"live_bytes", memory.live_bytes[index]},
-            {"retiring_bytes", memory.retiring_bytes[index]}};
+            {"retiring_bytes", memory.retiring_bytes[index]},
+            {"local_live_bytes", memory.local_live_bytes[index]},
+            {"local_retiring_bytes", memory.local_retiring_bytes[index]},
+            {"nonlocal_live_bytes", memory.nonlocal_live_bytes[index]},
+            {"nonlocal_retiring_bytes", memory.nonlocal_retiring_bytes[index]}};
+    const auto observation_status = [](auto status) -> std::string_view {
+        using Status = hs::RendererDiagnosticsMemory::ObservationStatus;
+        switch (status)
+        {
+        case Status::Fresh: return "fresh";
+        case Status::Cached: return "cached";
+        case Status::Failed: return "failed";
+        case Status::Unsupported: return "unsupported";
+        default: return "unavailable";
+        }
+    };
     return {
         {"dxgi_local", {{"available", memory.budget_available},
+            {"status", observation_status(memory.local_status)},
+            {"success_sequence", memory.local_success_sequence}, {"age_ms", memory.local_observed_age_ms},
+            {"last_error_hresult", memory.local_last_error},
             {"usage_bytes", memory.budget_available ? Json(memory.local_usage_bytes) : Json(nullptr)},
             {"budget_bytes", memory.budget_available ? Json(memory.local_budget_bytes) : Json(nullptr)}}},
         {"dxgi_nonlocal", {{"available", memory.nonlocal_budget_available},
+            {"status", observation_status(memory.nonlocal_status)},
+            {"success_sequence", memory.nonlocal_success_sequence}, {"age_ms", memory.nonlocal_observed_age_ms},
+            {"last_error_hresult", memory.nonlocal_last_error},
             {"usage_bytes", memory.nonlocal_budget_available ? Json(memory.nonlocal_usage_bytes) : Json(nullptr)},
             {"budget_bytes", memory.nonlocal_budget_available ? Json(memory.nonlocal_budget_bytes) : Json(nullptr)}}},
+        {"host_memory", {{"available", memory.host_budget_available},
+            {"status", observation_status(memory.host_status)},
+            {"success_sequence", memory.host_success_sequence}, {"age_ms", memory.host_observed_age_ms},
+            {"last_error", memory.host_last_error},
+            {"staging_budget_bytes", memory.host_budget_available ? Json(memory.host_staging_budget_bytes) : Json(nullptr)}}},
         {"tracked_partial", {{"categories", std::move(categories)},
             {"live_bytes", memory.tracked_live_bytes}, {"retiring_bytes", memory.tracked_retiring_bytes},
             {"gpu_bytes", memory.tracked_gpu_bytes}, {"reclaimed_bytes", memory.tracked_reclaimed_bytes},
             {"gpu_reserved_bytes", memory.gpu_reserved_bytes},
             {"gpu_growth_since_budget_bytes", memory.gpu_growth_since_budget_bytes},
+            {"local_gpu_reserved_bytes", memory.local_gpu_reserved_bytes},
+            {"nonlocal_gpu_reserved_bytes", memory.nonlocal_gpu_reserved_bytes},
+            {"local_growth_since_budget_bytes", memory.local_growth_since_budget_bytes},
+            {"nonlocal_growth_since_budget_bytes", memory.nonlocal_growth_since_budget_bytes},
             {"host_staging_bytes", memory.host_staging_bytes}, {"host_reserved_bytes", memory.host_reserved_bytes},
             {"host_staging_budget_bytes", memory.host_budget_available ? Json(memory.host_staging_budget_bytes) : Json(nullptr)}}},
+        {"allocator_stats", {{"available", memory.allocator_stats_available},
+            {"local_block_bytes", memory.allocator_stats_available ? Json(memory.allocator_local_block_bytes) : Json(nullptr)},
+            {"nonlocal_block_bytes", memory.allocator_stats_available ? Json(memory.allocator_nonlocal_block_bytes) : Json(nullptr)},
+            {"local_usage_estimate_bytes", memory.allocator_stats_available ? Json(memory.allocator_local_usage_estimate_bytes) : Json(nullptr)},
+            {"nonlocal_usage_estimate_bytes", memory.allocator_stats_available ? Json(memory.allocator_nonlocal_usage_estimate_bytes) : Json(nullptr)},
+            {"sums_with_dxgi", false}}},
         {"texture_physical_bytes", memory.texture_physical_bytes},
         {"known_provider_allocations", {{"presentation_bytes", memory.presentation_provider_bytes},
             {"reconstruction_guide_bytes", memory.reconstruction_guide_bytes},
-            {"renderer_view_bytes", memory.renderer_view_bytes},
-            {"shared_deformation_bytes", memory.shared_deformation_bytes}}}};
+            {"renderer_view_bytes", memory.renderer_view_bytes_available ? Json(memory.renderer_view_bytes) : Json(nullptr)},
+            {"renderer_view_bytes_available", memory.renderer_view_bytes_available},
+            {"shared_deformation_bytes", memory.shared_deformation_bytes_available ? Json(memory.shared_deformation_bytes) : Json(nullptr)},
+            {"shared_deformation_bytes_available", memory.shared_deformation_bytes_available}}}};
 }
 
 Json DiagnosticsReceipt(const hs::RendererDiagnosticsSnapshot &diagnostics)
@@ -985,13 +1020,16 @@ void ValidateDynamicLodSkinGrowthProbe(const std::vector<DynamicUploadRow> &rows
         const auto source_count = skin_count + 1;
         const auto history_count = index == 0 ? 0u : index == 2 ? 1u : skin_count;
         const auto visibility_refs = 1u + skin_count;
+        // The two added slots acquire previous-skin bindings on their first
+        // retained frame, then remain unchanged.
+        const auto updated_count = index == 3 ? 2u : 0u;
         if (row.instances != source_count || row.stable_slots != source_count ||
             row.slot_count != source_count || row.anonymous_instances != 0 ||
             row.dynamic_visibility_refs != visibility_refs || row.skin_cache_active != skin_count ||
             row.skin_gpu_dispatches != skin_count || row.skin_history_valid != history_count ||
             row.skin_gpu_history_reads != history_count ||
             row.created != (index == 0 || index == 2 ? 2u : 0u) ||
-            row.updated != 0 || row.destroyed != 0)
+            row.updated != updated_count || row.destroyed != 0)
             throw std::runtime_error("dynamic LOD/skin growth diagnostics mismatch");
     }
     receipt["dynamic_lod_skin_growth"] = {
@@ -1245,15 +1283,25 @@ void ValidateGpuLodGrowthSteady(const std::filesystem::path &path, Json &receipt
     };
 }
 
+Json ValidationStatusReceipt(const hs::RendererValidationStatus &status)
+{
+    return {{"requested", {{"debug_layer", status.debug_layer_requested},
+                {"gpu_based_validation", status.gpu_validation_requested}}},
+        {"d3d12_debug_interface", {{"acquisition_attempted", status.debug_interface_acquisition_attempted},
+            {"acquired", status.debug_interface_acquired}}},
+        {"gpu_validation_interface_queried", status.gpu_validation_interface_queried},
+        {"debug_layer_enable_call_before_device", status.debug_layer_enable_called_before_device},
+        {"gpu_validation_enable_call_before_device", status.gpu_validation_enable_called_before_device},
+        {"device_creation", {{"attempted", status.device_creation_attempted},
+            {"succeeded", status.device_creation_succeeded}, {"hresult", status.device_creation_hresult},
+            {"created_after_requested_enable_calls", status.device_created_after_requested_enable_calls}}},
+        {"activation_state_getter_available", false}};
+}
+
 } // namespace
 
 int main(int argc, char **argv)
 {
-#if defined(HS_SCENE_PROBE_ACTION_ENABLED)
-    for (int index = 1; index < argc; ++index)
-        if (std::string_view(argv[index]) == "--produce-scene-probe")
-            return hs::render_test::ProduceSceneProbe(argc, argv);
-#endif
     Json receipt{{"schema_version", 1}, {"runner", "render-only"},
         {"fixture", "static-environment-moving-player-v1"}, {"execution_valid", false}};
     std::filesystem::path artifacts;
@@ -1279,7 +1327,6 @@ int main(int argc, char **argv)
         std::filesystem::path pointer;
         std::filesystem::path material_reload_pointer;
         std::filesystem::path material_reload_invalid_pointer;
-        std::filesystem::path scene_probe_output;
         std::uint32_t frames = 60;
         bool frames_explicit{};
         bool persistent_scene_probe{};
@@ -1291,12 +1338,12 @@ int main(int argc, char **argv)
         std::string grass_history_probe;
         std::uint32_t grass_cadence = 60;
         bool timing_stream_probe{};
+        bool timing_stream_critical_probe{};
         bool hero_work_probe{}, hero_work_mode_explicit{}, shadow_transition_probe{}, hero_layer_probe{};
         bool world_transport_probe{};
         bool gameplay_scene{};
         bool static_shadow_bake_probe{};
         bool static_shadow_bake_only{};
-        bool scene_probe_bake_only{};
         bool local_probe_revision_probe{};
         bool oit_overdraw_probe{};
         std::string vfx_composition_probe;
@@ -1324,7 +1371,6 @@ int main(int argc, char **argv)
             else if (arg.starts_with("--material-reload-invalid="))
                 material_reload_invalid_pointer = arg.substr(26);
             else if (arg.starts_with("--artifacts=")) artifacts = arg.substr(12);
-            else if (arg.starts_with("--scene-probe-output=")) scene_probe_output = arg.substr(21);
             else if (arg.starts_with("--frames="))
             {
                 frames = Number(arg.substr(9), 1, 600);
@@ -1363,7 +1409,18 @@ int main(int argc, char **argv)
                 grass_cadence = Number(arg.substr(16), 30, 240);
             else if (arg == "--timing-stream-probe")
             {
+                if (timing_stream_critical_probe)
+                    throw std::runtime_error("timing stream probes are mutually exclusive");
                 timing_stream_probe = config.capture_timing_stream = true;
+                config.width = 320; config.height = 180;
+            }
+            else if (arg == "--timing-stream-critical-probe")
+            {
+                if (timing_stream_probe)
+                    throw std::runtime_error("timing stream probes are mutually exclusive");
+                timing_stream_probe = timing_stream_critical_probe = config.capture_timing_stream = true;
+                config.capture_gpu_timings = false;
+                config.dynamic_resolution = true;
                 config.width = 320; config.height = 180;
             }
             else if (arg == "--hero-work-probe") hero_work_probe = true;
@@ -1382,10 +1439,6 @@ int main(int argc, char **argv)
             else if (arg == "--gameplay-scene") gameplay_scene = true;
             else if (arg == "--static-shadow-bake-probe") gameplay_scene = static_shadow_bake_probe = true;
             else if (arg == "--static-shadow-bake-only") static_shadow_bake_only = true;
-            else if (arg == "--scene-probe-bake-only")
-            {
-                scene_probe_bake_only = true;
-            }
             else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
             else if (arg == "--oit-overdraw-probe") oit_overdraw_probe = true;
             else if (arg.starts_with("--vfx-composition-probe=")) vfx_composition_probe = arg.substr(24);
@@ -1767,29 +1820,6 @@ int main(int argc, char **argv)
         hs::SelectedGeneration material_reload_invalid_generation;
         failure_code = "HS_GENERATION_INVALID";
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
-        if (scene_probe_bake_only)
-        {
-            if (scene_probe_output.empty() || !scene_probe_output.is_absolute())
-                throw std::runtime_error("Scene probe bake requires an absolute --scene-probe-output path");
-            std::filesystem::path path;
-            Require(generation.Require("render/lighting/local_probes.spkg", path));
-            std::ifstream input(path, std::ios::binary | std::ios::ate);
-            if (!input || input.tellg() <= 0) throw std::runtime_error("Scene probe bake requires a layout-only SPB1 package");
-            std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
-            input.seekg(0);
-            if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
-                throw std::runtime_error("Could not read the selected layout-only SPB1 package");
-            const auto package = hs::render_data::ReadSceneProbePackage(bytes, hs::MakeAssetId("render/lighting/local_probes.spkg"));
-            if (package.payload != hs::render_data::SceneProbePayload::Layout)
-                throw std::runtime_error("Scene probe bake input must contain layout metadata only");
-            frames = static_cast<std::uint32_t>(package.probes.size()) + 4;
-            frames_explicit = true;
-            config.material_quality = hs::GraphicsQuality::Ultra;
-            config.pom_quality = hs::GraphicsOptionalQuality::Ultra;
-            config.foliage_quality = hs::GraphicsQuality::Ultra;
-            config.texture_quality = hs::GraphicsQuality::Ultra;
-            config.geometry_quality = hs::GraphicsQuality::Ultra;
-        }
         receipt["generation_id"] = generation.id;
         receipt["generation_scope"] = generation.scope;
         hs::VfxEntitySurfaceCommand entity_surface_template;
@@ -1861,15 +1891,14 @@ int main(int argc, char **argv)
         config.product_paths = generation.product_paths;
         config.product_digests = generation.product_digests;
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
-        if (world_transport_probe || owned_view_probe || gameplay_scene || scene_probe_bake_only)
+        if (world_transport_probe || owned_view_probe || gameplay_scene)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
             std::filesystem::path product_path;
             Require(generation.Require(config.scene_hlod_product_id, product_path));
             Require(generation.Require("render/lighting/local_probes.spkg", product_path));
             measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation); });
-            receipt[scene_probe_bake_only ? "scene_probe_bake_inputs" :
-                    world_transport_probe ? "world_transport" : "owned_view_scene"] = {
+            receipt[world_transport_probe ? "world_transport" : "owned_view_scene"] = {
                 {"layout_abi", world_scene->layout_abi},
                 {"eligible_static_member_count", world_scene->eligible_static_members.size()},
                 {"static_instance_count", world_scene->instances.size()},
@@ -2131,7 +2160,20 @@ int main(int argc, char **argv)
                 hs::render_data::TextureDimension::Texture3D, &hs::render_data::TextureDescriptor::dimension);
             receipt["packed_renderer_bytes"] = offset;
         }
-        measure("initialize", [&] { Require(renderer.Initialize(config)); });
+        receipt["validation_requested"] = {{"debug_layer", config.validation},
+            {"gpu_based_validation", config.gpu_validation}};
+        measure("initialize", [&] {
+            const auto initialized = renderer.Initialize(config);
+            const auto status = renderer.ValidationStatus();
+            receipt["validation_status"] = ValidationStatusReceipt(status);
+            if (!initialized && status.debug_interface_acquisition_attempted &&
+                ((status.debug_layer_requested && !status.debug_interface_acquired) ||
+                 (status.gpu_validation_requested &&
+                    (!status.debug_interface_acquired || !status.gpu_validation_interface_queried))))
+                failure_code = status.gpu_validation_requested
+                    ? "HS_RENDER_GBV_PREREQUISITE_FAILED" : "HS_RENDER_DEBUG_LAYER_PREREQUISITE_FAILED";
+            Require(initialized);
+        });
         config.font_bytes = {};
         std::vector<std::byte>().swap(startup_font);
         hs::LightView static_shadow_sun;
@@ -2306,7 +2348,7 @@ int main(int argc, char **argv)
             for (auto &source : current) source.revisions = {11, 22, 33, 44};
         hs::RenderSnapshotPair pair;
         pair.has_current = true;
-        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || scene_probe_bake_only ? world_scene
+        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
         // fixture terrain/rocks otherwise occlude different pixels after roll.
@@ -2409,30 +2451,6 @@ int main(int argc, char **argv)
         std::array<hs::LightView, 3> world_lights{};
         std::vector<hs::LightView> light_list_lights;
         if (static_shadow_bake_probe) pair.current.lights = std::span(&static_shadow_sun, 1);
-        if (scene_probe_bake_only)
-        {
-            // Match Presentation's canonical production sun. WorldTransportProbe
-            // deliberately adds synthetic point/spot test lights and is not a
-            // valid authoring profile for production local-probe radiance.
-            auto &sun = world_lights[0];
-            sun.direction = hs::kEnvironmentSunDirection;
-            sun.quantity = 3.0f * hs::kLightWhiteLumensPerWatt;
-            sun.color = {1.0f, .92f, .78f};
-            sun.stable_id = 0x48535f53554e0001ull;
-            sun.type = hs::LightType::Directional;
-            sun.unit = hs::LightUnit::Lux;
-            sun.shadow_flags = hs::kLightShadowRequested;
-            pair.current.lights = std::span(world_lights).first(1);
-            receipt["scene_probe_bake_profile"] = {
-                {"id", "runtime-ultra-static-sun-v1"},
-                {"material_quality", std::string(hs::GraphicsEnumToken(config.material_quality))},
-                {"pom_quality", std::string(hs::GraphicsEnumToken(config.pom_quality))},
-                {"foliage_quality", std::string(hs::GraphicsEnumToken(config.foliage_quality))},
-                {"texture_quality", std::string(hs::GraphicsEnumToken(config.texture_quality))},
-                {"geometry_quality", std::string(hs::GraphicsEnumToken(config.geometry_quality))},
-                {"capture", "runtime-static-materials-shadows-global-sky-no-dynamic-post"},
-                {"light_stable_id", sun.stable_id}, {"lights", 1}};
-        }
         if (hero_work_probe && gameplay_scene)
         {
             world_lights[0].stable_id = 0x485753554e000001ull;
@@ -2485,7 +2503,21 @@ int main(int argc, char **argv)
                     sample.completed_frame_id <= previous)
                     throw std::runtime_error("Timing stream emitted incomplete or unsorted frame identities");
                 previous = sample.completed_frame_id;
-                if (timing_stream_probe && !config.dynamic_resolution)
+                if (timing_stream_critical_probe)
+                {
+                    const auto begin = std::ranges::find(sample.passes, 37u, &hs::GpuPassTiming::pass_id);
+                    const auto end = std::ranges::find(sample.passes, 38u, &hs::GpuPassTiming::pass_id);
+                    if (sample.mode != hs::GpuTimingMode::Critical ||
+                        sample.metric_kind != hs::GpuFrameTimingKind::ReferenceGraphSpan ||
+                        !sample.critical_path_valid || !sample.cpu_recording_valid ||
+                        sample.pass_timings_valid || sample.passes.size() != 2 ||
+                        begin == sample.passes.end() || end == sample.passes.end() ||
+                        begin->queue != hs::RenderQueue::Direct || end->queue != hs::RenderQueue::Direct ||
+                        !begin->measured || !end->measured || !begin->name.empty() || !end->name.empty() ||
+                        begin->cpu_record_valid || end->cpu_record_valid)
+                        throw std::runtime_error("Critical timing stream did not retain only Direct endpoints and frame-level CPU timing");
+                }
+                else if (timing_stream_probe && !config.dynamic_resolution)
                 {
                     const auto ready = std::ranges::find(sample.passes, 38u, &hs::GpuPassTiming::pass_id);
                     if (sample.metric_kind != hs::GpuFrameTimingKind::SourceOutputReady ||
@@ -2505,10 +2537,11 @@ int main(int argc, char **argv)
                          sample.output_ready_qpc_frequency != ready->qpc_frequency))
                         throw std::runtime_error("Timing stream ready endpoint has inconsistent clock calibration");
                 }
-                for (const auto &pass : sample.passes)
-                    if (!pass.cpu_record_valid || pass.cpu_record_begin_qpc == 0 ||
-                        pass.cpu_record_end_qpc < pass.cpu_record_begin_qpc)
-                        throw std::runtime_error("Timing stream lost per-pass CPU recording interval");
+                if (!timing_stream_critical_probe)
+                    for (const auto &pass : sample.passes)
+                        if (!pass.cpu_record_valid || pass.cpu_record_begin_qpc == 0 ||
+                            pass.cpu_record_end_qpc < pass.cpu_record_begin_qpc)
+                            throw std::runtime_error("Timing stream lost per-pass CPU recording interval");
                 if (!timing_stream_history.emplace(sample.completed_frame_id, std::move(sample)).second)
                     throw std::runtime_error("Timing stream emitted a duplicate completed frame");
             }
@@ -3083,7 +3116,7 @@ int main(int argc, char **argv)
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = scene_probe_bake_only || entity_surface_probe || !vfx_composition_probe.empty()};
+                    .wait_for_streaming = entity_surface_probe || !vfx_composition_probe.empty()};
                 if (provider_switch_probe)
                 {
                     std::uint64_t input_token{};
@@ -3653,6 +3686,8 @@ int main(int argc, char **argv)
             receipt["timing_stream"] = {{"completed_frames", timing_stream_history.size()},
                 {"live_frames", timing_stream_live}, {"drained_frames", timing_stream_drained},
                 {"all_frames_covered", true}, {"slot_wrap_and_duplicate_read", true},
+                {"mode", timing_stream_critical_probe ? "Critical" : "Full"},
+                {"critical_endpoints_only", timing_stream_critical_probe},
                 {"source_output_ready_contract", !config.dynamic_resolution},
                 {"fixed_epoch_ready_monotonic", !config.dynamic_resolution}};
         }
@@ -3680,29 +3715,6 @@ int main(int argc, char **argv)
                             throw std::runtime_error("Cluster Retest count survived the live frame's slot reuse");
                 receipt["hzb_cluster_retest"]["empty_after_slot_reuse"] = true;
             }
-        }
-        if (scene_probe_bake_only)
-        {
-            failure_code = "HS_SCENE_PROBE_BAKE_FAILED";
-            if (frames != 0 && frame_result.views.empty())
-                throw std::runtime_error("Scene probe bake completed without a rendered main view");
-            Require(renderer.Capture({.path = scene_probe_output, .kind = hs::CaptureKind::SceneProbePackage}));
-            std::ifstream baked_input(scene_probe_output, std::ios::binary | std::ios::ate);
-            if (!baked_input || baked_input.tellg() <= 0)
-                throw std::runtime_error("Native scene probe bake did not publish its SPB1 package");
-            std::vector<std::byte> baked_bytes(static_cast<std::size_t>(baked_input.tellg()));
-            baked_input.seekg(0);
-            if (!baked_input.read(reinterpret_cast<char *>(baked_bytes.data()), static_cast<std::streamsize>(baked_bytes.size())))
-                throw std::runtime_error("Could not read the native scene probe bake output");
-            const auto baked = hs::render_data::ReadSceneProbePackage(
-                baked_bytes, hs::MakeAssetId("render/lighting/local_probes.spkg"));
-            if (baked.payload != hs::render_data::SceneProbePayload::Baked)
-                throw std::runtime_error("Native scene probe bake did not emit all four payloads");
-            Require(renderer.Shutdown());
-            receipt["scene_probe_bake"] = {{"payload", "baked"}, {"probes", baked.probes.size()}, {"frames", frames}};
-            receipt["execution_valid"] = true;
-            exit_code = 0;
-            return write_receipt();
         }
         measure("capture", [&] { Require(renderer.Capture({.path = artifacts / "capture.png"})); });
         observe_world_timings();
@@ -3961,6 +3973,7 @@ int main(int argc, char **argv)
             ValidateDynamicLodSkinGrowthProbe(
                 DynamicUploadRows(artifacts / "dynamic_instance_upload.csv"), frames, receipt);
         receipt["validation_errors"] = renderer.ValidationErrorCount();
+        receipt["validation_status"] = ValidationStatusReceipt(renderer.ValidationStatus());
         receipt["frames"] = frames;
         if (static_shadow_bake_probe) receipt["static_shadow_bake"]["subsequent_render_frames"] = frames;
         receipt["static_scene_upload_count"] = frame_result.static_scene_upload_count;

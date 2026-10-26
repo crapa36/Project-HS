@@ -5,90 +5,51 @@
 #include <hs/core/settings.hpp>
 #include <hs/presentation/projector.hpp>
 
-#include <array>
 #include <atomic>
-#include <mutex>
-#include <optional>
 #include <cstdint>
 #include <memory>
 #include <span>
 #include <type_traits>
-#include <vector>
 
 namespace hs::runtime_detail
 {
-// Small copied facts needed to resolve a click against the exact draw packet.
-// The snapshot itself remains the owner of the full gameplay projection.
-struct UiDrawPacketFacts
+struct PresentedUiFrame
 {
-    std::uint64_t generation{};
-    std::uint64_t session_id{};
-    std::uint64_t selection_epoch{};
-    SessionProbe session{};
-    PresentationUiState ui{};
-    SettingsData settings{};
-    std::shared_ptr<const GraphicsSettingsUiModel> graphics_model;
-    std::uint8_t modal_phase{};
-};
-
-struct UiDrawPacket final : UiDrawPacketFacts
-{
-    // Copied only after the renderer acknowledges this generation at Present.
-    std::vector<UiModel> draw_models;
+    std::shared_ptr<const UiFrame> frame;
     ViewExtent presented_extent{};
 };
 
-// The simulation stages facts; rendering publishes only its matching Present receipt.
 struct UiDrawPackets
 {
-    std::array<std::optional<UiDrawPacketFacts>, 3> ui_packet_facts;
-    mutable std::mutex ui_packet_mutex;
-    std::atomic<std::shared_ptr<const UiDrawPacket>> presented_ui_packet;
-
-    void StageUiPacket(std::size_t slot, UiDrawPacketFacts facts)
-    {
-        if (slot >= ui_packet_facts.size()) return;
-        std::scoped_lock lock(ui_packet_mutex);
-        ui_packet_facts[slot] = std::move(facts);
-    }
-
-    [[nodiscard]] bool ReadUiPacketFacts(std::uint64_t generation,
-                                         UiDrawPacketFacts &facts) const
-    {
-        std::scoped_lock lock(ui_packet_mutex);
-        for (const auto &candidate : ui_packet_facts)
-            if (candidate && candidate->generation == generation)
-            { facts = *candidate; return true; }
-        return false;
-    }
-
-    void RetireUiPacketFacts(std::uint64_t generation)
-    {
-        std::scoped_lock lock(ui_packet_mutex);
-        for (auto &candidate : ui_packet_facts)
-            if (candidate && candidate->generation == generation) candidate.reset();
-    }
+    std::atomic<std::shared_ptr<const PresentedUiFrame>> presented_ui_packet;
 
     [[nodiscard]] bool AcceptPresentedUiPacket(std::uint64_t receipt_generation,
-        std::uint64_t rendered_generation, std::uint64_t session_id,
-        std::span<const UiModel> draw_models, ViewExtent extent) noexcept
+        std::shared_ptr<const UiFrame> frame, std::uint64_t session_id,
+        ViewExtent extent) noexcept
     {
-        if (!receipt_generation || receipt_generation != rendered_generation) return false;
-        UiDrawPacketFacts facts;
-        if (!ReadUiPacketFacts(receipt_generation, facts) || facts.session_id != session_id) return false;
+        if (!frame || !receipt_generation || receipt_generation != frame->generation ||
+            frame->session_id != session_id ||
+            !extent.width || !extent.height) return false;
+        const auto accepted = presented_ui_packet.load(std::memory_order_acquire);
+        if (accepted)
+        {
+            if (accepted->frame->generation > receipt_generation) return false;
+            if (accepted->frame->generation == receipt_generation)
+            {
+                if (accepted->frame != frame) return false;
+                if (accepted->presented_extent == extent) return true;
+            }
+        }
         try
         {
-            auto packet = std::make_shared<UiDrawPacket>();
-            static_cast<UiDrawPacketFacts &>(*packet) = std::move(facts);
-            packet->draw_models.assign(draw_models.begin(), draw_models.end());
-            packet->presented_extent = extent;
-            presented_ui_packet.store(std::move(packet), std::memory_order_release);
-            RetireUiPacketFacts(receipt_generation);
+            auto receipt = std::make_shared<const PresentedUiFrame>(
+                PresentedUiFrame{std::move(frame), extent});
+            presented_ui_packet.store(std::move(receipt), std::memory_order_release);
             return true;
         }
         catch (...)
         {
-            return false; // Keep the previous accepted packet on allocation failure.
+            return false; // Keep the accepted owner if receipt allocation fails.
         }
     }
 
@@ -177,6 +138,27 @@ static_assert(std::is_trivially_copyable_v<UiActionEnvelope>);
         a.sfx_volume == b.sfx_volume && a.ui_volume == b.ui_volume &&
         a.skill_virtual_keys == b.skill_virtual_keys &&
         a.screen_overlay_intensity == b.screen_overlay_intensity;
+}
+
+[[nodiscard]] inline bool SameUiState(const PresentationUiState &a,
+                                      const PresentationUiState &b) noexcept
+{
+    return a.page == b.page && a.selected_collection_skill == b.selected_collection_skill &&
+        a.selected_character_skill == b.selected_character_skill &&
+        a.loadout_source_slot == b.loadout_source_slot && a.settings_group == b.settings_group &&
+        a.settings_page == b.settings_page && a.character_details_page == b.character_details_page;
+}
+
+[[nodiscard]] inline bool SameUiFrameInputs(const UiFrame &frame,
+    std::uint64_t session_id, std::uint64_t dynamic_pair_revision,
+    const PresentationUiState &ui, const SettingsData &settings,
+    const std::shared_ptr<const GraphicsSettingsUiModel> &graphics_model,
+    std::uint8_t modal_phase, std::uint8_t pending_rebind_slot, bool input_rejected) noexcept
+{
+    return frame.session_id == session_id && frame.dynamic_pair_revision == dynamic_pair_revision &&
+        SameUiState(frame.ui, ui) && SameUiSettings(frame.settings, settings) &&
+        frame.graphics_model == graphics_model && frame.modal_phase == modal_phase &&
+        frame.pending_rebind_slot == pending_rebind_slot && frame.input_rejected == input_rejected;
 }
 
 [[nodiscard]] inline bool PointHitsUiDrawButton(std::span<const UiModel> models,

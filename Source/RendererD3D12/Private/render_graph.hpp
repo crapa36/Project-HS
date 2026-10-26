@@ -265,6 +265,9 @@ struct GraphExecutionOptions
     void *timestamp_query_heap{};
     void *timestamp_readback{};
     std::uint32_t timestamp_base{};
+    // Optional compiled execution-order to query-pair map; UINT32_MAX skips a pass.
+    const std::uint32_t *timestamp_query_slots{};
+    std::size_t timestamp_query_slot_count{};
     const RenderTaskExecutor *task_executor{};
     // Optional capture output in compiled execution order; each recording task owns one element.
     GpuPassTiming *cpu_pass_timings{};
