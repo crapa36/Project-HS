@@ -6,7 +6,9 @@
 #include <hs/renderer/vfx_program.hpp>
 
 #include <cstdint>
+#include <cstddef>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace hs::runtime_detail
@@ -19,6 +21,68 @@ struct VfxTypedFrameInputs
     std::vector<std::uint64_t> unsupported_effect_ids;
 };
 
+// Indexes the one retained publication pair without owning snapshots or rows.
+// Duplicate identities deliberately retain the first source-order match.
+class PreparedPairFacts
+{
+  public:
+    struct Key
+    {
+        std::uint64_t session_id{};
+        Sequence previous_publication{}, current_publication{};
+        std::uint32_t quality{};
+        std::uint64_t binding_revision{}, geometry_revision{};
+        const void *previous_data{}, *current_data{}, *instance_data{}, *capture_data{};
+        std::size_t previous_count{}, current_count{}, instance_count{}, capture_count{};
+        bool operator==(const Key &) const = default;
+    };
+
+    void Prepare(Key key, std::span<const PersistentVfxVisual> previous,
+                 std::span<const PersistentVfxVisual> current,
+                 std::span<const RenderInstance> instances,
+                 std::span<const CapturedRenderInstance> captures);
+    [[nodiscard]] const PersistentVfxVisual *Previous(
+        const PersistentVfxVisual &visual, std::span<const PersistentVfxVisual> rows) const noexcept;
+    [[nodiscard]] const PersistentVfxVisual *Current(
+        std::uint64_t stable_id, PersistentVfxKind kind,
+        std::span<const PersistentVfxVisual> rows) const noexcept;
+    [[nodiscard]] const RenderInstance *Instance(
+        std::uint64_t stable_id, std::span<const RenderInstance> rows) const noexcept;
+    [[nodiscard]] const CapturedRenderInstance *Capture(
+        std::uint64_t session_id, Sequence sequence, Tick tick, std::uint64_t entity_id,
+        std::span<const CapturedRenderInstance> rows) const noexcept;
+
+  private:
+    struct VisualKey
+    {
+        std::uint64_t stable_id{};
+        PersistentVfxKind kind{};
+        bool operator==(const VisualKey &) const = default;
+    };
+    struct VisualHash
+    {
+        std::size_t operator()(const VisualKey &key) const noexcept;
+    };
+    struct CaptureKey
+    {
+        std::uint64_t session_id{};
+        Sequence sequence{};
+        Tick tick{};
+        std::uint64_t entity_id{};
+        bool operator==(const CaptureKey &) const = default;
+    };
+    struct CaptureHash
+    {
+        std::size_t operator()(const CaptureKey &key) const noexcept;
+    };
+    Key key_{};
+    bool prepared_{};
+    std::unordered_map<VisualKey, std::size_t, VisualHash> previous_;
+    std::unordered_map<VisualKey, std::size_t, VisualHash> current_;
+    std::unordered_map<std::uint64_t, std::size_t> instances_;
+    std::unordered_map<CaptureKey, std::size_t, CaptureHash> captures_;
+};
+
 // Convert the presentation contracts into typed v4 renderer inputs. The
 // function owns no state and does not create a lifetime or geometry value when
 // the source contract does not provide one.
@@ -27,7 +91,8 @@ struct VfxTypedFrameInputs
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
-    Tick current_tick);
+    Tick current_tick,
+    const PreparedPairFacts *pair_facts = nullptr);
 
 // Retain only the captured endpoints of a successful second retreat. The
 // movement is instantaneous in gameplay; fixed authored seconds own the fade.

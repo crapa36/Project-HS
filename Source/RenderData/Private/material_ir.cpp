@@ -1905,13 +1905,14 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
         }
     result += "HsMaterialSurface HsMaterialEvaluateSurface(HsMaterialContext ctx)\n{\n";
     result += EmitContextNodes(optimized, graph, surface_reachable, material_ordinal * kMaterialTextureSlots);
+    std::string surface_result;
     if (graph.closure_output != kNoMaterialInput)
-        result += "    HsMaterialSurface result = " + value(graph.closure_output) +
+        surface_result = "    HsMaterialSurface result = " + value(graph.closure_output) +
             ";\n    result.normal_is_world = " +
             (graph.normal_space == MaterialNormalSpace::World ? "true" : "false") +
             ";\n    return result;\n}\n";
     else
-        result += "    HsMaterialSurface result = (HsMaterialSurface)0;\n    result.base_color = " + value(graph.base_color_output) +
+        surface_result = "    HsMaterialSurface result = (HsMaterialSurface)0;\n    result.base_color = " + value(graph.base_color_output) +
             ";\n    result.roughness = " + value(graph.roughness_output) +
             ";\n    result.metallic = ctx.metallic;\n    result.normal = " +
             (graph.normal_output == kNoMaterialInput ? "ctx.normal" : value(graph.normal_output)) +
@@ -1922,6 +1923,25 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
             ";\n    result.normal_is_world = " +
             (graph.normal_space == MaterialNormalSpace::World ? "true" : "false") +
             ";\n    return result;\n}\n";
+    result += surface_result;
+    // Raster coverage and shading share the opacity dependency nodes. Keep
+    // unrelated surface work after discard, including normal/POM sampling.
+    result += "HsMaterialSurface HsMaterialEvaluateCoveredSurface(HsMaterialContext ctx)\n{\n";
+    if (graph.kind == MaterialGraphKind::Masked)
+    {
+        const auto &opacity_live = graph.closure_output != kNoMaterialInput
+            ? material.impl_->closure_opacity_live : material.impl_->output_live[2];
+        const auto opacity = graph.closure_output != kNoMaterialInput
+            ? "n" + std::to_string(material.impl_->closure_opacity) : value(graph.opacity_output);
+        result += EmitContextNodes(optimized, graph, opacity_live, material_ordinal * kMaterialTextureSlots);
+        result += "    if (" + opacity + " < HsMaterialOpacityCutoff) discard;\n";
+        auto remaining = surface_reachable;
+        for (std::size_t i = 0; i < remaining.size(); ++i)
+            remaining[i] = remaining[i] && !opacity_live[i];
+        result += EmitContextNodes(optimized, graph, remaining, material_ordinal * kMaterialTextureSlots);
+        result += surface_result;
+    }
+    else result += "    return HsMaterialEvaluateSurface(ctx);\n}\n";
     result += "float HsMaterialEvaluateOpacity(HsMaterialContext ctx)\n{\n";
     if (graph.closure_output != kNoMaterialInput && graph.kind == MaterialGraphKind::Masked)
     {

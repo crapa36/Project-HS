@@ -1859,6 +1859,9 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 const auto vertices = ReadU32(argument + 4);
                 const auto instances = ReadU32(argument + 8);
                 if (!vertices || !instances) continue;
+                const auto active_bit = 1u << (view == 4 ? 0u : static_cast<unsigned>(view));
+                if ((cut.constants.active_view_mask & active_bit) == 0u)
+                    return fail_mapped("Cluster command diagnostic emits into an inactive view.");
                 if (selection >= command.published)
                 {
                     ++command.outside_prefix_nonzero;
@@ -1896,7 +1899,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             status.frame_id_low;
         const auto constants_frame_id = (static_cast<std::uint64_t>(constants.frame_id_high) << 32u) |
             constants.frame_id_low;
-        if (constants.reserved || constants.candidate_count != cut.cut->candidate_count ||
+        if ((constants.active_view_mask & ~15u) || constants.candidate_count != cut.cut->candidate_count ||
             constants.generation != cut.cut->generation ||
             constants.generation != impl_->cluster_runtime->generation ||
             constants.output_capacity != cut.cut->output_capacity ||
@@ -2319,6 +2322,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
         output << (index ? "," : "") << "\n    {\"catalog\": " << cut.ordinal
                << ", \"frame\": " << cut.cut->actual_frame_id
                << ", \"candidate_count\": " << cut.cut->candidate_count
+               << ", \"active_view_mask\": " << cut.constants.active_view_mask
                << ", \"output_capacity\": " << cut.cut->output_capacity
                << ", \"committed_records\": " << cut.status.committed_records
                << ", \"failure_flags\": " << cut.status.failure_flags
@@ -2378,10 +2382,49 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
     case CaptureKind::GeometryDiagnostics:
     case CaptureKind::VisibilityDiagnostics:
     case CaptureKind::HdrColor:
+    case CaptureKind::SceneProbePackage:
         break;
     default:
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Capture kind is invalid.");
+    }
+    if(request.kind==CaptureKind::SceneProbePackage)
+    {
+        if(request.view_id!=kMainRenderViewId)
+            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
+                "Scene-probe package capture is renderer-wide and requires the main view ID.");
+        if(auto waited=impl_->WaitForGpu();!waited) return waited;
+        const auto completed=impl_->graph_queue_executor.Completed();
+        impl_->transient_pools[0].ResetCompletedClaims(completed);
+        std::vector<std::byte> bytes;
+        const auto barriers=impl_->enhanced?BarrierMode::Enhanced:BarrierMode::Legacy;
+        if(auto exported=impl_->local_probes.ExportBakedPackage(impl_->graph_queue_executor,
+                impl_->transient_pools[0],0,barriers,bytes);!exported) return exported;
+
+        std::error_code directory_error;
+        if(!request.path.parent_path().empty())
+            std::filesystem::create_directories(request.path.parent_path(),directory_error);
+        if(directory_error)
+            return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
+                "Could not create scene-probe package output directory.");
+        auto temporary=request.path; temporary+=L".tmp";
+        {
+            std::ofstream output(temporary,std::ios::binary|std::ios::trunc);
+            output.write(reinterpret_cast<const char *>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+            output.flush();
+            if(!output)
+            {
+                output.close(); std::error_code ignored; std::filesystem::remove(temporary,ignored);
+                return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
+                    "Could not write complete scene-probe package staging file.");
+            }
+        }
+        if(!MoveFileExW(temporary.c_str(),request.path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+        {
+            const auto error=GetLastError(); std::error_code ignored; std::filesystem::remove(temporary,ignored);
+            return HResultFailure("Publish scene-probe package",HRESULT_FROM_WIN32(error));
+        }
+        return Result::Success();
     }
     if (request.view_id != kMainRenderViewId &&
         !impl_->owned_views.contains(request.view_id.value))
@@ -2431,6 +2474,11 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         break;
     case CaptureKind::VisibilityDiagnostics:
         result = CaptureVisibilityDiagnostics(request.path);
+        break;
+    case CaptureKind::SceneProbePackage:
+        // Handled above before view-scoped capture routing.
+        result = Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
+                                 "Scene-probe package capture was not dispatched.");
         break;
     default:
         // The request kind was checked above; keep the switch exhaustive if the

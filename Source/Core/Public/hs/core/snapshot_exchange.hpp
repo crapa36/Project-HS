@@ -25,6 +25,8 @@ class RenderSnapshotExchange
     {
         RenderSnapshot previous{};
         RenderSnapshot current{};
+        Sequence previous_publication_sequence{};
+        Sequence current_publication_sequence{};
         bool has_previous{};
         bool has_current{};
     };

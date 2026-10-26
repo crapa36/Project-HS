@@ -14,6 +14,11 @@ namespace hs
         requested.graphics.preset = *config.graphics_preset;
         ApplyGraphicsPreset(requested.graphics);
     }
+    if (config.pom_quality)
+    {
+        requested.graphics.pom_quality = *config.pom_quality;
+        requested.graphics.preset = GraphicsPreset::Custom;
+    }
     // Smoke runs use process graphics defaults, independent of a saved profile.
     if (config.resolution_explicit || config.smoke)
     {

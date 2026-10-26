@@ -105,6 +105,10 @@ struct FrameContext
     bool timestamps_recorded{};
     std::uint64_t submitted_frame_id{};
     std::uint32_t submitted_view_id{};
+    GpuFrameTimingKind timing_kind{GpuFrameTimingKind::Unavailable};
+    std::uint64_t timing_generation{}, timing_resize_epoch{};
+    ViewExtent timing_render_active;
+    bool timing_main_view{}, timing_frame_generation_enabled{};
     std::uint64_t cpu_qpc_frequency{};
     mutable std::uint64_t timing_stream_published_frame_id{};
     float cpu_recording_ms{};

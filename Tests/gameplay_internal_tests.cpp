@@ -461,8 +461,8 @@ void TestBalanceHitDeduplication()
         if (first) reference.push_back(cast);
         Check(observer.RecordHit(observer.player_hit_casts, cast) == first,
               "delayed and repeated hits preserve first-hit attribution");
-        for (auto &enemy : observer.enemy_hit_casts)
-            Check(observer.RecordHit(enemy, cast) == first,
+        for (std::size_t index = 0; index < observer.enemy_hit_casts.size(); ++index)
+            Check(observer.RecordEnemyHit(index, cast) == first,
                   "enemy archetypes independently deduplicate the same cast");
     }
     Check(observer.player_hit_casts.size() == reference.size(),
@@ -474,6 +474,22 @@ void TestBalanceHitDeduplication()
           "run reset clears metrics and player hit history");
     for (auto &enemy : observer.enemy_hit_casts)
         Check(observer.RecordHit(enemy, 50), "run reset clears every enemy history");
+
+    observer.player_hit_casts = {0, 4, 9};
+    observer.enemy_hit_casts[0] = {4, 9};
+    observer.enemy_seen_zero[0] = true;
+    observer.active_player_casts = {9, 9};
+    observer.active_enemy_casts[0] = {9, 9};
+    observer.RetireInactiveCauses();
+    Check(observer.player_hit_casts == std::vector<std::uint64_t>{9} &&
+              observer.enemy_hit_casts[0] == std::vector<std::uint64_t>{9},
+          "retirement preserves only active future causes and deduplicates membership");
+    Check(!observer.RecordEnemyHit(0, 0),
+          "enemy cast zero remains a fixed per-archetype seen key after retirement");
+    observer.Reset(false);
+    Check(!observer.metrics.detailed_balance_captured &&
+              observer.player_hit_casts.empty() && !observer.enemy_seen_zero[0],
+          "session reset marks disabled detail and clears all retained causes");
 }
 
 void TestBleedActivePrefix()
@@ -628,6 +644,46 @@ void TestSweptSpatialGridOrder()
         unique.Collect(grid, {0, 0}, {8, 8}, 60, count);
         Check(unique.rows == inner.rows, "retained visits reset between queries");
     }
+
+    grid.MarkBuilt(17, 23);
+    Check(grid.IsCurrent(17, 23) && !grid.IsCurrent(18, 23) &&
+              !grid.IsCurrent(17, 24),
+          "swept grid freshness requires both matching tick and actor generation");
+
+    EnemySpatialGrid unordered_grid;
+    unordered_grid.BeginBuild();
+    unordered_grid.AddRange(0, 20, 20, 20, 20);
+    unordered_grid.AddRange(1, 2, 2, 2, 2);
+    unordered_grid.FinishBuild();
+    EnemyQuery fast, canonical;
+    fast.Collect(unordered_grid, {-60, -60}, {60, 60}, 60, 2, false);
+    canonical.Collect(unordered_grid, {-60, -60}, {60, 60}, 60, 2, true);
+    Check(fast.rows == std::vector<std::size_t>{1, 0} &&
+              canonical.rows == std::vector<std::size_t>{0, 1},
+          "projectile broad phase can preserve visit order while canonical queries sort rows");
+}
+
+void TestSlowMultiplierIsReadOnly()
+{
+    using namespace hs;
+    using namespace hs::gameplay_detail;
+    PickupWorld world;
+    InitializePickupFixture(world);
+    Check(world.SpawnEnemy(EnemyKind::Melee, {2.0f, 0.0f}),
+          "slow read fixture enemy spawn");
+    world.actors->enemies.AppendFrom(world.actors->pending_enemy_spawns);
+    world.tick = 100;
+    auto enemy = world.actors->enemies[0];
+    enemy.status.slows = {{0.5f, 101}, {0.75f, 99}, {0.25f, 102}};
+    const auto before = enemy.status.slows;
+    Check(world.SlowMultiplier(enemy) == 0.375f &&
+              enemy.status.slows.size() == before.size() &&
+              std::ranges::equal(enemy.status.slows, before, [](const auto &a, const auto &b) {
+                  return a.reduction == b.reduction && a.expires == b.expires &&
+                      a.source_skill == b.source_skill && a.source_upgrade == b.source_upgrade &&
+                      a.source_relic == b.source_relic;
+              }),
+          "slow read ignores expired effects without erasing or reordering stored state");
 }
 
 void TestCastCleanupMembership()
@@ -797,6 +853,7 @@ int main(int argc, char **argv)
               "phase-specific visibility barriers are explicit and ordered");
         TestSpatialGridAgainstBruteForce();
         TestSweptSpatialGridOrder();
+        TestSlowMultiplierIsReadOnly();
         TestCastCleanupMembership();
         TestHitIndexCleanup();
         TestBalanceHitDeduplication();

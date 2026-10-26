@@ -83,6 +83,8 @@ Presentation prepares an immutable ProcessSceneLayout for the actual launch seed
 generation and environment geometry. Runtime retains that owner across session
 restarts with the same layout. Render packets share its read-only Core
 StaticRenderScene view; mutable scene storage is frozen before publication.
+Core snapshot read pairs expose the publication sequence of each retained slot;
+tick/session values alone are not a publication identity.
 Renderer prepares HLOD member mappings and proxy bindings once per retained scene
 and refreshes only residency-dependent fields each frame.
 
@@ -112,12 +114,23 @@ VfxImageData owns mutable vectors and the shared decoder/static-policy preparati
 in hs_vfx_image_io, backed by the CPU-only hs_vfx_program_io format reader.
 Developer Catalog file loading is hs_runtime_vfx_io. These decoders are absent
 from the Release Runtime link, and IO libraries build only when consumed.
+Runtime retains each adapted VFX event payload once in a stable-order
+ActiveEffectStore; profile lists and entity-surface captures hold private row
+references. PreparedPairFacts indexes only the retained snapshot pair by its
+publication sequences, and frame adapters still recompute live age and geometry.
 Light output recipes and their effect ranges are prepared by that same CPU IO
 phase and emitted as immutable tables; Runtime evaluates only live input/time.
 Renderer accepts font bytes and DirectWrite owns its copy after initialization.
 Release reads the generated, verified font range from the pack; developer hosts
 load their explicit font input. Renderer texture/shader/bulk deployment still uses
 selected Generation products; this cutover does not complete those domains.
+
+Runtime pairs small UI/session facts with each snapshot publication. Only the
+matching successful main-Present receipt promotes that frame's draw layout into
+the bounded latest UI packet. Main hit testing uses its rects and displayed
+facts; queued gameplay actions retain the packet/session/selection identity and
+are revalidated against the current simulation facts before application. This is
+a Present-accepted input contract, not a physical scan-out receipt.
 
 RendererD3D12 is the single concrete platform backend. D3D12 types stay inside that boundary and Runtime/Apps that compose it. A generic renderer interface, factory, or registry is unwarranted without a real second backend.
 
@@ -126,7 +139,9 @@ and lossless page decoders. RendererD3D12 exposes a synchronous offline depth ba
 canonical environment geometry, full source texture mips and the existing material
 opacity shaders. It can run immediately after renderer initialization. Apps own
 file publication and Generation selection. When content tools are enabled, the
-existing render-test host also publishes the native bake through AssetPipeline.
+dedicated Apps target `hs_static_shadow_bake` publishes the native bake through
+AssetPipeline. Its producer identity follows RendererD3D12 implementation changes;
+unrelated render-test host edits do not invalidate the archive.
 The explicit hs_render_static_shadow_candidate target uses a shadow-free input
 Generation; its output is composed into runtime-full after the shadow-free input.
 Gameplay projection and the baker share Presentation's fixed environment-sun direction. Ordinary runtime shadow
@@ -141,6 +156,9 @@ only when baked supply, all receiver domains and current coarse-page command
 capacity are guaranteed. Otherwise the actual CSM remains registered. Software
 GI retains CSM until its off-camera receiver domain is closed. CPU policy and
 completed GPU publication are separate diagnostics.
+CPU frame/task capture can omit GPU timing queries and their measurement-only
+resolve. This is explicit in diagnostic metadata; absent GPU measurements are
+not zero-duration work. Active DRS retains its required reference timing samples.
 The fixed shadow command allocation is partitioned by actual coarse demand and
 active-group weight for approved no-CSM frames. Fallback frames retain the
 original floor division. CPU admission, GPU scatter and native indirect draws

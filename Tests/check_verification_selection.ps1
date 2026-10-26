@@ -38,17 +38,23 @@ set_tests_properties(cleanup PROPERTIES FIXTURES_CLEANUP sample)
         Set-Content (Join-Path $fixtureRoot 'check.cmake')
     & $CMake -S $fixtureRoot -B $buildRoot -G Ninja "-DCMAKE_MAKE_PROGRAM=$Ninja" | Out-Null
     Assert ($LASTEXITCODE -eq 0) 'fixture configure failed'
-    $metadata = Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot
-    $exact = @(Select-HsExactTests $metadata @('literal.test', 'literal.test'))
-    Assert ($exact.Count -eq 1 -and $exact[0].name -ceq 'literal.test') 'exact selection must deduplicate without regex expansion'
-    $rejected = $false
-    try { Select-HsExactTests $metadata @('literal.*') | Out-Null } catch { $rejected = $true }
-    Assert $rejected 'unknown exact names must fail'
     $selectionFile = Join-Path $fixtureRoot 'selected.txt'
-    [IO.File]::WriteAllLines($selectionFile, [string[]]@('literal.test'), [Text.UTF8Encoding]::new($false))
-    $selected = @((Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot -TestNamesFile $selectionFile).tests)
+    $requested = @('literal.test', 'literal.test')
+    [IO.File]::WriteAllLines($selectionFile, [string[]]$requested, [Text.UTF8Encoding]::new($false))
+    $metadata = Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot -TestNamesFile $selectionFile
+    $exact = @(Select-HsExactTests $metadata $requested)
+    Assert ($exact.Count -eq 1 -and $exact[0].name -ceq 'literal.test') 'exact selection must deduplicate without regex expansion'
+    $selected = @($metadata.tests)
     $selectedNames = @($selected | ForEach-Object { $_.name } | Sort-Object)
     Assert (($selectedNames -join ',') -ceq 'cleanup,literal.test,setup') 'CTest must expand required fixture setup and cleanup'
+    $invalidFile = Join-Path $fixtureRoot 'invalid.txt'
+    foreach ($invalid in @(@{ Names = @('literal.*') }, @{ Names = @('literal.test', 'literal.*') })) {
+        [IO.File]::WriteAllLines($invalidFile, [string[]]$invalid.Names, [Text.UTF8Encoding]::new($false))
+        $invalidMetadata = Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot -TestNamesFile $invalidFile
+        $rejected = $false
+        try { Select-HsExactTests $invalidMetadata $invalid.Names | Out-Null } catch { $rejected = $true }
+        Assert $rejected 'unknown literal names must fail even when mixed with valid tests and expanded fixtures'
+    }
     $labelSelection = @((Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot -Labels @('label[.]')).tests)
     Assert ((@($labelSelection | ForEach-Object { $_.name } | Sort-Object) -join ',') -ceq ($selectedNames -join ',')) 'label selection must remain literal and include fixtures'
     $targets = @($selected | ForEach-Object { "test_prep/$($_.name)" })
@@ -57,8 +63,13 @@ set_tests_properties(cleanup PROPERTIES FIXTURES_CLEANUP sample)
     Assert (!(Test-Path (Join-Path $buildRoot 'unrelated'))) 'partial preparation must not build unrelated targets'
     & $ctest --test-dir $buildRoot --tests-from-file $selectionFile --no-tests=error --output-on-failure
     Assert ($LASTEXITCODE -eq 0) 'selected fixture execution failed'
-    & $ctest --test-dir $buildRoot -R '^literalXtest$' --no-tests=error --output-on-failure *> (Join-Path $fixtureRoot 'failure.log')
-    Assert ($LASTEXITCODE -ne 0) 'native test failure must remain a failure'
+    try {
+        # Windows PowerShell converts native stderr to errors; this failure is intentional.
+        $ErrorActionPreference = 'Continue'
+        & $ctest --test-dir $buildRoot -R '^literalXtest$' --no-tests=error --output-on-failure *> (Join-Path $fixtureRoot 'failure.log')
+        $failureExitCode = $LASTEXITCODE
+    } finally { $ErrorActionPreference = 'Stop' }
+    Assert ($failureExitCode -ne 0) 'native test failure must remain a failure'
     Write-Output 'Exact selection, labels, fixture prerequisite partial builds, and native failure contracts passed.'
 } finally {
     $resolved = [IO.Path]::GetFullPath($fixtureRoot)

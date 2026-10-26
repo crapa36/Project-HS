@@ -5,12 +5,16 @@
 #include <hs/core/types.hpp>
 #include <hs/renderer/hero_work.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <vector>
 
 namespace hs
 {
+
+enum class SurfaceFrontend : std::uint8_t;
+enum class GeometryFrontend : std::uint8_t;
 
 struct ApplicationTimelineAction
 {
@@ -53,10 +57,14 @@ struct ApplicationConfig
     std::uint32_t skill_vfx_upgrade_mask{0xFFu};
     Float2 skill_vfx_aim{0.0f, 9.0f};
     bool capture_diagnostics{}; // Opt in to full performance CSV/NDJSON; ordinary play writes no detailed logs.
+    bool capture_gpu_timings{true}; // Diagnostics may record CPU cadence without intrusive GPU queries.
     std::uint32_t diagnostic_enemy_count{}; // Smoke + diagnostics only; zero keeps ordinary spawning.
     bool capture_hero_work{}; // Isolated developer native-query capture; ordinary performance runs leave false.
     HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
     std::optional<GraphicsPreset> graphics_preset;
+    std::optional<SurfaceFrontend> surface_frontend;
+    std::optional<GraphicsOptionalQuality> pom_quality;
+    std::optional<GeometryFrontend> geometry_frontend;
     bool record_playtest{};
     bool replay_compare{};
     std::uint32_t width{1280};

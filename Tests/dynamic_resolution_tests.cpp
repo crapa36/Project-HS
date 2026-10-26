@@ -18,7 +18,7 @@ void Check(bool condition, std::string_view message)
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
-constexpr DynamicResolutionSample slow_sample{true, false, true, 30.0};
+constexpr DynamicResolutionSample slow_sample{true, false, true, 30.0, DynamicResolutionMetricKind::ReferenceGraphSpan};
 
 void TestPreparedIntegerDomains()
 {
@@ -75,7 +75,7 @@ void TestHardBoundsBeforeAlignmentAndRate()
         const DynamicResolutionConfig config{true, 60, 50, 50};
         // Target-rate timing must not let the aggregate width/height scale hide
         // an invalid individual dimension behind the hysteresis early return.
-        const auto selected = controller.Select(view, config, {true, false, true, 1000.0 / 60.0});
+        const auto selected = controller.Select(view, config, {true, false, true, 1000.0 / 60.0, DynamicResolutionMetricKind::ReferenceGraphSpan});
         Check(selected.sample_accepted && selected.changed && selected.active_extent == ViewExtent{960, 540},
               "hard bounds beat alignment, per-sample rate and hysteresis");
         const auto epoch = view.resize_epoch;
@@ -125,17 +125,18 @@ void TestOrdinaryRateAndIgnoredSamples()
     Check(controller.Select(view, config, slow_sample).active_extent == view.render_active,
           "a subpixel rate bound does not force an aligned step");
     for (const auto sample : std::array{
-             DynamicResolutionSample{false, false, true, 30},
-             DynamicResolutionSample{true, true, true, 30},
-             DynamicResolutionSample{true, false, false, 30},
-             DynamicResolutionSample{true, false, true, 0},
-             DynamicResolutionSample{true, false, true, std::numeric_limits<double>::quiet_NaN()},
-             DynamicResolutionSample{true, false, true, std::numeric_limits<double>::infinity()}})
+             DynamicResolutionSample{true, false, true, 30},
+             DynamicResolutionSample{false, false, true, 30, DynamicResolutionMetricKind::ReferenceGraphSpan},
+             DynamicResolutionSample{true, true, true, 30, DynamicResolutionMetricKind::ReferenceGraphSpan},
+             DynamicResolutionSample{true, false, false, 30, DynamicResolutionMetricKind::ReferenceGraphSpan},
+             DynamicResolutionSample{true, false, true, 0, DynamicResolutionMetricKind::ReferenceGraphSpan},
+             DynamicResolutionSample{true, false, true, std::numeric_limits<double>::quiet_NaN(), DynamicResolutionMetricKind::ReferenceGraphSpan},
+             DynamicResolutionSample{true, false, true, std::numeric_limits<double>::infinity(), DynamicResolutionMetricKind::ReferenceGraphSpan}})
     {
         controller.Reset();
         const auto ignored = controller.Select(view, config, sample);
         Check(!ignored.sample_accepted && !ignored.changed && ignored.active_extent == view.render_active,
-              "uncompleted/generated/CPU-limited/invalid samples do not select an extent");
+              "unqualified-metric/uncompleted/generated/CPU-limited/invalid samples do not select an extent");
     }
     config.enabled = false;
     Check(!controller.Select(view, config, slow_sample).sample_accepted, "disabled DRS ignores timing");

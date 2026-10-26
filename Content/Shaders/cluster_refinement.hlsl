@@ -8,7 +8,7 @@ cbuffer ClusterRefinementConstants : register(b0, space6)
     uint CandidateCount, GroupCount, ClusterCount, ChildCount;
     uint PageCount, OutputCapacity, GeometryDrawBase, ContentGeneration;
     uint PrefixStage, PrefixBlockCount, MaxAncestorSteps, GeometryFrontendFlags;
-    uint ClusterRefBase, RasterRecordBase, MaterialWord, Reserved;
+    uint ClusterRefBase, RasterRecordBase, MaterialWord, ActiveViewMask;
     float4 CameraOriginNear;
     float4 ViewRight, ViewUp, ViewForward;
     float4 ProjectionScale;
@@ -180,7 +180,7 @@ bool ConstantsValid()
         PreviousPages.GetDimensions(count, stride); valid = valid && PageCount <= count;
         PreviousCutStatus.GetDimensions(count); valid = valid && count >= 48u;
     }
-    valid = valid && CandidateCount != 0u && ContentGeneration != 0u && Reserved == 0u && (GeometryFrontendFlags == 0u || GeometryFrontendFlags == 2u) &&
+    valid = valid && CandidateCount != 0u && ContentGeneration != 0u && (ActiveViewMask & ~15u) == 0u && (GeometryFrontendFlags == 0u || GeometryFrontendFlags == 2u) &&
         PrefixBlockCount == CandidateCount / 64u + (CandidateCount % 64u != 0u ? 1u : 0u) &&
         all(isfinite(CameraOriginNear)) && CameraOriginNear.w > 0.0 &&
         all(isfinite(ViewRight)) && all(isfinite(ViewUp)) && all(isfinite(ViewForward)) &&
@@ -381,7 +381,7 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
-    candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
+    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint cache_stride = OutputCapacity / CandidateCount;
     const uint cache_base = CandidateCount * 2u + candidate_index * cache_stride;
     uint selected_groups = 0u;
@@ -563,7 +563,7 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
-    candidate.ViewMask &= HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
+    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
     const uint2 expected = CutCounts[candidate_index];

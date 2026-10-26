@@ -26,6 +26,7 @@ struct OwnedViewProbeEvidence
     RendererFrameResult final_frame;
     std::uint64_t submissions_before{}, submissions_after_bad_preflight{}, submissions_after{};
     bool duplicate_rejected{}, nonfinite_origin_rejected{}, rejected_outputs_unchanged{}, stale_diagnostics_rejected{};
+    bool nonfinite_flash_history_rejected{};
     std::array<std::filesystem::path, 2> captures;
     std::filesystem::path hdr_capture;
 };
@@ -60,19 +61,21 @@ inline bool SameStamp(const RenderViewFrameResult &a, const RenderViewFrameResul
         SameView(a.rendered_view, b.rendered_view) &&
         a.unjittered_view_projection == b.unjittered_view_projection;
 }
-inline bool SameResultEvidence(const RendererFrameResult &a, const RendererFrameResult &b)
+inline bool SameRejectedResultEvidence(const RendererFrameResult &a, const RendererFrameResult &b)
 {
     return a.frame == b.frame && SameIdentity(a.identity, b.identity) &&
         a.view_history_generation == b.view_history_generation && SameView(a.rendered_view, b.rendered_view) &&
         a.unjittered_view_projection == b.unjittered_view_projection &&
-        a.views.size() == b.views.size() && std::ranges::equal(a.views, b.views, SameStamp);
+        a.views.size() == b.views.size() && std::ranges::equal(a.views, b.views, SameStamp) &&
+        !a.vfx_world_step_submitted && a.vfx_world_tick == 0 && a.vfx_world_session_id == 0 &&
+        a.presented_ui_packet_generation == 0;
 }
 } // namespace owned_view_probe_detail
 
 // Opt-in integration probe. The caller owns the ordinary internal renderer
 // configuration and snapshot leases. This helper never requests a native SDK
 // provider or manufactures a provider token. It performs exactly three frame
-// packages, two rejected preflights and two captures of persistent view output.
+// packages, three rejected preflights and two captures of persistent view output.
 inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
     const RenderSnapshotExchange::ReadPair &snapshots, const std::filesystem::path &artifacts,
     AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
@@ -202,17 +205,29 @@ inline Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const RenderFrameInput duplicate_input{.views = duplicate, .snapshots = snapshots};
             const auto rejected_duplicate = renderer.Render(duplicate_input, result);
             evidence.duplicate_rejected = !rejected_duplicate && rejected_duplicate.Code() == ErrorCode::InvalidArgument;
-            const bool duplicate_preserved = SameResultEvidence(result, accepted) &&
+            const bool duplicate_preserved = SameRejectedResultEvidence(result, accepted) &&
                 renderer.GetDiagnostics().total_rendered_frames == before;
             auto nonfinite = views; nonfinite[2].view_origin.x = std::numeric_limits<double>::quiet_NaN();
             const RenderFrameInput nonfinite_input{.views = nonfinite, .snapshots = snapshots};
             const auto rejected_nonfinite = renderer.Render(nonfinite_input, result);
             evidence.nonfinite_origin_rejected = !rejected_nonfinite && rejected_nonfinite.Code() == ErrorCode::InvalidArgument;
+            const bool nonfinite_preserved = SameRejectedResultEvidence(result, accepted) &&
+                renderer.GetDiagnostics().total_rendered_frames == before;
+            VfxFlashSpawnInput flash{};
+            flash.size = flash.lifetime = flash.hdr = 1.0f;
+            flash.interpolate_owner_position = true;
+            flash.previous_position.x = std::numeric_limits<float>::quiet_NaN();
+            RenderFrameInput bad_flash_input{.views = views, .snapshots = snapshots};
+            bad_flash_input.vfx.flashes = std::span(&flash, 1);
+            const auto rejected_flash = renderer.Render(bad_flash_input, result);
+            evidence.nonfinite_flash_history_rejected = !rejected_flash &&
+                rejected_flash.Code() == ErrorCode::InvalidArgument;
             evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
-            evidence.rejected_outputs_unchanged = duplicate_preserved && SameResultEvidence(result, accepted) &&
+            evidence.rejected_outputs_unchanged = duplicate_preserved && nonfinite_preserved && SameRejectedResultEvidence(result, accepted) &&
                 evidence.submissions_after_bad_preflight == before;
-            if (!evidence.duplicate_rejected || !evidence.nonfinite_origin_rejected || !evidence.rejected_outputs_unchanged)
-                return Failure("Duplicate/nonfinite preflight was accepted or mutated submission/result evidence.");
+            if (!evidence.duplicate_rejected || !evidence.nonfinite_origin_rejected ||
+                !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged)
+                return Failure("Duplicate/nonfinite view or flash preflight was accepted or mutated submission/result evidence.");
         }
     }
     evidence.final_frame = std::move(result);
@@ -268,6 +283,7 @@ inline nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence
         {"submissions_after_bad_preflight", evidence.submissions_after_bad_preflight},
         {"submissions_after", evidence.submissions_after}, {"duplicate_rejected", evidence.duplicate_rejected},
         {"nonfinite_origin_rejected", evidence.nonfinite_origin_rejected},
+        {"nonfinite_flash_history_rejected", evidence.nonfinite_flash_history_rejected},
         {"rejected_outputs_unchanged", evidence.rejected_outputs_unchanged},
         {"stale_diagnostics_rejected", evidence.stale_diagnostics_rejected},
         {"captures", {evidence.captures[0].filename().string(), evidence.captures[1].filename().string()}},

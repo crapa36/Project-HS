@@ -6,13 +6,15 @@
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/presentation/meadow_surface.hpp>
+#include <hs/render_data/scene_probe.hpp>
 #include <hs/renderer/renderer.hpp>
 #include <hs/renderer/render_frame_input.hpp>
 #include <hs/renderer/vfx_program_loader.hpp>
 #include "view_fixture.hpp"
 #include "static_shadow_bake_probe.hpp"
-#if defined(HS_STATIC_SHADOW_ACTION_ENABLED)
-#include "static_shadow_action.hpp"
+#include "../Common/world_transport_scene.hpp"
+#if defined(HS_SCENE_PROBE_ACTION_ENABLED)
+#include "scene_probe_action.hpp"
 #endif
 #include <hs/jobs/task_system.hpp>
 #include <nlohmann/json.hpp>
@@ -309,11 +311,18 @@ bool ValidateHeroWaterShadowProbe(Json &probe, const std::map<std::uint64_t, hs:
             return pass.pass_id == 226 && pass.queue == hs::RenderQueue::Copy;
         });
         const bool seed = gpu.valid && gpu.fence_completed && seed_pass != gpu.passes.end();
+        const bool root_commands = std::ranges::any_of(gpu.passes, [](const auto &pass) {
+            return pass.pass_id == 228 && (pass.queue == hs::RenderQueue::Compute || pass.queue == hs::RenderQueue::Copy);
+        });
+        const bool root_draw = seen(229), fixed_root = root_commands && root_draw;
+        check(root_commands == root_draw, "fixed-root command generation and depth producer must both complete");
         row["gpu_completed"] = gpu.valid && gpu.fence_completed;
         row["csm_pass2_present"] = csm;
         row["vsm_static_bank_completed"] = bank; row["vsm_publish_completed"] = publish;
         row["vsm_shadow_data_ready_completed"] = ready; row["coarse_seed_upload_completed"] = seed;
         row["coarse_seed_upload_timestamp_measured"] = seed && seed_pass->measured;
+        row["fixed_root_commands_completed"] = root_commands;
+        row["fixed_root_depth_completed"] = root_draw;
         row["completed_passes"] = Json::array();
         for (const auto &pass : gpu.passes)
             row["completed_passes"].push_back({{"pass_id", pass.pass_id}, {"name", pass.name},
@@ -324,14 +333,15 @@ bool ValidateHeroWaterShadowProbe(Json &probe, const std::map<std::uint64_t, hs:
         {
             check(!csm, "CPU approved frame still executed the CSM producer");
             check(row.at("guarantee_reason_bits").get<std::uint32_t>() == 1 &&
-                row.at("baked_active").get<bool>() && row.at("required_coarse_pages").get<std::uint32_t>() != 0 &&
-                row.at("baked_pages").get<std::uint32_t>() >= row.at("required_coarse_pages").get<std::uint32_t>() &&
+                row.at("baked_active").get<bool>() &&
+                (fixed_root || (row.at("required_coarse_pages").get<std::uint32_t>() != 0 &&
+                 row.at("baked_pages").get<std::uint32_t>() >= row.at("required_coarse_pages").get<std::uint32_t>())) &&
                 row.at("baked_staging_bytes").get<std::uint64_t>() != 0 && bank && publish && ready,
                 "approved coarse path lacks completed resource producer/publication evidence");
         }
         else check(csm, "conservative fallback did not execute the actual CSM producer");
         const auto ordinal = row.at("fixture_frame").get<std::uint32_t>();
-        if (ordinal == 1) { first_positive = positive; if (positive) check(seed, "first positive frame did not complete coarse seed upload"); }
+        if (ordinal == 1) { first_positive = positive; if (positive && !fixed_root) check(seed, "first positive frame did not complete coarse seed upload"); }
         if (ordinal == 2) { mismatch_fallback = prepared && required && csm; check(!positive && csm, "changed light did not use real fallback"); }
         if (ordinal >= 3 && !positive) restored_positive = false;
         last_positive = positive;
@@ -567,72 +577,6 @@ std::shared_ptr<const hs::StaticRenderScene> Scene(std::string_view generation)
     }
     return hs::FreezeStaticRenderScene(std::move(scene));
 }
-
-std::shared_ptr<const hs::StaticRenderScene> WorldTransportScene(
-    const hs::SelectedGeneration &generation)
-{
-    std::filesystem::path rules_path;
-    Require(generation.Require("game-data/simulation-rules", rules_path));
-    hs::SimulationRules rules;
-    Require(hs::LoadSimulationRules(rules_path, rules));
-    if (rules.arena_obstacle_count > rules.arena_obstacles.size())
-        throw std::runtime_error("simulation rules contain an invalid obstacle count");
-    auto layout = hs::BuildEnvironmentLayout(rules.arena_half_extent, rules.arena_boundary,
-        std::span(rules.arena_obstacles).first(rules.arena_obstacle_count), 0);
-    if (layout.eligible_static_members.empty())
-        throw std::runtime_error("production arena has no HLOD eligible static members");
-    auto scene = std::make_unique<hs::StaticRenderSceneStorage>();
-    scene->content_generation_id = generation.id;
-    scene->scene_asset_id = hs::MakeAssetId("render/hlod/arena.shl1");
-    scene->layout_abi = layout.abi;
-    scene->eligible_layout_digest = layout.eligible_digest;
-    for (const auto &member : layout.eligible_static_members)
-        scene->eligible_static_members.push_back(
-            {member.stable_id, member.object_id, member.instance_index});
-    scene->instances = std::move(layout.instances);
-    return hs::FreezeStaticRenderScene(std::move(scene));
-}
-
-#if defined(HS_STATIC_SHADOW_ACTION_ENABLED)
-void BakeStaticShadowGeneration(const hs::SelectedGeneration &generation,
-    const std::shared_ptr<const hs::StaticRenderScene> &scene,
-    const std::filesystem::path &artifacts,
-    const hs::render_test::BeginStaticShadowArchive &begin,
-    const hs::render_test::WriteStaticShadowPage &write_page)
-{
-    hs::RendererConfig config;
-    auto startup_font = ReadDeveloperFont();
-    config.font_bytes = startup_font;
-    config.width = 320; config.height = 180;
-    config.artifact_directory = artifacts;
-    config.vsync = false; config.devtools_visible = false;
-    config.temporal_reconstruction = false;
-    config.vfx_quality = hs::VfxQuality::Low;
-    config.ao_mode = hs::GraphicsAoMode::Off;
-    config.contact_shadows = false;
-    config.reflection_mode = hs::GraphicsReflectionMode::Off;
-    config.volumetric_quality = hs::GraphicsOptionalQuality::Off;
-    config.content_generation_id = generation.id;
-    config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
-    config.product_paths = generation.product_paths;
-    config.product_digests = generation.product_digests;
-    TestWindow window;
-    window.Create(config.width, config.height);
-    config.window = window.handle;
-    hs::D3D12Renderer renderer;
-    Require(renderer.Initialize(config));
-    config.font_bytes = {};
-    std::vector<std::byte>().swap(startup_font);
-    hs::LightView sun;
-    sun.direction = hs::kEnvironmentSunDirection;
-    sun.quantity = 50000.0f; sun.color = {1.0f, .94f, .86f};
-    sun.stable_id = 0x535342414b450001ull;
-    sun.shadow_flags = hs::kLightShadowRequested;
-    Require(renderer.BakeStaticShadowPages(scene, sun, begin, write_page));
-    Require(renderer.Shutdown());
-    if (renderer.ValidationErrorCount()) throw std::runtime_error("Static shadow producer reported native validation errors");
-}
-#endif
 
 hs::AssetId SelectedArcherAsset(const hs::SelectedGeneration &generation)
 {
@@ -1299,10 +1243,10 @@ void ValidateGpuLodGrowthSteady(const std::filesystem::path &path, Json &receipt
 
 int main(int argc, char **argv)
 {
-#if defined(HS_STATIC_SHADOW_ACTION_ENABLED)
+#if defined(HS_SCENE_PROBE_ACTION_ENABLED)
     for (int index = 1; index < argc; ++index)
-        if (std::string_view(argv[index]) == "--produce-static-shadow")
-            return hs::render_test::ProduceStaticShadow(argc, argv, WorldTransportScene, BakeStaticShadowGeneration);
+        if (std::string_view(argv[index]) == "--produce-scene-probe")
+            return hs::render_test::ProduceSceneProbe(argc, argv);
 #endif
     Json receipt{{"schema_version", 1}, {"runner", "render-only"},
         {"fixture", "static-environment-moving-player-v1"}, {"execution_valid", false}};
@@ -1322,13 +1266,14 @@ int main(int argc, char **argv)
     try
     {
         hs::RendererConfig config;
-
+        config.capture_timing_stream = true;
         config.vsync = false;
         config.interpolate = false;
         config.devtools_visible = false;
         std::filesystem::path pointer;
         std::filesystem::path material_reload_pointer;
         std::filesystem::path material_reload_invalid_pointer;
+        std::filesystem::path scene_probe_output;
         std::uint32_t frames = 60;
         bool frames_explicit{};
         bool persistent_scene_probe{};
@@ -1345,6 +1290,7 @@ int main(int argc, char **argv)
         bool gameplay_scene{};
         bool static_shadow_bake_probe{};
         bool static_shadow_bake_only{};
+        bool scene_probe_bake_only{};
         bool local_probe_revision_probe{};
         bool oit_overdraw_probe{};
         std::string vfx_composition_probe;
@@ -1372,6 +1318,7 @@ int main(int argc, char **argv)
             else if (arg.starts_with("--material-reload-invalid="))
                 material_reload_invalid_pointer = arg.substr(26);
             else if (arg.starts_with("--artifacts=")) artifacts = arg.substr(12);
+            else if (arg.starts_with("--scene-probe-output=")) scene_probe_output = arg.substr(21);
             else if (arg.starts_with("--frames="))
             {
                 frames = Number(arg.substr(9), 1, 600);
@@ -1429,6 +1376,10 @@ int main(int argc, char **argv)
             else if (arg == "--gameplay-scene") gameplay_scene = true;
             else if (arg == "--static-shadow-bake-probe") gameplay_scene = static_shadow_bake_probe = true;
             else if (arg == "--static-shadow-bake-only") static_shadow_bake_only = true;
+            else if (arg == "--scene-probe-bake-only")
+            {
+                scene_probe_bake_only = true;
+            }
             else if (arg == "--local-probe-revision-probe") gameplay_scene = local_probe_revision_probe = true;
             else if (arg == "--oit-overdraw-probe") oit_overdraw_probe = true;
             else if (arg.starts_with("--vfx-composition-probe=")) vfx_composition_probe = arg.substr(24);
@@ -1810,6 +1761,29 @@ int main(int argc, char **argv)
         hs::SelectedGeneration material_reload_invalid_generation;
         failure_code = "HS_GENERATION_INVALID";
         measure("generation", [&] { Require(hs::LoadSelectedGeneration(pointer, generation)); });
+        if (scene_probe_bake_only)
+        {
+            if (scene_probe_output.empty() || !scene_probe_output.is_absolute())
+                throw std::runtime_error("Scene probe bake requires an absolute --scene-probe-output path");
+            std::filesystem::path path;
+            Require(generation.Require("render/lighting/local_probes.spkg", path));
+            std::ifstream input(path, std::ios::binary | std::ios::ate);
+            if (!input || input.tellg() <= 0) throw std::runtime_error("Scene probe bake requires a layout-only SPB1 package");
+            std::vector<std::byte> bytes(static_cast<std::size_t>(input.tellg()));
+            input.seekg(0);
+            if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+                throw std::runtime_error("Could not read the selected layout-only SPB1 package");
+            const auto package = hs::render_data::ReadSceneProbePackage(bytes, hs::MakeAssetId("render/lighting/local_probes.spkg"));
+            if (package.payload != hs::render_data::SceneProbePayload::Layout)
+                throw std::runtime_error("Scene probe bake input must contain layout metadata only");
+            frames = static_cast<std::uint32_t>(package.probes.size()) + 4;
+            frames_explicit = true;
+            config.material_quality = hs::GraphicsQuality::Ultra;
+            config.pom_quality = hs::GraphicsOptionalQuality::Ultra;
+            config.foliage_quality = hs::GraphicsQuality::Ultra;
+            config.texture_quality = hs::GraphicsQuality::Ultra;
+            config.geometry_quality = hs::GraphicsQuality::Ultra;
+        }
         receipt["generation_id"] = generation.id;
         receipt["generation_scope"] = generation.scope;
         hs::VfxEntitySurfaceCommand entity_surface_template;
@@ -1881,14 +1855,15 @@ int main(int argc, char **argv)
         config.product_paths = generation.product_paths;
         config.product_digests = generation.product_digests;
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
-        if (world_transport_probe || owned_view_probe || gameplay_scene)
+        if (world_transport_probe || owned_view_probe || gameplay_scene || scene_probe_bake_only)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
             std::filesystem::path product_path;
             Require(generation.Require(config.scene_hlod_product_id, product_path));
             Require(generation.Require("render/lighting/local_probes.spkg", product_path));
-            measure("world_scene", [&] { world_scene = WorldTransportScene(generation); });
-            receipt[world_transport_probe ? "world_transport" : "owned_view_scene"] = {
+            measure("world_scene", [&] { world_scene = hs::app::WorldTransportScene(generation); });
+            receipt[scene_probe_bake_only ? "scene_probe_bake_inputs" :
+                    world_transport_probe ? "world_transport" : "owned_view_scene"] = {
                 {"layout_abi", world_scene->layout_abi},
                 {"eligible_static_member_count", world_scene->eligible_static_members.size()},
                 {"static_instance_count", world_scene->instances.size()},
@@ -2089,7 +2064,7 @@ int main(int argc, char **argv)
             for (auto &source : current) source.revisions = {11, 22, 33, 44};
         hs::RenderSnapshotExchange::ReadPair pair;
         pair.has_current = true;
-        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene ? world_scene
+        pair.current.static_scene = world_transport_probe || owned_view_probe || gameplay_scene || scene_probe_bake_only ? world_scene
             : grid_floor_probe ? grid_floor_scene : scene;
         // The camera-basis oracle measures an unoccluded silhouette. Ordinary
         // fixture terrain/rocks otherwise occlude different pixels after roll.
@@ -2192,6 +2167,30 @@ int main(int argc, char **argv)
         std::array<hs::LightView, 3> world_lights{};
         std::vector<hs::LightView> light_list_lights;
         if (static_shadow_bake_probe) pair.current.lights = std::span(&static_shadow_sun, 1);
+        if (scene_probe_bake_only)
+        {
+            // Match Presentation's canonical production sun. WorldTransportProbe
+            // deliberately adds synthetic point/spot test lights and is not a
+            // valid authoring profile for production local-probe radiance.
+            auto &sun = world_lights[0];
+            sun.direction = hs::kEnvironmentSunDirection;
+            sun.quantity = 3.0f * hs::kLightWhiteLumensPerWatt;
+            sun.color = {1.0f, .92f, .78f};
+            sun.stable_id = 0x48535f53554e0001ull;
+            sun.type = hs::LightType::Directional;
+            sun.unit = hs::LightUnit::Lux;
+            sun.shadow_flags = hs::kLightShadowRequested;
+            pair.current.lights = std::span(world_lights).first(1);
+            receipt["scene_probe_bake_profile"] = {
+                {"id", "runtime-ultra-static-sun-v1"},
+                {"material_quality", std::string(hs::GraphicsEnumToken(config.material_quality))},
+                {"pom_quality", std::string(hs::GraphicsEnumToken(config.pom_quality))},
+                {"foliage_quality", std::string(hs::GraphicsEnumToken(config.foliage_quality))},
+                {"texture_quality", std::string(hs::GraphicsEnumToken(config.texture_quality))},
+                {"geometry_quality", std::string(hs::GraphicsEnumToken(config.geometry_quality))},
+                {"capture", "runtime-static-materials-shadows-global-sky-no-dynamic-post"},
+                {"light_stable_id", sun.stable_id}, {"lights", 1}};
+        }
         if (hero_work_probe && gameplay_scene)
         {
             world_lights[0].stable_id = 0x485753554e000001ull;
@@ -2244,6 +2243,26 @@ int main(int argc, char **argv)
                     sample.completed_frame_id <= previous)
                     throw std::runtime_error("Timing stream emitted incomplete or unsorted frame identities");
                 previous = sample.completed_frame_id;
+                if (timing_stream_probe && !config.dynamic_resolution)
+                {
+                    const auto ready = std::ranges::find(sample.passes, 38u, &hs::GpuPassTiming::pass_id);
+                    if (sample.metric_kind != hs::GpuFrameTimingKind::SourceOutputReady ||
+                        sample.critical_path_valid || !sample.output_ready_valid || !sample.main_view ||
+                        !sample.metric_generation || !sample.resize_epoch || !sample.output_ready_ticks ||
+                        !sample.output_ready_frequency || frame_result.views.size() != 1 ||
+                        sample.render_active != frame_result.views.front().rendered_view.render_active ||
+                        std::ranges::any_of(sample.passes, [](const auto &pass) { return pass.pass_id == 37; }) ||
+                        ready == sample.passes.end() || ready->name != "SourceRenderOutputReady" ||
+                        ready->queue != hs::RenderQueue::Direct || !ready->measured ||
+                        sample.output_ready_ticks != ready->end_ticks ||
+                        sample.output_ready_frequency != ready->timestamp_frequency)
+                        throw std::runtime_error("Timing stream lost the natural source-output-ready contract");
+                    if (sample.output_ready_clock_calibrated &&
+                        (!ready->clock_calibrated || !sample.output_ready_qpc_frequency ||
+                         sample.output_ready_qpc != ready->end_qpc ||
+                         sample.output_ready_qpc_frequency != ready->qpc_frequency))
+                        throw std::runtime_error("Timing stream ready endpoint has inconsistent clock calibration");
+                }
                 for (const auto &pass : sample.passes)
                     if (!pass.cpu_record_valid || pass.cpu_record_begin_qpc == 0 ||
                         pass.cpu_record_end_qpc < pass.cpu_record_begin_qpc)
@@ -2822,7 +2841,7 @@ int main(int argc, char **argv)
                             ? 1.0f / 60.0f : 0.0f}
                         : persistent_scene_probe || material_reload_probe
                         ? std::optional<float>{0.0f} : std::nullopt,
-                    .wait_for_streaming = entity_surface_probe || !vfx_composition_probe.empty()};
+                    .wait_for_streaming = scene_probe_bake_only || entity_surface_probe || !vfx_composition_probe.empty()};
                 if (provider_switch_probe)
                 {
                     std::uint64_t input_token{};
@@ -2838,6 +2857,10 @@ int main(int argc, char **argv)
                         Require(renderer.Render(render_input, frame_result));
                     });
                 else Require(renderer.Render(render_input, frame_result));
+                if (!frame_result.vfx_world_step_submitted ||
+                    frame_result.vfx_world_tick != pair.current.header.tick ||
+                    frame_result.vfx_world_session_id != pair.current.header.session_id)
+                    throw std::runtime_error("Submitted world-step receipt does not match the rendered session/tick");
                 if (hero_layer_probe)
                 {
                     const auto status = renderer.GetGraphicsSettingsStatus();
@@ -2901,6 +2924,13 @@ int main(int argc, char **argv)
                         if (timing_stream_history.size() != before_duplicate_read)
                             throw std::runtime_error("Repeated timing read republished a completed frame");
                     }
+                }
+                if (!timing_stream_probe && !(hero_work_probe && gameplay_scene))
+                {
+                    // Timing consumers above retain the latest sample; only the
+                    // explicit stream probes need the consume-once history.
+                    std::vector<hs::GpuPassTimings> unused_timings;
+                    Require(renderer.ConsumeCompletedGpuPassTimings(unused_timings));
                 }
                 if (vfx_composition_probe == "switch")
                 {
@@ -3359,12 +3389,30 @@ int main(int argc, char **argv)
             for (std::uint64_t frame = 1; frame <= frames; ++frame)
                 if (!timing_stream_history.contains(frame))
                     throw std::runtime_error("Timing stream omitted an intermediate completed frame");
+            if (!config.dynamic_resolution)
+            {
+                const auto &expected = timing_stream_history.begin()->second;
+                std::uint64_t previous_ready{};
+                for (const auto &entry : timing_stream_history)
+                {
+                    const auto &sample = entry.second;
+                    // This fixture never resizes or switches providers/quality.
+                    if (sample.metric_generation != expected.metric_generation || sample.resize_epoch != expected.resize_epoch ||
+                        sample.render_active != expected.render_active || sample.view_id != expected.view_id ||
+                        sample.output_ready_frequency != expected.output_ready_frequency ||
+                        sample.output_ready_ticks <= previous_ready)
+                        throw std::runtime_error("Timing stream changed its fixed epoch or regressed the Direct ready endpoint");
+                    previous_ready = sample.output_ready_ticks;
+                }
+            }
             std::vector<hs::GpuPassTimings> empty;
             Require(renderer.ConsumeCompletedGpuPassTimings(empty));
             if (!empty.empty()) throw std::runtime_error("Timing stream consume repeated drained frames");
             receipt["timing_stream"] = {{"completed_frames", timing_stream_history.size()},
                 {"live_frames", timing_stream_live}, {"drained_frames", timing_stream_drained},
-                {"all_frames_covered", true}, {"slot_wrap_and_duplicate_read", true}};
+                {"all_frames_covered", true}, {"slot_wrap_and_duplicate_read", true},
+                {"source_output_ready_contract", !config.dynamic_resolution},
+                {"fixed_epoch_ready_monotonic", !config.dynamic_resolution}};
         }
         failure_code = "HS_RENDER_CAPTURE_FAILED";
         if (config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
@@ -3390,6 +3438,29 @@ int main(int argc, char **argv)
                             throw std::runtime_error("Cluster Retest count survived the live frame's slot reuse");
                 receipt["hzb_cluster_retest"]["empty_after_slot_reuse"] = true;
             }
+        }
+        if (scene_probe_bake_only)
+        {
+            failure_code = "HS_SCENE_PROBE_BAKE_FAILED";
+            if (frames != 0 && frame_result.views.empty())
+                throw std::runtime_error("Scene probe bake completed without a rendered main view");
+            Require(renderer.Capture({.path = scene_probe_output, .kind = hs::CaptureKind::SceneProbePackage}));
+            std::ifstream baked_input(scene_probe_output, std::ios::binary | std::ios::ate);
+            if (!baked_input || baked_input.tellg() <= 0)
+                throw std::runtime_error("Native scene probe bake did not publish its SPB1 package");
+            std::vector<std::byte> baked_bytes(static_cast<std::size_t>(baked_input.tellg()));
+            baked_input.seekg(0);
+            if (!baked_input.read(reinterpret_cast<char *>(baked_bytes.data()), static_cast<std::streamsize>(baked_bytes.size())))
+                throw std::runtime_error("Could not read the native scene probe bake output");
+            const auto baked = hs::render_data::ReadSceneProbePackage(
+                baked_bytes, hs::MakeAssetId("render/lighting/local_probes.spkg"));
+            if (baked.payload != hs::render_data::SceneProbePayload::Baked)
+                throw std::runtime_error("Native scene probe bake did not emit all four payloads");
+            Require(renderer.Shutdown());
+            receipt["scene_probe_bake"] = {{"payload", "baked"}, {"probes", baked.probes.size()}, {"frames", frames}};
+            receipt["execution_valid"] = true;
+            exit_code = 0;
+            return write_receipt();
         }
         measure("capture", [&] { Require(renderer.Capture({.path = artifacts / "capture.png"})); });
         observe_world_timings();
@@ -3578,7 +3649,8 @@ int main(int argc, char **argv)
                 representative_texture.actual_resident_mip != representative_texture.target_mip ||
                 representative_texture.reclaims == 0)
                 throw std::runtime_error("Texture streaming representative did not complete at its effective mip target and reclaim staging/backing.");
-            if (residency_stats.geometry_streaming_requests < 2 ||
+            // View demand selects the families; require completion of actual requests.
+            if (residency_stats.geometry_streaming_requests == 0 ||
                 residency_stats.geometry_streaming_uploads !=
                     residency_stats.geometry_streaming_requests ||
                 residency_stats.geometry_streaming_publications !=

@@ -1,8 +1,11 @@
 #include "renderer_instance_order.hpp"
 #include "render_instance_lookup.hpp"
 #include "renderer_grass_benders.hpp"
+#include "renderer_geometry_demand.hpp"
+#include "renderer_geometry.hpp"
 
 #include <iostream>
+#include <bit>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -227,6 +230,131 @@ void TestGrassBenders()
     benders = SelectGrassBenders(scene);
     Check(benders.count == 1 && benders.instances[0] == &scene[0], "player-only grass bender");
 }
+void TestRasterIndexSuffix()
+{
+    // Duplicate triangles remain distinct canonical primitives. Each material
+    // owns two primitives; remapping only permutes within those subranges.
+    const std::array<std::uint32_t, 12> canonical{0,1,2, 0,1,2, 3,4,5, 5,6,3};
+    const std::array<std::uint32_t, 4> remap{1,0,3,2};
+    std::array<std::uint32_t, 24> storage{};
+    std::copy(canonical.begin(), canonical.end(), storage.begin());
+    const auto suffix = std::as_writable_bytes(std::span(storage).subspan(12));
+    Check(WriteGeometryRasterIndexSuffix(suffix, std::as_bytes(std::span(canonical)),
+        std::as_bytes(std::span(remap))), "raster suffix construction");
+    Check(std::equal(canonical.begin(), canonical.end(), storage.begin()), "canonical prefix changed");
+    for (std::size_t primitive = 0; primitive < remap.size(); ++primitive)
+    {
+        Check(remap[primitive] / 2 == primitive / 2, "material subrange changed");
+        for (std::size_t corner = 0; corner < 3; ++corner)
+            Check(storage[12 + primitive * 3 + corner] == canonical[remap[primitive] * 3 + corner],
+                "raster order must preserve canonical triangle corners");
+    }
+    Check(!WriteGeometryRasterIndexSuffix(suffix.first(4), std::as_bytes(std::span(canonical)),
+        std::as_bytes(std::span(remap))), "short suffix accepted");
+    Check(!WriteGeometryRasterIndexSuffix(suffix, std::as_bytes(std::span(canonical)), {}), "missing remap accepted");
+    const std::array<std::uint32_t, 4> invalid{4,0,1,2};
+    Check(!WriteGeometryRasterIndexSuffix(suffix, std::as_bytes(std::span(canonical)),
+        std::as_bytes(std::span(invalid))), "out-of-range primitive accepted");
+}
+
+void TestGeometryDemandCells()
+{
+    std::vector<GeometryDemandPoint> points{{{-0.1f, 0, 30}, 2, 0, false},
+        {{0, 0, 30}, 1, 1, true}, {{1, 2, 31}, 3, 2, false},
+        {{0, 0, 30}, std::numeric_limits<float>::infinity(), 3, false}};
+    auto cells = BuildGeometryDemandCells(points);
+    Check(cells.size() == 3 && cells[0].instances == Order{0} &&
+        cells[1].instances == Order({1, 2}) && cells[1].max_scale == 3 && cells[1].any_wind &&
+        cells[2].instances == Order{3}, "demand cell membership/negative coordinate/fallback");
+    struct Plane { float x, y, z, w; };
+    const std::array planes{Plane{1,0,0,8}, Plane{-1,0,0,8}, Plane{0,0,1,-1}};
+    float view[4][4]{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1}};
+    Check(ClassifyGeometryDemandCell(cells[2], 1, planes) == GeometryDemandCellVisibility::Partial &&
+        std::isinf(GeometryDemandCellErrorUpperBound(cells[2], 1, 1, view, 1000, .1f)),
+        "invalid inputs must remain unprunable");
+    const GeometryDemandCell near_cell{{0, 0, .05f}, {1, 1, .05f}, 1, false, {0, 1}};
+    Check(std::isinf(GeometryDemandCellErrorUpperBound(near_cell, 0, 0, view, 1000, .1f)),
+        "zero error still requires the near-branch fallback");
+    std::mt19937 random(931);
+    std::uniform_real_distribution<float> coordinate(-1000, 1000), positive(0, 10);
+    std::uniform_real_distribution<float> within_cell(.25f, 15.75f);
+    for (unsigned trial = 0; trial < 300; ++trial)
+    {
+        points.clear();
+        for (unsigned i = 0; i < 60; ++i)
+        {
+            const float base = 16.0f * (static_cast<int>(i % (2 + trial % 2)) - 1);
+            const std::array<float, 3> position = i < 30
+                ? std::array<float, 3>{base + within_cell(random), base + within_cell(random), 32 + base + within_cell(random)}
+                : std::array<float, 3>{coordinate(random), coordinate(random), coordinate(random)};
+            points.push_back({position, positive(random), i, (i & 1) != 0});
+        }
+        cells = BuildGeometryDemandCells(points);
+        Check(std::ranges::any_of(cells, [](const auto &cell) { return cell.instances.size() >= 10; }),
+            "generated scene must exercise multi-member AABBs");
+        const float angle = coordinate(random), c = std::cos(angle), s = std::sin(angle);
+        view[0][0] = c; view[0][2] = s; view[2][0] = -s; view[2][2] = c;
+        view[3][0] = coordinate(random); view[3][1] = coordinate(random); view[3][2] = coordinate(random);
+        // Reuse the same membership with changed current catalog/grass bounds.
+        for (unsigned catalog = 0; catalog < 2; ++catalog)
+        {
+        const float catalog_radius = positive(random), catalog_error = trial % 3 ? positive(random) : 0;
+        const float wind_margin = catalog ? 4.0f : .25f;
+        std::array<std::array<float, 60>, 2> references{};
+        std::vector<double> bounds;
+        for (const auto &cell : cells)
+        {
+            const float radius = catalog_radius * cell.max_scale + (cell.any_wind ? wind_margin : 0);
+            const float error = catalog_error * cell.max_scale;
+            const auto visibility = ClassifyGeometryDemandCell(cell, radius, planes);
+            const double bound = GeometryDemandCellErrorUpperBound(cell, radius, error, view, 1000, .1f);
+            bounds.push_back(bound);
+            for (const auto id : cell.instances)
+            {
+                const auto &p = points[id].position;
+                const float point_radius = catalog_radius * points[id].scale + (points[id].wind ? wind_margin : 0);
+                const float point_error = catalog_error * points[id].scale;
+                bool outside = false, inside = true;
+                for (const auto &plane : planes)
+                {
+                    const float dot = std::fma(p[0], plane.x, std::fma(p[1], plane.y, std::fma(p[2], plane.z, plane.w)));
+                    outside |= dot < -point_radius; inside &= dot >= 0;
+                }
+                Check(visibility != GeometryDemandCellVisibility::Outside || outside, "false cell outside");
+                Check(visibility != GeometryDemandCellVisibility::Inside || inside, "false cell inside");
+                for (const bool fused : {false, true})
+                {
+                    float v[3]{};
+                    for (unsigned axis = 0; axis < 3; ++axis)
+                        v[axis] = fused ? std::fma(p[0], view[0][axis], std::fma(p[1], view[1][axis], std::fma(p[2], view[2][axis], view[3][axis]))) :
+                            ((p[0] * view[0][axis] + p[1] * view[1][axis]) + p[2] * view[2][axis]) + view[3][axis];
+                    const float distance = v[2] - point_radius - point_error;
+                    if (distance <= .1f)
+                    {
+                        Check(std::isinf(bound), "near branch must not prune");
+                        references[fused][id] = 2.0f * 1.25f;
+                        continue;
+                    }
+                    const float rho = std::hypot(std::abs(v[0]) + point_radius + point_error, std::abs(v[1]) + point_radius + point_error) / distance;
+                    const float reference = point_error * 1000 * std::sqrt(1.0f + rho * rho) / distance;
+                    references[fused][id] = reference;
+                    Check(reference <= bound, "cell error bound underestimated float source");
+                }
+            }
+        }
+        for (const auto &reference : references)
+        {
+            const float direct = *std::max_element(reference.begin(), reference.end());
+            float pruned{};
+            for (std::size_t cell = 0; cell < cells.size(); ++cell)
+                if (bounds[cell] > pruned)
+                    for (const auto id : cells[cell].instances) pruned = std::max(pruned, reference[id]);
+            Check(std::bit_cast<std::uint32_t>(direct) == std::bit_cast<std::uint32_t>(pruned),
+                "cell pruning changed the exact demand maximum");
+        }
+        }
+    }
+}
 } // namespace
 
 int main()
@@ -239,6 +367,8 @@ int main()
         TestRandomizedEquivalence();
         TestInstanceLookup();
         TestGrassBenders();
+        TestGeometryDemandCells();
+        TestRasterIndexSuffix();
         std::cout << "instance preparation: ordering, retained lookup/churn and nearest grass benders passed\n";
         return 0;
     }

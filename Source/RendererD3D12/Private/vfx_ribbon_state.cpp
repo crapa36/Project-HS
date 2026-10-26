@@ -66,36 +66,12 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                             std::uint32_t point_budget, float interpolation,
                             Float3 previous_eye, std::string &error)
 {
-    if (point_budget < kRibbonHistorySamples)
-    {
-        error = "Ribbon point budget must provide at least one 64-sample slot";
-        return false;
-    }
-    if (!std::isfinite(interpolation) || interpolation < 0.0f || interpolation > 1.0f || !Finite(previous_eye))
-    {
-        error = "Ribbon interpolation and previous eye must be finite";
-        return false;
-    }
+    if (!ValidateSources(sources, error)) return false;
+    return UpdateValidated(sources, tick, session, catalog_generation, point_budget, interpolation, previous_eye, error);
+}
 
-    const auto capacity = point_budget / kRibbonHistorySamples;
-    if (!initialized_ || session != session_ || catalog_generation != catalog_generation_ || capacity != capacity_ || tick < last_tick_)
-    {
-        slots_.clear();
-        slot_by_key_.clear();
-        updates_.clear();
-        outputs_.clear();
-        capacity_ = capacity;
-        session_ = session;
-        catalog_generation_ = catalog_generation;
-        initialized_ = true;
-    }
-
-    std::vector<std::size_t> order(sources.size());
-    for (std::size_t i = 0; i < sources.size(); ++i) order[i] = i;
-    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-        if (sources[a].importance != sources[b].importance) return sources[a].importance > sources[b].importance;
-        return SourceKey(sources[a]) < SourceKey(sources[b]);
-    });
+bool VfxRibbonState::ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error)
+{
     for (std::size_t i = 0; i < sources.size(); ++i)
     {
         const auto &source = sources[i];
@@ -139,6 +115,46 @@ bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
                 return false;
             }
     }
+    error.clear();
+    return true;
+}
+
+bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
+                            Tick tick, std::uint64_t session,
+                            std::uint64_t catalog_generation,
+                            std::uint32_t point_budget, float interpolation,
+                            Float3 previous_eye, std::string &error)
+{
+    if (point_budget < kRibbonHistorySamples)
+    {
+        error = "Ribbon point budget must provide at least one 64-sample slot";
+        return false;
+    }
+    if (!std::isfinite(interpolation) || interpolation < 0.0f || interpolation > 1.0f || !Finite(previous_eye))
+    {
+        error = "Ribbon interpolation and previous eye must be finite";
+        return false;
+    }
+
+    const auto capacity = point_budget / kRibbonHistorySamples;
+    if (!initialized_ || session != session_ || catalog_generation != catalog_generation_ || capacity != capacity_ || tick < last_tick_)
+    {
+        slots_.clear();
+        slot_by_key_.clear();
+        updates_.clear();
+        outputs_.clear();
+        capacity_ = capacity;
+        session_ = session;
+        catalog_generation_ = catalog_generation;
+        initialized_ = true;
+    }
+
+    std::vector<std::size_t> order(sources.size());
+    for (std::size_t i = 0; i < sources.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        if (sources[a].importance != sources[b].importance) return sources[a].importance > sources[b].importance;
+        return SourceKey(sources[a]) < SourceKey(sources[b]);
+    });
     const auto winner_count = std::min<std::size_t>(capacity_, order.size());
     dropped_sources_ = static_cast<std::uint32_t>(order.size() - winner_count);
     for (auto &slot : slots_)

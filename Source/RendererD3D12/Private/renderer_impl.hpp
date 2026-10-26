@@ -16,6 +16,7 @@
 #include "renderer_options.hpp"
 #include "renderer_caster_storage.hpp"
 #include "renderer_geometry.hpp"
+#include "renderer_geometry_demand.hpp"
 #include "renderer_skin_ranges.hpp"
 #include "render_graph.hpp"
 
@@ -331,6 +332,7 @@ struct GeometryPageGpu
     ResidencyTicket residency;
     D3D12_VERTEX_BUFFER_VIEW vertex_view{};
     D3D12_INDEX_BUFFER_VIEW index_view{};
+    std::uint32_t raster_index_offset{};
     std::uint32_t vertex_count{};
     std::uint32_t index_count{};
     std::uint32_t meshlet_count{};
@@ -347,6 +349,7 @@ struct GeometryPageGpu
         storage.Reset(); offsets={}; sizes={};
         residency = {};
         vertex_view = {}; index_view = {};
+        raster_index_offset = 0;
         vertex_count = index_count = meshlet_count = triangle_offset = remap_offset = 0;
         page_slot = fallback_page_slot = UINT32_MAX;
         generation = 1;
@@ -511,6 +514,8 @@ struct UiTextLayout
 struct UiCpuSurface
 {
     bool bitmap_valid{};
+    std::uint64_t bitmap_version{}, submitted_version{}, completed_version{};
+    CompletionSet copy_completion;
     ComPtr<IWICBitmap> bitmap;
     ComPtr<ID2D1RenderTarget> target;
     ComPtr<ID2D1SolidColorBrush> brush;
@@ -685,7 +690,7 @@ struct D3D12Renderer::Impl
         std::uint32_t vertex_stride{SkinVertexRanges::kVertexBytes};
         SkinVertexRanges vertex_ranges;
         bool skin_cache_valid{};
-        std::uint64_t package_id{}, signature{};
+        std::uint64_t package_id{};
         std::vector<std::byte> identity;
     };
     static AllocationResource RetainViewAllocation(const AllocationResource &source)
@@ -808,9 +813,10 @@ struct D3D12Renderer::Impl
         std::size_t leaf_count{};
         std::array<std::pair<std::size_t, std::size_t>, kEnvironmentMaterialNames.size() * 3> ranges{};
         std::pair<std::size_t, std::size_t> ground_range{};
-        std::array<std::vector<GpuClusterCandidate>, kEnvironmentMaterialNames.size()> candidates;
+        std::array<std::shared_ptr<const std::vector<GpuClusterCandidate>>, kEnvironmentMaterialNames.size()> candidates;
         std::array<std::array<std::uint32_t, 3>, kEnvironmentMaterialNames.size()> candidate_catalogs{};
         std::array<bool, kEnvironmentMaterialNames.size()> candidates_valid{};
+        std::array<std::vector<GeometryDemandCell>, kEnvironmentMaterialNames.size()> geometry_demand_cells;
         float foliage_density{};
         bool valid{};
     };
@@ -837,6 +843,12 @@ struct D3D12Renderer::Impl
         AllocationResource texture;
         ResidencyTicket residency;
         CompletionSet completion{};
+    };
+    struct PreparedEnvironmentGeometry
+    {
+        render_data::GeometryData geometry;
+        render_data::PackageView package;
+        std::array<std::byte, 32> digest{};
     };
     struct EnvironmentTextureStream
     {
@@ -912,6 +924,7 @@ struct D3D12Renderer::Impl
         StreamingRequestId request;
         std::future<std::vector<std::byte>> read_future;
         std::vector<std::byte> decoded_storage;
+        std::shared_ptr<PreparedEnvironmentGeometry> preparation;
         ResidencyTicket decoded_residency;
         ResidencyTicket decode_reservation;
         std::uint64_t read_bytes{}, last_demand_frame{};
@@ -946,6 +959,7 @@ struct D3D12Renderer::Impl
                 read_future.wait();
             read_future = {};
             std::vector<std::byte>{}.swap(decoded_storage);
+            preparation.reset();
             decoded_residency = {};
             candidate.Reset();
             decode_reservation = {};
@@ -1091,7 +1105,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] const HlodViewRuntime *ActiveHlodView() const noexcept;
     [[nodiscard]] Result PrepareHlodStaticScene(const std::shared_ptr<const StaticRenderScene> &, std::span<const RenderInstance> &);
     [[nodiscard]] Result PrepareHlodFrame(std::uint32_t, std::vector<GpuStaticDrawRef> &);
-    [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &);
+    [[nodiscard]] Result AddHlodFramePasses(std::uint32_t, std::uint32_t, ResourceVersion, ResourceVersion, ResourceVersion, HlodFrameGraph &);
     void ReadHlodFrame(PassBuilder &, const HlodFrameGraph &, bool) const;
     [[nodiscard]] Result DrawHlodGeometry(ID3D12GraphicsCommandList *, std::uint32_t, std::uint32_t);
     [[nodiscard]] Result CommitHlodFrameGraph(std::uint32_t, HlodFrameGraph &, const CompletionSet &);
@@ -1155,7 +1169,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareGeometryPageUpload(
         GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
         std::span<const std::byte> package_bytes, AssetId page_asset,
-        std::uint32_t page_slot, AllocationResource &upload);
+        std::uint32_t page_slot, AllocationResource &upload,
+        PreparedEnvironmentGeometry *preparation = nullptr);
     void RecordGeometryPageUpload(ID3D12GraphicsCommandList *list,
         const GeometryPageGpu &page, const AllocationResource &upload) const;
     [[nodiscard]] const GeometryPageGpu *FindGeometryPage(std::uint32_t page_slot) const noexcept;
@@ -1403,6 +1418,19 @@ struct D3D12Renderer::Impl
     };
     std::array<EnvironmentMaterialBindingsGpu, kAuthoredMaterialNames.size()>
         environment_material_bindings;
+    struct EnvironmentDescriptorBank
+    {
+        struct Entry
+        {
+            ComPtr<ID3D12Resource> resource;
+            bool written{};
+        };
+        ComPtr<ID3D12DescriptorHeap> heap;
+        D3D12_CPU_DESCRIPTOR_HANDLE first{};
+        UINT stride{};
+        std::array<Entry, kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots> entries;
+    };
+    mutable std::array<EnvironmentDescriptorBank, kFrameCount> environment_descriptor_banks;
     render_data::RockMaterial terrain_material;
     struct EnvironmentMeshGpu : GeometryPageGpu
     {
@@ -1670,7 +1698,6 @@ struct D3D12Renderer::Impl
     float preview_yaw{180.0f};
     float preview_pitch{10.0f};
 #endif
-    renderer_detail::VfxPersistentState typed_vfx_persistent_state;
     Tick last_particle_tick{};
     std::uint64_t render_session_id{};
 };

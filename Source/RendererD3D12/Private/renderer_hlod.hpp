@@ -8,6 +8,7 @@
 #include <d3d12.h>
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
@@ -17,6 +18,18 @@
 
 namespace hs
 {
+class HlodSlotSet
+{
+public:
+    void Resize(std::uint32_t capacity);
+    void Clear() noexcept;
+    [[nodiscard]] bool Insert(std::uint32_t slot) noexcept;
+    [[nodiscard]] bool Contains(std::uint32_t slot) const noexcept;
+private:
+    std::uint32_t capacity_{};
+    std::vector<std::uint64_t> words_;
+};
+
 inline constexpr std::uint32_t kHlodProxyResident = 1u;
 inline constexpr std::uint32_t kHlodRepresentationChanged = 1u;
 inline constexpr std::uint32_t kHlodViewCount = 4;

@@ -4,6 +4,7 @@ import itertools
 from pathlib import Path
 import re
 import random
+import struct
 import unittest
 
 SHADERS = Path(__file__).resolve().parents[1] / "Content" / "Shaders"
@@ -51,6 +52,12 @@ class ShaderContracts(unittest.TestCase):
         body = shader.split("float3 AoViewPosition(", 1)[1].split("struct AoGuide", 1)[0]
         self.assertIn("AoInverseProjection", body)
         self.assertNotIn("AoWorldToView", body)
+        self.assertIn("AoParameters.w > 0.5", body)
+        self.assertIn("view.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0])", body)
+        self.assertIn("view.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1])", body)
+        self.assertIn("view.z = mad(depth, AoInverseProjection[2][2], AoInverseProjection[3][2])", body)
+        self.assertIn("view.w = mad(depth, AoInverseProjection[2][3], AoInverseProjection[3][3])", body)
+        self.assertIn("return view.xyz * rcp(view.w)", body)
         self.assertIn("return view.xyz / view.w", body)
         frame = (SHADERS.parents[1] / "Source/RendererD3D12/Private/renderer_frame.cpp").read_text()
         setup = frame.split("AmbientOcclusionConstants ambient_constants;", 1)[1].split(
@@ -59,6 +66,12 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn("&ambient_constants.inverse_projection", setup)
         self.assertIn("XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&ambient_constants.projection))", setup)
         self.assertIn("XMMatrixTranslationFromVector(eye) * view", setup)
+        ao = (SHADERS.parents[1] / "Source/RendererD3D12/Private/renderer_ambient_occlusion.cpp").read_text()
+        fast_gate = ao.split("bool SupportsFastAoUnprojection(", 1)[1].split("bool FitsGuide", 1)[0]
+        self.assertIn("std::isfinite(value)", fast_gate)
+        for coefficient in ("_12", "_13", "_14", "_21", "_23", "_24", "_31", "_32"):
+            self.assertRegex(fast_gate, rf"inverse\.{coefficient} != 0\.0f")
+        self.assertIn("constants.gtao_parameters.w = SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f", ao)
 
         def mul(a, b):
             return [[sum(x * y for x, y in zip(row, col)) for col in zip(*b)] for row in a]
@@ -115,6 +128,67 @@ class ShaderContracts(unittest.TestCase):
                 for actual, previous, target in zip(direct, old, expected):
                     self.assertAlmostEqual(actual, target, places=7)
                     self.assertAlmostEqual(actual, previous, places=7)
+
+        # Fast homogeneous reconstruction must retain all supplied coefficients,
+        # including jitter/off-axis and orthographic depth, and reject a sheared
+        # generic inverse instead of silently dropping its cross-axis terms.
+        def axis_inverse(matrix):
+            return (all(math.isfinite(value) for row in matrix for value in row) and
+                    all(matrix[row][column] == 0.0 for row, column in
+                        ((0, 1), (0, 2), (0, 3), (1, 0), (1, 2), (1, 3), (2, 0), (2, 1))) and
+                    matrix[0][0] != 0.0 and matrix[1][1] != 0.0 and
+                    matrix[2][2] * matrix[3][3] - matrix[2][3] * matrix[3][2] != 0.0)
+        def inverse_axis_projection(matrix, orthographic=False):
+            # Build the canonical inverse directly. Gauss-Jordan elimination can
+            # leave roundoff in exact structural zeros (for example -2e-19 in
+            # inverse[2][0] for the jittered perspective below), while the
+            # production contract deliberately requires those entries to be 0.
+            result = [[0.0] * 4 for _ in range(4)]
+            result[0][0] = 1.0 / matrix[0][0]
+            result[1][1] = 1.0 / matrix[1][1]
+            if orthographic:
+                result[2][2] = 1.0 / matrix[2][2]
+                result[3][0] = -matrix[3][0] / matrix[0][0]
+                result[3][1] = -matrix[3][1] / matrix[1][1]
+                result[3][2] = -matrix[3][2] / matrix[2][2]
+                result[3][3] = 1.0
+            else:
+                result[2][3] = 1.0 / matrix[3][2]
+                result[3][0] = -matrix[2][0] / matrix[0][0]
+                result[3][1] = -matrix[2][1] / matrix[1][1]
+                result[3][2] = 1.0
+                result[3][3] = -matrix[2][2] / matrix[3][2]
+            return result
+        matrices = []
+        perspective = [[1.2, 0., 0., 0.], [0., 1.7, 0., 0.],
+                       [0., 0., 1.001, 1.], [0., 0., -.1001, 0.]]
+        matrices.append(mul(perspective, translation((.0017, -.0023, 0.))))
+        off_axis = [row[:] for row in perspective]
+        off_axis[2][0], off_axis[2][1] = .15, -.08
+        matrices.append(off_axis)
+        ortho = [[.1, 0., 0., 0.], [0., .1, 0., 0.],
+                 [0., 0., .01001, 0.], [0., 0., -.001001, 1.]]
+        matrices.append(mul(ortho, translation((.003, -.004, 0.))))
+        generic = [row[:] for row in perspective]
+        generic[0][1] = .12
+        matrices.append(generic)
+        for index, projection in enumerate(matrices):
+            inverse_projection = inverse(projection) if index == 3 else inverse_axis_projection(projection, orthographic=index == 2)
+            fast = axis_inverse(inverse_projection)
+            self.assertEqual(fast, index != 3)
+            for depth, ndc in itertools.product((0.0, .001, .37, .999, 1.0),
+                                                ((-.95, .8), (.0, .0), (.73, -.61))):
+                clip = [ndc[0], ndc[1], depth, 1.0]
+                general_h = transform(clip, inverse_projection)
+                general = divide(general_h)
+                if fast:
+                    fast_h = [ndc[0] * inverse_projection[0][0] + inverse_projection[3][0],
+                              ndc[1] * inverse_projection[1][1] + inverse_projection[3][1],
+                              depth * inverse_projection[2][2] + inverse_projection[3][2],
+                              depth * inverse_projection[2][3] + inverse_projection[3][3]]
+                    optimized = divide(fast_h)
+                    for actual, expected in zip(optimized, general):
+                        self.assertAlmostEqual(actual, expected, places=9)
 
     def test_sdr_scene_middle_grey_is_calibrated_without_scaling_ui(self):
         import re
@@ -345,8 +419,8 @@ class ShaderContracts(unittest.TestCase):
 
     def test_terrain_pom_skips_only_bounded_subpixel_displacement(self):
         shader = (SHADERS / "material_terrain.hlsli").read_text(encoding="utf-8-sig")
-        pom = shader.split("float2 TerrainParallaxUv(", 1)[1].split("HsMaterialTerrainResult TerrainSample(", 1)[0]
-        self.assertIn("if (!pom || steps == 0u || distanceToEye >= 55.0) return uv", pom)
+        pom = shader.split("float3 TerrainParallaxFootprint(", 1)[1].split("HsMaterialTerrainResult TerrainSample(", 1)[0]
+        self.assertIn("if (steps == 0u || distanceToEye >= 55.0) return 0", pom)
         self.assertIn("gradientEnergy=dot(dx,dx)+dot(dy,dy)", pom)
         self.assertIn("gradientArea=abs(dx.x*dy.y-dx.y*dy.x)", pom)
         self.assertIn("gradientEnergy>1e-20 && gradientArea>gradientEnergy*1e-6", pom)
@@ -394,6 +468,52 @@ class ShaderContracts(unittest.TestCase):
                        ((1e-20, 0.), (0., 1e-20)), ((math.inf, 0.), (0., 1.)),
                        ((math.nan, 0.), (0., 1.))):
             self.assertEqual(weight(dx, dy, (.1, .2))[0], 1.)
+
+        # Binary32 oracle for the old rotated calculation versus one shared
+        # footprint. Round each elementary operation, not just the final result.
+        f32 = lambda x: struct.unpack('f', struct.pack('f', x))[0]
+        mul = lambda a, b: f32(a*b)
+        add = lambda a, b: f32(a+b)
+        dot = lambda v: add(mul(v[0], v[0]), mul(v[1], v[1]))
+        def quarter(v, r):
+            return (v, (-v[1], v[0]), (-v[0], -v[1]), (v[1], -v[0]))[r]
+        def binary_weight(dx, dy, ray):
+            energy = add(dot(dx), dot(dy))
+            area = abs(f32(mul(dx[0], dy[1])-mul(dx[1], dy[0])))
+            if not (energy > f32(1e-20) and area > mul(energy, f32(1e-6))):
+                return 1.
+            bound = mul(f32(math.sqrt(dot(ray))), f32(f32(math.sqrt(energy))/area))
+            if not math.isfinite(bound):
+                return 1.
+            t = min(1., max(0., f32(f32(bound-.25)/.25)))
+            return mul(mul(t, t), f32(3.-mul(2., t)))
+        footprints = (((1., 0.), (0., 1.)), ((1024., .125), (.25, .001)),
+                      ((1., 0.), (1., 1e-8)), ((0., 0.), (0., 0.)),
+                      ((1e-20, 0.), (0., 1e-20)), ((math.inf, 0.), (0., 1.)),
+                      ((math.nan, 0.), (0., 1.)))
+        # Neighbouring binary32 rays straddle both unchanged weight thresholds.
+        rays = [(.1, -.2)]
+        for threshold in (.25, .5):
+            bits = struct.unpack('I', struct.pack('f', threshold/math.sqrt(2.)))[0]
+            rays += [(struct.unpack('f', struct.pack('I', bits+delta))[0], 0.)
+                     for delta in (-1, 0, 1)]
+        for dx, dy in footprints:
+            dx, dy = tuple(map(f32, dx)), tuple(map(f32, dy))
+            for ray in rays:
+                ray = tuple(map(f32, ray))
+                shared = binary_weight(dx, dy, ray)
+                for rotation in range(4):
+                    self.assertEqual(shared, binary_weight(quarter(dx, rotation),
+                        quarter(dy, rotation), quarter(ray, rotation)))
+        # Scaling before a quarter turn preserves the original per-component
+        # division/multiplication order, including the near-grazing clamp/fade.
+        for z, height, tile, fade in itertools.product((.001, .05, .9),
+                (.025, .035, .05), (9., 12.), (0., .0001, .5, 1.)):
+            def scale(v):
+                return tuple(mul(f32(mul(f32(c/max(f32(z), f32(.05))), f32(height))/tile), f32(fade)) for c in v)
+            v = (f32(.37), f32(-.81))
+            for rotation in range(4):
+                self.assertEqual(scale(quarter(v, rotation)), quarter(scale(v), rotation))
 
     def test_terrain_histogram_uses_available_gaussian_mip(self):
         text = (SHADERS / "material_terrain.hlsli").read_text(encoding="utf-8-sig")
@@ -624,10 +744,10 @@ class ShaderContracts(unittest.TestCase):
         self.assertIn("if(camera&&(receiver.minimum.w!=0||receiver.maximum.w!=1))return-1;", proof)
         # Receiver roles and query geometry have direct CPU behavior tests.
         # Keep this source check on the actual native matrix wiring instead.
-        self.assertIn("inputs.main_csm_view_projection_valid=true;", inputs)
+        self.assertIn("inputs.prepare_main_csm=", inputs)
         self.assertIn("constants->shadow_view_projection[cascade].m[column][row]", inputs)
         native_policy = re.sub(r"\s+", "", (renderer / "renderer_virtual_shadow.cpp").read_text(encoding="utf-8"))
-        self.assertIn("BuildShadowCsmQueryFrusta(in.main_csm_view_projection,facts.csm_query_frusta)", native_policy)
+        self.assertIn("BuildShadowCsmQueryFrusta(csm_matrices,facts.csm_query_frusta)", native_policy)
         self.assertIn("environment_variant_radii[render_data::kMeadowWaterGeometry]", frame)
         # The origin-centered sphere includes offsets, signed/nonuniform scale, and yaw.
         rng = random.Random(0x56534D)
@@ -717,6 +837,16 @@ class ShaderContracts(unittest.TestCase):
         # Main surface resolve keeps the previous-frame deformation for motion.
         resolve = (SHADERS / "visibility_buffer.hlsl").read_text(encoding="utf-8-sig")
         self.assertIn("EvaluateSceneVertex(input0, context, indices.x)", resolve)
+
+    def test_hero_history_only_runs_for_nearest_composite(self):
+        scene = (SHADERS / "project_hs.hlsl").read_text(encoding="utf-8-sig")
+        current = scene.split("SceneOutput HeroCurrentVS(", 1)[1].split("SceneOutput ShadowVS(", 1)[0]
+        self.assertIn("(SceneDrawMaterial & 1u) != 0, false)", current)
+        root = SHADERS.parents[1]
+        native = (root / "Source/RendererD3D12/Private/renderer_transparency.cpp").read_text(encoding="utf-8-sig")
+        self.assertIn("const auto &phase_vertex = index == 3 ? vertex : current_vertex", native)
+        self.assertIn("next->work->Pipeline(index, pipeline, phase_vertex, pixel, product)", native)
+        self.assertIn("layer == 0 ? 3 : 4", native)
 
     def test_grass_outer_guard_skips_only_zero_contributions(self):
         scene = (SHADERS / "grass_deformation.hlsli").read_text(encoding="utf-8-sig")

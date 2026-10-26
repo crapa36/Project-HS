@@ -63,6 +63,7 @@ Result D3D12Renderer::Impl::AddGeometryDrawRecord(
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Geometry mesh dispatch exceeds the hardware group limit.");
     packed_pass = (static_cast<std::uint32_t>(records.size()) << 2) | view;
+    if (page.raster_index_offset != 0) flags |= kGeometryRasterPrimitiveRemap;
     if (previous_geometry_page_versions[page.page_slot] == page.generation)
         flags |= kGeometryPreviousPage;
     records.push_back({page.page_slot, 0, page.index_count, 0,
@@ -113,11 +114,16 @@ Result D3D12Renderer::Impl::DrawGeometry(ID3D12GraphicsCommandList *list,
 {
     const auto id = packed_pass >> 2;
     if (!list || !indexed_pipeline || frame_slot >= kFrameCount || id == 0 ||
-        id >= frames[frame_slot].geometry_draw_records_cpu.size() ||
-        (arguments && (argument_offset > arguments->GetDesc().Width ||
-         arguments->GetDesc().Width - argument_offset < kGeometryArgumentStride)))
+        id >= frames[frame_slot].geometry_draw_records_cpu.size())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Geometry draw has an invalid record or argument range.");
+    if (arguments)
+    {
+        const auto bytes = arguments->GetDesc().Width;
+        if (argument_offset > bytes || bytes - argument_offset < kGeometryArgumentStride)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                   "Geometry draw has an invalid argument range.");
+    }
     const auto &record = frames[frame_slot].geometry_draw_records_cpu[id];
     if (record.page_slot != page.page_slot || record.geometry_generation != page.generation)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -125,11 +131,8 @@ Result D3D12Renderer::Impl::DrawGeometry(ID3D12GraphicsCommandList *list,
     list->SetGraphicsRoot32BitConstant(6, packed_pass, 0);
     if ((record.flags & kGeometryMeshEligible) != 0)
     {
-        if (!GeometryUsesMesh(indexed_pipeline, page, record.instance_count))
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Mesh geometry record has no compatible mesh pipeline.");
         for (const auto &pair : mesh_pipeline_pairs)
-            if (pair.indexed == indexed_pipeline)
+            if (pair.indexed == indexed_pipeline && pair.mesh)
             {
                 list->SetPipelineState(pair.mesh.Get());
                 if (arguments)
@@ -147,6 +150,8 @@ Result D3D12Renderer::Impl::DrawGeometry(ID3D12GraphicsCommandList *list,
                 }
                 return Result::Success();
             }
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                               "Mesh geometry record has no compatible mesh pipeline.");
     }
     list->SetPipelineState(indexed_pipeline);
     list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

@@ -48,15 +48,14 @@ float2 TerrainDetailFadeRange()
     return HS_MATERIAL_DETAIL_FADE_RANGE;
 }
 
-float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment_wrap,
-    float2 uv, float2 dx, float2 dy, uint layer, uint rotation,
-    float3 viewTs, float distanceToEye, bool pom, uint steps, uint refinementSteps, uint height_slot)
+float3 TerrainParallaxFootprint(float2 dx, float2 dy, uint layer,
+    float3 viewTs, float distanceToEye, uint steps)
 {
-    // POM-off performs no height lookup. The separate authored height output
-    // remains available to the material's height-based layer blending.
-    if (!pom || steps == 0u || distanceToEye >= 55.0) return uv;
+    if (steps == 0u || distanceToEye >= 55.0) return 0;
     float tile=TerrainTileSize(layer); float heightScale=layer==3?0.05:layer==2?0.035:0.025;
-    float2 ray=TerrainRotate(viewTs.xy,rotation)/max(abs(viewTs.z),0.05)*heightScale/tile*(1-smoothstep(35,55,distanceToEye));
+    // Preserve the component-wise divide/multiply order. Quarter turns only
+    // permute/sign-flip components; ray length and the Jacobian norms agree.
+    float2 ray=viewTs.xy/max(abs(viewTs.z),0.05)*heightScale/tile*(1-smoothstep(35,55,distanceToEye));
     float pomWeight=1;
     const float gradientEnergy=dot(dx,dx)+dot(dy,dy);
     const float gradientArea=abs(dx.x*dy.y-dx.y*dy.x);
@@ -65,8 +64,17 @@ float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment
     {
         const float parallaxPixels=length(ray)*(sqrt(gradientEnergy)/gradientArea);
         if(isfinite(parallaxPixels)) pomWeight=smoothstep(0.25,0.5,parallaxPixels);
-        [branch] if(pomWeight<=0) return uv;
     }
+    return float3(ray,pomWeight);
+}
+
+float2 TerrainParallaxUv(Texture2DArray<float4> height, SamplerState environment_wrap,
+    float2 uv, float2 dx, float2 dy, uint layer, float2 ray, float pomWeight,
+    uint steps, uint refinementSteps, uint height_slot)
+{
+    // Disabled/subpixel POM performs no height lookup. Authored height remains
+    // sampled separately for material layer blending.
+    [branch] if(pomWeight<=0) return uv;
     const HsTextureGradState height_state = HsTexturePrepareGrad(height_slot);
     float depth=0,previous=0; float2 start=uv;
     [loop] for(uint j=0;j<steps;++j)
@@ -88,13 +96,13 @@ HsMaterialTerrainResult TerrainSample(
     Texture2DArray<float4> normal, Texture2DArray<float4> detail,
     Texture2DArray<float4> height, SamplerState environment_wrap,
     float2 baseUv, float2 baseDx, float2 baseDy, uint layer, uint seed,
-    float3 viewTs, float distanceToEye, bool pom,
+    float3 parallax, float distanceToEye,
     uint gaussian_slot, uint surface_slot, uint normal_slot, uint detail_slot, uint height_slot)
 {
     uint rotation=TerrainHash(seed)&3; float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
     float2 uv=TerrainRotate(baseUv,rotation)+offset, dx=TerrainRotate(baseDx,rotation),dy=TerrainRotate(baseDy,rotation);
-    uv=TerrainParallaxUv(height,environment_wrap,uv,dx,dy,layer,rotation,viewTs,
-        distanceToEye,pom,HS_MATERIAL_POM_STEPS,HS_MATERIAL_POM_REFINEMENT_STEPS,height_slot);
+    uv=TerrainParallaxUv(height,environment_wrap,uv,dx,dy,layer,TerrainRotate(parallax.xy,rotation),parallax.z,
+        HS_MATERIAL_POM_STEPS,HS_MATERIAL_POM_REFINEMENT_STEPS,height_slot);
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
     m.base_color=HsTextureSampleGrad(gaussian,gaussian_slot,environment_wrap,float3(uv,layer),dx,dy).rgb;
     float2 ra=HsTextureSampleGrad(surface,surface_slot,environment_wrap,float3(uv,layer),dx,dy).rg; m.roughness=ra.x;m.ao=ra.y;
@@ -149,15 +157,16 @@ HsMaterialTerrainResult TerrainLayer(
     float tile=TerrainTileSize(layer);
     float2 uv=world.xz/tile,dx=worldDx.xz/tile,dy=worldDy.xz/tile;
     float3 ts=normalize(viewDirection).xzy;
+    const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,ts,distanceToEye,HS_MATERIAL_POM_STEPS);
 
     float2 p=(world.xz+warp*1.3)/(tile*0.9),i=floor(p),f=frac(p);
     float2 a=i,b=i+float2(1,0),c=i+float2(0,1);
     float3 w=float3(1-f.x-f.y,f.x,f.y);
     if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);w=float3(f.x+f.y-1,1-f.x,1-f.y);}
     w=w*w*(3-2*w);w/=max(w.x+w.y+w.z,1e-5);
-    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(a,seed),ts,distanceToEye,true,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
-    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(b,seed),ts,distanceToEye,true,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
-    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(c,seed),ts,distanceToEye,true,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
+    HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(a,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
+    HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(b,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
+    HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,uv,dx,dy,layer,TerrainCell(c,seed),parallax,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot);
     float3 gaussian_value=0.5+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-0.5)*rsqrt(dot(w,w));
     float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*2048*2048,1e-8));
     // Decode with the mip actually available to the Gaussian sample, including streaming fallback.

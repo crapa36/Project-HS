@@ -64,9 +64,15 @@ float HsBsdfD(float no_h, float alpha)
     return alpha_squared / (HsBsdfPi * denominator * denominator);
 }
 
+float HsBsdfPow5(float x)
+{
+    const float x2 = x * x;
+    return x2 * x2 * x;
+}
+
 float3 HsBsdfSchlickFresnel(float3 f0, float vo_h)
 {
-    return f0 + (1.0 - f0) * pow(1.0 - vo_h, 5.0);
+    return f0 + (1.0 - f0) * HsBsdfPow5(1.0 - vo_h);
 }
 
 float3 HsBsdfOpticalReflectionFresnel(HsSurfaceClosure surface, float vo_h, float base_fresnel_override)

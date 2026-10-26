@@ -17,6 +17,7 @@
 #include <cstring>
 #include <exception>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <unordered_set>
 #include <vector>
@@ -35,55 +36,6 @@ enum class Preparation
 };
 
 using render_graph::ResourceUse;
-
-// Exact, field-wise structural equality; counts and range tags delimit variable
-// records. Native frame identities, callbacks and per-frame initial access are
-// absent. Texture dimensions describe capacity, not callback active rects.
-using PlanKey = std::vector<std::uint64_t>;
-
-struct PlanKeyWriter
-{
-    PlanKey &storage;
-    std::size_t size{};
-
-    void Append(std::initializer_list<std::uint64_t> words)
-    {
-        const auto end = size + words.size();
-        if (end > storage.size()) storage.resize(end);
-        std::memcpy(storage.data() + size, words.begin(), words.size() * sizeof(std::uint64_t));
-        size = end;
-    }
-    void Finish() { storage.resize(size); }
-};
-
-void AppendPlanVersion(PlanKeyWriter &key, ResourceVersion version)
-{
-    key.Append({version.resource.value,
-        static_cast<std::uint64_t>(version.resource.kind), version.ordinal});
-}
-
-void AppendPlanDescriptor(PlanKeyWriter &key, const D3D12_RESOURCE_DESC &desc)
-{
-    key.Append({static_cast<std::uint64_t>(desc.Dimension), desc.Alignment,
-        desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels,
-        static_cast<std::uint64_t>(desc.Format), desc.SampleDesc.Count,
-        desc.SampleDesc.Quality, static_cast<std::uint64_t>(desc.Layout),
-        static_cast<std::uint64_t>(desc.Flags)});
-}
-
-void AppendPlanUse(PlanKeyWriter &key, const ResourceUse &use)
-{
-    AppendPlanVersion(key, use.predecessor);
-    AppendPlanVersion(key, use.successor);
-    key.Append({static_cast<std::uint64_t>(use.access),
-        use.writes, use.reads, use.range.index()});
-    if (const auto *range = std::get_if<BufferRange>(&use.range))
-        key.Append({range->offset, range->size});
-    else if (const auto *range = std::get_if<TextureSubresourceRange>(&use.range))
-        key.Append({range->first_mip, range->mip_count,
-            range->first_array_slice, range->array_slice_count,
-            range->first_plane, range->plane_count});
-}
 
 [[nodiscard]] constexpr std::size_t QueueIndex(QueueHint queue) noexcept
 {
@@ -205,6 +157,7 @@ struct LogicalResource
     bool alias_activation{};
     std::size_t pool_view_index{SIZE_MAX};
     ExternalQueueCompletion imported_external_completion;
+    std::uintptr_t imported_identity{};
     D3D12_HEAP_TYPE fixed_buffer_heap{D3D12_HEAP_TYPE_DEFAULT};
     D3D12_RESOURCE_DESC native_description{};
 };
@@ -242,6 +195,121 @@ struct Pass
     std::shared_ptr<ExternalOperation> external;
     std::move_only_function<Result(RenderPassContext &)> owner_execute;
     bool execute_on_owner{};
+};
+
+bool SameVersion(ResourceVersion a, ResourceVersion b) noexcept
+{
+    return a.resource.value == b.resource.value && a.resource.kind == b.resource.kind && a.ordinal == b.ordinal;
+}
+
+bool SameUse(const ResourceUse &a, const ResourceUse &b) noexcept
+{
+    if (!SameVersion(a.predecessor, b.predecessor) || !SameVersion(a.successor, b.successor) ||
+        a.access != b.access || a.writes != b.writes || a.reads != b.reads || a.range.index() != b.range.index()) return false;
+    if (const auto *left = std::get_if<BufferRange>(&a.range))
+    {
+        const auto &right = std::get<BufferRange>(b.range);
+        return left->offset == right.offset && left->size == right.size;
+    }
+    if (const auto *left = std::get_if<TextureSubresourceRange>(&a.range))
+    {
+        const auto &right = std::get<TextureSubresourceRange>(b.range);
+        return std::tie(left->first_mip, left->mip_count, left->first_array_slice, left->array_slice_count,
+                        left->first_plane, left->plane_count) ==
+               std::tie(right.first_mip, right.mip_count, right.first_array_slice, right.array_slice_count,
+                        right.first_plane, right.plane_count);
+    }
+    return true;
+}
+
+bool SameDescriptor(const D3D12_RESOURCE_DESC &a, const D3D12_RESOURCE_DESC &b) noexcept
+{
+    return std::tie(a.Dimension, a.Alignment, a.Width, a.Height, a.DepthOrArraySize, a.MipLevels,
+                    a.Format, a.SampleDesc.Count, a.SampleDesc.Quality, a.Layout, a.Flags) ==
+           std::tie(b.Dimension, b.Alignment, b.Width, b.Height, b.DepthOrArraySize, b.MipLevels,
+                    b.Format, b.SampleDesc.Count, b.SampleDesc.Quality, b.Layout, b.Flags);
+}
+
+unsigned ExecutionKind(const Pass &pass) noexcept
+{
+    return pass.external ? 4u : pass.owner_execute ? (pass.execute_on_owner ? 3u : 2u) : pass.execute ? 1u : 0u;
+}
+
+// Only declaration values survive Reset. Current native owners, callbacks and
+// completion remain in LogicalResource/Pass and are validated on every binding.
+struct TopologyValues
+{
+    struct Resource
+    {
+        ResourceKind kind{};
+        bool imported{}, final_set{};
+        D3D12_RESOURCE_DESC descriptor{};
+        D3D12_HEAP_TYPE fixed_heap{};
+        Access final{};
+        ResourceVersion final_version{};
+    };
+    struct PassValues
+    {
+        std::uint32_t id{};
+        QueueHint queue{};
+        unsigned execution_kind{};
+        std::vector<ResourceUse> uses;
+        QueueHint external_queue{};
+        std::vector<ExternalResourceAccess> boundaries;
+    };
+    bool valid{};
+    std::vector<Resource> resources;
+    std::vector<PassValues> passes;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering;
+
+    bool Matches(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
+                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering) const
+    {
+        if (!valid || resources.size() != current_resources.size() || passes.size() != current_passes.size() ||
+            ordering != current_ordering) return false;
+        for (std::size_t i = 0; i < resources.size(); ++i)
+        {
+            const auto &a = resources[i]; const auto &b = current_resources[i];
+            if (a.kind != b.kind || a.imported != b.imported || a.final_set != b.final_set ||
+                a.fixed_heap != b.fixed_buffer_heap || a.final != (b.final_set ? b.final : Access::Undefined) ||
+                !SameVersion(a.final_version, b.final_version) ||
+                !SameDescriptor(a.descriptor, b.imported ? b.native_description : NativeDesc(b.kind, b.texture, b.buffer)))
+                return false;
+        }
+        for (std::size_t i = 0; i < passes.size(); ++i)
+        {
+            const auto &a = passes[i]; const auto &b = current_passes[i];
+            if (a.id != b.id || a.queue != b.queue || a.execution_kind != ExecutionKind(b) ||
+                !std::equal(a.uses.begin(), a.uses.end(), b.uses.begin(), b.uses.end(), SameUse)) return false;
+            if (!b.external) continue;
+            if (a.external_queue != b.external->binding.queue_type ||
+                !std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(), b.external->accesses.end(),
+                    [](const auto &left, const auto &right) {
+                        return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
+                            left.incoming == right.incoming && left.outgoing == right.outgoing;
+                    })) return false;
+        }
+        return true;
+    }
+
+    void Capture(std::span<const LogicalResource> current_resources, std::span<const Pass> current_passes,
+                 const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering)
+    {
+        resources.clear(); resources.reserve(current_resources.size());
+        passes.clear(); passes.reserve(current_passes.size());
+        for (const auto &r : current_resources)
+            resources.push_back({r.kind, r.imported, r.final_set,
+                r.imported ? r.native_description : NativeDesc(r.kind, r.texture, r.buffer),
+                r.fixed_buffer_heap, r.final_set ? r.final : Access::Undefined, r.final_version});
+        for (const auto &p : current_passes)
+        {
+            auto &stored = passes.emplace_back();
+            stored.id = p.id; stored.queue = p.queue; stored.execution_kind = ExecutionKind(p); stored.uses = p.uses;
+            if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
+        }
+        ordering = current_ordering;
+        valid = true;
+    }
 };
 
 [[nodiscard]] bool SameDevice(ID3D12DeviceChild *child, ID3D12Device *device)
@@ -818,17 +886,17 @@ struct RenderGraphBuilder::Impl
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering_dependencies;
     render_graph::CompiledSchedule schedule;
     render_graph::AliasPlan alias_plan;
-    PlanKey cached_plan_key;
+    TopologyValues topology;
     Microsoft::WRL::ComPtr<ID3D12Device> plan_device;
     struct PreviousPlan
     {
-        PlanKey key;
+        TopologyValues topology;
         render_graph::CompiledSchedule schedule;
         render_graph::AliasPlan aliases;
     };
     std::array<PreviousPlan, 7> previous_plans;
     std::size_t next_previous_plan{};
-    PlanKey candidate_plan_key;
+    std::uint64_t plan_input_builds{};
     std::uint64_t plan_compilations{};
     std::uint64_t plan_reuses{};
     bool invalid_final{};
@@ -2346,17 +2414,10 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         return fail("RenderGraph transient pool has no allocator or device.");
     if (impl_->plan_device.Get() != pool.impl_->device.Get())
     {
-        impl_->cached_plan_key.clear();
+        impl_->topology = {};
         for (auto &previous : impl_->previous_plans) previous = {};
         impl_->plan_device = pool.impl_->device;
     }
-    auto &plan_key = impl_->candidate_plan_key;
-    // Overwrite retained words without repeated vector insert/iterator bookkeeping.
-    PlanKeyWriter key_writer{plan_key};
-    const auto adapter = pool.impl_->device->GetAdapterLuid();
-    key_writer.Append({adapter.LowPart,
-        static_cast<std::uint32_t>(adapter.HighPart), pool.impl_->device->GetNodeCount(),
-        impl_->resources.size(), impl_->passes.size()});
     for (auto &resource : impl_->resources)
     {
         resource.first_use = UINT32_MAX; resource.last_use = 0;
@@ -2395,19 +2456,6 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                 resource.initial != Access::Common)
                 return fail("RenderGraph externally completed buffers must be imported in COMMON.");
         }
-        else if (resource.kind == ResourceKind::Texture)
-        {
-            const auto &d = resource.texture;
-            if (!d.width || !d.height || d.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
-                d.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || !d.format ||
-                (d.flags & ~(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
-                             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) ||
-                ((d.flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
-                 (d.flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))))
-                return fail("RenderGraph transient texture descriptor is invalid.");
-        }
-        else if (!resource.buffer.size || resource.buffer.flags & ~D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
-            return fail("RenderGraph transient buffer descriptor is invalid.");
     }
     capture_stage(captured_cpu.cpu_prepare_validation_us);
     const auto compatible = [](const LogicalResource &r, Access access) {
@@ -2444,93 +2492,21 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         default: return true;
         }
     };
-    const auto format_planes = [&](DXGI_FORMAT format, std::uint32_t &count) {
-        auto &cache = pool.impl_->format_planes;
-        const auto found = std::find_if(cache.begin(), cache.end(),
-                                       [&](const auto &entry) { return entry.first == format; });
-        if (found != cache.end()) { count = found->second; return true; }
-        D3D12_FEATURE_DATA_FORMAT_INFO info{format, 0};
-        if (!pool.impl_->device ||
-            FAILED(pool.impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_INFO, &info, sizeof(info))) ||
-            !info.PlaneCount) return false;
-        count = info.PlaneCount;
-        cache.emplace_back(format, count);
-        return true;
-    };
-    std::vector<render_graph::ResourceInfo> resource_infos;
-    resource_infos.reserve(impl_->resources.size());
     std::unordered_set<std::uintptr_t> imported_identities;
     imported_identities.reserve(impl_->resources.size());
-    for (const auto &r : impl_->resources)
+    for (auto &resource : impl_->resources)
     {
-        render_graph::ResourceInfo info;
-        info.kind = r.kind;
-        info.initialized = r.imported;
-        info.buffer_size = r.buffer.size;
-        info.final_set = r.final_set;
-        info.final_version = r.final_version;
-        if (r.imported && !compatible(r, r.initial))
+        if (!resource.imported) continue;
+        if (!compatible(resource, resource.initial))
             return fail("RenderGraph initial access is incompatible with its imported resource.");
-        if (r.final_set && !compatible(r, r.final))
-            return fail("RenderGraph final access is incompatible with its resource.");
-        if (r.imported)
-        {
-            auto *native = static_cast<ID3D12Resource *>(r.native);
-            const auto &desc = r.native_description;
-            // COM identity also catches different interface pointers to one
-            // import; separate logical handles cannot track its physical state.
-            Microsoft::WRL::ComPtr<IUnknown> identity;
-            if (FAILED(native->QueryInterface(IID_PPV_ARGS(&identity))))
-                return fail("RenderGraph cannot identify an imported resource.");
-            info.imported_identity = reinterpret_cast<std::uintptr_t>(identity.Get());
-            // Import identities can change with the frame slot while the plan
-            // remains reusable. Validate duplicates every frame, outside its key.
-            if (!imported_identities.insert(info.imported_identity).second)
-                return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
-            if (r.kind == ResourceKind::Buffer) info.buffer_size = desc.Width;
-            else
-            {
-                info.mip_count = desc.MipLevels;
-                info.array_count = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : desc.DepthOrArraySize;
-                if (!format_planes(desc.Format, info.plane_count))
-                    return fail("RenderGraph cannot query imported texture format planes.");
-            }
-        }
-        else if (r.kind == ResourceKind::Texture)
-        {
-            if (!format_planes(static_cast<DXGI_FORMAT>(r.texture.format), info.plane_count))
-                return fail("RenderGraph cannot query transient texture format planes.");
-        }
-        AppendPlanDescriptor(key_writer, r.imported
-            ? r.native_description
-            : NativeDesc(r.kind, r.texture, r.buffer));
-        key_writer.Append({static_cast<std::uint64_t>(info.kind),
-            info.initialized, info.buffer_size, info.mip_count, info.array_count,
-            info.plane_count, info.final_set, static_cast<std::uint64_t>(r.fixed_buffer_heap),
-            static_cast<std::uint64_t>(r.final_set ? r.final : Access::Undefined)});
-        AppendPlanVersion(key_writer, info.final_version);
-        resource_infos.push_back(info);
+        Microsoft::WRL::ComPtr<IUnknown> identity;
+        if (FAILED(static_cast<ID3D12Resource *>(resource.native)->QueryInterface(IID_PPV_ARGS(&identity))))
+            return fail("RenderGraph cannot identify an imported resource.");
+        resource.imported_identity = reinterpret_cast<std::uintptr_t>(identity.Get());
+        if (!imported_identities.insert(resource.imported_identity).second)
+            return fail("RenderGraph imports one physical resource more than once; reuse its handle.");
     }
-    std::vector<std::vector<std::uint32_t>> predecessor_ids(impl_->passes.size());
-    std::vector<std::pair<std::uint32_t, std::size_t>> pass_indices;
-    if (!impl_->ordering_dependencies.empty())
-    {
-        pass_indices.reserve(impl_->passes.size());
-        for (std::size_t index = 0; index < impl_->passes.size(); ++index)
-            pass_indices.emplace_back(impl_->passes[index].id, index);
-        std::sort(pass_indices.begin(), pass_indices.end());
-    }
-    for (const auto &[producer_id, consumer_id] : impl_->ordering_dependencies)
-    {
-        const auto consumer = std::lower_bound(pass_indices.begin(), pass_indices.end(),
-            std::pair{consumer_id, std::size_t{0}});
-        if (consumer == pass_indices.end() || consumer->first != consumer_id)
-            return fail("RenderGraph ordering consumer does not exist.");
-        predecessor_ids[consumer->second].push_back(producer_id);
-    }
-    for (std::size_t pass_index = 0; pass_index < impl_->passes.size(); ++pass_index)
-    {
-        const auto &pass = impl_->passes[pass_index];
+    for (const auto &pass : impl_->passes)
         if (pass.external)
         {
             const auto &external = *pass.external;
@@ -2539,93 +2515,162 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                 queue->GetDesc().Type != NativeQueueType(pass.queue) ||
                 !SameDevice(queue, pool.impl_->device.Get()) || !external.execute)
                 return fail("RenderGraph external operation requires a matching owned native queue and device.");
-            if (external.accesses.size() != pass.uses.size())
-                return fail("RenderGraph external operation requires one boundary for every whole-resource use.");
-            for (std::size_t index = 0; index < external.accesses.size(); ++index)
+        }
+    const auto matches = [&](const TopologyValues &values) {
+        return values.Matches(impl_->resources, impl_->passes, impl_->ordering_dependencies);
+    };
+    bool reused = matches(impl_->topology);
+    if (!reused)
+        if (const auto previous = std::find_if(impl_->previous_plans.begin(), impl_->previous_plans.end(),
+                [&](const auto &entry) { return matches(entry.topology); }); previous != impl_->previous_plans.end())
+        {
+            std::swap(impl_->topology, previous->topology);
+            std::swap(impl_->schedule, previous->schedule);
+            std::swap(impl_->alias_plan, previous->aliases);
+            reused = true;
+        }
+    if (reused) ++impl_->plan_reuses;
+    if (!reused)
+    {
+        ++impl_->plan_input_builds;
+        for (const auto &resource : impl_->resources)
+        {
+            if (resource.imported) continue;
+            if (resource.kind == ResourceKind::Texture)
             {
-                const auto &boundary = external.accesses[index];
-                const auto *resource = impl_->Find(boundary.resource);
-                const auto native_flags = resource && resource->imported
-                    ? resource->native_description.Flags
-                    : static_cast<D3D12_RESOURCE_FLAGS>(resource && resource->kind == ResourceKind::Texture
-                        ? resource->texture.flags : resource ? resource->buffer.flags : 0);
-                const bool common_boundary = resource && (resource->kind == ResourceKind::Buffer ||
-                    pass.queue == QueueHint::Copy || (native_flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS));
-                if (!resource || !compatible(*resource, boundary.incoming) || !compatible(*resource, boundary.outgoing) ||
-                    (resource->imported && !SameDevice(static_cast<ID3D12Resource *>(resource->native), pool.impl_->device.Get())) ||
-                    !QueueAccessCompatible(pass.queue, boundary.incoming) ||
-                    !QueueAccessCompatible(pass.queue, boundary.outgoing) ||
-                    boundary.incoming == Access::Present || boundary.outgoing == Access::Present ||
-                    boundary.incoming == Access::DepthRead || boundary.incoming == Access::DepthWrite ||
-                    boundary.incoming == Access::DepthShaderRead || boundary.outgoing == Access::DepthRead ||
-                    boundary.outgoing == Access::DepthWrite || boundary.outgoing == Access::DepthShaderRead ||
-                    (common_boundary &&
-                     (boundary.incoming != Access::Common || boundary.outgoing != Access::Common)))
-                    return fail("RenderGraph external resource boundary is unsupported or incompatible.");
-                for (std::size_t previous = 0; previous < index; ++previous)
-                    if (external.accesses[previous].resource.value == boundary.resource.value)
-                        return fail("RenderGraph external resource boundary is duplicated.");
-                const auto use = std::find_if(pass.uses.begin(), pass.uses.end(), [&](const auto &item) {
-                    return item.predecessor.resource.value == boundary.resource.value &&
-                           item.predecessor.resource.kind == boundary.resource.kind;
-                });
-                if (use == pass.uses.end() || !std::holds_alternative<std::monostate>(use->range))
-                    return fail("RenderGraph external boundaries require declared whole-resource uses.");
-                if (!use->writes && (boundary.incoming == Access::RenderTarget ||
-                    boundary.incoming == Access::UnorderedWrite || boundary.incoming == Access::CopyDest))
-                    return fail("RenderGraph external writable entry requires a declared resource write.");
+                const auto &d = resource.texture;
+                if (!d.width || !d.height || d.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
+                    d.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION || !d.format ||
+                    (d.flags & ~(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL |
+                                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) ||
+                    ((d.flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+                     (d.flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))))
+                    return fail("RenderGraph transient texture descriptor is invalid.");
+            }
+            else if (!resource.buffer.size || resource.buffer.flags & ~D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+                return fail("RenderGraph transient buffer descriptor is invalid.");
+        }
+        const auto format_planes = [&](DXGI_FORMAT format, std::uint32_t &count) {
+            auto &cache = pool.impl_->format_planes;
+            const auto found = std::find_if(cache.begin(), cache.end(),
+                                           [&](const auto &entry) { return entry.first == format; });
+            if (found != cache.end()) { count = found->second; return true; }
+            D3D12_FEATURE_DATA_FORMAT_INFO info{format, 0};
+            if (!pool.impl_->device ||
+                FAILED(pool.impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_INFO, &info, sizeof(info))) ||
+                !info.PlaneCount) return false;
+            count = info.PlaneCount;
+            cache.emplace_back(format, count);
+            return true;
+        };
+        std::vector<render_graph::ResourceInfo> resource_infos;
+        resource_infos.reserve(impl_->resources.size());
+        for (const auto &r : impl_->resources)
+        {
+            render_graph::ResourceInfo info;
+            info.kind = r.kind;
+            info.initialized = r.imported;
+            info.buffer_size = r.buffer.size;
+            info.final_set = r.final_set;
+            info.final_version = r.final_version;
+            if (r.final_set && !compatible(r, r.final))
+                return fail("RenderGraph final access is incompatible with its resource.");
+            if (r.imported)
+            {
+                const auto &desc = r.native_description;
+                info.imported_identity = r.imported_identity;
+                if (r.kind == ResourceKind::Buffer) info.buffer_size = desc.Width;
+                else
+                {
+                    info.mip_count = desc.MipLevels;
+                    info.array_count = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : desc.DepthOrArraySize;
+                    if (!format_planes(desc.Format, info.plane_count))
+                        return fail("RenderGraph cannot query imported texture format planes.");
+                }
+            }
+            else if (r.kind == ResourceKind::Texture)
+            {
+                if (!format_planes(static_cast<DXGI_FORMAT>(r.texture.format), info.plane_count))
+                    return fail("RenderGraph cannot query transient texture format planes.");
+            }
+            resource_infos.push_back(info);
+        }
+        std::vector<std::vector<std::uint32_t>> predecessor_ids(impl_->passes.size());
+        std::vector<std::pair<std::uint32_t, std::size_t>> pass_indices;
+        if (!impl_->ordering_dependencies.empty())
+        {
+            pass_indices.reserve(impl_->passes.size());
+            for (std::size_t index = 0; index < impl_->passes.size(); ++index)
+                pass_indices.emplace_back(impl_->passes[index].id, index);
+            std::sort(pass_indices.begin(), pass_indices.end());
+        }
+        for (const auto &[producer_id, consumer_id] : impl_->ordering_dependencies)
+        {
+            const auto consumer = std::lower_bound(pass_indices.begin(), pass_indices.end(),
+                std::pair{consumer_id, std::size_t{0}});
+            if (consumer == pass_indices.end() || consumer->first != consumer_id)
+                return fail("RenderGraph ordering consumer does not exist.");
+            predecessor_ids[consumer->second].push_back(producer_id);
+        }
+        for (std::size_t pass_index = 0; pass_index < impl_->passes.size(); ++pass_index)
+        {
+            const auto &pass = impl_->passes[pass_index];
+            if (pass.external)
+            {
+                const auto &external = *pass.external;
+                if (external.accesses.size() != pass.uses.size())
+                    return fail("RenderGraph external operation requires one boundary for every whole-resource use.");
+                for (std::size_t index = 0; index < external.accesses.size(); ++index)
+                {
+                    const auto &boundary = external.accesses[index];
+                    const auto *resource = impl_->Find(boundary.resource);
+                    const auto native_flags = resource && resource->imported
+                        ? resource->native_description.Flags
+                        : static_cast<D3D12_RESOURCE_FLAGS>(resource && resource->kind == ResourceKind::Texture
+                            ? resource->texture.flags : resource ? resource->buffer.flags : 0);
+                    const bool common_boundary = resource && (resource->kind == ResourceKind::Buffer ||
+                        pass.queue == QueueHint::Copy || (native_flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS));
+                    if (!resource || !compatible(*resource, boundary.incoming) || !compatible(*resource, boundary.outgoing) ||
+                        (resource->imported && !SameDevice(static_cast<ID3D12Resource *>(resource->native), pool.impl_->device.Get())) ||
+                        !QueueAccessCompatible(pass.queue, boundary.incoming) ||
+                        !QueueAccessCompatible(pass.queue, boundary.outgoing) ||
+                        boundary.incoming == Access::Present || boundary.outgoing == Access::Present ||
+                        boundary.incoming == Access::DepthRead || boundary.incoming == Access::DepthWrite ||
+                        boundary.incoming == Access::DepthShaderRead || boundary.outgoing == Access::DepthRead ||
+                        boundary.outgoing == Access::DepthWrite || boundary.outgoing == Access::DepthShaderRead ||
+                        (common_boundary &&
+                         (boundary.incoming != Access::Common || boundary.outgoing != Access::Common)))
+                        return fail("RenderGraph external resource boundary is unsupported or incompatible.");
+                    for (std::size_t previous = 0; previous < index; ++previous)
+                        if (external.accesses[previous].resource.value == boundary.resource.value)
+                            return fail("RenderGraph external resource boundary is duplicated.");
+                    const auto use = std::find_if(pass.uses.begin(), pass.uses.end(), [&](const auto &item) {
+                        return item.predecessor.resource.value == boundary.resource.value &&
+                               item.predecessor.resource.kind == boundary.resource.kind;
+                    });
+                    if (use == pass.uses.end() || !std::holds_alternative<std::monostate>(use->range))
+                        return fail("RenderGraph external boundaries require declared whole-resource uses.");
+                    if (!use->writes && (boundary.incoming == Access::RenderTarget ||
+                        boundary.incoming == Access::UnorderedWrite || boundary.incoming == Access::CopyDest))
+                        return fail("RenderGraph external writable entry requires a declared resource write.");
+                }
+            }
+            for (const auto &use : pass.uses)
+            {
+                const auto *resource = impl_->Find(use.predecessor.resource);
+                if (!resource || !compatible(*resource, use.access))
+                    return fail("RenderGraph access is incompatible with its resource.");
             }
         }
-        for (const auto &use : pass.uses)
-        {
-            const auto *resource = impl_->Find(use.predecessor.resource);
-            if (!resource || !compatible(*resource, use.access))
-                return fail("RenderGraph access is incompatible with its resource.");
-        }
-        const bool has_execute = pass.execute || pass.owner_execute || pass.external;
-        const auto &predecessors = predecessor_ids[pass_index];
-        // Every declared pass is retained by the current compiler. Execution
-        // kind and external boundaries capture its available side-effect data.
-        const std::uint64_t execution_kind = pass.external ? 4 : pass.owner_execute
-            ? (pass.execute_on_owner ? 3 : 2) : pass.execute ? 1 : 0;
-        key_writer.Append({pass.id, static_cast<std::uint64_t>(pass.queue),
-            has_execute, execution_kind, pass.uses.size(), predecessors.size()});
-        for (const auto &use : pass.uses) AppendPlanUse(key_writer, use);
-        for (const auto predecessor : predecessors) key_writer.Append({predecessor});
-        if (pass.external)
-        {
-            key_writer.Append({static_cast<std::uint64_t>(pass.external->binding.queue_type),
-                pass.external->accesses.size()});
-            for (const auto &boundary : pass.external->accesses)
-                key_writer.Append({boundary.resource.value,
-                    static_cast<std::uint64_t>(boundary.resource.kind),
-                    static_cast<std::uint64_t>(boundary.incoming),
-                    static_cast<std::uint64_t>(boundary.outgoing)});
-        }
-    }
-    key_writer.Finish();
-    capture_stage(captured_cpu.cpu_prepare_info_key_us);
-    if (impl_->cached_plan_key == plan_key)
-        ++impl_->plan_reuses;
-    else if (const auto previous = std::find_if(impl_->previous_plans.begin(), impl_->previous_plans.end(),
-                 [&](const auto &entry) { return entry.key == plan_key; }); previous != impl_->previous_plans.end())
-    {
-        // Rotate exact value-only plans without copying schedules or retaining callbacks/imports.
-        std::swap(impl_->cached_plan_key, previous->key);
-        std::swap(impl_->schedule, previous->schedule);
-        std::swap(impl_->alias_plan, previous->aliases);
-        ++impl_->plan_reuses;
-    }
-    else
-    {
-        // Validation and the exact key are complete before copying compiler-only inputs.
+        capture_stage(captured_cpu.cpu_prepare_info_key_us);
+        // Only a topology miss builds compiler inputs and validates immutable uses.
         for (std::size_t index = 0; index < resource_infos.size(); ++index)
         {
             const auto &resource = impl_->resources[index];
             auto &info = resource_infos[index];
             info.name = resource.name;
             if (resource.imported) continue;
-            // Allocation requirements derive from the device and exact descriptor in the key.
+            // Allocation requirements derive from the device and retained descriptor contract.
             const auto desc = NativeDesc(resource.kind, resource.texture, resource.buffer);
             const auto allocation = pool.impl_->device->GetResourceAllocationInfo(0, 1, &desc);
             if (!allocation.SizeInBytes || allocation.SizeInBytes == UINT64_MAX || !allocation.Alignment)
@@ -2653,20 +2698,22 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             return result;
         // Publish only a fully validated compiler result. A failed candidate
         // leaves the previous successful plan available for a later frame.
-        auto compiled_key = plan_key;
-        if (!impl_->cached_plan_key.empty())
+        TopologyValues compiled_topology;
+        compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies);
+        if (impl_->topology.valid)
         {
             auto &previous = impl_->previous_plans[impl_->next_previous_plan];
-            previous.key = std::move(impl_->cached_plan_key);
+            previous.topology = std::move(impl_->topology);
             previous.schedule = std::move(impl_->schedule);
             previous.aliases = std::move(impl_->alias_plan);
             impl_->next_previous_plan = (impl_->next_previous_plan + 1) % impl_->previous_plans.size();
         }
         impl_->schedule = std::move(schedule);
         impl_->alias_plan = std::move(aliases);
-        impl_->cached_plan_key = std::move(compiled_key);
+        impl_->topology = std::move(compiled_topology);
         ++impl_->plan_compilations;
     }
+    if (reused) capture_stage(captured_cpu.cpu_prepare_info_key_us);
     capture_stage(captured_cpu.cpu_prepare_compile_us);
     const auto pass_count = static_cast<std::uint32_t>(impl_->passes.size());
     for (std::uint32_t position = 0; position < pass_count; ++position)
@@ -2715,7 +2762,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         if (found == entries.end())
         {
             TransientResourcePool::Impl::Entry entry;
-            entry.kind = resource_infos[group.resources.front()].kind;
+            entry.kind = impl_->resources[group.resources.front()].kind;
             const auto &first = impl_->resources[group.resources.front()];
             entry.texture = first.texture;
             entry.buffer = first.buffer;
@@ -3009,6 +3056,11 @@ std::uint64_t RenderGraphBuilder::PlanCompilationCount() const noexcept
 std::uint64_t RenderGraphBuilder::PlanReuseCount() const noexcept
 {
     return impl_->plan_reuses;
+}
+
+std::uint64_t RenderGraphBuilder::PlanInputBuildCount() const noexcept
+{
+    return impl_->plan_input_builds;
 }
 
 std::string_view RenderGraphBuilder::CompiledPassName(std::uint32_t execution_index) const noexcept

@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <string_view>
@@ -446,8 +447,10 @@ std::optional<float> Lifetime(const PersistentVfxVisual &visual,
 }
 const PersistentVfxVisual *FindPrevious(
     std::span<const PersistentVfxVisual> previous,
-    const PersistentVfxVisual &visual) noexcept
+    const PersistentVfxVisual &visual,
+    const PreparedPairFacts *pair_facts) noexcept
 {
+    if (pair_facts) return pair_facts->Previous(visual, previous);
     const auto found = std::find_if(previous.begin(), previous.end(),
         [&visual](const PersistentVfxVisual &candidate) {
             return candidate.stable_id == visual.stable_id &&
@@ -674,12 +677,88 @@ bool FiniteWarningOwner(const PersistentVfxVisual &owner, Tick current_tick) noe
 
 } // namespace
 
+std::size_t PreparedPairFacts::VisualHash::operator()(const VisualKey &key) const noexcept
+{
+    return std::hash<std::uint64_t>{}(key.stable_id ^
+        (static_cast<std::uint64_t>(key.kind) << 56));
+}
+
+std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) const noexcept
+{
+    auto hash = std::hash<std::uint64_t>{}(key.session_id);
+    const auto mix = [&](std::uint64_t value) {
+        hash ^= std::hash<std::uint64_t>{}(value) + 0x9e3779b97f4a7c15ull +
+            (hash << 6) + (hash >> 2);
+    };
+    mix(key.sequence); mix(key.tick); mix(key.entity_id);
+    return hash;
+}
+
+void PreparedPairFacts::Prepare(Key key,
+    std::span<const PersistentVfxVisual> previous,
+    std::span<const PersistentVfxVisual> current,
+    std::span<const RenderInstance> instances,
+    std::span<const CapturedRenderInstance> captures)
+{
+    key.previous_data = previous.data(); key.previous_count = previous.size();
+    key.current_data = current.data(); key.current_count = current.size();
+    key.instance_data = instances.data(); key.instance_count = instances.size();
+    key.capture_data = captures.data(); key.capture_count = captures.size();
+    if (prepared_ && key_ == key) return;
+    key_ = key;
+    prepared_ = true;
+    previous_.clear(); current_.clear(); instances_.clear(); captures_.clear();
+    previous_.reserve(previous.size()); current_.reserve(current.size());
+    instances_.reserve(instances.size()); captures_.reserve(captures.size());
+    for (std::size_t i = 0; i < previous.size(); ++i)
+        previous_.try_emplace({previous[i].stable_id, previous[i].kind}, i);
+    for (std::size_t i = 0; i < current.size(); ++i)
+        current_.try_emplace({current[i].stable_id, current[i].kind}, i);
+    for (std::size_t i = 0; i < instances.size(); ++i)
+        instances_.try_emplace(instances[i].stable_id, i);
+    for (std::size_t i = 0; i < captures.size(); ++i)
+        captures_.try_emplace({captures[i].session_id, captures[i].sequence,
+                               captures[i].tick, captures[i].source_entity_id}, i);
+}
+
+const PersistentVfxVisual *PreparedPairFacts::Previous(
+    const PersistentVfxVisual &visual,
+    std::span<const PersistentVfxVisual> rows) const noexcept
+{
+    const auto found = previous_.find({visual.stable_id, visual.kind});
+    return found != previous_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
+}
+
+const PersistentVfxVisual *PreparedPairFacts::Current(
+    std::uint64_t stable_id, PersistentVfxKind kind,
+    std::span<const PersistentVfxVisual> rows) const noexcept
+{
+    const auto found = current_.find({stable_id, kind});
+    return found != current_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
+}
+
+const RenderInstance *PreparedPairFacts::Instance(
+    std::uint64_t stable_id, std::span<const RenderInstance> rows) const noexcept
+{
+    const auto found = instances_.find(stable_id);
+    return found != instances_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
+}
+
+const CapturedRenderInstance *PreparedPairFacts::Capture(
+    std::uint64_t session_id, Sequence sequence, Tick tick, std::uint64_t entity_id,
+    std::span<const CapturedRenderInstance> rows) const noexcept
+{
+    const auto found = captures_.find({session_id, sequence, tick, entity_id});
+    return found != captures_.end() && found->second < rows.size() ? &rows[found->second] : nullptr;
+}
+
 VfxTypedFrameInputs BuildVfxTypedFrameInputs(
     const VfxProgramView &cooked,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
-    Tick current_tick)
+    Tick current_tick,
+    const PreparedPairFacts *pair_facts)
 {
     VfxTypedFrameInputs result;
     result.events.reserve(events.size());
@@ -1185,7 +1264,7 @@ VfxTypedFrameInputs BuildVfxTypedFrameInputs(
         const auto current_position = visual.projectile_owner_id != 0
             ? visual.projectile_current_position : visual.position;
         input.current_transform = Transform(current_position, visual.yaw);
-        const auto *prior = FindPrevious(previous, visual);
+        const auto *prior = FindPrevious(previous, visual, pair_facts);
         input.previous_transform = visual.projectile_owner_id != 0
             ? Transform(visual.projectile_previous_position,
                         std::atan2(visual.projectile_velocity.x,

@@ -69,7 +69,7 @@ class Window
     [[nodiscard]] Result ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borderless,
                                                std::uint32_t client_width,
                                                std::uint32_t client_height);
-    void SetUiClickHandler(std::function<void(Float2)> handler);
+    void SetUiClickHandler(std::function<void(Float2, ViewExtent)> handler);
     void SetUiHoverHandler(std::function<void(Float2)> handler);
 
   private:
@@ -89,7 +89,7 @@ class Window
     PresentationCamera camera_{};
     std::optional<std::uint8_t> pending_rebind_slot_;
     std::optional<std::array<std::uint16_t, 4>> rebound_skill_keys_;
-    std::function<void(Float2)> ui_click_handler_;
+    std::function<void(Float2, ViewExtent)> ui_click_handler_;
     std::function<void(Float2)> ui_hover_handler_;
     Sequence input_sequence_{};
     bool accepting_input_{true};

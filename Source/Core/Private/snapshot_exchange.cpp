@@ -150,11 +150,15 @@ RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest
     if (previous_)
     {
         pair.previous = exchange_->slots_[*previous_].storage.View();
+        pair.previous_publication_sequence =
+            exchange_->slots_[*previous_].publish_sequence.load(std::memory_order_relaxed);
         pair.has_previous = true;
     }
     if (current_)
     {
         pair.current = exchange_->slots_[*current_].storage.View();
+        pair.current_publication_sequence =
+            exchange_->slots_[*current_].publish_sequence.load(std::memory_order_relaxed);
         pair.has_current = true;
     }
     return pair;

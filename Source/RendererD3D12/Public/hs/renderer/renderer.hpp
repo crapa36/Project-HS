@@ -306,8 +306,9 @@ struct RendererConfig
     bool warp{};
     bool validation{};
     bool gpu_validation{};
-    // Capture-only completed timing stream; ordinary rendering retains only the latest sample.
+    // Opt in to CPU timing capture and the optional completed GPU timing stream.
     bool capture_timing_stream{};
+    bool capture_gpu_timings{true}; // Active DRS always retains its required reference samples.
     // Intrusive per-contributor native queries/readbacks. Keep false for normal A/B.
     bool capture_hero_work{};
     HeroWorkDiagnosticMode hero_work_mode{HeroWorkDiagnosticMode::Full};
@@ -431,11 +432,17 @@ struct RendererCpuTimings
     // Do not add these values to the outer stage totals.
     std::uint64_t graph_prepare_validation_us{}, graph_prepare_info_key_us{};
     std::uint64_t graph_prepare_compile_us{}, graph_prepare_transient_us{};
+    // Capture-only consecutive children of graph_build_us, including native preparation.
+    std::uint64_t graph_resources_us{}, graph_base_passes_us{}, graph_shadows_us{};
+    std::uint64_t graph_light_probes_us{}, graph_scene_selection_us{}, graph_ao_us{};
+    std::uint64_t graph_opaque_us{}, graph_hero_us{}, graph_post_us{};
     // Capture-only nested wall intervals; do not add to the outer stage totals.
     // The first three belong to scene_prepare_us; the rest to constants_upload_us.
     std::uint64_t retained_vfx_us{}, ribbon_prepare_us{}, particle_spawn_prepare_us{};
     std::uint64_t typed_vfx_upload_prepare_us{}, particle_upload_prepare_us{}, local_vfx_prepare_us{};
     std::uint64_t palette_prepare_us{}, skin_prepare_us{}, scene_reconcile_us{}, scene_gpu_prepare_us{};
+    std::uint64_t scene_skin_prepare_us{}, scene_shadow_prepare_us{}, scene_cluster_prepare_us{};
+    std::uint64_t scene_geometry_demand_us{}, scene_texture_prepare_us{}, scene_upload_plan_us{};
     // Capture-only ribbon children; thread CPU is kernel+user, not scheduler-ready time.
     std::uint64_t ribbon_state_us{}, ribbon_wait_us{}, ribbon_allocation_us{};
     std::uint64_t ribbon_replacement_count{}, ribbon_allocation_bytes{}, ribbon_prepare_thread_cpu_us{};
@@ -471,6 +478,12 @@ struct RendererFrameResult
     std::vector<RenderViewFrameResult> views;
     RendererCpuTimings cpu_timings;
     RendererStreamlinePresentCount streamline_present;
+    // World mutation accepted by GPU queues, including a later view/Present failure.
+    bool vfx_world_step_submitted{};
+    Tick vfx_world_tick{};
+    std::uint64_t vfx_world_session_id{};
+    // Main Present accepted this UI packet; this is not a display scanout timestamp.
+    std::uint64_t presented_ui_packet_generation{};
 };
 
 struct RendererOptions;
@@ -515,6 +528,13 @@ struct GpuPassTiming
     bool cpu_callback_valid{};
 };
 
+enum class GpuFrameTimingKind : std::uint8_t
+{
+    Unavailable,
+    ReferenceGraphSpan,
+    SourceOutputReady,
+};
+
 struct GpuPassTimings
 {
     std::vector<GpuPassTiming> passes;
@@ -528,6 +548,13 @@ struct GpuPassTimings
     bool gpu_limited{};
     bool fence_completed{};
     std::uint64_t cpu_qpc_frequency{};
+    GpuFrameTimingKind metric_kind{GpuFrameTimingKind::Unavailable};
+    std::uint64_t metric_generation{}, resize_epoch{};
+    ViewExtent render_active;
+    bool main_view{}, frame_generation_enabled{};
+    // A source-output endpoint, not a cadence or a measured dependency span.
+    std::uint64_t output_ready_ticks{}, output_ready_frequency{}, output_ready_qpc{}, output_ready_qpc_frequency{};
+    bool output_ready_valid{}, output_ready_clock_calibrated{};
 };
 
 struct RendererQueueStats
@@ -723,6 +750,7 @@ class D3D12Renderer
     [[nodiscard]] std::uint64_t ValidationErrorCount() const noexcept;
     [[nodiscard]] std::uint32_t LastParticleCount() const noexcept;
     [[nodiscard]] float DecorativeParticleFraction() const noexcept;
+    // Latest collected sample; ordinary rendering without capture/DRS may have none.
     [[nodiscard]] GpuPassTimings LastGpuPassTimings() const;
     // Owner thread only; cached data remains valid until the next renderer mutation.
     // No query readback, clock calibration, allocation or copy occurs here.
@@ -769,8 +797,8 @@ class D3D12Renderer
                                 std::span<const PresentationEvent> events,
                                 std::span<const ParticleSpawnCommand> particle_spawns,
                                 std::span<const VfxLineSpawnCommand> effect_lines,
-                                std::span<const VfxEventInput> typed_vfx_events,
-                                std::span<const VfxPersistentInput> typed_vfx_persistent,
+                                std::uint32_t typed_vfx_event_count,
+                                std::uint32_t typed_vfx_persistent_count,
                                 std::span<const VfxGroundSpawnInput> typed_ground_spawns,
                                 std::span<const VfxFlashSpawnInput> typed_flash_spawns,
                                 std::span<const VfxOwnedMeshInput> typed_mesh_spawns,

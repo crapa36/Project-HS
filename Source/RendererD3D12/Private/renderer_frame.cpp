@@ -34,8 +34,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                              std::span<const PresentationEvent> events,
                              std::span<const ParticleSpawnCommand> particle_spawns,
                              std::span<const VfxLineSpawnCommand> effect_lines,
-                             std::span<const VfxEventInput> typed_vfx_events,
-                             std::span<const VfxPersistentInput> typed_vfx_persistent,
+                             std::uint32_t typed_vfx_event_count,
+                             std::uint32_t typed_vfx_persistent_count,
                              std::span<const VfxGroundSpawnInput> typed_ground_spawns,
                              std::span<const VfxFlashSpawnInput> typed_flash_spawns,
                              std::span<const VfxOwnedMeshInput> typed_mesh_spawns,
@@ -54,7 +54,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         const auto view = MainViewInput(snapshots.current.camera);
         RenderFrameInput input;
         input.views = std::span(&view, 1); input.snapshots = snapshots; input.events = events;
-        input.vfx = {particle_spawns, effect_lines, typed_vfx_events, typed_vfx_persistent,
+        input.vfx = {particle_spawns, effect_lines, typed_vfx_event_count, typed_vfx_persistent_count,
             typed_ground_spawns, typed_flash_spawns, typed_mesh_spawns, typed_fresnels, typed_ribbons,
             typed_lights, typed_distortions, typed_decals, typed_volumes, typed_screen, typed_entity_surfaces};
         input.devtools = devtools;
@@ -103,13 +103,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->asset_io.SetWaitForReads(wait_for_streaming);
     if (wait_for_streaming)
         if (auto waited = impl_->WaitForGpu(); !waited) return waited;
-    for (const auto &input : typed_vfx_events)
-        if (input.effect_handle == kInvalidVfxEffectHandle)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                   "Typed VFX event has an invalid effect handle.");
-    std::string vfx_error;
-    if (!impl_->typed_vfx_persistent_state.Update(typed_vfx_persistent, vfx_error))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", vfx_error);
     const auto back_buffer_index = presented_view ? impl_->swap_chain->GetCurrentBackBufferIndex()
         : static_cast<std::uint32_t>(impl_->frame_number % kFrameCount);
     auto &frame = impl_->frames[back_buffer_index];
@@ -159,8 +152,15 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             impl_->config.dynamic_resolution && !impl_->ResolveFeatures(impl_->config).software_gi_enabled,
             static_cast<double>(impl_->config.target_render_fps),
             impl_->config.dynamic_min_percent, impl_->config.dynamic_max_percent};
+        const bool current_timing = timing.main_view && timing.view_id == impl_->active_view_id.value &&
+            timing.metric_generation == impl_->view_configuration_revision &&
+            timing.resize_epoch == impl_->view_state.resize_epoch &&
+            timing.render_active == impl_->view_state.render_active;
         auto selected = impl_->dynamic_resolution_controller.Select(impl_->view_state,
-            resolution_config, {timing.critical_path_valid, false, timing.gpu_limited, timing.critical_path_ms});
+            resolution_config, {current_timing && timing.critical_path_valid, false,
+                timing.gpu_limited, timing.critical_path_ms,
+                timing.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan
+                    ? DynamicResolutionMetricKind::ReferenceGraphSpan : DynamicResolutionMetricKind::Unavailable});
         if (impl_->reconstruction_provider && impl_->reconstruction_provider->Initialized())
         {
             const auto &plan = impl_->reconstruction_plan;
@@ -227,6 +227,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
 
     cpu_timings.streaming_us = measure_stage();
     auto snapshot = snapshots.has_current ? snapshots.current : RenderSnapshot{};
+    struct WorldStepReceipt
+    {
+        RendererFrameResult &output;
+        Tick tick;
+        std::uint64_t session;
+        bool submitted{};
+        std::uint64_t presented_ui_generation{};
+        ~WorldStepReceipt()
+        {
+            output.presented_ui_packet_generation = presented_ui_generation;
+            if (!submitted) return;
+            output.vfx_world_step_submitted = true;
+            output.vfx_world_tick = tick;
+            output.vfx_world_session_id = session;
+        }
+    } world_step_receipt{frame_result, snapshot.header.tick, snapshot.header.session_id};
     if (!impl_->legacy_frame_bridge) snapshot.camera.vertical_fov_degrees = view_input.camera.vertical_fov_degrees;
     const bool scene_new_session = snapshot.header.session_id != impl_->render_session_id;
     const bool new_session = scene_new_session || snapshot.header.session_id != impl_->view_session_id;
@@ -529,7 +545,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (ribbon_checkpoint) impl_->ribbon_state = std::move(*ribbon_checkpoint);
         return failure;
     };
-    if (impl_->render_scene_inputs && !impl_->ribbon_state.Update(
+    std::string vfx_error;
+    if (impl_->render_scene_inputs && !impl_->ribbon_state.UpdateValidated(
             ribbon_sources,
             snapshot.header.tick, snapshot.header.session_id, typed_ribbons.catalog_generation,
             impl_->config.ribbon_history_points, interpolation, impl_->previous_ribbon_eye, vfx_error))
@@ -646,6 +663,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             auto &next_draws = rebuilt_draws.emplace();
             std::array<std::vector<GpuStaticDrawRef>, kEnvironmentVisibilityBucketCount>
                 static_environment_buckets;
+            std::array<std::vector<GeometryDemandPoint>, kEnvironmentMaterialNames.size()> demand_points;
             std::vector<GpuStaticDrawRef> static_ground_bucket;
             for (std::size_t index = 0; index < static_scene->instances.size(); ++index)
             {
@@ -654,8 +672,12 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 if (is_environment_mesh(source.mesh))
                 {
                     if (!RetainDecorativeFoliage(source, index, foliage_density)) continue;
-                    const auto base = environment_mesh_index(source) * 3;
+                    const auto ordinal = environment_mesh_index(source);
+                    const auto base = ordinal * 3;
                     static_environment_buckets[base].push_back({instance_index, 0, 1.0f, static_generation});
+                    demand_points[ordinal].push_back({{source.position.x, source.position.y, source.position.z},
+                        std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)}),
+                        instance_index, HasEnvironmentWind(source.mesh, source.environment_variant)});
                 }
                 else if (source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch)
                     static_ground_bucket.push_back({instance_index, 0, 1.0f, static_generation});
@@ -670,6 +692,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 next_draws.refs.insert(next_draws.refs.end(), bucket.begin(), bucket.end());
                 for (std::size_t lod = 0; lod < 3; ++lod)
                     next_draws.ranges[asset + lod] = {begin, bucket.size()};
+                next_draws.geometry_demand_cells[asset / 3] = BuildGeometryDemandCells(demand_points[asset / 3]);
             }
             next_draws.ground_range = {next_draws.refs.size(), static_ground_bucket.size()};
             next_draws.refs.insert(next_draws.refs.end(), static_ground_bucket.begin(), static_ground_bucket.end());
@@ -792,21 +815,22 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             auto &candidates = cluster_candidates[ordinal];
             if (!static_draws.candidates_valid[ordinal] || static_draws.candidate_catalogs[ordinal] != catalog_key)
             {
-                candidates.clear();
-                candidates.reserve(count);
+                auto next_candidates = std::make_shared<std::vector<GpuClusterCandidate>>();
+                next_candidates->reserve(count);
                 const auto mesh = static_cast<std::uint32_t>(render_data::EnvironmentMeshForOrdinal(static_cast<std::uint32_t>(ordinal)));
                 for (std::size_t index = begin; index < begin + count; ++index)
                 {
                     const auto &reference = static_draw_refs[index];
-                    candidates.push_back({reference.instance_index, reference.instance_generation,
+                    next_candidates->push_back({reference.instance_index, reference.instance_generation,
                         static_cast<std::uint32_t>(ordinal), 15u, catalog.group_base, catalog.group_count,
                         mesh, 0u, 0.0f, reference.mesh_flags, catalog.first_root, 0u});
                 }
+                candidates = std::move(next_candidates);
                 static_draws.candidate_catalogs[ordinal] = catalog_key;
                 static_draws.candidates_valid[ordinal] = true;
             }
             cluster_inputs[ordinal].candidates = candidates;
-            cluster_inputs[ordinal].max_instance_count = static_cast<std::uint32_t>(candidates.size());
+            cluster_inputs[ordinal].max_instance_count = static_cast<std::uint32_t>(candidates->size());
             cluster_inputs[ordinal].constants.raster_record_base = UINT32_MAX;
         }
         for (std::size_t lod = 0; lod < 3; ++lod)
@@ -1114,9 +1138,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 kDefaultSceneDrawMaterial | 1u); !result) return result;
         for (std::size_t ordinal = 0; ordinal < cluster_inputs.size(); ++ordinal)
         {
-            if (!cluster_active[ordinal] || cluster_candidates[ordinal].empty()) continue;
+            if (!cluster_active[ordinal] || !cluster_candidates[ordinal] || cluster_candidates[ordinal]->empty()) continue;
             const auto count = std::max<std::uint64_t>(
-                static_cast<std::uint64_t>(cluster_candidates[ordinal].size()) *
+                static_cast<std::uint64_t>(cluster_candidates[ordinal]->size()) *
                     impl_->cluster_runtime->catalogs[ordinal].worst_cut_records,
                 impl_->cluster_runtime->frames[back_buffer_index].cuts[ordinal].required_capacity);
             if (count > UINT32_MAX - raster_cursor)
@@ -2058,49 +2082,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     };
     std::vector<FresnelDraw> fresnel_draws;
     fresnel_draws.reserve(typed_fresnels.size());
-    std::unordered_set<std::uint64_t> fresnel_ids;
+    // Immutable typed payloads were admitted by ValidateFramePayload before any view submission.
     for (std::size_t index = 0; index < typed_fresnels.size(); ++index)
     {
         const auto &source = typed_fresnels[index];
-        const auto finite_transform = [](const VfxTransform &transform) {
-            return std::ranges::all_of(transform, [](float value) { return std::isfinite(value); });
-        };
-        const bool crown = source.kind == VfxFresnelShellKind::BossCrown;
-        const bool transition = source.kind == VfxFresnelShellKind::BossTransition;
         const bool player = source.kind == VfxFresnelShellKind::PlayerInvulnerable;
-        if (source.render_instance_id == 0 || source.stable_id == 0 ||
-            source.effect_handle == kInvalidVfxEffectHandle ||
-            !fresnel_ids.insert(source.stable_id).second || (!crown && !transition && !player) ||
-            !finite_transform(source.current_transform) ||
-            !finite_transform(source.previous_transform) ||
-            !std::isfinite(source.footprint_radius) || source.footprint_radius <= 0.0f ||
-            !std::isfinite(source.source_progress) || source.source_progress < 0.0f ||
-            source.source_progress >= 1.0f ||
-            !std::isfinite(source.elapsed_seconds) || source.elapsed_seconds < 0.0f ||
-            !std::isfinite(source.color.x) || source.color.x < 0.0f ||
-            !std::isfinite(source.color.y) || source.color.y < 0.0f ||
-            !std::isfinite(source.color.z) || source.color.z < 0.0f ||
-            !std::isfinite(source.color.w) || source.color.w < 0.0f || source.color.w > 1.0f ||
-            !std::isfinite(source.hdr) || source.hdr <= 0.0f ||
-            source.gradient_row >= impl_->vfx_gradient_rows ||
-            !std::isfinite(source.motion_rate_hz) || source.motion_rate_hz < 0.0f ||
-            !std::isfinite(source.motion_amplitude) || source.motion_amplitude < 0.0f ||
-            source.motion_amplitude > 1.0f ||
-            !std::isfinite(source.motion_inset_fraction) ||
-            source.motion_inset_fraction < 0.0f || source.motion_inset_fraction > 1.0f ||
-            !std::isfinite(source.noise_amount) || source.noise_amount < 0.0f ||
-            source.noise_amount > 1.0f ||
-            (crown && (source.sector_count != 6 || !std::isfinite(source.rotation_hz) ||
-                       source.rotation_hz >= 0.0f || source.fresnel_power != 0.0f ||
-                       source.end_crack != 0 || source.noise_amount != 0.0f)) ||
-            (transition && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
-                            !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
-                            source.end_crack != 1 || source.noise_amount != 0.0f)) ||
-            (player && (source.sector_count != 0 || source.rotation_hz != 0.0f ||
-                        !std::isfinite(source.fresnel_power) || source.fresnel_power <= 0.0f ||
-                        source.end_crack != 0)))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                   "Invalid Fresnel shell command.");
         const auto match = std::ranges::find_if(render_instances, [&](const RenderInstance &instance) {
             return instance.stable_id == source.render_instance_id &&
                    (player ? instance.mesh == RenderMesh::Archer :
@@ -2138,19 +2124,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (impl_->config.slime_family_preview_count == 0)
         for (const auto &source : typed_mesh_spawns)
         {
-            const auto finite = [](const Float3 &v) {
-                return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
-            };
-            if (source.mesh_index == 0 || source.mesh_index > 7 ||
-                source.gradient_row >= impl_->vfx_gradient_rows || !finite(source.position) ||
-                !finite(source.previous_position) || !finite(source.velocity) ||
-                !finite({source.color.x,source.color.y,source.color.z}) || !std::isfinite(source.color.w) ||
-                !std::isfinite(source.radius) || source.radius <= 0 ||
-                !std::isfinite(source.hdr) || source.hdr <= 0 ||
-                !std::isfinite(source.fresnel) || source.fresnel < 0 || source.fresnel > 1 ||
-                !std::isfinite(source.head_to_tail_ratio) || source.head_to_tail_ratio < 0 || source.head_to_tail_ratio >= 1 ||
-                !std::isfinite(source.shell_thickness) || source.shell_thickness < 0)
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid owner mesh command.");
             auto &target_mesh = gpu_owner_meshes[owner_mesh_count++];
             target_mesh = {};
             target_mesh.position_lifetime_min = {
@@ -2179,56 +2152,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (const auto &source : typed_flash_spawns)
     {
         if (source.oit != oit_group) continue;
-        const auto finite = std::isfinite(source.position.x) &&
-            std::isfinite(source.position.y) && std::isfinite(source.position.z) &&
-            (!source.interpolate_owner_position ||
-             (std::isfinite(source.previous_position.x) && std::isfinite(source.previous_position.y) &&
-              std::isfinite(source.previous_position.z))) &&
-            std::isfinite(source.color.x) && std::isfinite(source.color.y) &&
-            std::isfinite(source.color.z) && std::isfinite(source.color.w) &&
-            std::isfinite(source.size) && source.size > 0.0f &&
-            std::isfinite(source.delay) && source.delay >= 0.0f &&
-            std::isfinite(source.lifetime) && source.lifetime > 0.0f &&
-            std::isfinite(source.hdr) && source.hdr > 0.0f &&
-            std::isfinite(source.normalized_age) && source.normalized_age >= 0.0f &&
-            source.normalized_age <= 1.0f && source.gradient_row < impl_->vfx_gradient_rows &&
-            static_cast<std::uint32_t>(source.shape) <= static_cast<std::uint32_t>(VfxImpactShape::Spark) &&
-            std::isfinite(source.direction.x) && std::isfinite(source.direction.y) && std::isfinite(source.direction.z) &&
-            std::isfinite(source.aspect) && source.aspect > 0 &&
-            (source.curve_row == 0xffffffffu || source.curve_row < 7) &&
-            (source.mask_slice == 0xffffffffu || source.mask_slice < 12) &&
-            std::isfinite(source.mask_strength) && source.mask_strength >= 0 && source.mask_strength <= 1 &&
-            std::isfinite(source.initial_offset.x) && std::isfinite(source.initial_offset.y) && std::isfinite(source.initial_offset.z) &&
-            std::isfinite(source.initial_velocity.x) && std::isfinite(source.initial_velocity.y) && std::isfinite(source.initial_velocity.z) &&
-            std::isfinite(source.orbit_radius) && source.orbit_radius >= 0 &&
-            std::isfinite(source.orbit_phase) && std::isfinite(source.orbit_rate) &&
-            std::isfinite(source.drag) && source.drag >= 0 &&
-            source.oit == (static_cast<std::uint32_t>(source.shape) >= 10 && static_cast<std::uint32_t>(source.shape) <= 12) &&
-            source.fbm_octaves > 0 && source.fbm_octaves <= 4 &&
-            std::isfinite(source.domain_warp) && source.domain_warp >= 0 &&
-            std::isfinite(source.opacity_scale) && source.opacity_scale > 0 &&
-            std::isfinite(source.motion_strength) && source.motion_strength >= 0 && source.motion_strength <= 1 &&
-            std::isfinite(source.procedural_flow_speed) && source.procedural_flow_speed >= 0 &&
-            std::isfinite(source.smoke_fps) && source.smoke_fps >= 0 &&
-            (source.shape != VfxImpactShape::Smoke6Way ||
-             (source.smoke_frame_count > 0 && source.smoke_first_frame < 64 &&
-              source.smoke_frame_count <= 64 - source.smoke_first_frame && source.smoke_fps > 0));
-        const auto spark_speed = std::hypot(source.initial_velocity.x,
-                                            source.initial_velocity.y,
-                                            source.initial_velocity.z);
-        const auto spark_direction = std::hypot(source.direction.x,
-                                                source.direction.y,
-                                                source.direction.z);
-        const auto spark_alignment = source.direction.x * source.initial_velocity.x +
-            source.direction.y * source.initial_velocity.y +
-            source.direction.z * source.initial_velocity.z;
-        if (!finite || (source.shape == VfxImpactShape::Spark &&
-            (source.oit || source.ground_base_anchor || source.aspect != 1.0f ||
-             !std::isfinite(spark_speed) || spark_speed <= 0.0f ||
-             !std::isfinite(spark_direction) || std::abs(spark_direction - 1.0f) > 0.001f ||
-             spark_alignment < 0.999f * spark_speed)))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                   "Invalid authored flash command.");
         if (!source.oit) ++flash_add_count;
         auto &flash = gpu_flashes[flash_count++];
         flash = {};
@@ -2291,177 +2214,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 (geometry.shape == VfxGroundShape::Circle ||
                  geometry.shape == VfxGroundShape::ConeBorder ||
                  geometry.shape == VfxGroundShape::RingGapsBorder);
-            if (preview && (!std::isfinite(geometry.progress) || geometry.progress < 0 || geometry.progress > 1 ||
-                !std::isfinite(geometry.animation_phase) || geometry.animation_phase < 0 ||
-                ((geometry.shape == VfxGroundShape::RingGapsTicks || geometry.shape == VfxGroundShape::CirclePreviewTicks) && geometry.tick_count == 0)))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored annulus preview timing.");
-            if (annulus && (!std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0 ||
-                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= geometry.inner_radius ||
-                !std::isfinite(geometry.edge_width) || geometry.edge_width < 0 ||
-                ((geometry.shape == VfxGroundShape::RingGapsBorder || geometry.shape == VfxGroundShape::RingGapsPreviewBorder || geometry.shape == VfxGroundShape::CirclePreviewBorder) && geometry.edge_width == 0) ||
-                (circle_preview && (geometry.inner_radius != 0 || !geometry.gap_angles_radians.empty() || geometry.gap_half_angle_radians != 0)) ||
-                !std::isfinite(geometry.gap_half_angle_radians) || geometry.gap_half_angle_radians < 0 ||
-                geometry.gap_half_angle_radians > std::numbers::pi_v<float> ||
-                std::ranges::any_of(geometry.gap_angles_radians, [](float angle) { return !std::isfinite(angle); })))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored annulus geometry.");
-            const float direction_length = std::hypot(geometry.direction.x, geometry.direction.z);
-            if (safe_sector && (!std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0 ||
-                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= geometry.inner_radius ||
-                !std::isfinite(geometry.half_angle_radians) || geometry.half_angle_radians <= 0 || geometry.half_angle_radians > std::numbers::pi_v<float> ||
-                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0 ||
-                !std::isfinite(geometry.animation_phase) || geometry.spokes == 0 || geometry.rings == 0 ||
-                !std::isfinite(direction_length) || direction_length < .999f || direction_length > 1.001f ||
-                !std::isfinite(geometry.direction.y) || geometry.direction.y != 0))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored safe-sector marker.");
-            if (hex && (!input.additive || source.primitive != VfxPrimitive::ExactRing ||
-                geometry.spokes != 6 || !std::isfinite(geometry.progress) ||
-                geometry.progress < 0.0f || geometry.progress >= 1.0f ||
-                (geometry.animation_phase != 0.0f && geometry.animation_phase != 1.0f) ||
-                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
-                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
-                !std::isfinite(source.start_size_min) ||
-                source.start_size_min < geometry.outer_radius + geometry.edge_width ||
-                (geometry.mask_slice != 0xffffffffu && geometry.mask_slice >= 12) ||
-                !std::isfinite(geometry.mask_strength) || geometry.mask_strength < 0.0f ||
-                geometry.mask_strength > 1.0f ||
-                (geometry.mask_slice == 0xffffffffu && geometry.mask_strength != 0.0f)))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored hex constellation.");
-            if (state_ring && (input.additive || source.primitive != VfxPrimitive::ExactRing ||
-                geometry.spokes < 3 || geometry.spokes > 64 ||
-                geometry.rings > 1 ||
-                !std::isfinite(geometry.progress) ||
-                geometry.progress < 0.0f || geometry.progress > 1.0f ||
-                !std::isfinite(geometry.animation_phase) || geometry.animation_phase < 0.0f ||
-                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
-                !std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0.0f ||
-                geometry.inner_radius >= geometry.outer_radius ||
-                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
-                std::abs(geometry.inner_radius -
-                         std::max(0.0f, geometry.outer_radius - geometry.edge_width)) > 0.0001f ||
-                !std::isfinite(source.start_size_min) ||
-                source.start_size_min <= 0.0f ||
-                std::abs(source.start_size_min -
-                         (geometry.outer_radius + geometry.edge_width)) > 0.0001f ||
-                !std::isfinite(source.stretch) ||
-                std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
-                geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
-                !geometry.gap_angles_radians.empty()))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored state ring.");
-            if (polar_rune && (input.additive || source.primitive != VfxPrimitive::ExactRing ||
-                geometry.spokes != 6 || geometry.rings != 2 ||
-                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
-                geometry.progress >= 1.0f || !std::isfinite(geometry.animation_phase) ||
-                geometry.animation_phase < 0.0f ||
-                !std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f ||
-                !std::isfinite(geometry.inner_radius) || geometry.inner_radius < 0.0f ||
-                geometry.inner_radius >= geometry.outer_radius ||
-                !std::isfinite(geometry.edge_width) || geometry.edge_width <= 0.0f ||
-                std::abs(geometry.inner_radius -
-                         std::max(0.0f, geometry.outer_radius - geometry.edge_width)) > 0.0001f ||
-                !std::isfinite(source.start_size_min) ||
-                std::abs(source.start_size_min -
-                         (geometry.outer_radius + geometry.edge_width)) > 0.0001f ||
-                !std::isfinite(source.stretch) ||
-                std::abs(source.stretch - geometry.outer_radius / source.start_size_min) > 0.001f ||
-                geometry.mask_slice != 0xffffffffu || geometry.mask_strength != 0.0f ||
-                !geometry.gap_angles_radians.empty()))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored polar rune.");
             const float authored_radius = geometry.outer_radius;
             const float authored_edge = geometry.edge_width;
-            const float authored_extent = axial_fracture
-                ? std::max(geometry.range * 0.5f + authored_edge,
-                           std::max(authored_radius, authored_edge * 3.0f))
-                : repeating_chevron
-                    ? std::max(geometry.half_length, geometry.half_width) + authored_edge
-                    : authored_radius + authored_edge;
-            const float authored_direction_length = std::hypot(geometry.direction.x,
-                                                                geometry.direction.z);
-            const bool invalid_direction = (axial_fracture || repeating_chevron) &&
-                (!std::isfinite(authored_direction_length) ||
-                 authored_direction_length < 0.999f ||
-                 authored_direction_length > 1.001f ||
-                 !std::isfinite(geometry.direction.y) || geometry.direction.y != 0.0f);
-            const bool invalid_chevron = repeating_chevron &&
-                (!std::isfinite(geometry.half_width) || geometry.half_width <= 0.0f ||
-                 !std::isfinite(geometry.half_length) || geometry.half_length <= 0.0f ||
-                 !std::isfinite(geometry.spacing) || geometry.spacing <= 0.0f ||
-                 geometry.spokes != 7);
-            if (authored_additive_shape && (!input.additive ||
-                source.primitive != VfxPrimitive::ExactRing ||
-                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
-                geometry.progress >= 1.0f ||
-                !std::isfinite(geometry.animation_phase) ||
-                (!repeating_chevron && (!std::isfinite(authored_radius) ||
-                                        authored_radius <= 0.0f)) ||
-                !std::isfinite(authored_edge) || authored_edge <= 0.0f ||
-                !std::isfinite(authored_extent) ||
-                !std::isfinite(source.start_size_min) ||
-                source.start_size_min < authored_extent ||
-                (broken_hex && (!std::isfinite(geometry.gap_half_angle_radians) ||
-                    geometry.gap_half_angle_radians <= 0.0f ||
-                    geometry.gap_half_angle_radians >= std::numbers::pi_v<float> / 3.0f)) ||
-                (broken_crown && (!std::isfinite(geometry.inner_radius) ||
-                    geometry.inner_radius <= 0.0f ||
-                    geometry.inner_radius >= authored_radius)) ||
-                invalid_chevron || invalid_direction ||
-                (axial_fracture && (!std::isfinite(geometry.range) ||
-                    geometry.range <= 0.0f))))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored additive ground geometry.");
-            if (boss_signature && (source.primitive != VfxPrimitive::ExactRing ||
-                !std::isfinite(geometry.progress) || geometry.progress < 0.0f ||
-                geometry.progress >= 1.0f || !std::isfinite(geometry.edge_width) ||
-                geometry.edge_width <= 0.0f ||
-                (geometry.shape == VfxGroundShape::Circle &&
-                 (!std::isfinite(geometry.outer_radius) || geometry.outer_radius <= 0.0f)) ||
-                !std::isfinite(source.start_size_min) ||
-                source.start_size_min < (geometry.shape == VfxGroundShape::ConeBorder
-                    ? geometry.range : geometry.outer_radius) + geometry.edge_width))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored boss signature.");
-            if ((geometry.shape != VfxGroundShape::Circle && !line && !cone && !annulus && !safe_sector && !hex && !authored_additive_shape && !state_ring && !polar_rune) ||
-                ((line || cone) && (!std::isfinite(direction_length) || direction_length < 0.999f || direction_length > 1.001f ||
-                          !std::isfinite(geometry.direction.y) || geometry.direction.y != 0.0f ||
-                          (line && (!std::isfinite(geometry.half_width) || geometry.half_width <= 0.0f ||
-                                    !std::isfinite(geometry.half_length) || geometry.half_length <= 0.0f)) ||
-                          (cone && (!std::isfinite(geometry.range) || geometry.range <= 0.0f ||
-                                    !std::isfinite(geometry.half_angle_radians) || geometry.half_angle_radians <= 0.0f ||
-                                    geometry.half_angle_radians > std::numbers::pi_v<float>)) ||
-                          !std::isfinite(geometry.edge_width) || geometry.edge_width < 0.0f ||
-                          ((geometry.shape == VfxGroundShape::LineBorder || geometry.shape == VfxGroundShape::ConeBorder) && geometry.edge_width == 0.0f) ||
-                          !std::isfinite(geometry.spacing) || geometry.spacing <= 0.0f ||
-                          !std::isfinite(geometry.scroll))))
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored line geometry.");
-            const auto finite_color = std::isfinite(source.start_color.x) &&
-                std::isfinite(source.start_color.y) &&
-                std::isfinite(source.start_color.z) &&
-                std::isfinite(source.start_color.w);
-            if (input.effect_handle == kInvalidVfxEffectHandle ||
-                source.renderer != VfxRenderer::Ground ||
-                (source.primitive != VfxPrimitive::ExactRing &&
-                 source.primitive != VfxPrimitive::LowFrequencyFill) || source.count != 1 ||
-                (input.additive && ((geometry.shape != VfxGroundShape::Circle && !hex && !boss_signature && !authored_additive_shape) ||
-                                    source.primitive != VfxPrimitive::ExactRing)) ||
-                (input.additive && geometry.shape == VfxGroundShape::Circle &&
-                 geometry.animation_phase != 0.0f && !boss_signature) ||
-                !std::isfinite(source.position.x) ||
-                !std::isfinite(source.position.y) ||
-                !std::isfinite(source.position.z) ||
-                !std::isfinite(source.start_size_min) ||
-                source.start_size_min <= 0.0f ||
-                !std::isfinite(source.stretch) ||
-                (!line && !cone && !annulus && !safe_sector && !axial_fracture &&
-                 !repeating_chevron &&
-                 source.primitive == VfxPrimitive::ExactRing &&
-                 (source.stretch <= 0.0f || source.stretch >= 1.0f)) ||
-                !finite_color || !std::isfinite(input.motion.rate_hz) ||
-                !std::isfinite(input.motion.amplitude) ||
-                !std::isfinite(input.motion.inset_fraction) ||
-                input.motion.rate_hz < 0.0f || input.motion.amplitude < 0.0f ||
-                input.motion.amplitude > 1.0f || input.motion.inset_fraction < 0.0f ||
-                input.motion.inset_fraction > 1.0f ||
-                !std::isfinite(input.hdr) || input.hdr < 0.0f ||
-                input.gradient_row >= impl_->vfx_gradient_rows)
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                       "Invalid authored ground command.");
             // OIT commands grow from the front; additive rings grow from the
             // back of the same upload allocation.
             auto &gpu_ring = input.additive
@@ -2575,25 +2329,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::uint32_t total_particles_to_spawn{};
     for (const auto &source : frame_particle_spawns)
     {
-        if (source.mesh_index > 7)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "VFX mesh selector exceeds atlas range");
-        if (source.authored_ballistic && (source.renderer != VfxRenderer::Mesh || source.mesh_index == 0 || source.count != 1 ||
-            !std::isfinite(source.position.x) || !std::isfinite(source.position.y) || !std::isfinite(source.position.z) ||
-            !std::isfinite(source.lifetime_min) || !std::isfinite(source.lifetime_max) || source.lifetime_min <= 0 || source.lifetime_max < source.lifetime_min ||
-            !std::isfinite(source.start_size_min) || !std::isfinite(source.start_size_max) || source.start_size_min <= 0 || source.start_size_max < source.start_size_min ||
-            !std::isfinite(source.end_size_min) || !std::isfinite(source.end_size_max) || source.end_size_min < 0 || source.end_size_max < source.end_size_min ||
-            !std::isfinite(source.start_color.x) || !std::isfinite(source.start_color.y) || !std::isfinite(source.start_color.z) || !std::isfinite(source.start_color.w) ||
-            !std::isfinite(source.end_color.x) || !std::isfinite(source.end_color.y) || !std::isfinite(source.end_color.z) || !std::isfinite(source.end_color.w) ||
-            !std::isfinite(source.rotation_min) || !std::isfinite(source.rotation_max) || !std::isfinite(source.angular_velocity_min) || !std::isfinite(source.angular_velocity_max) ||
-            !std::isfinite(source.authored_ground_y + source.authored_collision_radius) ||
-            !std::isfinite(source.authored_initial_velocity.x) || !std::isfinite(source.authored_initial_velocity.y) || !std::isfinite(source.authored_initial_velocity.z) ||
-            !std::isfinite(source.authored_drag) || source.authored_drag < 0 ||
-            !std::isfinite(source.authored_bounce) || source.authored_bounce < 0 || source.authored_bounce > 1 ||
-            !std::isfinite(source.authored_ground_y) || !std::isfinite(source.authored_collision_radius) || source.authored_collision_radius < 0 ||
-            !std::isfinite(source.authored_hdr) || source.authored_hdr <= 0 || source.authored_gradient_row >= impl_->vfx_gradient_rows ||
-            !std::isfinite(source.authored_birth_fraction) || source.authored_birth_fraction < 0 || source.authored_birth_fraction >= 1 ||
-            !std::isfinite(source.gravity)))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored ballistic command.");
+        // Public commands were admitted once; local commands keep mesh_index=0 and authored_ballistic=false.
         if (source.authored_ballistic && (snapshot.header.tick < source.authored_birth_tick ||
             (snapshot.header.tick == source.authored_birth_tick && source.authored_birth_fraction > 0))) continue;
         if (total_particles_to_spawn == particle_capacity)
@@ -2952,12 +2688,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::vector<LightCandidate> light_candidates;
     for (const auto &source : typed_lights)
     {
-        if (!std::isfinite(source.position.x) || !std::isfinite(source.position.y) || !std::isfinite(source.position.z) ||
-            !std::isfinite(source.radius) || source.radius <= 0 || !std::isfinite(source.intensity) || source.intensity < 0 ||
-            !std::isfinite(source.linear_rgb.x) || !std::isfinite(source.linear_rgb.y) || !std::isfinite(source.linear_rgb.z) ||
-            source.linear_rgb.x < 0 || source.linear_rgb.y < 0 || source.linear_rgb.z < 0 ||
-            static_cast<std::uint32_t>(source.quality) > 2)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored VFX light.");
         if (source.intensity == 0 || impl_->config.slime_family_preview_count != 0) continue;
         const auto world = DirectX::XMVectorSet(source.position.x, source.position.y, source.position.z, 1);
         DirectX::XMFLOAT3 view_position;
@@ -3004,29 +2734,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::vector<DistortionCandidate> distortion_candidates;
     for (const auto &source : typed_distortions)
     {
-        const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
-        if (!finite(source.position) || !finite(source.direction) || !std::isfinite(source.radius) || source.radius <= 0 ||
-            !std::isfinite(source.strength) || source.strength < 0 || !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 ||
-            !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1 ||
-            static_cast<std::uint32_t>(source.shape) > 6 || static_cast<std::uint32_t>(source.quality) > 2)
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid authored distortion command.");
-        const bool cone = source.shape == VfxDistortionShape::ConeSector;
-        const bool annulus = source.shape == VfxDistortionShape::GappedAnnulus;
-        const float horizontal_direction = std::hypot(source.direction.x,source.direction.z);
-        if ((cone && (!std::isfinite(source.half_angle_degrees) || source.half_angle_degrees <= 0 ||
-                      source.half_angle_degrees > 180 || !std::isfinite(horizontal_direction) ||
-                      horizontal_direction <= .0001f || source.inner_radius != 0 ||
-                      source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())) ||
-            (annulus && (!std::isfinite(source.inner_radius) || source.inner_radius < 0 ||
-                         source.inner_radius >= source.radius || !std::isfinite(source.gap_half_width_degrees) ||
-                         source.gap_half_width_degrees < 0 || source.gap_half_width_degrees > 180 ||
-                         source.half_angle_degrees != 0 ||
-                         (!source.gap_angles_degrees.empty() && source.gap_half_width_degrees == 0) ||
-                         std::any_of(source.gap_angles_degrees.begin(),source.gap_angles_degrees.end(),
-                             [](float angle){return !std::isfinite(angle); }))) ||
-            (!cone && !annulus && (source.inner_radius != 0 || source.half_angle_degrees != 0 ||
-                                   source.gap_half_width_degrees != 0 || !source.gap_angles_degrees.empty())))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Invalid exact distortion geometry.");
         if (source.alpha == 0 || source.strength == 0 || impl_->config.slime_family_preview_count != 0) continue;
         DirectX::XMFLOAT3 center;
         DirectX::XMStoreFloat3(&center, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(source.position.x,source.position.y,source.position.z,1),view));
@@ -3071,17 +2778,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::vector<DecalCandidate> decal_candidates;
     for (const auto &source : typed_decals)
     {
-        const auto finite = [](Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); };
-        const bool fracture = source.kind == VfxDecalKind::Fracture;
-        if (!finite(source.position) || !finite(source.direction) || !finite(source.linear_rgb) ||
-            source.linear_rgb.x < 0 || source.linear_rgb.y < 0 || source.linear_rgb.z < 0 ||
-            !std::isfinite(source.radius) || source.radius <= 0 || !std::isfinite(source.hdr) || source.hdr < 0 ||
-            !std::isfinite(source.alpha) || source.alpha < 0 || source.alpha > 1 || !std::isfinite(source.normalized_age) ||
-            source.normalized_age < 0 || source.normalized_age > 1 || !std::isfinite(source.edge_glow) || source.edge_glow < 0 || source.edge_glow > 1 ||
-            source.gradient_row >= impl_->vfx_gradient_rows || source.texture_slice >= (fracture ? 4u : 8u) ||
-            static_cast<std::uint32_t>(source.kind) > 1 || static_cast<std::uint32_t>(source.quality) > 2 ||
-            (fracture && source.voronoi_cells == 0))
-            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Invalid authored projected decal.");
         if (source.alpha == 0 || impl_->config.slime_family_preview_count != 0) continue;
         // Ground-only projector slab follows its source anchor, including elevated death events.
         DirectX::XMFLOAT3 center;
@@ -3119,29 +2815,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         gpu.metadata={source.gradient_row,source.texture_slice,static_cast<std::uint32_t>(source.kind),source.stable_seed};
     }
     cpu_timings.local_vfx_prepare_us = capture_elapsed(local_vfx_prepare_start);
-    const auto &cascade_extent = cascade_extents;
-    const auto base_shadow = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
-    constants->shadow_atlas_texel_size = {1.0f / float(base_shadow * 2u), 1.0f / float(base_shadow * 2u), float(base_shadow * 2u), float(impl_->QualityProfileFor(impl_->config.shadow_quality).shadow_filter_samples)};
-    const auto light_direction = DirectX::XMVector3Normalize(DirectX::XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f));
-    const auto light_up = std::abs(DirectX::XMVectorGetY(light_direction)) > 0.99f
-        ? DirectX::XMVectorSet(0, 0, 1, 0) : DirectX::XMVectorSet(0, 1, 0, 0);
-    const auto light_view = DirectX::XMMatrixLookAtLH(
-        DirectX::XMVectorScale(light_direction, -shadow_distance), DirectX::XMVectorZero(), light_up);
-    for (std::size_t cascade = 0; cascade < 3; ++cascade)
-    {
-        const float resolution = float(base_shadow);
-        const float extent = cascade_extent[cascade];
-        const auto center = DirectX::XMVector3TransformCoord(target, light_view);
-        const float texel = extent / resolution;
-        const float cx = std::round(DirectX::XMVectorGetX(center) / texel) * texel;
-        const float cy = std::round(DirectX::XMVectorGetY(center) / texel) * texel;
-        const float cz = DirectX::XMVectorGetZ(center);
-        const float half = extent * 0.5f;
-        const auto projection = DirectX::XMMatrixOrthographicOffCenterLH(cx-half, cx+half, cy-half, cy+half,
-                                                                      cz+shadow_distance, cz-shadow_distance);
-        DirectX::XMStoreFloat4x4(&constants->shadow_view_projection[cascade], DirectX::XMMatrixTranspose(light_view * projection));
-        constants->shadow_atlas_scale_offset[cascade] = {0.5f, 0.5f, cascade == 1 ? 0.5f : 0.0f, cascade == 2 ? 0.5f : 0.0f};
-    }
+    bool cascades_prepared = false;
+    const auto prepare_cascades = [&] {
+        if (cascades_prepared) return;
+        const auto &cascade_extent = cascade_extents;
+        const auto base_shadow = std::clamp(impl_->config.shadow_resolution, 1024u, 2048u);
+        constants->shadow_atlas_texel_size = {1.0f / float(base_shadow * 2u), 1.0f / float(base_shadow * 2u), float(base_shadow * 2u), float(impl_->QualityProfileFor(impl_->config.shadow_quality).shadow_filter_samples)};
+        const auto light_direction = DirectX::XMVector3Normalize(DirectX::XMVectorSet(light.direction.x, light.direction.y, light.direction.z, 0.0f));
+        const auto light_up = std::abs(DirectX::XMVectorGetY(light_direction)) > 0.99f
+            ? DirectX::XMVectorSet(0, 0, 1, 0) : DirectX::XMVectorSet(0, 1, 0, 0);
+        const auto light_view = DirectX::XMMatrixLookAtLH(
+            DirectX::XMVectorScale(light_direction, -shadow_distance), DirectX::XMVectorZero(), light_up);
+        for (std::size_t cascade = 0; cascade < 3; ++cascade)
+        {
+            const float resolution = float(base_shadow);
+            const float extent = cascade_extent[cascade];
+            const auto center = DirectX::XMVector3TransformCoord(target, light_view);
+            const float texel = extent / resolution;
+            const float cx = std::round(DirectX::XMVectorGetX(center) / texel) * texel;
+            const float cy = std::round(DirectX::XMVectorGetY(center) / texel) * texel;
+            const float cz = DirectX::XMVectorGetZ(center);
+            const float half = extent * 0.5f;
+            const auto projection = DirectX::XMMatrixOrthographicOffCenterLH(cx-half, cx+half, cy-half, cy+half,
+                                                                          cz+shadow_distance, cz-shadow_distance);
+            DirectX::XMStoreFloat4x4(&constants->shadow_view_projection[cascade], DirectX::XMMatrixTranspose(light_view * projection));
+            constants->shadow_atlas_scale_offset[cascade] = {0.5f, 0.5f, cascade == 1 ? 0.5f : 0.0f, cascade == 2 ? 0.5f : 0.0f};
+        }
+        cascades_prepared = true;
+    };
     for (auto &bone : constants->archer_bones)
     {
         DirectX::XMStoreFloat4x4(
@@ -3439,222 +3140,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     for (std::size_t index = 0; index < constants->grass_bender_count.x; ++index)
         grass_visibility_radius += 0.105f *
             std::max(constants->grass_benders[index].w, 0.1f);
-    // Software streaming demand is independent of GPU draw compaction. Merge
-    // camera and cascade error before requesting a family's finer resident page.
-    std::array<std::array<DirectX::XMFLOAT4, 6>, 4> demand_planes{};
-    const auto make_demand_planes = [&](std::size_t index, DirectX::CXMMATRIX matrix) {
-        const auto columns = DirectX::XMMatrixTranspose(matrix);
-        const DirectX::XMVECTOR planes[]{
-            DirectX::XMVectorAdd(columns.r[3], columns.r[0]),
-            DirectX::XMVectorSubtract(columns.r[3], columns.r[0]),
-            DirectX::XMVectorAdd(columns.r[3], columns.r[1]),
-            DirectX::XMVectorSubtract(columns.r[3], columns.r[1]),
-            columns.r[2], DirectX::XMVectorSubtract(columns.r[3], columns.r[2])};
-        for (std::size_t plane = 0; plane < 6; ++plane)
-            DirectX::XMStoreFloat4(&demand_planes[index][plane],
-                                  DirectX::XMPlaneNormalize(planes[plane]));
-    };
-    make_demand_planes(0, view * projection);
-    for (std::size_t cascade = 0; cascade < 3; ++cascade)
-        make_demand_planes(cascade + 1, DirectX::XMMatrixTranspose(
-            DirectX::XMLoadFloat4x4(&constants->shadow_view_projection[cascade])));
-    for (std::size_t ordinal = 0; ordinal < cluster_inputs.size(); ++ordinal)
-    {
-        auto &cut = cluster_inputs[ordinal].constants;
-        cut.camera_origin_near = {constants->camera_time.x, constants->camera_time.y,
-            constants->camera_time.z, constants->lod_options.z};
-        cut.view_right = {constants->lod_view_right.x, constants->lod_view_right.y, constants->lod_view_right.z, 0};
-        cut.view_up = {constants->lod_view_up.x, constants->lod_view_up.y, constants->lod_view_up.z, 0};
-        cut.view_forward = {constants->lod_view_forward.x, constants->lod_view_forward.y,
-            constants->lod_view_forward.z, 0};
-        cut.projection_scale = {constants->lod_projection.x, constants->lod_projection.y,
-            constants->lod_projection.z, constants->lod_projection.w};
-        cut.error_tolerance.fill(constants->lod_options.x);
-        cut.geometry_frontend_flags = impl_->mesh_shader_enabled ? kGeometryMeshEligible : 0u;
-        cut.material_word = (impl_->material_parameter_bases[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] << 1u) | 1u;
-        for (std::size_t consumer = 0; consumer < 4; ++consumer)
-            for (std::size_t plane = 0; plane < 6; ++plane)
-            {
-                const auto &p = demand_planes[consumer][plane];
-                cut.frustum_planes[consumer][plane] = {p.x, p.y, p.z, p.w};
-            }
-    }
-    if (auto *hlod_view = impl_->ActiveHlodView(); hlod_view && hlod_view->frames[back_buffer_index].enabled)
-    {
-        auto &hlod_views = hlod_view->frames[back_buffer_index].views;
-        for (std::size_t index = 0; index < hlod_views.size(); ++index)
-        {
-            auto &hlod_view = hlod_views[index];
-            hlod_view.origin_near = {constants->camera_time.x, constants->camera_time.y,
-                constants->camera_time.z, constants->lod_options.z};
-            hlod_view.forward = constants->lod_view_forward;
-            for (std::size_t plane = 0; plane < 6; ++plane)
-                hlod_view.frustum_planes[plane] = demand_planes[index][plane];
-            const float projection_scale = index == 0 ? constants->lod_projection.x
-                : index == 1 ? constants->lod_projection.y : index == 2 ? constants->lod_projection.z : constants->lod_projection.w;
-            hlod_view.error_policy = {projection_scale, constants->lod_options.x, 0.15f, index == 0 ? 0.0f : 1.0f};
-        }
-    }
-    if (auto prepared = impl_->PrepareClusterFrame(back_buffer_index, cluster_inputs); !prepared) return prepared;
-    std::array<float, kEnvironmentMaterialNames.size()> geometry_demand{};
-    const float shadow_demand_projection[]{constants->lod_projection.y,
-        constants->lod_projection.z, constants->lod_projection.w};
-    const auto accumulate_geometry_demand = [&](const auto &source) {
-        if (!is_environment_mesh(source.mesh)) return;
-        const auto ordinal = environment_mesh_index(source);
-        const auto &coarse = impl_->environment_meshes[ordinal * 3 + 1];
-        const auto scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y),
-                                     std::abs(source.scale.z)});
-        const auto deformation = HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f;
-        const auto radius = impl_->environment_variant_radii[ordinal] * scale + deformation;
-        const auto error = coarse.metadata.geometric_error * scale + 2.0f * deformation;
-        const auto &center = source.position;
-        for (std::size_t consumer = 0; consumer < demand_planes.size(); ++consumer)
-        {
-            const float shadow_error = consumer == 0 ? 0.0f
-                : error * shadow_demand_projection[consumer - 1];
-            // A shadow view cannot raise the per-catalog maximum after a
-            // larger visible instance/view has already supplied its demand.
-            if (consumer != 0 && shadow_error <= geometry_demand[ordinal]) continue;
-            bool visible = true;
-            for (const auto &plane : demand_planes[consumer])
-                visible = visible && center.x * plane.x + center.y * plane.y +
-                    center.z * plane.z + plane.w >= -radius;
-            if (!visible) continue;
-            float projected_error{};
-            if (consumer == 0)
-            {
-                DirectX::XMFLOAT3 view_center{};
-                DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3TransformCoord(
-                    DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
-                const auto distance = view_center.z - radius - error;
-                if (distance <= constants->lod_options.z)
-                    projected_error = constants->lod_options.x * 2.0f;
-                else
-                {
-                    const auto safe_distance = std::max(distance, constants->lod_options.z);
-                    const auto rho = std::hypot(std::abs(view_center.x) + radius + error,
-                                                std::abs(view_center.y) + radius + error) / safe_distance;
-                    projected_error = error * constants->lod_projection.x *
-                        std::sqrt(1.0f + rho * rho) / safe_distance;
-                }
-            }
-            else
-            {
-                projected_error = shadow_error;
-            }
-            geometry_demand[ordinal] = std::max(geometry_demand[ordinal], projected_error);
-        }
-    };
-    for (const auto &source : render_instances) accumulate_geometry_demand(source);
-    if (static_scene)
-        for (const auto &source : static_scene->instances)
-            if (!is_environment_mesh(source.mesh) || !cluster_active[environment_mesh_index(source)])
-                accumulate_geometry_demand(source);
-    for (std::uint32_t ordinal = 0; ordinal < geometry_demand.size(); ++ordinal)
-        if (geometry_demand[ordinal] > constants->lod_options.x)
-            if (auto requested = impl_->DemandEnvironmentGeometry(ordinal,
-                    std::bit_cast<UINT>(std::max(geometry_demand[ordinal] / constants->lod_options.x, 1.0f)));
-                !requested) return requested;
-    // Measure ground UV derivatives through the actual unjittered view. The
-    // smallest authored terrain tile is 9m (TerrainTileSize, material_terrain).
-    float terrain_footprint = std::numeric_limits<float>::infinity();
-    if (!impl_->config.grid_floor_probe && impl_->environment_textures[0].resource)
-    {
-        const auto inverse = DirectX::XMLoadFloat4x4(&constants->inverse_unjittered_view_projection);
-        const auto ground_point = [&](float u, float v, DirectX::XMFLOAT3 &point) {
-            const auto near_point = DirectX::XMVector3TransformCoord(
-                DirectX::XMVectorSet(u * 2 - 1, 1 - v * 2, 1, 1), inverse);
-            DirectX::XMFLOAT3 origin{}, direction{};
-            DirectX::XMStoreFloat3(&origin, eye);
-            DirectX::XMStoreFloat3(&direction, DirectX::XMVectorSubtract(near_point, eye));
-            if (direction.y >= 0.0f || origin.y <= 0.0f) return false;
-            const auto scale = -origin.y / direction.y;
-            point = {origin.x + direction.x * scale, 0, origin.z + direction.z * scale};
-            return std::isfinite(point.x) && std::isfinite(point.z) &&
-                   std::hypot(point.x - origin.x, point.z - origin.z) <= 500.0f;
-        };
-        for (const auto v : {0.1f, 0.5f, 0.9f})
-            for (const auto u : {0.1f, 0.5f, 0.9f})
-            {
-                DirectX::XMFLOAT3 p{}, dx{}, dy{};
-                if (!ground_point(u, v, p) || !ground_point(u + 1.0f / impl_->render_width, v, dx) ||
-                    !ground_point(u, v + 1.0f / impl_->render_height, dy)) continue;
-                const auto footprint = std::max(std::hypot(dx.x - p.x, dx.z - p.z),
-                                               std::hypot(dy.x - p.x, dy.z - p.z));
-                if (footprint > 0.0f)
-                    terrain_footprint = std::min(terrain_footprint, footprint);
-            }
-    }
-    const auto demand_material = [&](std::uint32_t material, std::uint32_t mip, std::uint32_t priority,
-                                     bool baseline_consumer) {
-        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
-        {
-            const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
-            if (id && (baseline_consumer || !impl_->texture_streaming.HardwareBacked(id)))
-                impl_->texture_streaming.Demand(id, mip, priority, impl_->frame_number);
-        }
-    };
-    std::array<bool, kEnvironmentMaterialNames.size()> environment_material_requested{};
-    const auto demand_environment_material = [&](const RenderInstance &source, bool capture_consumer) {
-        if (!is_environment_mesh(source.mesh)) return;
-        const auto material = static_cast<std::uint32_t>(environment_mesh_index(source));
-        if (environment_material_requested[material]) return;
-        const auto radius = impl_->environment_variant_radii[material] *
-            std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)}) +
-            (HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f);
-        bool visible = capture_consumer || active_features.software_gi_enabled;
-        for (const auto &planes : demand_planes)
-        {
-            if (visible) break;
-            bool in_view = true;
-            for (const auto &plane : planes)
-                in_view = in_view && source.position.x * plane.x + source.position.y * plane.y +
-                    source.position.z * plane.z + plane.w >= -radius;
-            visible = visible || in_view;
-        }
-        if (!visible) return;
-        environment_material_requested[material] = true;
-        // Geometry has no authored UV density. Software conservatively requests
-        // the finest allowed mip for actual visible owners; raster hardware
-        // demand comes from real samples. Software GI consumers use software demand.
-        demand_material(render_data::EnvironmentGeometryMaterialOrdinal(material), 0, std::bit_cast<UINT>(std::max(geometry_demand[material], 1.0f)),
-            active_features.software_gi_enabled);
-    };
-    for (const auto &source : render_instances) demand_environment_material(source, false);
-    if (static_scene)
-        for (const auto &source : static_scene->instances)
-            demand_environment_material(source, impl_->local_probes.AllocatedBytes() != 0);
-    if (!impl_->config.grid_floor_probe && std::isfinite(terrain_footprint))
-        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
-        {
-            const auto id = impl_->material_texture_stream_ids[kTerrainMaterialOrdinal * render_data::kMaterialTextureSlots + slot];
-            if (!id || (impl_->texture_streaming.HardwareBacked(id) && !active_features.software_gi_enabled)) continue;
-            const auto logical = impl_->texture_streaming.View(id).logical_description;
-            const auto rho = std::max(static_cast<float>(logical.width) * terrain_footprint / 9.0f, 1.0f);
-            impl_->texture_streaming.Demand(id, static_cast<std::uint32_t>(std::floor(std::log2(rho))),
-                std::bit_cast<UINT>(1.0f / terrain_footprint), impl_->frame_number);
-        }
-    if (static_scene && impl_->local_probes.AllocatedBytes() != 0)
-        for (const auto &source : static_scene->instances)
-            if (source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch)
-            {
-                demand_material(kTerrainMaterialOrdinal, 0, 1, active_features.software_gi_enabled);
-                break;
-            }
-    if (auto result = impl_->texture_streaming.Pump(impl_->frame_number, completed_streaming,
-            impl_->asset_io, impl_->streaming, impl_->residency); !result) return result;
-    impl_->PublishEnvironmentMaterialTextures(back_buffer_index);
-    if (auto result = impl_->texture_feedback.PrepareFrame(back_buffer_index, completed_streaming,
-            impl_->material_texture_stream_ids, impl_->texture_streaming, impl_->residency); !result) return result;
-    auto feedback_cpu = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    feedback_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
-        kTextureFeedbackDescriptorOffset) * impl_->srv_stride;
-    auto feedback_gpu = impl_->srv_heap->GetGPUDescriptorHandleForHeapStart();
-    feedback_gpu.ptr += (static_cast<UINT64>(back_buffer_index) * kTextureDescriptorCount +
-        kTextureFeedbackDescriptorOffset) * impl_->srv_stride;
-    if (auto result = impl_->texture_feedback.WriteDescriptors(back_buffer_index, impl_->srv_heap.Get(),
-            feedback_cpu, feedback_gpu, impl_->srv_stride); !result) return result;
     const auto skin_prepare_start = capture_clock();
     impl_->skin_cache.BeginFrame(new_session);
     static_assert(sizeof(Vertex) == 76 && SkinVertexRanges::kVertexBytes == 36);
@@ -3845,40 +3330,44 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     cpu_timings.scene_reconcile_us = capture_elapsed(scene_reconcile_start);
 
     const auto scene_gpu_prepare_start = capture_clock();
+    auto scene_substage_start = scene_gpu_prepare_start;
+    const auto record_scene_substage = [&](std::uint64_t &duration) {
+        if (!impl_->config.capture_timing_stream) return;
+        const auto end = std::chrono::steady_clock::now();
+        duration = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            end - scene_substage_start).count());
+        scene_substage_start = end;
+    };
     const auto required_slots = impl_->dynamic_scene_slots.SlotCount();
     constexpr std::size_t kSkinBoundStride = sizeof(float) * 4;
     const bool have_skinned_instances = std::ranges::any_of(
         dynamic_skin_slots, [](std::uint32_t slot) {
             return slot != std::numeric_limits<std::uint32_t>::max();
         });
-    std::uint64_t skin_signature = 1469598103934665603ull;
     std::vector<std::byte> skin_identity;
-    const auto skin_hash = [&](const void *data, std::size_t bytes) {
-        const auto *input = static_cast<const unsigned char *>(data);
-        for (std::size_t i = 0; i < bytes; ++i) { skin_signature ^= input[i]; skin_signature *= 1099511628211ull; }
+    const auto append_skin_identity = [&](const void *data, std::size_t bytes) {
         const auto *begin = static_cast<const std::byte *>(data);
         if (bytes) skin_identity.insert(skin_identity.end(), begin, begin + bytes);
     };
     // Camera-dependent static/environment LOD expansion is not deformation.
-    // Hash only canonical skinned slots and their current pose; each view uses
+    // Compare only canonical skinned slots and their current pose; each view uses
     // the same immutable deformation even when its draw stream differs.
     for (std::size_t index = 0; index < dynamic_skin_slots.size(); ++index)
         if (dynamic_skin_slots[index] != std::numeric_limits<std::uint32_t>::max())
         {
-            skin_hash(&dynamic_skin_slots[index], sizeof(dynamic_skin_slots[index]));
-            skin_hash(&dynamic_pose_flags[index], sizeof(dynamic_pose_flags[index]));
-            skin_hash(&dynamic_pose_times[index], sizeof(dynamic_pose_times[index]));
-            skin_hash(&dynamic_skin_offsets[index], sizeof(dynamic_skin_offsets[index]));
-            skin_hash(&dynamic_skin_vertex_counts[index], sizeof(dynamic_skin_vertex_counts[index]));
-            skin_hash(&dynamic_skin_geometry_ids[index], sizeof(dynamic_skin_geometry_ids[index]));
-            skin_hash(&render_instances[index].mesh, sizeof(render_instances[index].mesh));
+            append_skin_identity(&dynamic_skin_slots[index], sizeof(dynamic_skin_slots[index]));
+            append_skin_identity(&dynamic_pose_flags[index], sizeof(dynamic_pose_flags[index]));
+            append_skin_identity(&dynamic_pose_times[index], sizeof(dynamic_pose_times[index]));
+            append_skin_identity(&dynamic_skin_offsets[index], sizeof(dynamic_skin_offsets[index]));
+            append_skin_identity(&dynamic_skin_vertex_counts[index], sizeof(dynamic_skin_vertex_counts[index]));
+            append_skin_identity(&dynamic_skin_geometry_ids[index], sizeof(dynamic_skin_geometry_ids[index]));
+            append_skin_identity(&render_instances[index].mesh, sizeof(render_instances[index].mesh));
         }
-    skin_hash(palette_keys.data(), palette_keys.size() * sizeof(ArcherPaletteKey));
-    skin_hash(constants->archer_bones, sizeof(constants->archer_bones));
-    skin_hash(&required_slots, sizeof(required_slots));
+    append_skin_identity(palette_keys.data(), palette_keys.size() * sizeof(ArcherPaletteKey));
+    append_skin_identity(constants->archer_bones, sizeof(constants->archer_bones));
+    append_skin_identity(&required_slots, sizeof(required_slots));
     const bool reuse_canonical_skin = have_skinned_instances && impl_->canonical_skin_current &&
         impl_->canonical_skin_current->package_id == impl_->active_render_package_id &&
-        impl_->canonical_skin_current->signature == skin_signature &&
         impl_->canonical_skin_current->identity == skin_identity;
     const auto completed_skin = impl_->graph_queue_executor.Completed();
     std::erase_if(impl_->canonical_skin_frames, [&](const auto &lease) {
@@ -4007,6 +3496,846 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::size_t dynamic_scene_staging_bytes{};
     const auto persistent_instances = impl_->dynamic_scene_slots.Instances();
     const auto persistent_metadata = impl_->dynamic_scene_slots.Metadata();
+    // Plan shadows from all current casters before demand and graph imports.
+    record_scene_substage(cpu_timings.scene_skin_prepare_us);
+    VirtualShadowOutputs virtual_shadow_outputs;
+    impl_->virtual_shadows.BeginFramePolicy();
+    LocalShadowOutputs local_shadow_outputs;
+    decltype(impl_->previous_shadow_casters) current_shadow_casters;
+    std::shared_ptr<Impl::StaticShadowCasterBatch> static_shadow_batch;
+    struct ShadowBinding
+    {
+        const GeometryPageGpu *page{};
+        ID3D12PipelineState *pipeline{};
+        UINT material{};
+        bool immutable{};
+    };
+    std::vector<ShadowBinding> bindings;
+    std::vector<VirtualShadowDrawGroup> groups;
+    std::vector<VirtualShadowCaster> casters;
+    std::vector<VirtualShadowReceiver> receivers;
+    std::vector<ShadowSurfaceReceiver> dynamic_surface_receivers;
+    std::vector<VirtualShadowNativeRead> reads;
+    VirtualShadowInputs inputs;
+    VirtualShadowFramePlan shadow_plan;
+    bool csm_required = true;
+    if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
+    {
+        auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
+        const auto caster_preparation_epoch = BeginShadowCasterPreparation(
+            shadow_owner.scratch_shadow_casters, shadow_owner.shadow_caster_preparation_epoch);
+        current_shadow_casters = std::move(shadow_owner.scratch_shadow_casters);
+        const auto static_caster_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0u;
+        // Static groups occupy the retained prefix; dynamic bindings are resolved per frame.
+        std::array<std::array<UINT, kGpuVisibilityBucketCount + 2>, 2> shadow_group_indices;
+        for (auto &indices : shadow_group_indices) indices.fill(UINT32_MAX);
+        std::vector<std::size_t> removed_static_indices;
+        std::size_t matched_previous_casters{};
+        std::size_t prepared_casters{};
+#ifndef NDEBUG
+        auto &caster_key_oracle = shadow_owner.shadow_caster_key_oracle;
+        if (impl_->config.validation || impl_->config.gpu_validation)
+            BeginShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch,
+                shadow_owner.shadow_caster_key_oracle_prepared);
+#endif
+        current_shadow_casters.reserve(dynamic_draw_refs.size());
+        casters.reserve(dynamic_draw_refs.size());
+        std::uint32_t froxel_receiver_index = UINT32_MAX;
+        bool camera_receiver_domain_closed=true;
+        std::optional<VirtualShadowReceiver> water_receiver, gel_receiver;
+        const auto merge_receiver = [](std::optional<VirtualShadowReceiver> &target,
+            DirectX::XMFLOAT4 center, double radius) -> Result {
+            if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
+                !std::isfinite(radius) || radius < 0 ||
+                std::abs(double(center.x)) + radius > FLT_MAX ||
+                std::abs(double(center.y)) + radius > FLT_MAX ||
+                std::abs(double(center.z)) + radius > FLT_MAX)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                    "Virtual shadow receiver has nonfinite or unbounded world bounds.");
+            VirtualShadowReceiver bounds{
+                {std::nextafter(float(double(center.x) - radius), -FLT_MAX),
+                 std::nextafter(float(double(center.y) - radius), -FLT_MAX),
+                 std::nextafter(float(double(center.z) - radius), -FLT_MAX), 0},
+                {std::nextafter(float(double(center.x) + radius), FLT_MAX),
+                 std::nextafter(float(double(center.y) + radius), FLT_MAX),
+                 std::nextafter(float(double(center.z) + radius), FLT_MAX), 0}};
+            if (!target) target = bounds;
+            else
+            {
+                target->minimum.x = std::min(target->minimum.x, bounds.minimum.x);
+                target->minimum.y = std::min(target->minimum.y, bounds.minimum.y);
+                target->minimum.z = std::min(target->minimum.z, bounds.minimum.z);
+                target->maximum.x = std::max(target->maximum.x, bounds.maximum.x);
+                target->maximum.y = std::max(target->maximum.y, bounds.maximum.y);
+                target->maximum.z = std::max(target->maximum.z, bounds.maximum.z);
+            }
+            return Result::Success();
+        };
+        for (const auto &hero : typed_volumes)
+            receivers.push_back({{hero.bounds_min.x, hero.bounds_min.y, hero.bounds_min.z, 0},
+                {hero.bounds_max.x, hero.bounds_max.y, hero.bounds_max.z, 0}});
+        // Captures use their private static CSM, so retain only their existing
+        // depth-interval contribution. Froxels still request world shadow pages.
+        for (const auto &probe : impl_->local_probes.Probes())
+            receivers.push_back({{std::min({probe.influence_min.x, probe.projection_min.x, probe.position.x - probe.capture_distance}),
+                    std::min({probe.influence_min.y, probe.projection_min.y, probe.position.y - probe.capture_distance}),
+                    std::min({probe.influence_min.z, probe.projection_min.z, probe.position.z - probe.capture_distance}), 1.0f},
+                {std::max({probe.influence_max.x, probe.projection_max.x, probe.position.x + probe.capture_distance}),
+                    std::max({probe.influence_max.y, probe.projection_max.y, probe.position.y + probe.capture_distance}),
+                    std::max({probe.influence_max.z, probe.projection_max.z, probe.position.z + probe.capture_distance}), 0}});
+        if (impl_->volumetrics.AllocatedBytes() != 0)
+        {
+            DirectX::XMFLOAT3 minimum{FLT_MAX, FLT_MAX, FLT_MAX}, maximum{-FLT_MAX, -FLT_MAX, -FLT_MAX};
+            const auto inverse = DirectX::XMLoadFloat4x4(&camera_relative_inverse_view_projection);
+            for (const float z : {0.0f, 1.0f})
+                for (const float y : {-1.0f, 1.0f})
+                    for (const float x : {-1.0f, 1.0f})
+                    {
+                        DirectX::XMFLOAT3 corner;
+                        DirectX::XMStoreFloat3(&corner, DirectX::XMVector3TransformCoord(
+                            DirectX::XMVectorSet(x, y, z, 1), inverse));
+                        corner.x += lod_eye.x; corner.y += lod_eye.y; corner.z += lod_eye.z;
+                        minimum.x = std::min(minimum.x, corner.x); minimum.y = std::min(minimum.y, corner.y); minimum.z = std::min(minimum.z, corner.z);
+                        maximum.x = std::max(maximum.x, corner.x); maximum.y = std::max(maximum.y, corner.y); maximum.z = std::max(maximum.z, corner.z);
+                    }
+            froxel_receiver_index = static_cast<std::uint32_t>(receivers.size());
+            receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
+            for (const auto &volume : impl_->volumetric_media)
+            {
+                if (volume.identity.w == static_cast<UINT>(VolumetricShape::Global)) continue;
+                minimum = {FLT_MAX, FLT_MAX, FLT_MAX}; maximum = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+                const auto local_to_world = DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&volume.world_to_local));
+                for (const float z : {-1.0f, 1.0f}) for (const float y : {-1.0f, 1.0f}) for (const float x : {-1.0f, 1.0f})
+                {
+                    DirectX::XMFLOAT3 corner;
+                    DirectX::XMStoreFloat3(&corner, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(x, y, z, 1), local_to_world));
+                    minimum.x = std::min(minimum.x, corner.x); minimum.y = std::min(minimum.y, corner.y); minimum.z = std::min(minimum.z, corner.z);
+                    maximum.x = std::max(maximum.x, corner.x); maximum.y = std::max(maximum.y, corner.y); maximum.z = std::max(maximum.z, corner.z);
+                }
+                receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
+            }
+        }
+        const auto previous_static_batch=shadow_owner.static_shadow_casters;
+        Impl::StaticShadowCasterBatch signature;
+        signature.source=static_scene; signature.generation=static_caster_generation;
+        signature.leaf_count=static_leaf_ref_count;
+        signature.receiver_proxy_count=hlod_static_instances.size();
+        signature.density=static_draws.foliage_density; signature.wind_radius=grass_visibility_radius;
+        signature.material_revision=impl_->material_parameter_revision; signature.pipeline_revision=impl_->pipeline_revision;
+        signature.mesh_shader=impl_->mesh_shader_enabled;
+        for(std::size_t bucket=0;bucket<kGpuVisibilityBucketCount;++bucket)
+        {
+            const auto *page=bucket_pages[bucket];
+            signature.geometry[bucket]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
+            signature.passes[bucket]=static_geometry_passes[bucket][1];
+        }
+        signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
+        signature.passes.back()=ground_geometry_passes[1];
+        const bool static_warm=!new_session && previous_static_batch &&
+            previous_static_batch->source==signature.source && previous_static_batch->generation==signature.generation &&
+            previous_static_batch->leaf_count==signature.leaf_count && previous_static_batch->density==signature.density &&
+            previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count &&
+            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->material_revision==signature.material_revision &&
+            previous_static_batch->pipeline_revision==signature.pipeline_revision && previous_static_batch->mesh_shader==signature.mesh_shader &&
+            previous_static_batch->geometry==signature.geometry && previous_static_batch->passes==signature.passes;
+        std::unordered_map<Impl::ShadowCasterMap::key_type,std::size_t,Impl::ShadowCasterKeyHash> old_static_indices,static_indices;
+        if(static_warm) static_shadow_batch=previous_static_batch;
+        else
+        {
+            static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(std::move(signature));
+            if(shadow_owner.static_shadow_caster_revision>UINT64_MAX-2) throw std::runtime_error("Static shadow caster revision exhausted");
+            static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
+            static_indices.reserve(static_leaf_ref_count);
+            if(!new_session && previous_static_batch)
+                for(std::size_t i=0;i<previous_static_batch->keys.size();++i) old_static_indices.emplace(previous_static_batch->keys[i],i);
+        }
+        // Camera shadow queries originate at raster surfaces, independently of
+        // shadow-caster eligibility. Retain all static draw bounds once in the
+        // existing immutable batch, including shadow-off surfaces and HLOD proxies.
+        const auto append_surface=[&](const RenderInstance &source,const GpuInstance *draw,
+            std::size_t dynamic_index,std::vector<ShadowSurfaceReceiver> &destination,
+            const render_data::GeometryBounds *proxy_bounds=nullptr) -> Result {
+            const bool environment=is_environment_mesh(source.mesh);
+            const auto scale=draw?draw->scale:DirectX::XMFLOAT4{source.scale.x,source.scale.y,source.scale.z,1};
+            const auto center=draw?draw->position:DirectX::XMFLOAT4{source.position.x,
+                source.position.y+(environment?0.0f:source.scale.y*0.5f),source.position.z,0};
+            const double yaw=draw?draw->yaw:source.yaw;
+            if(!std::isfinite(center.x)||!std::isfinite(center.y)||!std::isfinite(center.z)||
+               !std::isfinite(scale.x)||!std::isfinite(scale.y)||!std::isfinite(scale.z)||!std::isfinite(yaw))
+                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver transform is nonfinite.");
+            std::array<double,3> lo{INFINITY,INFINITY,INFINITY},hi{-INFINITY,-INFINITY,-INFINITY};
+            const auto merge_local=[&](const auto &bounds) {
+                for(unsigned axis=0;axis<3;++axis)
+                { lo[axis]=std::min(lo[axis],double(bounds.minimum[axis]));hi[axis]=std::max(hi[axis],double(bounds.maximum[axis])); }
+            };
+            if(proxy_bounds) merge_local(*proxy_bounds); // HLOD pages contain baked world-space vertices.
+            else if(environment)
+            {
+                const auto ordinal=environment_mesh_index(source);
+                for(unsigned lod=0;lod<3;++lod) merge_local(impl_->environment_meshes[ordinal*3+lod].metadata.bounds);
+            }
+            else if(source.mesh==RenderMesh::Archer)
+            {
+                // The exact prepared palette is the SkinCache input. Every
+                // nonnegative weighted matrix result is inside this bone/AABB
+                // envelope; the source codec admits weight sums 1 +/- .001.
+                if(dynamic_index>=archer_palette_slots.size()||archer_palette_slots[dynamic_index]==UINT32_MAX)
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto &bounds=impl_->archer_geometry.metadata.bounds;
+                const auto offset=archer_palette_data_offset+std::size_t(archer_palette_slots[dynamic_index])*archer_palette_stride;
+                lo={0,0,0};hi={0,0,0};std::array<double,3> magnitude{};
+                double source_l1{};
+                for(unsigned bone=0;bone<impl_->archer_bone_count;++bone)
+                {
+                    DirectX::XMFLOAT4X4 matrix;
+                    std::memcpy(&matrix,frame.mapped+offset+bone*sizeof(matrix),sizeof(matrix));
+                    for(unsigned corner=0;corner<8;++corner)
+                    {
+                        const std::array<double,4> p{bounds.minimum[0],bounds.minimum[1],bounds.minimum[2],1};
+                        auto q=p;
+                        for(unsigned axis=0;axis<3;++axis) if(corner&(1u<<axis)) q[axis]=bounds.maximum[axis];
+                        source_l1=std::max(source_l1,std::abs(q[0])+std::abs(q[1])+std::abs(q[2]));
+                        for(unsigned axis=0;axis<3;++axis)
+                        {
+                            double value{},absolute{};
+                            for(unsigned column=0;column<4;++column)
+                            { const double term=double(matrix.m[axis][column])*q[column];value+=term;absolute+=std::abs(term); }
+                            lo[axis]=std::min(lo[axis],value);hi[axis]=std::max(hi[axis],value);
+                            magnitude[axis]=std::max(magnitude[axis],absolute);
+                        }
+                    }
+                }
+                constexpr double gamma64=(64*0x1p-24)/(1-64*0x1p-24);
+                for(unsigned axis=0;axis<3;++axis)
+                {
+                    const double pad=gamma64*magnitude[axis]*1.0011+64*double(FLT_MIN)*(1+source_l1);
+                    lo[axis]=lo[axis]*1.0011-pad;hi[axis]=hi[axis]*1.0011+pad;
+                }
+            }
+            else if(is_monster(source.mesh))
+            {
+                const auto &asset=impl_->monster_assets[static_cast<UINT>(source.mesh)-static_cast<UINT>(RenderMesh::MonsterMelee)];
+                if(!(asset.deformation_flags&render_data::kMonsterBoundsPositionEnclosure)||
+                   dynamic_index>=dynamic_pose_times.size())
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto clip=std::min((dynamic_pose_flags[dynamic_index]>>8u)&0xfu,4u);
+                const auto meta=asset.clip_meta[clip];
+                if(!meta.y||!asset.bone_count) { camera_receiver_domain_closed=false;return Result::Success(); }
+                if(!std::isfinite(dynamic_pose_times[dynamic_index]))
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera skin receiver time is nonfinite.");
+                const float frame_position=std::clamp(dynamic_pose_times[dynamic_index],0.0f,1.0f)*float(meta.y-1u);
+                const auto frame0=std::min(static_cast<UINT>(std::floor(frame_position)),meta.y-1u);
+                const auto row=std::size_t(meta.x/asset.bone_count)+frame0;
+                if(row>=asset.interval_bounds.size()) { camera_receiver_domain_closed=false;return Result::Success(); }
+                const auto &bounds=asset.interval_bounds[row];
+                if(bounds.lod!=0||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
+                { camera_receiver_domain_closed=false;return Result::Success(); }
+                for(unsigned axis=0;axis<3;++axis) { lo[axis]=bounds.minimum[axis];hi[axis]=bounds.maximum[axis]; }
+            }
+            else
+            {
+                merge_local(source.mesh==RenderMesh::EnemyProjectile?impl_->gel_projectile_geometry.metadata.bounds:
+                    impl_->procedural_geometry.metadata.bounds);
+                if(source.mesh==RenderMesh::Area||source.mesh==RenderMesh::Ground) { lo[1]*=.1;hi[1]*=.1; }
+                else if(source.mesh==RenderMesh::DirtPatch) { lo[1]*=.035;hi[1]*=.035; }
+                else if(source.mesh==RenderMesh::PlayerProjectile) { lo[1]*=.55;hi[1]*=.55; }
+                else if(source.mesh==RenderMesh::Pickup)
+                {
+                    const double extent=std::max(std::abs(lo[0]),std::abs(hi[0]))+std::max(std::abs(lo[1]),std::abs(hi[1]));
+                    lo[0]=lo[1]=-extent;hi[0]=hi[1]=extent;
+                }
+                // Other placeholder operations only shrink the source box.
+            }
+            const double sine=std::sin(yaw),cosine=std::cos(yaw);
+            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
+            for(unsigned corner=0;corner<8;++corner)
+            {
+                const double x=(corner&1?hi[0]:lo[0])*scale.x,y=(corner&2?hi[1]:lo[1])*scale.y,z=(corner&4?hi[2]:lo[2])*scale.z;
+                const std::array<double,3> p{center.x+cosine*x+sine*z,center.y+y,center.z-sine*x+cosine*z};
+                const std::array<double,3> absolute{std::abs(double(center.x))+std::abs(x)+std::abs(z),std::abs(double(center.y))+std::abs(y),
+                    std::abs(double(center.z))+std::abs(x)+std::abs(z)};
+                for(unsigned axis=0;axis<3;++axis)
+                { low[axis]=std::min(low[axis],p[axis]);high[axis]=std::max(high[axis],p[axis]);magnitude[axis]=std::max(magnitude[axis],absolute[axis]); }
+            }
+            const double wind=HasEnvironmentWind(source.mesh,source.environment_variant)?grass_visibility_radius:0;
+            std::array<float,3> minimum{},maximum{};
+            for(unsigned axis=0;axis<3;++axis)
+            {
+                const double pad=wind+magnitude[axis]*0x1p-18+1.e-5;
+                if(!std::isfinite(low[axis])||!std::isfinite(high[axis])||low[axis]-pad<=-FLT_MAX||high[axis]+pad>=FLT_MAX)
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver bounds are unbounded.");
+                minimum[axis]=std::nextafter(float(low[axis]-pad),-FLT_MAX);
+                maximum[axis]=std::nextafter(float(high[axis]+pad),FLT_MAX);
+            }
+            const ShadowSurfaceReceiver receiver{{minimum[0],minimum[1],minimum[2],0},{maximum[0],maximum[1],maximum[2],1}};
+            destination.push_back(receiver);return Result::Success();
+        };
+        const auto append_caster = [&](const RenderInstance &source, const GpuStaticDrawRef &reference,
+                std::uint32_t ref_index, bool immutable, const GpuInstance *instance,
+                const ShadowSurfaceReceiver *qualified_surface=nullptr) -> Result {
+            const bool environment = is_environment_mesh(source.mesh);
+            const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
+            const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
+            const std::uint32_t bucket = environment ? static_cast<UINT>(environment_mesh_index(source) * 3 + 2)
+                : source.mesh == RenderMesh::Archer ? kArcherVisibilityBucket
+                : is_monster(source.mesh) ? kMonsterVisibilityBucketBegin + static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee)
+                : UINT32_MAX;
+            const auto *page = bucket != UINT32_MAX ? bucket_pages[bucket] : &impl_->procedural_geometry;
+            const auto pass = bucket != UINT32_MAX
+                ? (immutable ? static_geometry_passes[bucket][1] : dynamic_geometry_passes[bucket][1])
+                : immutable ? ground_geometry_passes[1] : terrain ? dynamic_terrain_geometry_passes[1] : procedural_geometry_passes[1];
+            if (!page || pass == 0) return Result::Failure(ErrorCode::InvalidState,
+                "hs_renderer_d3d12", "Virtual caster has no complete geometry record.");
+            const UINT ordinal = environment ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3) : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
+            const UINT material = ordinal < kAuthoredMaterialNames.size()
+                ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
+            const auto binding_key = (std::uint64_t(material) << 32) | (immutable ? 0x80000000u : 0u) | page->page_slot;
+            const auto binding_slot = bucket != UINT32_MAX ? static_cast<std::size_t>(bucket)
+                : kGpuVisibilityBucketCount + (terrain ? 0u : 1u);
+            const auto draw_group = ResolveShadowCasterGroup(
+                shadow_group_indices[immutable ? 1u : 0u][binding_slot], groups, binding_key, [&] {
+                    // The pipeline belongs to the draw group, not each static instance.
+                    auto *pipeline = environment ? environment_pipeline(bucket, true)
+                        : hero ? impl_->hero_shadow_pipeline.Get() : impl_->shadow_pipeline.Get();
+                    groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
+                        ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
+                    bindings.push_back({page, pipeline, material, immutable});
+                });
+            VirtualShadowCaster caster;
+            const auto key = std::tuple{immutable, source.stable_id,
+                source.stable_id == 0 ? reference.instance_index + 1u : 0u};
+            Impl::ShadowCasterRecord previous_static_record;
+            const Impl::ShadowCasterRecord *previous{};
+            if(immutable)
+            {
+                if(const auto found=old_static_indices.find(key);found!=old_static_indices.end())
+                { previous_static_record.caster=previous_static_batch->records[found->second]; previous=&previous_static_record; }
+            }
+            else if(const auto found=impl_->previous_shadow_casters.find(key);found!=impl_->previous_shadow_casters.end()) previous=&found->second;
+            const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
+            const auto instance_index = reference.instance_index | (immutable ? 0x80000000u : 0u);
+            const auto &sphere = page->metadata.bounds.sphere;
+            const float sx = sphere[0] * source.scale.x, sy = sphere[1] * source.scale.y, sz = sphere[2] * source.scale.z;
+            const auto center = instance ? instance->position : DirectX::XMFLOAT4{
+                source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0};
+            const float maximum_scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)});
+            // StaticGpuScene assigns a fresh, nonwrapping instance generation
+            // whenever its strong immutable scene lease changes. Together with
+            // the page revision, this proves the local sphere transform is unchanged.
+            const bool reuse_static_center = immutable && !new_session &&
+                previous && previous->caster.immutable_source &&
+                previous->caster.instance_index == instance_index &&
+                previous->caster.instance_generation == reference.instance_generation &&
+                previous->caster.current_cut_revision == cut_revision;
+            if (reuse_static_center)
+            {
+                const auto &old = previous->caster.current_bounds;
+                caster.current_bounds = {old.x, old.y, old.z, sphere[3] * maximum_scale};
+            }
+            else
+            {
+                const auto caster_yaw = instance ? instance->yaw : source.yaw;
+                const float sine = std::sin(caster_yaw), cosine = std::cos(caster_yaw);
+                caster.current_bounds = {center.x + cosine * sx + sine * sz, center.y + sy,
+                    center.z - sine * sx + cosine * sz, sphere[3] * maximum_scale};
+            }
+            caster.skin = hero;
+            caster.wind = HasEnvironmentWind(source.mesh, source.environment_variant);
+            caster.animated_alpha = source.mesh == RenderMesh::Grass;
+            if (caster.skin && instance)
+            {
+                // SkinCache's conservative pose radius is centered on the actual
+                // interpolated draw origin, independently of the rest-pose sphere.
+                caster.current_bounds = {center.x, center.y, center.z, std::max(center.w,
+                    std::sqrt(sx*sx + sy*sy + sz*sz) + sphere[3] * maximum_scale)};
+            }
+            if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
+            if(qualified_surface && hero)
+            {
+                // Share the qualified actual-pose enclosure with page overlap,
+                // command admission and invalidation, not only receiver proof.
+                const auto sphere=ShadowSurfaceCasterSphere(*qualified_surface);
+                if(!sphere)
+                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Qualified skin shadow radius is unbounded.");
+                caster.current_bounds={sphere->x,sphere->y,sphere->z,sphere->w};
+            }
+            if (environment && environment_mesh_index(source) == render_data::kMeadowWaterGeometry)
+            {
+                const auto scale = instance ? instance->scale : DirectX::XMFLOAT4{source.scale.x, source.scale.y, source.scale.z, 1};
+                if (!std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Water receiver scale is nonfinite.");
+                // This origin-centered radius includes the local offset and every resident LOD.
+                const double radius = double(impl_->environment_variant_radii[render_data::kMeadowWaterGeometry]) *
+                    std::max({std::abs(double(scale.x)), std::abs(double(scale.y)), std::abs(double(scale.z))});
+                if (auto merged = merge_receiver(water_receiver, center, radius); !merged) return merged;
+            }
+            caster.current_revisions = immutable ? source.revisions
+                : impl_->dynamic_scene_slots.Revisions(reference.instance_index);
+            caster.current_revisions.material ^= impl_->material_parameter_revision;
+            caster.current_cut_revision = cut_revision;
+            caster.instance_index = instance_index;
+            caster.instance_generation = reference.instance_generation;
+            caster.source_ref = ref_index;
+            caster.geometry_record = pass >> 2;
+            caster.draw_group = draw_group;
+            caster.index_count = page->index_count;
+            caster.meshlet_count = page->meshlet_count;
+            caster.immutable_source = immutable;
+            caster.baked_source = immutable && render_data::IsStaticShadowCaster(source);
+            Impl::ShadowCasterRecord *current{};
+            if(immutable)
+            {
+                if(!static_indices.emplace(key,static_shadow_batch->records.size()).second) return Result::Success();
+                static_shadow_batch->keys.push_back(key);
+            }
+            else
+            {
+                current=&current_shadow_casters.try_emplace(key).first->second;
+                const bool inserted=MarkShadowCasterPrepared(current->prepared_epoch,caster_preparation_epoch);
+#ifndef NDEBUG
+                if(impl_->config.validation || impl_->config.gpu_validation)
+                    assert(inserted==MarkShadowCasterKeyOracle(caster_key_oracle,key,caster_preparation_epoch));
+#endif
+                if(!inserted) return Result::Success();
+                ++prepared_casters;
+            }
+            if (!new_session && previous)
+            {
+                if(!immutable) ++matched_previous_casters;
+                const auto &old = previous->caster;
+                caster.previous_bounds = old.current_bounds;
+                caster.previous_revisions = old.current_revisions;
+                caster.previous_cut_revision = old.current_cut_revision;
+                caster.previous_generation = old.instance_generation;
+                caster.previous_present = true;
+                caster.previous_immutable_source = old.immutable_source;
+                caster.previous_skin = old.skin;
+                caster.previous_wind = old.wind;
+                caster.previous_animated_alpha = old.animated_alpha;
+            }
+            if(immutable) static_shadow_batch->records.push_back(caster);
+            else { current->caster=caster; casters.push_back(caster); }
+            if (is_monster(source.mesh) && static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee) < 3)
+            {
+                const auto &b = caster.current_bounds;
+                receivers.push_back({{b.x-b.w,b.y-b.w,b.z-b.w,0}, {b.x+b.w,b.y+b.w,b.z+b.w,1}});
+            }
+            return Result::Success();
+        };
+        // Static groups form a stable prefix; fluctuating enemy families cannot renumber them.
+        if(static_warm)
+        {
+            for(const auto &binding:static_shadow_batch->bindings)
+            { groups.push_back({binding.key,binding.frontend}); bindings.push_back({binding.page,binding.pipeline,binding.material,true}); }
+            water_receiver=static_shadow_batch->water;
+            receivers.insert(receivers.end(),static_shadow_batch->receivers.begin(),static_shadow_batch->receivers.end());
+        }
+        else
+        {
+            const auto receiver_begin=receivers.size();
+            if(static_scene && impl_->static_gpu_scene)
+                for(std::size_t index=0;index<static_leaf_ref_count;++index)
+                {
+                    if(auto added=append_surface(static_scene->instances[static_draw_refs[index].instance_index],nullptr,
+                        SIZE_MAX,static_shadow_batch->surface_receivers);!added)return added;
+                    if(auto added=append_caster(static_scene->instances[static_draw_refs[index].instance_index],
+                        static_draw_refs[index],static_cast<UINT>(index),true,nullptr);!added) return added;
+                }
+            for(std::size_t index=0;index<hlod_static_instances.size();++index)
+                if(auto added=append_surface(hlod_static_instances[index],nullptr,SIZE_MAX,static_shadow_batch->surface_receivers,
+                    &impl_->hlod_runtime->scene.proxies.at(index).bounds);!added)return added;
+            for(const auto &surface:static_shadow_batch->surface_receivers)
+            {
+                auto &aggregate=static_shadow_batch->surface_aggregate;
+                if(!aggregate) aggregate=surface;
+                else
+                {
+                    aggregate->minimum.x=std::min(aggregate->minimum.x,surface.minimum.x);
+                    aggregate->minimum.y=std::min(aggregate->minimum.y,surface.minimum.y);
+                    aggregate->minimum.z=std::min(aggregate->minimum.z,surface.minimum.z);
+                    aggregate->maximum.x=std::max(aggregate->maximum.x,surface.maximum.x);
+                    aggregate->maximum.y=std::max(aggregate->maximum.y,surface.maximum.y);
+                    aggregate->maximum.z=std::max(aggregate->maximum.z,surface.maximum.z);
+                }
+            }
+            static_shadow_batch->water=water_receiver;
+            static_shadow_batch->receivers.assign(receivers.begin()+receiver_begin,receivers.end());
+            for(std::size_t i=0;i<bindings.size();++i)
+                static_shadow_batch->bindings.push_back({bindings[i].page,bindings[i].pipeline,bindings[i].material,
+                    groups[i].frontend,groups[i].binding_key});
+            if(!new_session && previous_static_batch)
+                for(std::size_t i=0;i<previous_static_batch->keys.size();++i)
+                    if(!static_indices.contains(previous_static_batch->keys[i])) removed_static_indices.push_back(i);
+
+        }
+        for (std::size_t index = 0; index < dynamic_draw_refs.size(); ++index)
+        {
+            const auto surface_begin=dynamic_surface_receivers.size();
+            if(auto added=append_surface(render_instances[index],&persistent_instances[dynamic_draw_refs[index].instance_index],
+                index,dynamic_surface_receivers);!added)return added;
+            const auto *qualified_surface=dynamic_surface_receivers.size()>surface_begin?&dynamic_surface_receivers.back():nullptr;
+            // Gel is a receiver even though it has no opaque shadow representation.
+            if (render_instances[index].mesh == RenderMesh::EnemyProjectile)
+            {
+                const auto &draw = persistent_instances[dynamic_draw_refs[index].instance_index];
+                if (!std::isfinite(draw.scale.x) || !std::isfinite(draw.scale.y) ||
+                    !std::isfinite(draw.scale.z) || !std::isfinite(draw.yaw) || !std::isfinite(draw.position.w))
+                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Gel receiver transform is nonfinite.");
+                const auto &sphere = impl_->gel_projectile_geometry.metadata.bounds.sphere;
+                const double origin_radius = std::sqrt(double(sphere[0])*sphere[0] +
+                    double(sphere[1])*sphere[1] + double(sphere[2])*sphere[2]) + sphere[3];
+                // Mesh6 has no skin/wind/charge deformation. Retain any larger current pose bound.
+                const double radius = std::max(double(draw.position.w), origin_radius *
+                    std::max({std::abs(double(draw.scale.x)), std::abs(double(draw.scale.y)), std::abs(double(draw.scale.z))}));
+                if (auto merged = merge_receiver(gel_receiver, draw.position, radius); !merged) return merged;
+                continue;
+            }
+            if (auto added = append_caster(render_instances[index], dynamic_draw_refs[index], static_cast<UINT>(index),
+                    false, &persistent_instances[dynamic_draw_refs[index].instance_index],qualified_surface); !added) return added;
+        }
+        // At most two additional entries, independent of water/projectile instance counts.
+        if (water_receiver) { water_receiver->maximum.w=1;receivers.push_back(*water_receiver); }
+        if (gel_receiver) { gel_receiver->maximum.w=1;receivers.push_back(*gel_receiver); }
+        PruneShadowCasterStorage(current_shadow_casters, caster_preparation_epoch, prepared_casters);
+#ifndef NDEBUG
+        if (impl_->config.validation || impl_->config.gpu_validation)
+        {
+            PruneShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch, prepared_casters,
+                shadow_owner.shadow_caster_key_oracle_prepared);
+            assert(caster_key_oracle.size() == prepared_casters);
+        }
+#endif
+        assert(current_shadow_casters.size() == prepared_casters);
+        // Unique current keys matching every previous key prove that no caster was removed.
+        if (!new_session && matched_previous_casters != impl_->previous_shadow_casters.size())
+        {
+            std::vector<const Impl::ShadowCasterMap::value_type *> removed_casters;
+            for (const auto &entry : impl_->previous_shadow_casters)
+                if (!current_shadow_casters.contains(entry.first)) removed_casters.push_back(&entry);
+            // Keep the former ordered-map order when removed casters invalidate cached pages.
+            std::ranges::sort(removed_casters, {}, [](const auto *entry) { return entry->first; });
+            for (const auto *entry : removed_casters)
+            {
+                const auto &old = entry->second.caster;
+                auto removed = old;
+                removed.present = false;
+                removed.previous_present = true;
+                removed.previous_bounds = old.current_bounds;
+                removed.previous_revisions = old.current_revisions;
+                removed.previous_cut_revision = old.current_cut_revision;
+                removed.previous_generation = old.instance_generation;
+                removed.previous_immutable_source = old.immutable_source;
+                removed.previous_skin = old.skin;
+                removed.previous_wind = old.wind;
+                removed.previous_animated_alpha = old.animated_alpha;
+                casters.push_back(removed);
+            }
+        }
+        std::ranges::sort(removed_static_indices,{},[&](std::size_t index) { return previous_static_batch->keys[index]; });
+        for(const auto index:removed_static_indices)
+        {
+            auto removed=previous_static_batch->records[index];
+            AdvanceShadowCasterHistory(removed); removed.present=false;
+            casters.push_back(removed);
+        }
+        inputs.frustum_receiver_index = froxel_receiver_index;
+        inputs.prepare_main_csm = [&](std::array<ShadowViewProjection,3> &matrices) {
+            prepare_cascades();
+            for(std::size_t cascade=0;cascade<3;++cascade)
+                for(std::size_t row=0;row<4;++row)for(std::size_t column=0;column<4;++column)
+                    matrices[cascade][row*4+column]=constants->shadow_view_projection[cascade].m[column][row];
+            return true;
+        };
+        inputs.view_id = impl_->active_view_id;
+        inputs.required_receiver_domains=ShadowReceiverCamera;
+        inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;
+        // These actual world/froxel enclosures are deliberately not clipped to
+        // raster surfaces. Software GI has no bounded CPU world-query contract.
+        if(!typed_volumes.empty()||impl_->volumetrics.AllocatedBytes()!=0)
+        { inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld; }
+        if(active_features.software_gi_enabled) inputs.required_receiver_domains|=ShadowReceiverSoftwareGi;
+        DirectX::XMStoreFloat4x4(&inputs.receiver_view_projection,clip_matrix);
+        inputs.surface_receivers={static_shadow_batch->surface_receivers,dynamic_surface_receivers,
+            static_shadow_batch->surface_aggregate?std::span<const ShadowSurfaceReceiver>(&*static_shadow_batch->surface_aggregate,1):
+                std::span<const ShadowSurfaceReceiver>{}};
+        if (primary_sun) inputs.light = *primary_sun;
+        DirectX::XMStoreFloat3(&inputs.clipmap_center, target);
+        inputs.view_origin = lod_eye;
+        inputs.inverse_view_projection = camera_relative_inverse_view_projection;
+        for (UINT i = 0; i < 3; ++i) inputs.coverage_extents[i] = cascade_extents[i] * 0.5f;
+        inputs.baked_static=primary_sun && impl_->material_parameter_revision==impl_->baked_generation_material_revision &&
+            impl_->pipeline_revision==impl_->baked_generation_pipeline_revision &&
+            impl_->virtual_shadows.MatchesBake(static_scene,*primary_sun,inputs.coverage_extents);
+        inputs.depth_span = shadow_distance * 2;
+        inputs.render_active = impl_->view_state.render_active;
+        inputs.frame_slot = back_buffer_index;
+        inputs.rendered_frame_id = impl_->frame_number;
+        inputs.completed = impl_->graph_queue_executor.Completed();
+        inputs.casters = ShadowCasterRange{static_shadow_batch->records,casters};
+        inputs.stable_caster_revision=static_shadow_batch->revision;
+        inputs.receivers = receivers; inputs.draw_groups = groups;
+        if (primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0)
+        {
+            if (auto prepared = impl_->virtual_shadows.PrepareFrame(inputs, shadow_plan); !prepared) return prepared;
+            csm_required = shadow_plan.guarantee.csm_required;
+        }
+    }
+    assert(shadow_plan.constants.root_options.w == 0u || !cascades_prepared);
+    if (csm_required) prepare_cascades();
+    const UINT active_view_mask = csm_required ? 15u : 1u;
+    const UINT active_view_count = csm_required ? kGpuVisibilityViewCount : 1u;
+    record_scene_substage(cpu_timings.scene_shadow_prepare_us);
+    // Software streaming demand is independent of GPU draw compaction. Merge
+    // camera and cascade error before requesting a family's finer resident page.
+    std::array<std::array<DirectX::XMFLOAT4, 6>, 4> demand_planes{};
+    const auto make_demand_planes = [&](std::size_t index, DirectX::CXMMATRIX matrix) {
+        const auto columns = DirectX::XMMatrixTranspose(matrix);
+        const DirectX::XMVECTOR planes[]{
+            DirectX::XMVectorAdd(columns.r[3], columns.r[0]),
+            DirectX::XMVectorSubtract(columns.r[3], columns.r[0]),
+            DirectX::XMVectorAdd(columns.r[3], columns.r[1]),
+            DirectX::XMVectorSubtract(columns.r[3], columns.r[1]),
+            columns.r[2], DirectX::XMVectorSubtract(columns.r[3], columns.r[2])};
+        for (std::size_t plane = 0; plane < 6; ++plane)
+            DirectX::XMStoreFloat4(&demand_planes[index][plane],
+                                  DirectX::XMPlaneNormalize(planes[plane]));
+    };
+    make_demand_planes(0, view * projection);
+    for (std::size_t cascade = 0; cascade + 1 < active_view_count; ++cascade)
+        make_demand_planes(cascade + 1, DirectX::XMMatrixTranspose(
+            DirectX::XMLoadFloat4x4(&constants->shadow_view_projection[cascade])));
+    for (std::size_t ordinal = 0; ordinal < cluster_inputs.size(); ++ordinal)
+    {
+        auto &cut = cluster_inputs[ordinal].constants;
+        cut.camera_origin_near = {constants->camera_time.x, constants->camera_time.y,
+            constants->camera_time.z, constants->lod_options.z};
+        cut.view_right = {constants->lod_view_right.x, constants->lod_view_right.y, constants->lod_view_right.z, 0};
+        cut.view_up = {constants->lod_view_up.x, constants->lod_view_up.y, constants->lod_view_up.z, 0};
+        cut.view_forward = {constants->lod_view_forward.x, constants->lod_view_forward.y,
+            constants->lod_view_forward.z, 0};
+        cut.projection_scale = {constants->lod_projection.x, constants->lod_projection.y,
+            constants->lod_projection.z, constants->lod_projection.w};
+        cut.error_tolerance.fill(constants->lod_options.x);
+        cut.geometry_frontend_flags = impl_->mesh_shader_enabled ? kGeometryMeshEligible : 0u;
+        cut.material_word = (impl_->material_parameter_bases[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] << 1u) | 1u;
+        for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+            for (std::size_t plane = 0; plane < 6; ++plane)
+            {
+                const auto &p = demand_planes[consumer][plane];
+                cut.frustum_planes[consumer][plane] = {p.x, p.y, p.z, p.w};
+            }
+    }
+    if (auto *hlod_view = impl_->ActiveHlodView(); hlod_view && hlod_view->frames[back_buffer_index].enabled)
+    {
+        auto &hlod_views = hlod_view->frames[back_buffer_index].views;
+        for (std::size_t index = 0; index < active_view_count; ++index)
+        {
+            auto &hlod_view = hlod_views[index];
+            hlod_view.origin_near = {constants->camera_time.x, constants->camera_time.y,
+                constants->camera_time.z, constants->lod_options.z};
+            hlod_view.forward = constants->lod_view_forward;
+            for (std::size_t plane = 0; plane < 6; ++plane)
+                hlod_view.frustum_planes[plane] = demand_planes[index][plane];
+            const float projection_scale = index == 0 ? constants->lod_projection.x
+                : index == 1 ? constants->lod_projection.y : index == 2 ? constants->lod_projection.z : constants->lod_projection.w;
+            hlod_view.error_policy = {projection_scale, constants->lod_options.x, 0.15f, index == 0 ? 0.0f : 1.0f};
+        }
+    }
+    for (auto &input : cluster_inputs) input.constants.active_view_mask = active_view_mask;
+    if (auto prepared = impl_->PrepareClusterFrame(back_buffer_index, cluster_inputs); !prepared) return prepared;
+    record_scene_substage(cpu_timings.scene_cluster_prepare_us);
+    std::array<float, kEnvironmentMaterialNames.size()> geometry_demand{};
+    const float shadow_demand_projection[]{constants->lod_projection.y,
+        constants->lod_projection.z, constants->lod_projection.w};
+    const auto accumulate_geometry_demand = [&](const auto &source, std::uint32_t consumers,
+                                                std::uint32_t inside_consumers) {
+        if (!is_environment_mesh(source.mesh)) return;
+        const auto ordinal = environment_mesh_index(source);
+        const auto &coarse = impl_->environment_meshes[ordinal * 3 + 1];
+        const auto scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y),
+                                     std::abs(source.scale.z)});
+        const auto deformation = HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f;
+        const auto radius = impl_->environment_variant_radii[ordinal] * scale + deformation;
+        const auto error = coarse.metadata.geometric_error * scale + 2.0f * deformation;
+        const auto &center = source.position;
+        for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+        {
+            if ((consumers & (1u << consumer)) == 0) continue;
+            const float shadow_error = consumer == 0 ? 0.0f
+                : error * shadow_demand_projection[consumer - 1];
+            // A shadow view cannot raise the per-catalog maximum after a
+            // larger visible instance/view has already supplied its demand.
+            if (consumer != 0 && shadow_error <= geometry_demand[ordinal]) continue;
+            bool visible = true;
+            if ((inside_consumers & (1u << consumer)) == 0)
+                for (const auto &plane : demand_planes[consumer])
+                    visible = visible && center.x * plane.x + center.y * plane.y +
+                        center.z * plane.z + plane.w >= -radius;
+            if (!visible) continue;
+            float projected_error{};
+            if (consumer == 0)
+            {
+                DirectX::XMFLOAT3 view_center{};
+                DirectX::XMStoreFloat3(&view_center, DirectX::XMVector3TransformCoord(
+                    DirectX::XMVectorSet(center.x, center.y, center.z, 1), view));
+                const auto distance = view_center.z - radius - error;
+                if (distance <= constants->lod_options.z)
+                    projected_error = constants->lod_options.x * 2.0f;
+                else
+                {
+                    const auto safe_distance = std::max(distance, constants->lod_options.z);
+                    const auto rho = std::hypot(std::abs(view_center.x) + radius + error,
+                                                std::abs(view_center.y) + radius + error) / safe_distance;
+                    projected_error = error * constants->lod_projection.x *
+                        std::sqrt(1.0f + rho * rho) / safe_distance;
+                }
+            }
+            else
+            {
+                projected_error = shadow_error;
+            }
+            geometry_demand[ordinal] = std::max(geometry_demand[ordinal], projected_error);
+        }
+    };
+    const auto all_demand_consumers = (1u << active_view_count) - 1u;
+    for (const auto &source : render_instances) accumulate_geometry_demand(source, all_demand_consumers, 0);
+    if (static_scene)
+        for (std::size_t ordinal = 0; ordinal < cluster_active.size(); ++ordinal)
+        {
+            if (cluster_active[ordinal]) continue;
+            for (const auto &cell : static_draws.geometry_demand_cells[ordinal])
+            {
+                const float deformation = cell.any_wind ? grass_visibility_radius : 0.0f;
+                const float radius = impl_->environment_variant_radii[ordinal] * cell.max_scale + deformation;
+                const float error = impl_->environment_meshes[ordinal * 3 + 1].metadata.geometric_error *
+                    cell.max_scale + 2.0f * deformation;
+                std::uint32_t consumers{}, inside_consumers{};
+                for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+                {
+                    const double upper = consumer == 0
+                        ? GeometryDemandCellErrorUpperBound(cell, radius, error, lod_view.m,
+                            constants->lod_projection.x, constants->lod_options.z)
+                        : error * shadow_demand_projection[consumer - 1];
+                    if (upper <= geometry_demand[ordinal]) continue;
+                    const auto visibility = ClassifyGeometryDemandCell(cell, radius, demand_planes[consumer]);
+                    if (visibility == GeometryDemandCellVisibility::Outside) continue;
+                    consumers |= 1u << consumer;
+                    if (visibility == GeometryDemandCellVisibility::Inside) inside_consumers |= 1u << consumer;
+                }
+                if (!consumers) continue;
+                // Cells only prune work; the original float calculation still chooses the exact priority.
+                for (const auto instance : cell.instances)
+                    accumulate_geometry_demand(static_scene->instances[instance], consumers, inside_consumers);
+            }
+        }
+    for (std::uint32_t ordinal = 0; ordinal < geometry_demand.size(); ++ordinal)
+        if (geometry_demand[ordinal] > constants->lod_options.x)
+            if (auto requested = impl_->DemandEnvironmentGeometry(ordinal,
+                    std::bit_cast<UINT>(std::max(geometry_demand[ordinal] / constants->lod_options.x, 1.0f)));
+                !requested) return requested;
+    record_scene_substage(cpu_timings.scene_geometry_demand_us);
+    // Measure ground UV derivatives through the actual unjittered view. The
+    // smallest authored terrain tile is 9m (TerrainTileSize, material_terrain).
+    float terrain_footprint = std::numeric_limits<float>::infinity();
+    if (!impl_->config.grid_floor_probe && impl_->environment_textures[0].resource)
+    {
+        const auto inverse = DirectX::XMLoadFloat4x4(&constants->inverse_unjittered_view_projection);
+        const auto ground_point = [&](float u, float v, DirectX::XMFLOAT3 &point) {
+            const auto near_point = DirectX::XMVector3TransformCoord(
+                DirectX::XMVectorSet(u * 2 - 1, 1 - v * 2, 1, 1), inverse);
+            DirectX::XMFLOAT3 origin{}, direction{};
+            DirectX::XMStoreFloat3(&origin, eye);
+            DirectX::XMStoreFloat3(&direction, DirectX::XMVectorSubtract(near_point, eye));
+            if (direction.y >= 0.0f || origin.y <= 0.0f) return false;
+            const auto scale = -origin.y / direction.y;
+            point = {origin.x + direction.x * scale, 0, origin.z + direction.z * scale};
+            return std::isfinite(point.x) && std::isfinite(point.z) &&
+                   std::hypot(point.x - origin.x, point.z - origin.z) <= 500.0f;
+        };
+        for (const auto v : {0.1f, 0.5f, 0.9f})
+            for (const auto u : {0.1f, 0.5f, 0.9f})
+            {
+                DirectX::XMFLOAT3 p{}, dx{}, dy{};
+                if (!ground_point(u, v, p) || !ground_point(u + 1.0f / impl_->render_width, v, dx) ||
+                    !ground_point(u, v + 1.0f / impl_->render_height, dy)) continue;
+                const auto footprint = std::max(std::hypot(dx.x - p.x, dx.z - p.z),
+                                               std::hypot(dy.x - p.x, dy.z - p.z));
+                if (footprint > 0.0f)
+                    terrain_footprint = std::min(terrain_footprint, footprint);
+            }
+    }
+    const auto demand_material = [&](std::uint32_t material, std::uint32_t mip, std::uint32_t priority,
+                                     bool baseline_consumer) {
+        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+        {
+            const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
+            if (id && (baseline_consumer || !impl_->texture_streaming.HardwareBacked(id)))
+                impl_->texture_streaming.Demand(id, mip, priority, impl_->frame_number);
+        }
+    };
+    std::array<bool, kEnvironmentMaterialNames.size()> environment_material_requested{};
+    const auto demand_environment_material = [&](const RenderInstance &source, bool capture_consumer) {
+        if (!is_environment_mesh(source.mesh)) return;
+        const auto material = static_cast<std::uint32_t>(environment_mesh_index(source));
+        if (environment_material_requested[material]) return;
+        const auto radius = impl_->environment_variant_radii[material] *
+            std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)}) +
+            (HasEnvironmentWind(source.mesh, source.environment_variant) ? grass_visibility_radius : 0.0f);
+        bool visible = capture_consumer || active_features.software_gi_enabled;
+        for (const auto &planes : demand_planes)
+        {
+            if (visible) break;
+            bool in_view = true;
+            for (const auto &plane : planes)
+                in_view = in_view && source.position.x * plane.x + source.position.y * plane.y +
+                    source.position.z * plane.z + plane.w >= -radius;
+            visible = visible || in_view;
+        }
+        if (!visible) return;
+        environment_material_requested[material] = true;
+        // Geometry has no authored UV density. Software conservatively requests
+        // the finest allowed mip for actual visible owners; raster hardware
+        // demand comes from real samples. Software GI consumers use software demand.
+        demand_material(render_data::EnvironmentGeometryMaterialOrdinal(material), 0, std::bit_cast<UINT>(std::max(geometry_demand[material], 1.0f)),
+            active_features.software_gi_enabled);
+    };
+    for (const auto &source : render_instances) demand_environment_material(source, false);
+    if (static_scene)
+    {
+        const bool capture_consumer = impl_->local_probes.AllocatedBytes() != 0;
+        for (std::size_t ordinal = 0; ordinal < environment_material_requested.size(); ++ordinal)
+        {
+            const auto [begin, count] = static_environment_ranges[ordinal * 3];
+            for (std::size_t index = begin; index < begin + count && !environment_material_requested[ordinal]; ++index)
+                demand_environment_material(static_scene->instances[static_draw_refs[index].instance_index], capture_consumer);
+        }
+    }
+    if (!impl_->config.grid_floor_probe && std::isfinite(terrain_footprint))
+        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+        {
+            const auto id = impl_->material_texture_stream_ids[kTerrainMaterialOrdinal * render_data::kMaterialTextureSlots + slot];
+            if (!id || (impl_->texture_streaming.HardwareBacked(id) && !active_features.software_gi_enabled)) continue;
+            const auto logical = impl_->texture_streaming.View(id).logical_description;
+            const auto rho = std::max(static_cast<float>(logical.width) * terrain_footprint / 9.0f, 1.0f);
+            impl_->texture_streaming.Demand(id, static_cast<std::uint32_t>(std::floor(std::log2(rho))),
+                std::bit_cast<UINT>(1.0f / terrain_footprint), impl_->frame_number);
+        }
+    if (static_draws.ground_range.second && impl_->local_probes.AllocatedBytes() != 0)
+        demand_material(kTerrainMaterialOrdinal, 0, 1, active_features.software_gi_enabled);
+    if (auto result = impl_->texture_streaming.Pump(impl_->frame_number, completed_streaming,
+            impl_->asset_io, impl_->streaming, impl_->residency); !result) return result;
+    impl_->PublishEnvironmentMaterialTextures(back_buffer_index);
+    if (auto result = impl_->texture_feedback.PrepareFrame(back_buffer_index, completed_streaming,
+            impl_->material_texture_stream_ids, impl_->texture_streaming, impl_->residency); !result) return result;
+    auto feedback_cpu = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    feedback_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
+        kTextureFeedbackDescriptorOffset) * impl_->srv_stride;
+    auto feedback_gpu = impl_->srv_heap->GetGPUDescriptorHandleForHeapStart();
+    feedback_gpu.ptr += (static_cast<UINT64>(back_buffer_index) * kTextureDescriptorCount +
+        kTextureFeedbackDescriptorOffset) * impl_->srv_stride;
+    if (auto result = impl_->texture_feedback.WriteDescriptors(back_buffer_index, impl_->srv_heap.Get(),
+            impl_->srv_cpu_heap.Get(), feedback_cpu, feedback_gpu, impl_->srv_stride); !result) return result;
+    record_scene_substage(cpu_timings.scene_texture_prepare_us);
     const bool upload_dynamic_header =
         !impl_->dynamic_instances_shader_read ||
         required_slots != impl_->dynamic_instance_slot_count;
@@ -4078,6 +4407,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::memcpy(frame.mapped + dynamic_ref_data_offset, dynamic_draw_refs.data(),
                     dynamic_draw_refs.size() * sizeof(GpuStaticDrawRef));
 
+    record_scene_substage(cpu_timings.scene_upload_plan_us);
     cpu_timings.scene_gpu_prepare_us = capture_elapsed(scene_gpu_prepare_start);
     const bool upload_static_scene = static_scene && impl_->static_gpu_scene &&
                                       !impl_->static_gpu_scene->submitted;
@@ -4297,6 +4627,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                 static_cast<std::uint32_t>(static_draw_refs.size()), dynamic_ref_data_offset,
                 static_cast<std::uint32_t>(dynamic_draw_refs.size())); !result) return result;
     cpu_timings.constants_upload_us = measure_stage();
+    auto graph_substage_start = capture_clock();
+    const auto record_graph_substage = [&](std::uint64_t &duration) {
+        if (!impl_->config.capture_timing_stream) return;
+        const auto end = std::chrono::steady_clock::now();
+        duration = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            end - graph_substage_start).count());
+        graph_substage_start = end;
+    };
     impl_->graph.Reset();
     std::vector<TextureStreamingGraphBinding> texture_bindings;
     auto copy_queue = std::make_shared<ComPtr<ID3D12CommandQueue>>(
@@ -4340,33 +4678,35 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         std::ranges::any_of(static_scene->instances, authored_source);
     const bool has_static_masked_material_draw = static_scene &&
         std::ranges::any_of(static_scene->instances, masked_source);
-    std::vector<std::pair<AllocationResource *, ResourceHandle>> imported_resources;
+    // Keep deduplication local to this frame and indexed by the allocation
+    // owner; do not rescan all prior imports on each declaration request.
+    std::unordered_map<AllocationResource *, ResourceHandle> imported_resources;
+    imported_resources.reserve(128);
     const auto import_buffer = [&](AllocationResource &resource, Access initial,
                                    std::string_view name) {
-        for (const auto &[imported, handle] : imported_resources)
-            if (imported == &resource) return handle;
+        if (const auto existing = imported_resources.find(&resource); existing != imported_resources.end())
+            return existing->second;
         const auto access = resource.graph_access == Access::Undefined
             ? initial : resource.graph_access;
         const auto handle = impl_->graph.ImportBuffer(
             {resource.resource.Get(), resource.graph_completion, resource.graph_queue}, access, name);
-        imported_resources.emplace_back(&resource, handle);
+        imported_resources.emplace(&resource, handle);
         return handle;
     };
     const auto import_texture = [&](AllocationResource &resource, Access initial,
                                     std::string_view name) {
+        if (const auto existing = imported_resources.find(&resource); existing != imported_resources.end())
+            return existing->second;
         if (const auto existing = canonical_textures.find(resource.resource.Get()); existing != canonical_textures.end())
         {
-            if (std::ranges::none_of(imported_resources, [&](const auto &entry) { return entry.first == &resource; }))
-                imported_resources.emplace_back(&resource, existing->second);
+            imported_resources.emplace(&resource, existing->second);
             return existing->second;
         }
-        for (const auto &[imported, handle] : imported_resources)
-            if (imported == &resource) return handle;
         const auto access = resource.graph_access == Access::Undefined
             ? initial : resource.graph_access;
         const auto handle = impl_->graph.ImportTexture(
             {resource.resource.Get(), resource.graph_completion, resource.graph_queue}, access, name);
-        imported_resources.emplace_back(&resource, handle);
+        imported_resources.emplace(&resource, handle);
         return handle;
     };
     TextureHandle environment_stream_texture{};
@@ -4468,16 +4808,18 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         ResourceVersion version{};
     };
     std::vector<GeometryPageGraph> geometry_pages;
+    std::array<bool, kProceduralGeometryPage + 1> geometry_page_seen{};
+    geometry_pages.reserve(geometry_page_seen.size());
     for (const auto &record : frame.geometry_draw_records_cpu)
     {
         // Shared hierarchy/HLOD pages are imported once by ClusterFrameGraph.
         if (record.page_slot > kProceduralGeometryPage) continue;
-        if (record.geometry_generation == 0 || std::ranges::any_of(geometry_pages,
-                [&](const auto &entry) { return entry.page->page_slot == record.page_slot; })) continue;
+        if (record.geometry_generation == 0 || geometry_page_seen[record.page_slot]) continue;
         const auto *page = impl_->FindGeometryPage(record.page_slot);
         if (!page)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Geometry graph has no page for a prepared draw record.");
+        geometry_page_seen[record.page_slot] = true;
         GeometryPageGraph entry{page};
         entry.version = impl_->graph.Version(import_buffer(
             const_cast<AllocationResource &>(page->storage), Access::VertexShaderRead, "GeometryPage"));
@@ -4693,6 +5035,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     auto ui_version = impl_->graph.Version(ui);
     auto back_buffer_version = impl_->graph.Version(back_buffer);
 
+    record_graph_substage(cpu_timings.graph_resources_us);
     if (!impl_->exposure_initialized)
     {
         const auto exposure_upload = import_buffer(impl_->initial_exposure, Access::CopySource, "InitialExposure");
@@ -5182,7 +5525,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             renderer.frame_submission_faulted = true;
         }
     } pending_hlod{*impl_, frame, hlod_graph};
-    if (auto prepared = impl_->AddHlodFramePasses(back_buffer_index, geometry_records_version,
+    if (auto prepared = impl_->AddHlodFramePasses(back_buffer_index,
+        active_view_mask, geometry_records_version,
         static_instances_version, {}, hlod_graph); !prepared) return prepared;
     auto visibility_pass = impl_->graph.AddPass(3, kRenderPassNames[3], QueueHint::Compute);
     impl_->ReadHlodFrame(visibility_pass, hlod_graph, false);
@@ -5244,7 +5588,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             7, frame.static_rejected_refs.resource->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(
             8, frame.static_rejected_args.resource->GetGPUVirtualAddress());
-        list->Dispatch(kGpuVisibilityBucketCount, kGpuVisibilityViewCount, 1);
+        list->Dispatch(kGpuVisibilityBucketCount, active_view_count, 1);
         if (dynamic_visibility_ref_count != 0)
         {
             list->SetComputeRootUnorderedAccessView(22, dynamic_lod_state.states.resource->GetGPUVirtualAddress());
@@ -5268,7 +5612,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             list->SetComputeRootUnorderedAccessView(
                 4, frame.dynamic_draw_args.resource->GetGPUVirtualAddress());
             list->Dispatch(
-                kGpuVisibilityBucketCount, kGpuVisibilityViewCount, 1);
+                kGpuVisibilityBucketCount, active_view_count, 1);
         }
     });
 
@@ -5334,7 +5678,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         csm_read(dynamic_visible_refs_version, Access::ShaderRead);
         csm_read(dynamic_draw_args_version, Access::IndirectArgs);
     };
-    bool csm_required = true, csm_registered = false;
+    bool csm_registered = false;
     const auto register_cascaded_shadow = [&] {
         collect_csm_reads();
         const auto shadow_initial = impl_->enhanced && impl_->shadow.graph_access == Access::Undefined
@@ -5927,543 +6271,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     surface_descriptor(kDecalSurfaceDescriptorOffset + kDecalSurfaceExportOffset + 3u,
         decal_surface_outputs.active ? decal_surface_outputs.emission.resource : nullptr,
         DXGI_FORMAT_R16G16B16A16_FLOAT);
-    VirtualShadowOutputs virtual_shadow_outputs;
-    impl_->virtual_shadows.BeginFramePolicy();
-    LocalShadowOutputs local_shadow_outputs;
-    decltype(impl_->previous_shadow_casters) current_shadow_casters;
-    std::shared_ptr<Impl::StaticShadowCasterBatch> static_shadow_batch;
+    record_graph_substage(cpu_timings.graph_base_passes_us);
     if ((primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0) || impl_->local_shadows.AllocatedBytes() != 0)
     {
-        auto &shadow_owner = *impl_->owned_views.at(impl_->active_view_id.value);
-        const auto caster_preparation_epoch = BeginShadowCasterPreparation(
-            shadow_owner.scratch_shadow_casters, shadow_owner.shadow_caster_preparation_epoch);
-        current_shadow_casters = std::move(shadow_owner.scratch_shadow_casters);
-        const auto static_caster_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0u;
-        struct ShadowBinding
-        {
-            const GeometryPageGpu *page{};
-            ID3D12PipelineState *pipeline{};
-            UINT material{};
-            bool immutable{};
-        };
-        std::vector<ShadowBinding> bindings;
-        std::vector<VirtualShadowDrawGroup> groups;
-        // Static groups occupy the retained prefix; dynamic bindings are resolved per frame.
-        std::array<std::array<UINT, kGpuVisibilityBucketCount + 2>, 2> shadow_group_indices;
-        for (auto &indices : shadow_group_indices) indices.fill(UINT32_MAX);
-        std::vector<VirtualShadowCaster> casters;
-        std::vector<std::size_t> removed_static_indices;
-        std::size_t matched_previous_casters{};
-        std::size_t prepared_casters{};
-#ifndef NDEBUG
-        auto &caster_key_oracle = shadow_owner.shadow_caster_key_oracle;
-        if (impl_->config.validation || impl_->config.gpu_validation)
-            BeginShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch,
-                shadow_owner.shadow_caster_key_oracle_prepared);
-#endif
-        current_shadow_casters.reserve(dynamic_draw_refs.size());
-        casters.reserve(dynamic_draw_refs.size());
-        std::vector<VirtualShadowReceiver> receivers;
-        std::uint32_t froxel_receiver_index = UINT32_MAX;
-        std::vector<ShadowSurfaceReceiver> dynamic_surface_receivers;
-        bool camera_receiver_domain_closed=true;
-        std::optional<VirtualShadowReceiver> water_receiver, gel_receiver;
-        const auto merge_receiver = [](std::optional<VirtualShadowReceiver> &target,
-            DirectX::XMFLOAT4 center, double radius) -> Result {
-            if (!std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z) ||
-                !std::isfinite(radius) || radius < 0 ||
-                std::abs(double(center.x)) + radius > FLT_MAX ||
-                std::abs(double(center.y)) + radius > FLT_MAX ||
-                std::abs(double(center.z)) + radius > FLT_MAX)
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Virtual shadow receiver has nonfinite or unbounded world bounds.");
-            VirtualShadowReceiver bounds{
-                {std::nextafter(float(double(center.x) - radius), -FLT_MAX),
-                 std::nextafter(float(double(center.y) - radius), -FLT_MAX),
-                 std::nextafter(float(double(center.z) - radius), -FLT_MAX), 0},
-                {std::nextafter(float(double(center.x) + radius), FLT_MAX),
-                 std::nextafter(float(double(center.y) + radius), FLT_MAX),
-                 std::nextafter(float(double(center.z) + radius), FLT_MAX), 0}};
-            if (!target) target = bounds;
-            else
-            {
-                target->minimum.x = std::min(target->minimum.x, bounds.minimum.x);
-                target->minimum.y = std::min(target->minimum.y, bounds.minimum.y);
-                target->minimum.z = std::min(target->minimum.z, bounds.minimum.z);
-                target->maximum.x = std::max(target->maximum.x, bounds.maximum.x);
-                target->maximum.y = std::max(target->maximum.y, bounds.maximum.y);
-                target->maximum.z = std::max(target->maximum.z, bounds.maximum.z);
-            }
-            return Result::Success();
-        };
-        std::vector<VirtualShadowNativeRead> reads;
-        for (const auto &hero : typed_volumes)
-            receivers.push_back({{hero.bounds_min.x, hero.bounds_min.y, hero.bounds_min.z, 0},
-                {hero.bounds_max.x, hero.bounds_max.y, hero.bounds_max.z, 0}});
-        // Captures use their private static CSM, so retain only their existing
-        // depth-interval contribution. Froxels still request world shadow pages.
-        for (const auto &probe : impl_->local_probes.Probes())
-            receivers.push_back({{std::min({probe.influence_min.x, probe.projection_min.x, probe.position.x - probe.capture_distance}),
-                    std::min({probe.influence_min.y, probe.projection_min.y, probe.position.y - probe.capture_distance}),
-                    std::min({probe.influence_min.z, probe.projection_min.z, probe.position.z - probe.capture_distance}), 1.0f},
-                {std::max({probe.influence_max.x, probe.projection_max.x, probe.position.x + probe.capture_distance}),
-                    std::max({probe.influence_max.y, probe.projection_max.y, probe.position.y + probe.capture_distance}),
-                    std::max({probe.influence_max.z, probe.projection_max.z, probe.position.z + probe.capture_distance}), 0}});
-        if (impl_->volumetrics.AllocatedBytes() != 0)
-        {
-            DirectX::XMFLOAT3 minimum{FLT_MAX, FLT_MAX, FLT_MAX}, maximum{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-            const auto inverse = DirectX::XMLoadFloat4x4(&camera_relative_inverse_view_projection);
-            for (const float z : {0.0f, 1.0f})
-                for (const float y : {-1.0f, 1.0f})
-                    for (const float x : {-1.0f, 1.0f})
-                    {
-                        DirectX::XMFLOAT3 corner;
-                        DirectX::XMStoreFloat3(&corner, DirectX::XMVector3TransformCoord(
-                            DirectX::XMVectorSet(x, y, z, 1), inverse));
-                        corner.x += lod_eye.x; corner.y += lod_eye.y; corner.z += lod_eye.z;
-                        minimum.x = std::min(minimum.x, corner.x); minimum.y = std::min(minimum.y, corner.y); minimum.z = std::min(minimum.z, corner.z);
-                        maximum.x = std::max(maximum.x, corner.x); maximum.y = std::max(maximum.y, corner.y); maximum.z = std::max(maximum.z, corner.z);
-                    }
-            froxel_receiver_index = static_cast<std::uint32_t>(receivers.size());
-            receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
-            for (const auto &volume : impl_->volumetric_media)
-            {
-                if (volume.identity.w == static_cast<UINT>(VolumetricShape::Global)) continue;
-                minimum = {FLT_MAX, FLT_MAX, FLT_MAX}; maximum = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
-                const auto local_to_world = DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&volume.world_to_local));
-                for (const float z : {-1.0f, 1.0f}) for (const float y : {-1.0f, 1.0f}) for (const float x : {-1.0f, 1.0f})
-                {
-                    DirectX::XMFLOAT3 corner;
-                    DirectX::XMStoreFloat3(&corner, DirectX::XMVector3TransformCoord(DirectX::XMVectorSet(x, y, z, 1), local_to_world));
-                    minimum.x = std::min(minimum.x, corner.x); minimum.y = std::min(minimum.y, corner.y); minimum.z = std::min(minimum.z, corner.z);
-                    maximum.x = std::max(maximum.x, corner.x); maximum.y = std::max(maximum.y, corner.y); maximum.z = std::max(maximum.z, corner.z);
-                }
-                receivers.push_back({{minimum.x, minimum.y, minimum.z, 0}, {maximum.x, maximum.y, maximum.z, 0}});
-            }
-        }
-        const auto previous_static_batch=shadow_owner.static_shadow_casters;
-        Impl::StaticShadowCasterBatch signature;
-        signature.source=static_scene; signature.generation=static_caster_generation;
-        signature.leaf_count=static_leaf_ref_count;
-        signature.receiver_proxy_count=hlod_static_instances.size();
-        signature.density=static_draws.foliage_density; signature.wind_radius=grass_visibility_radius;
-        signature.material_revision=impl_->material_parameter_revision; signature.pipeline_revision=impl_->pipeline_revision;
-        signature.mesh_shader=impl_->mesh_shader_enabled;
-        for(std::size_t bucket=0;bucket<kGpuVisibilityBucketCount;++bucket)
-        {
-            const auto *page=bucket_pages[bucket];
-            signature.geometry[bucket]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
-            signature.passes[bucket]=static_geometry_passes[bucket][1];
-        }
-        signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
-        signature.passes.back()=ground_geometry_passes[1];
-        const bool static_warm=!new_session && previous_static_batch &&
-            previous_static_batch->source==signature.source && previous_static_batch->generation==signature.generation &&
-            previous_static_batch->leaf_count==signature.leaf_count && previous_static_batch->density==signature.density &&
-            previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count &&
-            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->material_revision==signature.material_revision &&
-            previous_static_batch->pipeline_revision==signature.pipeline_revision && previous_static_batch->mesh_shader==signature.mesh_shader &&
-            previous_static_batch->geometry==signature.geometry && previous_static_batch->passes==signature.passes;
-        std::unordered_map<Impl::ShadowCasterMap::key_type,std::size_t,Impl::ShadowCasterKeyHash> old_static_indices,static_indices;
-        if(static_warm) static_shadow_batch=previous_static_batch;
-        else
-        {
-            static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(std::move(signature));
-            if(shadow_owner.static_shadow_caster_revision>UINT64_MAX-2) throw std::runtime_error("Static shadow caster revision exhausted");
-            static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
-            static_indices.reserve(static_leaf_ref_count);
-            if(!new_session && previous_static_batch)
-                for(std::size_t i=0;i<previous_static_batch->keys.size();++i) old_static_indices.emplace(previous_static_batch->keys[i],i);
-        }
-        // Camera shadow queries originate at raster surfaces, independently of
-        // shadow-caster eligibility. Retain all static draw bounds once in the
-        // existing immutable batch, including shadow-off surfaces and HLOD proxies.
-        const auto append_surface=[&](const RenderInstance &source,const GpuInstance *draw,
-            std::size_t dynamic_index,std::vector<ShadowSurfaceReceiver> &destination,
-            const render_data::GeometryBounds *proxy_bounds=nullptr) -> Result {
-            const bool environment=is_environment_mesh(source.mesh);
-            const auto scale=draw?draw->scale:DirectX::XMFLOAT4{source.scale.x,source.scale.y,source.scale.z,1};
-            const auto center=draw?draw->position:DirectX::XMFLOAT4{source.position.x,
-                source.position.y+(environment?0.0f:source.scale.y*0.5f),source.position.z,0};
-            const double yaw=draw?draw->yaw:source.yaw;
-            if(!std::isfinite(center.x)||!std::isfinite(center.y)||!std::isfinite(center.z)||
-               !std::isfinite(scale.x)||!std::isfinite(scale.y)||!std::isfinite(scale.z)||!std::isfinite(yaw))
-                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver transform is nonfinite.");
-            std::array<double,3> lo{INFINITY,INFINITY,INFINITY},hi{-INFINITY,-INFINITY,-INFINITY};
-            const auto merge_local=[&](const auto &bounds) {
-                for(unsigned axis=0;axis<3;++axis)
-                { lo[axis]=std::min(lo[axis],double(bounds.minimum[axis]));hi[axis]=std::max(hi[axis],double(bounds.maximum[axis])); }
-            };
-            if(proxy_bounds) merge_local(*proxy_bounds); // HLOD pages contain baked world-space vertices.
-            else if(environment)
-            {
-                const auto ordinal=environment_mesh_index(source);
-                for(unsigned lod=0;lod<3;++lod) merge_local(impl_->environment_meshes[ordinal*3+lod].metadata.bounds);
-            }
-            else if(source.mesh==RenderMesh::Archer)
-            {
-                // The exact prepared palette is the SkinCache input. Every
-                // nonnegative weighted matrix result is inside this bone/AABB
-                // envelope; the source codec admits weight sums 1 +/- .001.
-                if(dynamic_index>=archer_palette_slots.size()||archer_palette_slots[dynamic_index]==UINT32_MAX)
-                { camera_receiver_domain_closed=false;return Result::Success(); }
-                const auto &bounds=impl_->archer_geometry.metadata.bounds;
-                const auto offset=archer_palette_data_offset+std::size_t(archer_palette_slots[dynamic_index])*archer_palette_stride;
-                lo={0,0,0};hi={0,0,0};std::array<double,3> magnitude{};
-                double source_l1{};
-                for(unsigned bone=0;bone<impl_->archer_bone_count;++bone)
-                {
-                    DirectX::XMFLOAT4X4 matrix;
-                    std::memcpy(&matrix,frame.mapped+offset+bone*sizeof(matrix),sizeof(matrix));
-                    for(unsigned corner=0;corner<8;++corner)
-                    {
-                        const std::array<double,4> p{bounds.minimum[0],bounds.minimum[1],bounds.minimum[2],1};
-                        auto q=p;
-                        for(unsigned axis=0;axis<3;++axis) if(corner&(1u<<axis)) q[axis]=bounds.maximum[axis];
-                        source_l1=std::max(source_l1,std::abs(q[0])+std::abs(q[1])+std::abs(q[2]));
-                        for(unsigned axis=0;axis<3;++axis)
-                        {
-                            double value{},absolute{};
-                            for(unsigned column=0;column<4;++column)
-                            { const double term=double(matrix.m[axis][column])*q[column];value+=term;absolute+=std::abs(term); }
-                            lo[axis]=std::min(lo[axis],value);hi[axis]=std::max(hi[axis],value);
-                            magnitude[axis]=std::max(magnitude[axis],absolute);
-                        }
-                    }
-                }
-                constexpr double gamma64=(64*0x1p-24)/(1-64*0x1p-24);
-                for(unsigned axis=0;axis<3;++axis)
-                {
-                    const double pad=gamma64*magnitude[axis]*1.0011+64*double(FLT_MIN)*(1+source_l1);
-                    lo[axis]=lo[axis]*1.0011-pad;hi[axis]=hi[axis]*1.0011+pad;
-                }
-            }
-            else if(is_monster(source.mesh))
-            {
-                const auto &asset=impl_->monster_assets[static_cast<UINT>(source.mesh)-static_cast<UINT>(RenderMesh::MonsterMelee)];
-                if(!(asset.deformation_flags&render_data::kMonsterBoundsPositionEnclosure)||
-                   dynamic_index>=dynamic_pose_times.size())
-                { camera_receiver_domain_closed=false;return Result::Success(); }
-                const auto clip=std::min((dynamic_pose_flags[dynamic_index]>>8u)&0xfu,4u);
-                const auto meta=asset.clip_meta[clip];
-                if(!meta.y||!asset.bone_count) { camera_receiver_domain_closed=false;return Result::Success(); }
-                if(!std::isfinite(dynamic_pose_times[dynamic_index]))
-                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera skin receiver time is nonfinite.");
-                const float frame_position=std::clamp(dynamic_pose_times[dynamic_index],0.0f,1.0f)*float(meta.y-1u);
-                const auto frame0=std::min(static_cast<UINT>(std::floor(frame_position)),meta.y-1u);
-                const auto row=std::size_t(meta.x/asset.bone_count)+frame0;
-                if(row>=asset.interval_bounds.size()) { camera_receiver_domain_closed=false;return Result::Success(); }
-                const auto &bounds=asset.interval_bounds[row];
-                if(bounds.lod!=0||static_cast<UINT>(bounds.clip)!=clip||bounds.frame!=frame0)
-                { camera_receiver_domain_closed=false;return Result::Success(); }
-                for(unsigned axis=0;axis<3;++axis) { lo[axis]=bounds.minimum[axis];hi[axis]=bounds.maximum[axis]; }
-            }
-            else
-            {
-                merge_local(source.mesh==RenderMesh::EnemyProjectile?impl_->gel_projectile_geometry.metadata.bounds:
-                    impl_->procedural_geometry.metadata.bounds);
-                if(source.mesh==RenderMesh::Area||source.mesh==RenderMesh::Ground) { lo[1]*=.1;hi[1]*=.1; }
-                else if(source.mesh==RenderMesh::DirtPatch) { lo[1]*=.035;hi[1]*=.035; }
-                else if(source.mesh==RenderMesh::PlayerProjectile) { lo[1]*=.55;hi[1]*=.55; }
-                else if(source.mesh==RenderMesh::Pickup)
-                {
-                    const double extent=std::max(std::abs(lo[0]),std::abs(hi[0]))+std::max(std::abs(lo[1]),std::abs(hi[1]));
-                    lo[0]=lo[1]=-extent;hi[0]=hi[1]=extent;
-                }
-                // Other placeholder operations only shrink the source box.
-            }
-            const double sine=std::sin(yaw),cosine=std::cos(yaw);
-            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
-            for(unsigned corner=0;corner<8;++corner)
-            {
-                const double x=(corner&1?hi[0]:lo[0])*scale.x,y=(corner&2?hi[1]:lo[1])*scale.y,z=(corner&4?hi[2]:lo[2])*scale.z;
-                const std::array<double,3> p{center.x+cosine*x+sine*z,center.y+y,center.z-sine*x+cosine*z};
-                const std::array<double,3> absolute{std::abs(double(center.x))+std::abs(x)+std::abs(z),std::abs(double(center.y))+std::abs(y),
-                    std::abs(double(center.z))+std::abs(x)+std::abs(z)};
-                for(unsigned axis=0;axis<3;++axis)
-                { low[axis]=std::min(low[axis],p[axis]);high[axis]=std::max(high[axis],p[axis]);magnitude[axis]=std::max(magnitude[axis],absolute[axis]); }
-            }
-            const double wind=HasEnvironmentWind(source.mesh,source.environment_variant)?grass_visibility_radius:0;
-            std::array<float,3> minimum{},maximum{};
-            for(unsigned axis=0;axis<3;++axis)
-            {
-                const double pad=wind+magnitude[axis]*0x1p-18+1.e-5;
-                if(!std::isfinite(low[axis])||!std::isfinite(high[axis])||low[axis]-pad<=-FLT_MAX||high[axis]+pad>=FLT_MAX)
-                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver bounds are unbounded.");
-                minimum[axis]=std::nextafter(float(low[axis]-pad),-FLT_MAX);
-                maximum[axis]=std::nextafter(float(high[axis]+pad),FLT_MAX);
-            }
-            const ShadowSurfaceReceiver receiver{{minimum[0],minimum[1],minimum[2],0},{maximum[0],maximum[1],maximum[2],1}};
-            destination.push_back(receiver);return Result::Success();
-        };
-        const auto append_caster = [&](const RenderInstance &source, const GpuStaticDrawRef &reference,
-                std::uint32_t ref_index, bool immutable, const GpuInstance *instance,
-                const ShadowSurfaceReceiver *qualified_surface=nullptr) -> Result {
-            const bool environment = is_environment_mesh(source.mesh);
-            const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
-            const bool hero = source.mesh == RenderMesh::Archer || is_monster(source.mesh);
-            const std::uint32_t bucket = environment ? static_cast<UINT>(environment_mesh_index(source) * 3 + 2)
-                : source.mesh == RenderMesh::Archer ? kArcherVisibilityBucket
-                : is_monster(source.mesh) ? kMonsterVisibilityBucketBegin + static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee)
-                : UINT32_MAX;
-            const auto *page = bucket != UINT32_MAX ? bucket_pages[bucket] : &impl_->procedural_geometry;
-            const auto pass = bucket != UINT32_MAX
-                ? (immutable ? static_geometry_passes[bucket][1] : dynamic_geometry_passes[bucket][1])
-                : immutable ? ground_geometry_passes[1] : terrain ? dynamic_terrain_geometry_passes[1] : procedural_geometry_passes[1];
-            if (!page || pass == 0) return Result::Failure(ErrorCode::InvalidState,
-                "hs_renderer_d3d12", "Virtual caster has no complete geometry record.");
-            const UINT ordinal = environment ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3) : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
-            const UINT material = ordinal < kAuthoredMaterialNames.size()
-                ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
-            const auto binding_key = (std::uint64_t(material) << 32) | (immutable ? 0x80000000u : 0u) | page->page_slot;
-            const auto binding_slot = bucket != UINT32_MAX ? static_cast<std::size_t>(bucket)
-                : kGpuVisibilityBucketCount + (terrain ? 0u : 1u);
-            const auto draw_group = ResolveShadowCasterGroup(
-                shadow_group_indices[immutable ? 1u : 0u][binding_slot], groups, binding_key, [&] {
-                    // The pipeline belongs to the draw group, not each static instance.
-                    auto *pipeline = environment ? environment_pipeline(bucket, true)
-                        : hero ? impl_->hero_shadow_pipeline.Get() : impl_->shadow_pipeline.Get();
-                    groups.push_back({binding_key, impl_->GeometryUsesMesh(pipeline, *page, 1)
-                        ? VirtualShadowFrontend::Mesh : VirtualShadowFrontend::Indexed});
-                    bindings.push_back({page, pipeline, material, immutable});
-                });
-            VirtualShadowCaster caster;
-            const auto key = std::tuple{immutable, source.stable_id,
-                source.stable_id == 0 ? reference.instance_index + 1u : 0u};
-            Impl::ShadowCasterRecord previous_static_record;
-            const Impl::ShadowCasterRecord *previous{};
-            if(immutable)
-            {
-                if(const auto found=old_static_indices.find(key);found!=old_static_indices.end())
-                { previous_static_record.caster=previous_static_batch->records[found->second]; previous=&previous_static_record; }
-            }
-            else if(const auto found=impl_->previous_shadow_casters.find(key);found!=impl_->previous_shadow_casters.end()) previous=&found->second;
-            const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
-            const auto instance_index = reference.instance_index | (immutable ? 0x80000000u : 0u);
-            const auto &sphere = page->metadata.bounds.sphere;
-            const float sx = sphere[0] * source.scale.x, sy = sphere[1] * source.scale.y, sz = sphere[2] * source.scale.z;
-            const auto center = instance ? instance->position : DirectX::XMFLOAT4{
-                source.position.x, source.position.y + (environment ? 0.0f : source.scale.y * 0.5f), source.position.z, 0};
-            const float maximum_scale = std::max({std::abs(source.scale.x), std::abs(source.scale.y), std::abs(source.scale.z)});
-            // StaticGpuScene assigns a fresh, nonwrapping instance generation
-            // whenever its strong immutable scene lease changes. Together with
-            // the page revision, this proves the local sphere transform is unchanged.
-            const bool reuse_static_center = immutable && !new_session &&
-                previous && previous->caster.immutable_source &&
-                previous->caster.instance_index == instance_index &&
-                previous->caster.instance_generation == reference.instance_generation &&
-                previous->caster.current_cut_revision == cut_revision;
-            if (reuse_static_center)
-            {
-                const auto &old = previous->caster.current_bounds;
-                caster.current_bounds = {old.x, old.y, old.z, sphere[3] * maximum_scale};
-            }
-            else
-            {
-                const auto caster_yaw = instance ? instance->yaw : source.yaw;
-                const float sine = std::sin(caster_yaw), cosine = std::cos(caster_yaw);
-                caster.current_bounds = {center.x + cosine * sx + sine * sz, center.y + sy,
-                    center.z - sine * sx + cosine * sz, sphere[3] * maximum_scale};
-            }
-            caster.skin = hero;
-            caster.wind = HasEnvironmentWind(source.mesh, source.environment_variant);
-            caster.animated_alpha = source.mesh == RenderMesh::Grass;
-            if (caster.skin && instance)
-            {
-                // SkinCache's conservative pose radius is centered on the actual
-                // interpolated draw origin, independently of the rest-pose sphere.
-                caster.current_bounds = {center.x, center.y, center.z, std::max(center.w,
-                    std::sqrt(sx*sx + sy*sy + sz*sz) + sphere[3] * maximum_scale)};
-            }
-            if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
-            if(qualified_surface && hero)
-            {
-                // Share the qualified actual-pose enclosure with page overlap,
-                // command admission and invalidation, not only receiver proof.
-                const auto sphere=ShadowSurfaceCasterSphere(*qualified_surface);
-                if(!sphere)
-                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Qualified skin shadow radius is unbounded.");
-                caster.current_bounds={sphere->x,sphere->y,sphere->z,sphere->w};
-            }
-            if (environment && environment_mesh_index(source) == render_data::kMeadowWaterGeometry)
-            {
-                const auto scale = instance ? instance->scale : DirectX::XMFLOAT4{source.scale.x, source.scale.y, source.scale.z, 1};
-                if (!std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z))
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Water receiver scale is nonfinite.");
-                // This origin-centered radius includes the local offset and every resident LOD.
-                const double radius = double(impl_->environment_variant_radii[render_data::kMeadowWaterGeometry]) *
-                    std::max({std::abs(double(scale.x)), std::abs(double(scale.y)), std::abs(double(scale.z))});
-                if (auto merged = merge_receiver(water_receiver, center, radius); !merged) return merged;
-            }
-            caster.current_revisions = immutable ? source.revisions
-                : impl_->dynamic_scene_slots.Revisions(reference.instance_index);
-            caster.current_revisions.material ^= impl_->material_parameter_revision;
-            caster.current_cut_revision = cut_revision;
-            caster.instance_index = instance_index;
-            caster.instance_generation = reference.instance_generation;
-            caster.source_ref = ref_index;
-            caster.geometry_record = pass >> 2;
-            caster.draw_group = draw_group;
-            caster.index_count = page->index_count;
-            caster.meshlet_count = page->meshlet_count;
-            caster.immutable_source = immutable;
-            caster.baked_source = immutable && render_data::IsStaticShadowCaster(source);
-            Impl::ShadowCasterRecord *current{};
-            if(immutable)
-            {
-                if(!static_indices.emplace(key,static_shadow_batch->records.size()).second) return Result::Success();
-                static_shadow_batch->keys.push_back(key);
-            }
-            else
-            {
-                current=&current_shadow_casters.try_emplace(key).first->second;
-                const bool inserted=MarkShadowCasterPrepared(current->prepared_epoch,caster_preparation_epoch);
-#ifndef NDEBUG
-                if(impl_->config.validation || impl_->config.gpu_validation)
-                    assert(inserted==MarkShadowCasterKeyOracle(caster_key_oracle,key,caster_preparation_epoch));
-#endif
-                if(!inserted) return Result::Success();
-                ++prepared_casters;
-            }
-            if (!new_session && previous)
-            {
-                if(!immutable) ++matched_previous_casters;
-                const auto &old = previous->caster;
-                caster.previous_bounds = old.current_bounds;
-                caster.previous_revisions = old.current_revisions;
-                caster.previous_cut_revision = old.current_cut_revision;
-                caster.previous_generation = old.instance_generation;
-                caster.previous_present = true;
-                caster.previous_immutable_source = old.immutable_source;
-                caster.previous_skin = old.skin;
-                caster.previous_wind = old.wind;
-                caster.previous_animated_alpha = old.animated_alpha;
-            }
-            if(immutable) static_shadow_batch->records.push_back(caster);
-            else { current->caster=caster; casters.push_back(caster); }
-            if (is_monster(source.mesh) && static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee) < 3)
-            {
-                const auto &b = caster.current_bounds;
-                receivers.push_back({{b.x-b.w,b.y-b.w,b.z-b.w,0}, {b.x+b.w,b.y+b.w,b.z+b.w,1}});
-            }
-            return Result::Success();
-        };
-        // Static groups form a stable prefix; fluctuating enemy families cannot renumber them.
-        if(static_warm)
-        {
-            for(const auto &binding:static_shadow_batch->bindings)
-            { groups.push_back({binding.key,binding.frontend}); bindings.push_back({binding.page,binding.pipeline,binding.material,true}); }
-            water_receiver=static_shadow_batch->water;
-            receivers.insert(receivers.end(),static_shadow_batch->receivers.begin(),static_shadow_batch->receivers.end());
-        }
-        else
-        {
-            const auto receiver_begin=receivers.size();
-            if(static_scene && impl_->static_gpu_scene)
-                for(std::size_t index=0;index<static_leaf_ref_count;++index)
-                {
-                    if(auto added=append_surface(static_scene->instances[static_draw_refs[index].instance_index],nullptr,
-                        SIZE_MAX,static_shadow_batch->surface_receivers);!added)return added;
-                    if(auto added=append_caster(static_scene->instances[static_draw_refs[index].instance_index],
-                        static_draw_refs[index],static_cast<UINT>(index),true,nullptr);!added) return added;
-                }
-            for(std::size_t index=0;index<hlod_static_instances.size();++index)
-                if(auto added=append_surface(hlod_static_instances[index],nullptr,SIZE_MAX,static_shadow_batch->surface_receivers,
-                    &impl_->hlod_runtime->scene.proxies.at(index).bounds);!added)return added;
-            for(const auto &surface:static_shadow_batch->surface_receivers)
-            {
-                auto &aggregate=static_shadow_batch->surface_aggregate;
-                if(!aggregate) aggregate=surface;
-                else
-                {
-                    aggregate->minimum.x=std::min(aggregate->minimum.x,surface.minimum.x);
-                    aggregate->minimum.y=std::min(aggregate->minimum.y,surface.minimum.y);
-                    aggregate->minimum.z=std::min(aggregate->minimum.z,surface.minimum.z);
-                    aggregate->maximum.x=std::max(aggregate->maximum.x,surface.maximum.x);
-                    aggregate->maximum.y=std::max(aggregate->maximum.y,surface.maximum.y);
-                    aggregate->maximum.z=std::max(aggregate->maximum.z,surface.maximum.z);
-                }
-            }
-            static_shadow_batch->water=water_receiver;
-            static_shadow_batch->receivers.assign(receivers.begin()+receiver_begin,receivers.end());
-            for(std::size_t i=0;i<bindings.size();++i)
-                static_shadow_batch->bindings.push_back({bindings[i].page,bindings[i].pipeline,bindings[i].material,
-                    groups[i].frontend,groups[i].binding_key});
-            if(!new_session && previous_static_batch)
-                for(std::size_t i=0;i<previous_static_batch->keys.size();++i)
-                    if(!static_indices.contains(previous_static_batch->keys[i])) removed_static_indices.push_back(i);
-
-        }
-        for (std::size_t index = 0; index < dynamic_draw_refs.size(); ++index)
-        {
-            const auto surface_begin=dynamic_surface_receivers.size();
-            if(auto added=append_surface(render_instances[index],&persistent_instances[dynamic_draw_refs[index].instance_index],
-                index,dynamic_surface_receivers);!added)return added;
-            const auto *qualified_surface=dynamic_surface_receivers.size()>surface_begin?&dynamic_surface_receivers.back():nullptr;
-            // Gel is a receiver even though it has no opaque shadow representation.
-            if (render_instances[index].mesh == RenderMesh::EnemyProjectile)
-            {
-                const auto &draw = persistent_instances[dynamic_draw_refs[index].instance_index];
-                if (!std::isfinite(draw.scale.x) || !std::isfinite(draw.scale.y) ||
-                    !std::isfinite(draw.scale.z) || !std::isfinite(draw.yaw) || !std::isfinite(draw.position.w))
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Gel receiver transform is nonfinite.");
-                const auto &sphere = impl_->gel_projectile_geometry.metadata.bounds.sphere;
-                const double origin_radius = std::sqrt(double(sphere[0])*sphere[0] +
-                    double(sphere[1])*sphere[1] + double(sphere[2])*sphere[2]) + sphere[3];
-                // Mesh6 has no skin/wind/charge deformation. Retain any larger current pose bound.
-                const double radius = std::max(double(draw.position.w), origin_radius *
-                    std::max({std::abs(double(draw.scale.x)), std::abs(double(draw.scale.y)), std::abs(double(draw.scale.z))}));
-                if (auto merged = merge_receiver(gel_receiver, draw.position, radius); !merged) return merged;
-                continue;
-            }
-            if (auto added = append_caster(render_instances[index], dynamic_draw_refs[index], static_cast<UINT>(index),
-                    false, &persistent_instances[dynamic_draw_refs[index].instance_index],qualified_surface); !added) return added;
-        }
-        // At most two additional entries, independent of water/projectile instance counts.
-        if (water_receiver) { water_receiver->maximum.w=1;receivers.push_back(*water_receiver); }
-        if (gel_receiver) { gel_receiver->maximum.w=1;receivers.push_back(*gel_receiver); }
-        PruneShadowCasterStorage(current_shadow_casters, caster_preparation_epoch, prepared_casters);
-#ifndef NDEBUG
-        if (impl_->config.validation || impl_->config.gpu_validation)
-        {
-            PruneShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch, prepared_casters,
-                shadow_owner.shadow_caster_key_oracle_prepared);
-            assert(caster_key_oracle.size() == prepared_casters);
-        }
-#endif
-        assert(current_shadow_casters.size() == prepared_casters);
-        // Unique current keys matching every previous key prove that no caster was removed.
-        if (!new_session && matched_previous_casters != impl_->previous_shadow_casters.size())
-        {
-            std::vector<const Impl::ShadowCasterMap::value_type *> removed_casters;
-            for (const auto &entry : impl_->previous_shadow_casters)
-                if (!current_shadow_casters.contains(entry.first)) removed_casters.push_back(&entry);
-            // Keep the former ordered-map order when removed casters invalidate cached pages.
-            std::ranges::sort(removed_casters, {}, [](const auto *entry) { return entry->first; });
-            for (const auto *entry : removed_casters)
-            {
-                const auto &old = entry->second.caster;
-                auto removed = old;
-                removed.present = false;
-                removed.previous_present = true;
-                removed.previous_bounds = old.current_bounds;
-                removed.previous_revisions = old.current_revisions;
-                removed.previous_cut_revision = old.current_cut_revision;
-                removed.previous_generation = old.instance_generation;
-                removed.previous_immutable_source = old.immutable_source;
-                removed.previous_skin = old.skin;
-                removed.previous_wind = old.wind;
-                removed.previous_animated_alpha = old.animated_alpha;
-                casters.push_back(removed);
-            }
-        }
-        std::ranges::sort(removed_static_indices,{},[&](std::size_t index) { return previous_static_batch->keys[index]; });
-        for(const auto index:removed_static_indices)
-        {
-            auto removed=previous_static_batch->records[index];
-            AdvanceShadowCasterHistory(removed); removed.present=false;
-            casters.push_back(removed);
-        }
         reads.push_back({geometry_records_version, Access::ShaderRead});
         reads.push_back({dynamic_instances_version, Access::ShaderRead});
         reads.push_back({material_parameter_version, Access::ShaderRead});
@@ -6476,44 +6286,10 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         {
             reads.push_back({entry.version, Access::VertexShaderRead});
         }
-        VirtualShadowInputs inputs;
-        inputs.frustum_receiver_index = froxel_receiver_index;
-        for(std::size_t cascade=0;cascade<3;++cascade)
-            for(std::size_t row=0;row<4;++row)for(std::size_t column=0;column<4;++column)
-                inputs.main_csm_view_projection[cascade][row*4+column]=
-                    constants->shadow_view_projection[cascade].m[column][row];
-        inputs.main_csm_view_projection_valid=true;
-        inputs.view_id = impl_->active_view_id;
-        inputs.required_receiver_domains=ShadowReceiverCamera;
-        inputs.closed_receiver_domains=camera_receiver_domain_closed?ShadowReceiverCamera:0u;
-        // These actual world/froxel enclosures are deliberately not clipped to
-        // raster surfaces. Software GI has no bounded CPU world-query contract.
-        if(!typed_volumes.empty()||impl_->volumetrics.AllocatedBytes()!=0)
-        { inputs.required_receiver_domains|=ShadowReceiverWorld;inputs.closed_receiver_domains|=ShadowReceiverWorld; }
-        if(active_features.software_gi_enabled) inputs.required_receiver_domains|=ShadowReceiverSoftwareGi;
-        DirectX::XMStoreFloat4x4(&inputs.receiver_view_projection,clip_matrix);
-        inputs.surface_receivers={static_shadow_batch->surface_receivers,dynamic_surface_receivers,
-            static_shadow_batch->surface_aggregate?std::span<const ShadowSurfaceReceiver>(&*static_shadow_batch->surface_aggregate,1):
-                std::span<const ShadowSurfaceReceiver>{}};
         inputs.declare_material_sampling = [&](PassBuilder &pass) { read_material_sampling(pass, has_masked_material_draw); };
-        if (primary_sun) inputs.light = *primary_sun;
-        DirectX::XMStoreFloat3(&inputs.clipmap_center, target);
-        inputs.view_origin = lod_eye;
-        inputs.inverse_view_projection = camera_relative_inverse_view_projection;
-        for (UINT i = 0; i < 3; ++i) inputs.coverage_extents[i] = cascade_extents[i] * 0.5f;
-        inputs.baked_static=primary_sun && impl_->material_parameter_revision==impl_->baked_generation_material_revision &&
-            impl_->pipeline_revision==impl_->baked_generation_pipeline_revision &&
-            impl_->virtual_shadows.MatchesBake(static_scene,*primary_sun,inputs.coverage_extents);
-        inputs.depth_span = shadow_distance * 2;
-        inputs.render_active = impl_->view_state.render_active;
-        inputs.frame_slot = back_buffer_index;
-        inputs.rendered_frame_id = impl_->frame_number;
-        inputs.completed = impl_->graph_queue_executor.Completed();
         inputs.depth = depth_version; inputs.normal = gbuffer_normal_version;
         inputs.depth_resource = impl_->depth.resource.Get(); inputs.normal_resource = surface_normal_resource;
-        inputs.casters = ShadowCasterRange{static_shadow_batch->records,casters};
-        inputs.stable_caster_revision=static_shadow_batch->revision;
-        inputs.receivers = receivers; inputs.draw_groups = groups; inputs.native_reads = reads;
+        inputs.native_reads = reads;
         const auto draw_shadows = [&, bindings](RenderPassContext &context, const auto &outputs,
                 std::span<const VirtualShadowDrawBatch> batches) -> Result {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -6553,9 +6329,6 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         inputs.draw = draw_shadows;
         if (primary_sun && impl_->virtual_shadows.AllocatedBytes() != 0)
         {
-            VirtualShadowFramePlan shadow_plan;
-            if (auto prepared = impl_->virtual_shadows.PrepareFrame(inputs, shadow_plan); !prepared) return prepared;
-            csm_required = shadow_plan.guarantee.csm_required;
             if (csm_required) register_cascaded_shadow();
             pending_effects.shadows = true;
             if (auto registered = impl_->virtual_shadows.Register(impl_->graph, inputs, shadow_plan, virtual_shadow_outputs); !registered)
@@ -6594,6 +6367,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     // even speculative shader sampling cannot touch a stale/unwritten atlas.
     for (const auto offset : {0u,kToneMapInputDescriptorOffset,kFxaaInputDescriptorOffset})
         surface_descriptor(offset+3u, csm_required ? impl_->shadow.resource.Get() : nullptr, DXGI_FORMAT_R32_FLOAT);
+    record_graph_substage(cpu_timings.graph_shadows_us);
     LightingProbeOutputs probe_outputs;
     if (auto registered = impl_->lighting_probe.Register(impl_->graph,
             impl_->graph_queue_executor.Completed(), probe_outputs); !registered) return registered;
@@ -6645,6 +6419,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> capture_pages;
     std::vector<LocalProbeSceneRead> capture_reads;
     LocalProbeRuntimeFrameInputs local_probe_inputs;
+    local_probe_inputs.config = &impl_->config;
+    local_probe_inputs.pipeline_cache = &impl_->pipeline_cache;
     local_probe_inputs.scene = static_scene;
     local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
     local_probe_inputs.static_instance_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0;
@@ -6696,6 +6472,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             capture.index_version = capture.vertex_version;
             capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
             capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
+            capture.source_digest = page.source_digest;
             capture.bounds = page.metadata.bounds;
             capture.complete = page.storage.resource && page.index_count != 0;
         }
@@ -6761,6 +6538,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         pass.Read(ltc_outputs.matrix, Access::ShaderRead);
         pass.Read(ltc_outputs.amplitude, Access::ShaderRead);
     };
+    record_graph_substage(cpu_timings.graph_light_probes_us);
     if (auto result = impl_->texture_feedback.AddDecodePass(impl_->graph, back_buffer_index,
             1201, feedback_bindings); !result) return result;
     SceneGeometryOutputs scene_geometry_outputs;
@@ -7105,6 +6883,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             adaptive_outputs.density.version.resource && virtual_shadow_outputs.resources[0])
             impl_->graph.AddOrderingDependency(280, 149);
     }
+    record_graph_substage(cpu_timings.graph_scene_selection_us);
     AmbientOcclusionOutputs ambient_outputs;
     AmbientOcclusionInputs ambient_inputs{
         {depth_version, impl_->depth.resource.Get()},
@@ -7139,6 +6918,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     if (ambient_outputs.contact_srv.ptr)
         impl_->device->CopyDescriptorsSimple(1, ambient_descriptor, ambient_outputs.contact_srv,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    record_graph_substage(cpu_timings.graph_ao_us);
     auto lighting_pass = impl_->graph.AddPass(5, kRenderPassNames[5], QueueHint::Direct);
     if (adaptive_outputs.raster_ready)
         lighting_pass.Read(adaptive_outputs.rate.version, Access::ShadingRateSource);
@@ -7669,197 +7449,226 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         }
     });
 
-    std::vector<HeroTransparencySceneRead> hero_scene_reads{
-        {geometry_records_version, Access::ShaderRead}, {material_parameter_version, Access::ShaderRead},
-        {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::ShaderRead},
-        {dynamic_visible_refs_version, Access::ShaderRead}, {dynamic_draw_args_version, Access::IndirectArgs},
-        {impl_->graph.Version(environment_brdf_lut), Access::ShaderRead},
-        {probe_outputs.radiance, Access::ShaderRead}, {probe_outputs.prefiltered, Access::ShaderRead},
-        {probe_outputs.irradiance, Access::ShaderRead}, {light_outputs.lights, Access::ShaderRead},
-        {light_outputs.ranges, Access::ShaderRead}, {light_outputs.inline_indices, Access::ShaderRead},
-        {light_outputs.spill_indices, Access::ShaderRead}, {ltc_outputs.matrix, Access::ShaderRead},
-        {ltc_outputs.amplitude, Access::ShaderRead}};
-    if (shadow_version.resource) hero_scene_reads.push_back({shadow_version, Access::ShaderRead});
-    if (static_instances_buffer) hero_scene_reads.push_back({static_instances_version, Access::ShaderRead});
-    hero_scene_reads.push_back({static_visible_refs_version, Access::ShaderRead});
-    hero_scene_reads.push_back({static_draw_args_version, Access::IndirectArgs});
-    if (have_skinned_instances) hero_scene_reads.push_back({skin_cache_version, Access::ShaderRead});
-    if (local_probe_outputs.record_resource)
-        for (const auto version : {local_probe_outputs.radiance, local_probe_outputs.prefiltered,
-                local_probe_outputs.irradiance, local_probe_outputs.first_hit_distance, local_probe_outputs.records})
-            if (version.resource) hero_scene_reads.push_back({version, Access::AllShaderRead});
-    if (volumetric_outputs.constant_resource)
-        for (const auto version : {volumetric_outputs.constants, volumetric_outputs.filtered_scattering.version,
-                volumetric_outputs.column_depth.version, volumetric_outputs.scattering.version,
-                volumetric_outputs.transmittance.version, volumetric_raw_hdr}) hero_scene_reads.push_back({version, Access::AllShaderRead});
-    if (virtual_shadow_outputs.resources[0])
-        for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
-                virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
-            hero_scene_reads.push_back({version, Access::ShaderRead});
-    if(virtual_shadow_outputs.root_static.resource)
-        hero_scene_reads.push_back({virtual_shadow_outputs.root_static,Access::ShaderRead});
-    if(virtual_shadow_outputs.root_dynamic.resource)
-        hero_scene_reads.push_back({virtual_shadow_outputs.root_dynamic,Access::ShaderRead});
-    if (local_shadow_outputs.resources[0])
-        for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
-                local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
-            hero_scene_reads.push_back({version, Access::ShaderRead});
-    if (have_skinned_instances && previous_skin_frame_valid)
-        hero_scene_reads.push_back({previous_skin_cache_version, Access::ShaderRead});
-    if (ambient_outputs.ao.resource) hero_scene_reads.push_back({ambient_outputs.ao, Access::ShaderRead});
-    if (ambient_outputs.contact.resource) hero_scene_reads.push_back({ambient_outputs.contact, Access::ShaderRead});
-    for (const auto &page : geometry_pages)
-    {
-        hero_scene_reads.push_back({page.version, Access::VertexShaderRead});
-    }
+    record_graph_substage(cpu_timings.graph_opaque_us);
+    HeroTransparencyOutputs hero_outputs;
     HeroTransparencyInputs hero_inputs;
-    hero_inputs.opaque_depth = {depth_version, impl_->depth.resource.Get()};
-    hero_inputs.hdr = {hdr_version, opaque_hdr_resource};
-    hero_inputs.accumulation = {oit_accumulation_version, impl_->oit_accumulation.resource.Get()};
-    hero_inputs.revealage = {oit_revealage_version, impl_->oit_revealage.resource.Get()};
-    hero_inputs.accumulation_rtv = oit_accumulation_rtv;
-    hero_inputs.revealage_rtv = oit_revealage_rtv;
-    hero_inputs.opaque_readonly_dsv = readonly_dsv;
-    hero_inputs.render_active = impl_->view_state.render_active;
-    hero_inputs.frame_slot = back_buffer_index;
-    hero_inputs.completed = impl_->graph_queue_executor.Completed();
-    hero_inputs.shader_heap = impl_->srv_heap.Get();
-    hero_inputs.descriptor_source_heap = impl_->srv_cpu_heap.Get();
-    hero_inputs.table_cpu = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    hero_inputs.table_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
-        kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
-    hero_inputs.table_gpu = texture_table;
-    hero_inputs.table_gpu.ptr += static_cast<UINT64>(kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
-    hero_inputs.descriptor_stride = impl_->srv_stride;
-    hero_inputs.scene_reads = hero_scene_reads;
-    hero_inputs.draw = [&](ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
-                          HeroTransparencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE table) {
-        bind_graphics(list);
-        bind_scene_roots(list);
-        list->SetGraphicsRootDescriptorTable(36, table);
-        list->SetGraphicsRoot32BitConstant(6, kDefaultSceneDrawMaterial | 1u, 1);
-        list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
-        list->SetGraphicsRootShaderResourceView(35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
-        for (std::size_t asset = 0; asset < 3; ++asset)
-        {
-            if (monster_ranges[asset].second == 0) continue;
-            const auto bucket = kMonsterVisibilityBucketBegin + asset;
-            if (auto drawn = impl_->DrawGeometry(list, back_buffer_index, pipeline, *bucket_pages[bucket],
-                    dynamic_geometry_passes[bucket][0], frame.dynamic_draw_args.resource.Get(),
-                    bucket * kGeometryArgumentStride); !drawn)
-                throw std::runtime_error(std::string(drawn.Message()));
-        }
-        if (impl_->static_gpu_scene)
-        {
-            list->SetGraphicsRootShaderResourceView(34, impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress());
-            list->SetGraphicsRootShaderResourceView(35, frame.static_visible_refs.resource->GetGPUVirtualAddress());
-            for (std::size_t lod=0;lod<3;++lod)
-            {
-                const auto bucket=render_data::kMeadowWaterGeometry*3+lod;
-                if (static_environment_ranges[bucket].second==0) continue;
-                if(auto drawn=impl_->DrawGeometry(list,back_buffer_index,pipeline,*bucket_pages[bucket],
-                    static_geometry_passes[bucket][0],frame.static_draw_args.resource.Get(),bucket*kGeometryArgumentStride);!drawn)
-                    throw std::runtime_error(std::string(drawn.Message()));
-            }
-        }
-    };
+    std::vector<HeroTransparencySceneRead> hero_scene_reads, hero_peel_reads;
     struct HeroWorkBinding { std::size_t bucket{}; bool immutable{}; };
     std::vector<HeroWorkContributorInput> hero_work_contributors;
     std::vector<HeroWorkBinding> hero_work_bindings;
-    if (impl_->config.capture_hero_work)
+    bool have_hero_contributors = std::ranges::any_of(std::span(monster_ranges).first(3),
+        [](const auto &range) { return range.second != 0; });
+    if (impl_->static_gpu_scene)
+        for (std::size_t lod = 0; lod < 3; ++lod)
+            have_hero_contributors |= static_environment_ranges[render_data::kMeadowWaterGeometry * 3 + lod].second != 0;
+    // Empty contributors export absent guides; downstream consumers select their opaque path.
+    if (have_hero_contributors)
     {
-        static_assert(kGeometryArgumentStride == 24);
-        if (impl_->rendered_submission_count == UINT64_MAX)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
-        hero_work_contributors.reserve(6);
-        hero_work_bindings.reserve(6);
-        const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
-            const auto &page = *bucket_pages[bucket];
-            HeroWorkContributorInput contributor;
-            contributor.source.asset_id = page.source_asset.value;
-            contributor.source.product = page.source_product;
-            contributor.source.label = std::move(label);
-            contributor.source.lod = page.metadata.lod;
-            contributor.source.material = UINT32_MAX;
-            if (!page.submeshes.empty())
-            {
-                const auto material = page.submeshes.front().material_index;
-                if (std::ranges::all_of(page.submeshes, [&](const auto &part) { return part.material_index == material; }))
-                    contributor.source.material = material;
-            }
-            contributor.source.candidate_instances = candidates;
-            contributor.source.geometry_indices = page.index_count;
-            if (!immutable)
-            {
-                if (impl_->monster_basecolor.resource)
-                {
-                    const auto desc = impl_->monster_basecolor.resource->GetDesc();
-                    contributor.source.color_format = desc.Format;
-                    contributor.source.color_mips = desc.MipLevels;
-                }
-                if (impl_->monster_ram.resource)
-                {
-                    const auto desc = impl_->monster_ram.resource->GetDesc();
-                    contributor.source.data_format = desc.Format;
-                    contributor.source.data_mips = desc.MipLevels;
-                }
-            }
-            // Water's analytic closure has no corresponding character color/data pair.
-            contributor.arguments = immutable ? static_draw_args_version : dynamic_draw_args_version;
-            contributor.argument_resource = immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
-            contributor.argument_offset = bucket*kGeometryArgumentStride;
-            hero_work_contributors.push_back(std::move(contributor));
-            hero_work_bindings.push_back({bucket,immutable});
-        };
-        for (std::size_t asset=0;asset<3;++asset)
-            if (monster_ranges[asset].second)
-                append_work(kMonsterVisibilityBucketBegin+asset,false,static_cast<std::uint32_t>(monster_ranges[asset].second),
-                            "monster"+std::to_string(asset));
-        if (impl_->static_gpu_scene)
-            for (std::size_t lod=0;lod<3;++lod)
-            {
-                const auto bucket = render_data::kMeadowWaterGeometry*3+lod;
-                if (static_environment_ranges[bucket].second)
-                    append_work(bucket,true,static_cast<std::uint32_t>(static_environment_ranges[bucket].second),"water");
-            }
-        hero_inputs.work_contributors = hero_work_contributors;
-        hero_inputs.submitted_frame = impl_->rendered_submission_count+1;
-        hero_inputs.tick = snapshot.header.tick;
-        hero_inputs.view_id = impl_->active_view_id.value;
-        hero_inputs.direct_queue = impl_->graph_queue_executor.NativeQueue(QueueHint::Direct);
-        hero_inputs.direct_timestamp_frequency = impl_->graph_queue_executor.TimestampFrequency(QueueHint::Direct);
-        hero_inputs.work_draw = [&, bindings=hero_work_bindings](ID3D12GraphicsCommandList *list,
-            ID3D12PipelineState *pipeline, HeroTransparencyPhase, std::uint32_t,
-            D3D12_GPU_DESCRIPTOR_HANDLE table, std::uint32_t contributor, std::uint64_t diagnostic_uav) -> HeroWorkDrawCalls {
-            const auto binding = bindings.at(contributor);
+        hero_peel_reads = {
+            {geometry_records_version, Access::VertexShaderRead}, {material_parameter_version, Access::ShaderRead},
+            {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::VertexShaderRead},
+            {dynamic_visible_refs_version, Access::VertexShaderRead}, {dynamic_draw_args_version, Access::IndirectArgs},
+            {static_visible_refs_version, Access::VertexShaderRead}, {static_draw_args_version, Access::IndirectArgs}};
+        if (static_instances_buffer) hero_peel_reads.push_back({static_instances_version, Access::VertexShaderRead});
+        if (have_skinned_instances) hero_peel_reads.push_back({skin_cache_version, Access::VertexShaderRead});
+        if (have_skinned_instances && previous_skin_frame_valid)
+            hero_peel_reads.push_back({previous_skin_cache_version, Access::VertexShaderRead});
+        for (const auto &page : geometry_pages) hero_peel_reads.push_back({page.version, Access::VertexShaderRead});
+        if (impl_->family_diffuse.resource)
+            hero_peel_reads.push_back({impl_->graph.Version(import_texture(
+                impl_->family_diffuse, Access::ShaderRead, "Hero.OpacityColor")), Access::ShaderRead});
+        hero_scene_reads = {
+            {geometry_records_version, Access::ShaderRead}, {material_parameter_version, Access::ShaderRead},
+            {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::ShaderRead},
+            {dynamic_visible_refs_version, Access::ShaderRead}, {dynamic_draw_args_version, Access::IndirectArgs},
+            {impl_->graph.Version(environment_brdf_lut), Access::ShaderRead},
+            {probe_outputs.radiance, Access::ShaderRead}, {probe_outputs.prefiltered, Access::ShaderRead},
+            {probe_outputs.irradiance, Access::ShaderRead}, {light_outputs.lights, Access::ShaderRead},
+            {light_outputs.ranges, Access::ShaderRead}, {light_outputs.inline_indices, Access::ShaderRead},
+            {light_outputs.spill_indices, Access::ShaderRead}, {ltc_outputs.matrix, Access::ShaderRead},
+            {ltc_outputs.amplitude, Access::ShaderRead}};
+        for (auto *texture : {&impl_->family_diffuse, &impl_->family_normal})
+            if (texture->resource)
+                hero_scene_reads.push_back({impl_->graph.Version(import_texture(
+                    *texture, Access::ShaderRead, "Hero.MaterialTexture")), Access::ShaderRead});
+        if (shadow_version.resource) hero_scene_reads.push_back({shadow_version, Access::ShaderRead});
+        if (static_instances_buffer) hero_scene_reads.push_back({static_instances_version, Access::ShaderRead});
+        hero_scene_reads.push_back({static_visible_refs_version, Access::ShaderRead});
+        hero_scene_reads.push_back({static_draw_args_version, Access::IndirectArgs});
+        if (have_skinned_instances) hero_scene_reads.push_back({skin_cache_version, Access::ShaderRead});
+        if (local_probe_outputs.record_resource)
+            for (const auto version : {local_probe_outputs.radiance, local_probe_outputs.prefiltered,
+                    local_probe_outputs.irradiance, local_probe_outputs.first_hit_distance, local_probe_outputs.records})
+                if (version.resource) hero_scene_reads.push_back({version, Access::AllShaderRead});
+        if (volumetric_outputs.constant_resource)
+            for (const auto version : {volumetric_outputs.constants, volumetric_outputs.filtered_scattering.version,
+                    volumetric_outputs.column_depth.version, volumetric_outputs.scattering.version,
+                    volumetric_outputs.transmittance.version, volumetric_raw_hdr}) hero_scene_reads.push_back({version, Access::AllShaderRead});
+        if (virtual_shadow_outputs.resources[0])
+            for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
+                    virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
+                hero_scene_reads.push_back({version, Access::ShaderRead});
+        if(virtual_shadow_outputs.root_static.resource)
+            hero_scene_reads.push_back({virtual_shadow_outputs.root_static,Access::ShaderRead});
+        if(virtual_shadow_outputs.root_dynamic.resource)
+            hero_scene_reads.push_back({virtual_shadow_outputs.root_dynamic,Access::ShaderRead});
+        if (local_shadow_outputs.resources[0])
+            for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
+                    local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
+                hero_scene_reads.push_back({version, Access::ShaderRead});
+        if (have_skinned_instances && previous_skin_frame_valid)
+            hero_scene_reads.push_back({previous_skin_cache_version, Access::ShaderRead});
+        if (ambient_outputs.ao.resource) hero_scene_reads.push_back({ambient_outputs.ao, Access::ShaderRead});
+        if (ambient_outputs.contact.resource) hero_scene_reads.push_back({ambient_outputs.contact, Access::ShaderRead});
+        for (const auto &page : geometry_pages)
+        {
+            hero_scene_reads.push_back({page.version, Access::VertexShaderRead});
+        }
+        hero_inputs.opaque_depth = {depth_version, impl_->depth.resource.Get()};
+        hero_inputs.hdr = {hdr_version, opaque_hdr_resource};
+        hero_inputs.accumulation = {oit_accumulation_version, impl_->oit_accumulation.resource.Get()};
+        hero_inputs.revealage = {oit_revealage_version, impl_->oit_revealage.resource.Get()};
+        hero_inputs.accumulation_rtv = oit_accumulation_rtv;
+        hero_inputs.revealage_rtv = oit_revealage_rtv;
+        hero_inputs.opaque_readonly_dsv = readonly_dsv;
+        hero_inputs.render_active = impl_->view_state.render_active;
+        hero_inputs.frame_slot = back_buffer_index;
+        hero_inputs.completed = impl_->graph_queue_executor.Completed();
+        hero_inputs.shader_heap = impl_->srv_heap.Get();
+        hero_inputs.descriptor_source_heap = impl_->srv_cpu_heap.Get();
+        hero_inputs.table_cpu = impl_->srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        hero_inputs.table_cpu.ptr += (static_cast<SIZE_T>(back_buffer_index) * kTextureDescriptorCount +
+            kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
+        hero_inputs.table_gpu = texture_table;
+        hero_inputs.table_gpu.ptr += static_cast<UINT64>(kHeroTransparencyDescriptorOffset) * impl_->srv_stride;
+        hero_inputs.descriptor_stride = impl_->srv_stride;
+        hero_inputs.scene_reads = hero_scene_reads;
+        hero_inputs.peel_reads = hero_peel_reads;
+        hero_inputs.draw = [&](ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
+                              HeroTransparencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE table) {
             bind_graphics(list);
             bind_scene_roots(list);
-            list->SetGraphicsRootUnorderedAccessView(4,diagnostic_uav); // Separate T01 UAV; never particle arguments.
-            list->SetGraphicsRootDescriptorTable(36,table);
-            list->SetGraphicsRoot32BitConstant(6,kDefaultSceneDrawMaterial|1u,1);
-            list->SetGraphicsRootShaderResourceView(34,binding.immutable
-                ? impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress() : dynamic_instance_base);
-            list->SetGraphicsRootShaderResourceView(35,binding.immutable
-                ? frame.static_visible_refs.resource->GetGPUVirtualAddress() : frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
-            const auto pass = binding.immutable ? static_geometry_passes[binding.bucket][0] : dynamic_geometry_passes[binding.bucket][0];
-            if ((frame.geometry_draw_records_cpu.at(pass >> 2).flags & kGeometryMeshEligible) != 0)
-                throw std::runtime_error("Hero work capture requires the 24-byte indexed geometry command path.");
-            auto *arguments = binding.immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
-            if (auto drawn = impl_->DrawGeometry(list,back_buffer_index,pipeline,*bucket_pages[binding.bucket],
-                    pass,arguments,binding.bucket*kGeometryArgumentStride); !drawn)
-                throw std::runtime_error(std::string(drawn.Message()));
-            return {1,0,0}; // Hero/water records explicitly use the indexed SceneVS path.
+            list->SetGraphicsRootDescriptorTable(36, table);
+            list->SetGraphicsRoot32BitConstant(6, kDefaultSceneDrawMaterial | 1u, 1);
+            list->SetGraphicsRootShaderResourceView(34, dynamic_instance_base);
+            list->SetGraphicsRootShaderResourceView(35, frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
+            for (std::size_t asset = 0; asset < 3; ++asset)
+            {
+                if (monster_ranges[asset].second == 0) continue;
+                const auto bucket = kMonsterVisibilityBucketBegin + asset;
+                if (auto drawn = impl_->DrawGeometry(list, back_buffer_index, pipeline, *bucket_pages[bucket],
+                        dynamic_geometry_passes[bucket][0], frame.dynamic_draw_args.resource.Get(),
+                        bucket * kGeometryArgumentStride); !drawn)
+                    throw std::runtime_error(std::string(drawn.Message()));
+            }
+            if (impl_->static_gpu_scene)
+            {
+                list->SetGraphicsRootShaderResourceView(34, impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress());
+                list->SetGraphicsRootShaderResourceView(35, frame.static_visible_refs.resource->GetGPUVirtualAddress());
+                for (std::size_t lod=0;lod<3;++lod)
+                {
+                    const auto bucket=render_data::kMeadowWaterGeometry*3+lod;
+                    if (static_environment_ranges[bucket].second==0) continue;
+                    if(auto drawn=impl_->DrawGeometry(list,back_buffer_index,pipeline,*bucket_pages[bucket],
+                        static_geometry_passes[bucket][0],frame.static_draw_args.resource.Get(),bucket*kGeometryArgumentStride);!drawn)
+                        throw std::runtime_error(std::string(drawn.Message()));
+                }
+            }
         };
-    }
-    HeroTransparencyOutputs hero_outputs;
-    if (auto registered = impl_->hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs); !registered)
-        return registered;
-    pending_effects.transparency = static_cast<bool>(hero_outputs.depth.resource);
-    if (pending_effects.transparency)
-    {
-        oit_accumulation_version = hero_outputs.accumulation;
-        oit_revealage_version = hero_outputs.revealage;
-        constants->lod_clock.w |= 4u;
+        if (impl_->config.capture_hero_work)
+        {
+            static_assert(kGeometryArgumentStride == 24);
+            if (impl_->rendered_submission_count == UINT64_MAX)
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Hero work submission identity is exhausted.");
+            hero_work_contributors.reserve(6);
+            hero_work_bindings.reserve(6);
+            const auto append_work = [&](std::size_t bucket, bool immutable, std::uint32_t candidates, std::string label) {
+                const auto &page = *bucket_pages[bucket];
+                HeroWorkContributorInput contributor;
+                contributor.source.asset_id = page.source_asset.value;
+                contributor.source.product = page.source_product;
+                contributor.source.label = std::move(label);
+                contributor.source.lod = page.metadata.lod;
+                contributor.source.material = UINT32_MAX;
+                if (!page.submeshes.empty())
+                {
+                    const auto material = page.submeshes.front().material_index;
+                    if (std::ranges::all_of(page.submeshes, [&](const auto &part) { return part.material_index == material; }))
+                        contributor.source.material = material;
+                }
+                contributor.source.candidate_instances = candidates;
+                contributor.source.geometry_indices = page.index_count;
+                if (!immutable)
+                {
+                    if (impl_->monster_basecolor.resource)
+                    {
+                        const auto desc = impl_->monster_basecolor.resource->GetDesc();
+                        contributor.source.color_format = desc.Format;
+                        contributor.source.color_mips = desc.MipLevels;
+                    }
+                    if (impl_->monster_ram.resource)
+                    {
+                        const auto desc = impl_->monster_ram.resource->GetDesc();
+                        contributor.source.data_format = desc.Format;
+                        contributor.source.data_mips = desc.MipLevels;
+                    }
+                }
+                // Water's analytic closure has no corresponding character color/data pair.
+                contributor.arguments = immutable ? static_draw_args_version : dynamic_draw_args_version;
+                contributor.argument_resource = immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
+                contributor.argument_offset = bucket*kGeometryArgumentStride;
+                hero_work_contributors.push_back(std::move(contributor));
+                hero_work_bindings.push_back({bucket,immutable});
+            };
+            for (std::size_t asset=0;asset<3;++asset)
+                if (monster_ranges[asset].second)
+                    append_work(kMonsterVisibilityBucketBegin+asset,false,static_cast<std::uint32_t>(monster_ranges[asset].second),
+                                "monster"+std::to_string(asset));
+            if (impl_->static_gpu_scene)
+                for (std::size_t lod=0;lod<3;++lod)
+                {
+                    const auto bucket = render_data::kMeadowWaterGeometry*3+lod;
+                    if (static_environment_ranges[bucket].second)
+                        append_work(bucket,true,static_cast<std::uint32_t>(static_environment_ranges[bucket].second),"water");
+                }
+            hero_inputs.work_contributors = hero_work_contributors;
+            hero_inputs.submitted_frame = impl_->rendered_submission_count+1;
+            hero_inputs.tick = snapshot.header.tick;
+            hero_inputs.view_id = impl_->active_view_id.value;
+            hero_inputs.direct_queue = impl_->graph_queue_executor.NativeQueue(QueueHint::Direct);
+            hero_inputs.direct_timestamp_frequency = impl_->graph_queue_executor.TimestampFrequency(QueueHint::Direct);
+            hero_inputs.work_draw = [&, bindings=hero_work_bindings](ID3D12GraphicsCommandList *list,
+                ID3D12PipelineState *pipeline, HeroTransparencyPhase, std::uint32_t,
+                D3D12_GPU_DESCRIPTOR_HANDLE table, std::uint32_t contributor, std::uint64_t diagnostic_uav) -> HeroWorkDrawCalls {
+                const auto binding = bindings.at(contributor);
+                bind_graphics(list);
+                bind_scene_roots(list);
+                list->SetGraphicsRootUnorderedAccessView(4,diagnostic_uav); // Separate T01 UAV; never particle arguments.
+                list->SetGraphicsRootDescriptorTable(36,table);
+                list->SetGraphicsRoot32BitConstant(6,kDefaultSceneDrawMaterial|1u,1);
+                list->SetGraphicsRootShaderResourceView(34,binding.immutable
+                    ? impl_->static_gpu_scene->instances.resource->GetGPUVirtualAddress() : dynamic_instance_base);
+                list->SetGraphicsRootShaderResourceView(35,binding.immutable
+                    ? frame.static_visible_refs.resource->GetGPUVirtualAddress() : frame.dynamic_visible_refs.resource->GetGPUVirtualAddress());
+                const auto pass = binding.immutable ? static_geometry_passes[binding.bucket][0] : dynamic_geometry_passes[binding.bucket][0];
+                if ((frame.geometry_draw_records_cpu.at(pass >> 2).flags & kGeometryMeshEligible) != 0)
+                    throw std::runtime_error("Hero work capture requires the 24-byte indexed geometry command path.");
+                auto *arguments = binding.immutable ? frame.static_draw_args.resource.Get() : frame.dynamic_draw_args.resource.Get();
+                if (auto drawn = impl_->DrawGeometry(list,back_buffer_index,pipeline,*bucket_pages[binding.bucket],
+                        pass,arguments,binding.bucket*kGeometryArgumentStride); !drawn)
+                    throw std::runtime_error(std::string(drawn.Message()));
+                return {1,0,0}; // Hero/water records explicitly use the indexed SceneVS path.
+            };
+        }
+        if (auto registered = impl_->hero_transparency.RegisterLayers(impl_->graph, hero_inputs, hero_outputs); !registered)
+            return registered;
+        pending_effects.transparency = static_cast<bool>(hero_outputs.depth.resource);
+        if (pending_effects.transparency)
+        {
+            oit_accumulation_version = hero_outputs.accumulation;
+            oit_revealage_version = hero_outputs.revealage;
+            constants->lod_clock.w |= 4u;
+        }
     }
     auto composite_pass = impl_->graph.AddPass(8, kRenderPassNames[8], QueueHint::Direct);
     read_probe(composite_pass);
@@ -7908,8 +7717,9 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     });
 
     const auto raw_composite_version = composite_hdr_version;
-    if (auto registered = impl_->hero_transparency.RegisterComposition(impl_->graph,
-            {composite_hdr_version, composite_hdr_resource}, hero_outputs); !registered) return registered;
+    if (pending_effects.transparency)
+        if (auto registered = impl_->hero_transparency.RegisterComposition(impl_->graph,
+                {composite_hdr_version, composite_hdr_resource}, hero_outputs); !registered) return registered;
     if (hero_outputs.corrected.resource)
     {
         composite_hdr_version = hero_outputs.corrected;
@@ -7920,6 +7730,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         impl_->device->CopyDescriptorsSimple(1, descriptor, hero_outputs.corrected_srv,
             D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
+    record_graph_substage(cpu_timings.graph_hero_us);
     ScreenOverlayOutputs screen_overlay_outputs;
     ResourceVersion screen_overlay_gradient;
     const auto screen_intensity = impl_->explicit_frame->screen_overlay_intensity
@@ -8432,17 +8243,34 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             impl_->graph.SetFinalAccess(upload.version, Access::Common);
     impl_->graph.SetFinalAccess(ui_version, Access::ShaderRead);
     impl_->graph.SetFinalAccess(back_buffer_version, Access::Present);
-    auto critical_path_begin = impl_->graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
-    critical_path_begin.SetExecute([](RenderPassContext &) {});
-    auto critical_path_end = impl_->graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
-    critical_path_end.SetExecute([](RenderPassContext &) {});
-    for (std::uint32_t pass = 0; pass < impl_->graph.PassCount(); ++pass)
+    // shortcut: DRS retains reference scheduling until qualified ready cadence and recovery span are validated.
+    const bool reference_frame_timing = presented_view && impl_->config.dynamic_resolution &&
+        !active_features.software_gi_enabled;
+    const bool collect_gpu_timing = (impl_->config.capture_timing_stream && impl_->config.capture_gpu_timings) || reference_frame_timing;
+    if (reference_frame_timing)
     {
-        const auto id = impl_->graph.DeclaredPassId(pass);
-        if (id == 37 || id == 38) continue;
-        impl_->graph.AddOrderingDependency(37, id);
-        impl_->graph.AddOrderingDependency(id, 38);
+        auto begin = impl_->graph.AddPass(37, "RenderCriticalPathBegin", QueueHint::Direct);
+        begin.SetExecute([](RenderPassContext &) {});
+        auto end = impl_->graph.AddPass(38, "RenderCriticalPathEnd", QueueHint::Direct);
+        end.SetExecute([](RenderPassContext &) {});
+        for (std::uint32_t pass = 0; pass < impl_->graph.PassCount(); ++pass)
+        {
+            const auto id = impl_->graph.DeclaredPassId(pass);
+            if (id == 37 || id == 38) continue;
+            impl_->graph.AddOrderingDependency(37, id);
+            impl_->graph.AddOrderingDependency(id, 38);
+        }
     }
+    else
+    {
+        auto ready = impl_->graph.AddPass(38, "SourceRenderOutputReady", QueueHint::Direct);
+        ready.Read(back_buffer_version, Access::Present);
+        ready.SetExecute([](RenderPassContext &) {});
+        // Tagging reads the exact guide producers; unrelated streaming/readback
+        // must not join this boundary. The frame still owns their CompletionSet.
+        if (pending_effects.presentation) impl_->graph.AddOrderingDependency(904, 38);
+    }
+    record_graph_substage(cpu_timings.graph_post_us);
     cpu_timings.graph_build_us = measure_stage();
     GraphExecutionStats prepare_cpu;
     if (auto prepared = impl_->graph.Prepare(transient_pool,
@@ -8452,22 +8280,25 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     cpu_timings.graph_prepare_info_key_us = prepare_cpu.cpu_prepare_info_key_us;
     cpu_timings.graph_prepare_compile_us = prepare_cpu.cpu_prepare_compile_us;
     cpu_timings.graph_prepare_transient_us = prepare_cpu.cpu_prepare_transient_us;
-    if (auto prepared = impl_->PrepareFrameTimestamps(frame, impl_->graph.PassCount()); !prepared)
-        return prepared;
     frame.timestamp_passes.clear();
     frame.timestamp_frequencies.clear();
-    for (std::uint32_t slot = 0; slot < impl_->graph.PassCount(); ++slot)
+    if (collect_gpu_timing)
     {
-        const auto pass_id = impl_->graph.CompiledPassId(slot);
-        const auto queue = impl_->graph.CompiledPassQueue(slot);
-        const auto pass_name = impl_->graph.CompiledPassName(slot);
-        if (pass_name.empty())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "RenderGraph compiled an unnamed diagnostic pass.");
-        const auto frequency = impl_->graph_queue_executor.TimestampFrequency(queue);
-        frame.timestamp_passes.push_back({pass_id, std::string(pass_name),
-            static_cast<RenderQueue>(queue), 0, frequency != 0});
-        frame.timestamp_frequencies.push_back(frequency);
+        if (auto prepared = impl_->PrepareFrameTimestamps(frame, impl_->graph.PassCount()); !prepared)
+            return prepared;
+        for (std::uint32_t slot = 0; slot < impl_->graph.PassCount(); ++slot)
+        {
+            const auto pass_id = impl_->graph.CompiledPassId(slot);
+            const auto queue = impl_->graph.CompiledPassQueue(slot);
+            const auto pass_name = impl_->graph.CompiledPassName(slot);
+            if (pass_name.empty())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                       "RenderGraph compiled an unnamed diagnostic pass.");
+            const auto frequency = impl_->graph_queue_executor.TimestampFrequency(queue);
+            frame.timestamp_passes.push_back({pass_id, std::string(pass_name),
+                static_cast<RenderQueue>(queue), 0, frequency != 0});
+            frame.timestamp_frequencies.push_back(frequency);
+        }
     }
     auto *distortion_resource = static_cast<ID3D12Resource *>(impl_->graph.Resolve(distortion_vectors));
     if (!distortion_resource) return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Prepared distortion resource is missing.");
@@ -8514,8 +8345,11 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     // Publish the complete waited GPU bank after all services finalized it.
     impl_->PublishFrameDescriptors(back_buffer_index);
     GraphExecutionOptions execution_options;
-    execution_options.timestamp_query_heap = frame.timestamp_heap.Get();
-    execution_options.timestamp_readback = frame.timestamp_readback.resource.Get();
+    if (collect_gpu_timing)
+    {
+        execution_options.timestamp_query_heap = frame.timestamp_heap.Get();
+        execution_options.timestamp_readback = frame.timestamp_readback.resource.Get();
+    }
     execution_options.task_executor = &impl_->config.task_executor;
     frame.cpu_qpc_frequency = 0;
     if (impl_->config.capture_timing_stream)
@@ -8557,6 +8391,14 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         for (auto &skin_frame : impl_->frames) skin_frame.skin_cache_valid = false;
         return graph_result;
     }
+    world_step_receipt.submitted = impl_->render_scene_inputs;
+    if (impl_->ui_dirty[back_buffer_index])
+    {
+        auto &surface = impl_->ui_surfaces[back_buffer_index];
+        assert(surface.bitmap_valid && surface.bitmap_version != 0);
+        surface.submitted_version = surface.bitmap_version;
+        surface.copy_completion = impl_->graph.ResourceCompletion(ui);
+    }
     cpu_stage_start = std::chrono::steady_clock::now();
     const auto graph_cpu = impl_->graph_queue_executor.LastExecutionStats();
     cpu_timings.graph_plan_us = graph_cpu.cpu_plan_us;
@@ -8568,6 +8410,16 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     impl_->render_package_id = impl_->active_render_package_id;
     frame.submitted_frame_id = ++impl_->rendered_submission_count;
     frame.submitted_view_id = impl_->active_view_id.value;
+    frame.timing_kind = GpuFrameTimingKind::Unavailable;
+    if (collect_gpu_timing)
+    {
+        frame.timing_kind = reference_frame_timing ? GpuFrameTimingKind::ReferenceGraphSpan : GpuFrameTimingKind::SourceOutputReady;
+        frame.timing_generation = impl_->view_configuration_revision;
+        frame.timing_resize_epoch = impl_->view_state.resize_epoch;
+        frame.timing_render_active = impl_->view_state.render_active;
+        frame.timing_main_view = presented_view;
+        frame.timing_frame_generation_enabled = presented_view && impl_->sdk_presentation.IsEnabled();
+    }
     frame.completion = submitted_completion;
     impl_->texture_streaming.MarkSubmitted(submitted_completion, impl_->streaming);
     impl_->texture_feedback.MarkSubmitted(back_buffer_index, submitted_completion);
@@ -8591,7 +8443,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     {
         if (auto submitted = impl_->sdk_presentation.NotifySubmission(impl_->sdk_frame_identity,
                 impl_->graph_queue_executor.NativeQueue(QueueHint::Direct),
-                impl_->graph_queue_executor.NativeFence(QueueHint::Direct), submitted_completion.direct); !submitted) return submitted;
+                impl_->graph_queue_executor.NativeFence(QueueHint::Direct),
+                impl_->graph.ResourceCompletion(back_buffer_version.resource).direct); !submitted) return submitted;
         if (auto completed = impl_->presentation_guides.CompleteSubmission(impl_->graph,
                 submitted_completion, true); !completed) return completed;
         pending_effects.presentation = false;
@@ -8766,7 +8619,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
     }
     impl_->MarkEnvironmentStreamingUse(back_buffer_index, submitted_completion);
     transient_pool.SetClaimCompletion(submitted_completion);
-    frame.timestamps_recorded = true;
+    frame.timestamps_recorded = collect_gpu_timing;
     frame.ui_initialized = true;
     impl_->ui_dirty[back_buffer_index] = false;
     impl_->particles_initialized = true;
@@ -8798,7 +8651,7 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
             canonical.vertex_stride = SkinVertexRanges::kVertexBytes;
             canonical.vertex_ranges = std::move(skin_vertex_ranges);
             canonical.skin_cache_valid = true;
-            canonical.package_id = impl_->active_render_package_id; canonical.signature = skin_signature;
+            canonical.package_id = impl_->active_render_package_id;
             canonical.identity = std::move(skin_identity);
             impl_->canonical_skin_frames.push_back(current_skin_deformation);
         }
@@ -8874,6 +8727,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
         if (FAILED(device_reason)) return impl_->CheckDevice(device_reason, "SDK Present");
         return presented;
     }
+    if (presented_view)
+        world_step_receipt.presented_ui_generation = impl_->explicit_frame->ui_packet_generation;
 
     cpu_timings.present_us = measure_stage();
     impl_->diagnostics.RecordRenderedFrame(frame.submitted_frame_id, submit_qpc, present_begin_qpc,
@@ -8947,8 +8802,8 @@ Result D3D12Renderer::Render(const RenderSnapshotExchange::ReadPair &snapshots,
                     false, false,
 #endif
                     debug_command, debug_value, debug_secondary,
-                    static_cast<std::uint32_t>(typed_vfx_events.size()),
-                    static_cast<std::uint32_t>(impl_->typed_vfx_persistent_state.Active().size()),
+                    typed_vfx_event_count,
+                    typed_vfx_persistent_count,
                     ground_ring_count + ground_add_count, flash_count, owner_mesh_count,
                     static_cast<std::uint32_t>(fresnel_draws.size()),
                     static_cast<std::uint32_t>(ribbon_outputs.size()), impl_->ribbon_state.DroppedSources(), constants->vfx_light_count.x, distortion_count, constants->vfx_decal_count.x,

@@ -241,6 +241,8 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                       "Content/Shaders/adaptive_gtao.hlsl", L"AdaptiveGtaoResolveCS", L"cs_6_0"},
         ProgramOutput{"render/shader/hero_transparency_vs.dxil", "hero_transparency_vs.dxil",
                       "Content/Shaders/project_hs.hlsl", L"SceneVS", L"vs_6_0"},
+        ProgramOutput{"render/shader/hero_transparency_current_vs.dxil", "hero_transparency_current_vs.dxil",
+                      "Content/Shaders/project_hs.hlsl", L"HeroCurrentVS", L"vs_6_0"},
         ProgramOutput{"render/shader/hero_peel_front_ps.dxil", "hero_peel_front_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"HeroPeelFrontPS", L"ps_6_0"},
         ProgramOutput{"render/shader/hero_peel_exit_ps.dxil", "hero_peel_exit_ps.dxil",

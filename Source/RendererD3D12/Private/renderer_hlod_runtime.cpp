@@ -460,10 +460,13 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,
+Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot, std::uint32_t active_view_mask,
     ResourceVersion geometry_records, ResourceVersion static_scene, ResourceVersion static_refs,
     HlodFrameGraph &state)
 {
+    if (active_view_mask != 1u && active_view_mask != 15u)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "HLOD active view mask must select the camera or all shadow views.");
     static_cast<void>(static_refs);
     auto *context = ActiveHlodView();
     if (!context || !context->frames.at(frame_slot).enabled) return Result::Success();
@@ -472,7 +475,7 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,
     state.refs = graph.ImportBuffer({native.refs.resource.Get(), native.refs.graph_completion, native.refs.graph_queue},
         native.refs.graph_access, "HlodImmutableStaticRefs");
     HlodFrameInputs inputs;
-    inputs.frame_slot = frame_slot; inputs.active_view_mask = config.shadow_mode == GraphicsShadowMode::Raster ? 15u : 1u;
+    inputs.frame_slot = frame_slot; inputs.active_view_mask = active_view_mask;
     inputs.rendered_frame_id = native.frame_id; inputs.static_scene_generation = static_gpu_scene->instance_generation;
     const auto &owner = *owned_views.at(active_view_id.value);
     const bool camera_cut = explicit_view && explicit_view->camera_cut;

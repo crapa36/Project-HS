@@ -112,7 +112,8 @@ DynamicResolutionSelection DynamicResolutionController::Select(
         selection.filtered_critical_path_ms = 0.0;
         return selection;
     }
-    if (!sample.completed || sample.generated || !sample.gpu_limited ||
+    if (sample.metric_kind != DynamicResolutionMetricKind::ReferenceGraphSpan ||
+        !sample.completed || sample.generated || !sample.gpu_limited ||
         !std::isfinite(sample.render_critical_path_ms) || sample.render_critical_path_ms <= 0.0)
         return selection;
 

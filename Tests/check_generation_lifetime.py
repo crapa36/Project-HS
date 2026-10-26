@@ -261,12 +261,16 @@ def main():
             sibling_path = root / sibling['locator']
             sibling_bytes = sibling_path.read_bytes()
             sibling_path.write_bytes(b'X' * len(sibling_bytes))
-            assert 'generation-in-use' in run(*producer_command, success=False)
-            assert catalog_path.read_bytes() == catalog_bytes
-            assert catalog_path.stat().st_ino == catalog_identity
-            assert audio_result.read_bytes() == result_before
-            assert legacy_pointer.read_bytes() == legacy_pointer_before
-            assert not (root / 'CorruptProducts').exists()
+            refusal = run(*producer_command, success=False)
+            preserved = {
+                'catalog_bytes': catalog_path.read_bytes() == catalog_bytes,
+                'catalog_file_identity': catalog_path.stat().st_ino == catalog_identity,
+                'action_result': audio_result.read_bytes() == result_before,
+                'selected_pointer': legacy_pointer.read_bytes() == legacy_pointer_before,
+                'no_quarantine': not (root / 'CorruptProducts').exists(),
+            }
+            assert all(preserved.values()), {'preserved': preserved, 'producer_output': refusal}
+            assert 'generation-in-use' in refusal, {'preserved': preserved, 'producer_output': refusal}
             release.touch(); finish(reader)
             malformed = root / f'Generations/{"e" * 64}/generation.json'
             malformed.parent.mkdir()

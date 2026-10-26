@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <limits>
@@ -56,6 +57,8 @@ struct ReadOwner
     ResidencyTicket storage;
     std::vector<std::byte> bytes;
     std::future<std::vector<std::byte>> future;
+    std::future<void> prepare_future;
+    std::shared_ptr<std::atomic_bool> cancellation{std::make_shared<std::atomic_bool>()};
     EventOwner event;
     bool cancelled{}, submitted{};
 #if HS_WITH_DIRECTSTORAGE
@@ -76,6 +79,7 @@ struct ReadOwner
         }
 #endif
         if (future.valid()) future.wait();
+        if (prepare_future.valid()) prepare_future.wait();
     }
 };
 } // namespace
@@ -239,10 +243,13 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     { impl_->reads.erase(key); return IoFailure("Async asset request state transition failed."); }
     try
     {
-        retained->future = std::async(std::launch::async, [path, expected] {
+        const auto prepare = retained->input.prepare;
+        const auto cancellation = retained->cancellation;
+        retained->future = std::async(std::launch::async, [path, expected, prepare, cancellation] {
             std::vector<std::byte> bytes;
             if (auto result = ReadCheckedBinary(path, bytes, expected); !result)
                 throw std::runtime_error(std::string(result.Message()));
+            if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes);
             return bytes;
         });
     }
@@ -267,6 +274,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
     const auto *page = streaming.Find(request);
     read.cancelled = read.cancelled || !page || page->state == StreamingPageState::Cancelled ||
         page->content_generation != read.input.generation;
+    if (read.cancelled) read.cancellation->store(true, std::memory_order_release);
     HRESULT hr = S_OK;
 #if HS_WITH_DIRECTSTORAGE
     if (read.transport)
@@ -289,6 +297,36 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             const auto event_result = WaitForSingleObject(read.event.value, 0);
             if (event_result == WAIT_TIMEOUT) return Result::Success();
             if (event_result != WAIT_OBJECT_0) return IoFailure("DirectStorage completion event wait failed.");
+        }
+        if (SUCCEEDED(hr) && !read.cancelled && read.input.prepare)
+        {
+            if (!read.prepare_future.valid())
+            {
+                const auto prepare = read.input.prepare;
+                const auto cancellation = read.cancellation;
+                auto *bytes = &read.bytes;
+                read.prepare_future = std::async(std::launch::async, [prepare, cancellation, bytes] {
+                    if (!cancellation->load(std::memory_order_acquire)) prepare(*bytes);
+                });
+            }
+        }
+        if (read.prepare_future.valid())
+        {
+            if (wait_for_reads_) read.prepare_future.wait();
+            else if (read.prepare_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+                return Result::Success();
+            try { read.prepare_future.get(); }
+            catch (const std::exception &error)
+            {
+                if (!read.cancelled)
+                {
+                    static_cast<void>(streaming.FinishRead(request));
+                    static_cast<void>(streaming.Cancel(request));
+                    static_cast<void>(residency.ReleaseNow(read.storage));
+                    impl_->reads.erase(found);
+                    return IoFailure("Immutable asset preparation failed: " + std::string(error.what()));
+                }
+            }
         }
     }
     else
@@ -337,6 +375,7 @@ void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &strea
     const auto found = impl_->reads.find(request.value);
     if (found == impl_->reads.end()) return;
     found->second->cancelled = true;
+    found->second->cancellation->store(true, std::memory_order_release);
 #if HS_WITH_DIRECTSTORAGE
     if (found->second->transport)
         found->second->transport->queue->CancelRequestsWithTag(UINT64_MAX, found->second->tag);

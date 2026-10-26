@@ -816,6 +816,13 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
                                (SceneDrawMaterial & 1u) != 0);
 }
 
+SceneOutput HeroCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
+{
+    // Only the nearest composite writes motion guides; other Hero draws need the current pose.
+    return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
+                               (SceneDrawMaterial & 1u) != 0, false);
+}
+
 SceneOutput ShadowVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
     // Shadows consume current coverage only; previous deformation is for motion vectors.
@@ -1095,7 +1102,8 @@ bool HsEnvironmentLodCovered(SceneOutput input)
 }
 
 bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
-                    HsSceneGradients gradients, uint materialWord)
+                    HsSceneGradients gradients, uint materialWord,
+                    bool defer_environment_opacity = false)
 {
     if (input.Mesh==22u && input.Material==1u) return false;
     if (!HsEnvironmentLodCovered(input) ||
@@ -1118,9 +1126,11 @@ bool HsSceneCovered(SceneOutput input, bool front, bool environment_opaque,
     {
         const HsMaterialContext material_context =
             EnvironmentMaterialContext(input, front, gradients, materialWord);
-        if (!environment_opaque && (input.Mesh == 17 || input.Mesh == 19) &&
-            HsMaterialEvaluateOpacity(material_context) < HsMaterialOpacityCutoff)
-            return false;
+        if (!defer_environment_opacity && !environment_opaque && (input.Mesh == 17 || input.Mesh == 19))
+        {
+            if (HsMaterialEvaluateOpacity(material_context) < HsMaterialOpacityCutoff)
+                return false;
+        }
     }
     return true;
 }
@@ -1146,7 +1156,8 @@ float HsGridCoverage(float2 position, float2 footprint, float half_width)
 GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
                                      bool environment_opaque,
                                      HsSceneGradients gradients,
-                                     uint materialWord)
+                                     uint materialWord,
+                                     bool cover_environment_surface = false)
 {
     const HsMaterialContext material_context =
         EnvironmentMaterialContext(input, front, gradients, materialWord);
@@ -1230,7 +1241,15 @@ GBufferOutput HsEvaluateSceneSurface(SceneOutput input, bool front,
     else if (input.Mesh == 9 || input.Mesh == 20 || ((input.Mesh >= 16 && input.Mesh <= 19) || input.Mesh == 21 || input.Mesh == 22))
     {
         EnvMaterial m = (EnvMaterial)0;
+#ifdef HS_GENERATED_ENVIRONMENT_MATERIAL
+        HsSurfaceClosure surface;
+        if (cover_environment_surface)
+            surface = HsMaterialEvaluateCoveredSurface(material_context);
+        else
+            surface = HsMaterialEvaluateSurface(material_context);
+#else
         HsSurfaceClosure surface = HsMaterialEvaluateSurface(material_context);
+#endif
         if (input.Mesh == 19u)
             surface.base_color *= MeadowDryGrassGain(input.EnvironmentStableWorld.xz);
         {
@@ -1365,11 +1384,17 @@ GBufferOutput ScenePSImpl(SceneOutput input, bool front, bool environment_opaque
     // Derivatives must be captured before coverage can diverge this raster
     // quad. Shared visibility paths pass their own explicit gradients.
     const HsSceneGradients gradients = RasterSceneGradients(input);
+    // Only authored masked raster evaluates coverage and surface together.
+    // Visibility/shadow keep their opacity-only evaluator and resolve stays unclipped.
+    bool cover_environment_surface = false;
+#ifdef HS_GENERATED_ENVIRONMENT_MATERIAL
+    cover_environment_surface = !environment_opaque && (input.Mesh == 17 || input.Mesh == 19);
+#endif
     if (!HsSceneCovered(input, front, environment_opaque, gradients,
-                        SceneDrawMaterial))
+                        SceneDrawMaterial, cover_environment_surface))
         discard;
     return HsEvaluateSceneSurface(input, front, environment_opaque, gradients,
-                                  SceneDrawMaterial);
+                                  SceneDrawMaterial, cover_environment_surface);
 }
 
 struct FullScreenOutput
@@ -2536,11 +2561,13 @@ HsSurfaceClosure HsHeroTransportSurface(SceneOutput input, bool front, HsSceneGr
         water.absorption_per_m=float3(3.0,8.0,16.0);water.thickness_m=thickness;
         water.normal_is_world=true;return water;
     }
+    const uint transport_ordinal=5u;
     const uint ordinal=HsHeroBindingOrdinals(input.Mesh,input.Material).y;
-    if(ordinal!=5u) { HS_HERO_WORK_COUNT(11u); discard; }
-    const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,ordinal);
+    if(ordinal!=transport_ordinal) { HS_HERO_WORK_COUNT(11u); discard; }
+    // discard does not let DXC narrow the later dynamic material switch.
+    const HsMaterialContext ctx=HsHeroMaterialContext(input,front,gradients,transport_ordinal);
     HS_HERO_WORK_COUNT(13u);
-    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,ordinal),ctx);
+    const HsSurfaceClosure surface=HsHeroClosureToWorld(HsHeroEvaluateSurface(ctx,transport_ordinal),ctx);
 #ifdef HS_CAPTURE_HERO_WORK
     if(surface.opacity-0.001<0.0) HsHeroWorkAdd(12u);
 #endif

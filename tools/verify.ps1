@@ -124,9 +124,7 @@ try {
     Start-VerificationPhase 'selection'
     $selectionArguments = @()
     if ($Test) {
-        $metadata = Get-HsCTestMetadata -CTest $ctest -BuildRoot $buildRoot -Preset $preset
-        $exact = @(Select-HsExactTests $metadata $Test)
-        [IO.File]::WriteAllLines($testNamesPath, [string[]]@($exact | ForEach-Object { [string]$_.name }), [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllLines($testNamesPath, $Test, [Text.UTF8Encoding]::new($false))
         $selectionArguments += @('--tests-from-file', $testNamesPath)
     }
     foreach ($labelName in $Label) {
@@ -135,7 +133,10 @@ try {
     # Query the same selection CTest executes, including automatic fixture setup/cleanup.
     $metadataArguments = @{ CTest = $ctest; BuildRoot = $buildRoot; Preset = $preset; Labels = $Label }
     if ($Test) { $metadataArguments.TestNamesFile = $testNamesPath }
-    $selectedTests = @((Get-HsCTestMetadata @metadataArguments).tests)
+    $metadata = Get-HsCTestMetadata @metadataArguments
+    # CTest ignores unknown names in a selection file, even beside valid ones.
+    if ($Test) { Select-HsExactTests $metadata $Test | Out-Null }
+    $selectedTests = @($metadata.tests)
     if (!$selectedTests.Count) { throw 'No configured tests were selected.' }
     Start-VerificationPhase 'build'
     $ErrorActionPreference = 'Continue'

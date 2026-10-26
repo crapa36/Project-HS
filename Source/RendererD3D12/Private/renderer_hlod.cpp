@@ -8,7 +8,6 @@
 #include <cstring>
 #include <cmath>
 #include <limits>
-#include <unordered_set>
 #include <utility>
 
 namespace hs
@@ -113,6 +112,30 @@ void Dispatch(ID3D12GraphicsCommandList *list, std::uint32_t elements)
 }
 } // namespace
 
+void HlodSlotSet::Resize(std::uint32_t capacity)
+{
+    capacity_ = capacity;
+    words_.resize((std::uint64_t(capacity) + 63u) / 64u);
+    Clear();
+}
+void HlodSlotSet::Clear() noexcept
+{
+    std::fill(words_.begin(), words_.end(), 0u);
+}
+bool HlodSlotSet::Insert(std::uint32_t slot) noexcept
+{
+    if (slot >= capacity_) return false;
+    const auto mask = std::uint64_t{1} << (slot & 63u);
+    auto &word = words_[slot >> 6u];
+    if (word & mask) return false;
+    word |= mask;
+    return true;
+}
+bool HlodSlotSet::Contains(std::uint32_t slot) const noexcept
+{
+    return slot < capacity_ && (words_[slot >> 6u] & (std::uint64_t{1} << (slot & 63u))) != 0;
+}
+
 struct HlodStorage
 {
     struct Frame
@@ -132,6 +155,7 @@ struct HlodStorage
     render_data::SceneHlod scene;
     std::string content_id;
     std::uint32_t generation{}, slot_capacity{}, descriptor_stride{}, maximum_depth{1};
+    HlodSlotSet member_slot_bits, command_ordinals;
     std::uint32_t history_slot{UINT32_MAX};
     std::uint64_t bytes{}, metadata_bytes{}, upload_stride{};
     std::array<std::uint64_t, 3> snapshot_offsets{};
@@ -139,15 +163,15 @@ struct HlodStorage
     std::byte *mapped{};
     bool metadata_ready{}, usable{true};
     ~HlodStorage() { if (mapped && upload.resource) upload.resource->Unmap(0, nullptr); }
-    D3D12_CPU_DESCRIPTOR_HANDLE Cpu(std::uint32_t slot, std::uint32_t stage, std::uint32_t item) const
+    D3D12_CPU_DESCRIPTOR_HANDLE Cpu(std::uint32_t slot, std::uint32_t item) const
     {
         auto handle = descriptors->GetCPUDescriptorHandleForHeapStart();
-        handle.ptr += SIZE_T((slot * kStages + stage) * kTable + item) * descriptor_stride; return handle;
+        handle.ptr += SIZE_T(slot * kTable + item) * descriptor_stride; return handle;
     }
-    D3D12_GPU_DESCRIPTOR_HANDLE Gpu(std::uint32_t slot, std::uint32_t stage) const
+    D3D12_GPU_DESCRIPTOR_HANDLE Gpu(std::uint32_t slot) const
     {
         auto handle = descriptors->GetGPUDescriptorHandleForHeapStart();
-        handle.ptr += UINT64((slot * kStages + stage) * kTable) * descriptor_stride; return handle;
+        handle.ptr += UINT64(slot * kTable) * descriptor_stride; return handle;
     }
     D3D12_CPU_DESCRIPTOR_HANDLE Export(std::uint32_t slot, std::uint32_t item) const
     {
@@ -190,6 +214,8 @@ Result HlodSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     auto next = std::make_shared<HlodStorage>();
     next->device = device; next->allocator = allocator; next->scene = scene; next->content_id = content_id;
     next->generation = generation; next->slot_capacity = slot_capacity; next->frames.resize(frame_slots);
+    next->member_slot_bits.Resize(slot_capacity);
+    next->command_ordinals.Resize(static_cast<std::uint32_t>(scene.proxies.size()));
     next->descriptor_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     std::vector<GpuGroup> groups(scene.groups.size()); std::vector<GpuProxy> proxies(scene.proxies.size());
     next->members_cpu.resize(scene.members.size());
@@ -252,7 +278,7 @@ Result HlodSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     if (!groups.empty()) std::memcpy(next->mapped, groups.data(), groups.size() * sizeof(GpuGroup));
     if (!proxies.empty()) std::memcpy(next->mapped + Align(group_bytes), proxies.data(), proxies.size() * sizeof(GpuProxy));
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
-    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = frame_slots * kStages * kTable;
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors = frame_slots * kTable;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     native = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->descriptors));
     if (FAILED(native)) return Native("Create HLOD stage descriptor banks", native);
@@ -261,6 +287,16 @@ Result HlodSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     if (FAILED(native)) return Native("Create HLOD export descriptors", native);
     for (std::uint32_t slot = 0; slot < frame_slots; ++slot)
     {
+        const auto &frame = next->frames[slot];
+        const std::array<ID3D12Resource *, 5> owned_srvs{next->groups.resource.Get(), frame.buffers[Members].resource.Get(),
+            next->proxies.resource.Get(), frame.buffers[Bindings].resource.Get(), frame.buffers[Buckets].resource.Get()};
+        constexpr std::array<std::uint32_t, 5> strides{64, 32, 48, 48, 16};
+        for (std::uint32_t i = 0; i < owned_srvs.size(); ++i)
+            Srv(device, owned_srvs[i], strides[i], next->Cpu(slot, i));
+        constexpr std::array<std::uint32_t, kUavCount> buffers{Choice, Leaves, Selection, Indexed, Mesh, Counts, Demand, Status};
+        constexpr std::array<std::uint32_t, kUavCount> uav_strides{16, 16, 16, 0, 0, 0, 4, 0};
+        for (std::uint32_t i = 0; i < kUavCount; ++i)
+            Uav(device, frame.buffers[buffers[i]].resource.Get(), uav_strides[i], next->Cpu(slot, kSrvCount + i));
         Srv(device, next->frames[slot].buffers[Leaves].resource.Get(), 16, next->Export(slot, 0));
         Srv(device, next->frames[slot].buffers[Selection].resource.Get(), 16, next->Export(slot, 1));
     }
@@ -321,15 +357,14 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
     for (std::uint32_t view = 0; view < 4; ++view)
         if ((inputs.active_view_mask & (1u << view)) && !ValidView(inputs.views[view])) enabled = false;
     const auto bucket_count = inputs.buckets.size() <= scene.proxies.size() ? UINT(inputs.buckets.size()) : 0u;
-    std::unordered_set<std::uint32_t> member_slots;
+    storage->member_slot_bits.Clear();
     if (inputs.members.size() == scene.members.size())
         for (std::uint32_t m = 0; m < inputs.members.size(); ++m)
         {
             const auto &binding = inputs.members[m];
-            if (binding.stable_id != scene.members[m].stable_id || binding.instance_slot >= storage->slot_capacity ||
-                !binding.instance_generation || !member_slots.insert(binding.instance_slot).second) enabled = false;
+            if (binding.stable_id != scene.members[m].stable_id || !binding.instance_generation || !storage->member_slot_bits.Insert(binding.instance_slot)) enabled = false;
         }
-    std::vector<bool> commands(scene.proxies.size());
+    storage->command_ordinals.Clear();
     std::uint32_t next_command = 0;
     if (bucket_count)
         for (const auto &bucket : inputs.buckets)
@@ -344,11 +379,10 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
         for (std::uint32_t p = 0; p < inputs.proxies.size(); ++p)
         {
             const auto &binding = inputs.proxies[p];
-            if (binding.logical_page != scene.proxies[p].page_index || binding.command_ordinal >= commands.size() ||
+            if (binding.logical_page != scene.proxies[p].page_index || binding.command_ordinal >= scene.proxies.size() ||
                 binding.bucket_index >= bucket_count || binding.reserved || (binding.flags & ~kHlodProxyResident))
             { enabled = false; continue; }
-            if (commands[binding.command_ordinal]) enabled = false;
-            commands[binding.command_ordinal] = true;
+            if (!storage->command_ordinals.Insert(binding.command_ordinal)) enabled = false;
             const auto &bucket = inputs.buckets[binding.bucket_index];
             if (binding.command_ordinal < bucket.first_command ||
                 binding.command_ordinal - bucket.first_command >= bucket.command_count) enabled = false;
@@ -356,7 +390,7 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
                 (binding.content_generation != storage->generation || !binding.page_version ||
                  !binding.geometry_record_id || binding.geometry_record_id > 0x3fffffffu ||
                  binding.instance_slot >= storage->slot_capacity || !binding.instance_generation ||
-                 member_slots.contains(binding.instance_slot))) enabled = false;
+                 storage->member_slot_bits.Contains(binding.instance_slot))) enabled = false;
         }
     bool history = enabled && inputs.history_valid && storage->history_slot != UINT32_MAX && storage->history_slot != inputs.frame_slot;
     if (history)
@@ -368,37 +402,36 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
     const auto slot = inputs.frame_slot, previous_slot = history ? storage->history_slot : UINT32_MAX;
     auto &frame = storage->frames[slot];
     const auto offset = storage->metadata_bytes + UINT64(slot) * storage->upload_stride;
-    std::memset(storage->mapped + offset, 0, SIZE_T(storage->upload_stride));
+    // Valid snapshots overwrite every active element; padding/bucket tails are
+    // outside shader counts. Keep deterministic zero input for disabled paths.
+    if (!enabled) std::memset(storage->mapped + offset, 0, SIZE_T(storage->upload_stride));
     Constants constants;
     constants.counts = {UINT(scene.groups.size()), UINT(scene.members.size()), UINT(scene.proxies.size()), storage->slot_capacity};
     constants.limits = {UINT(scene.pages.size()), bucket_count, UINT(scene.proxies.size()), enabled ? 1u : 0u};
     constants.identity = {storage->generation, UINT(inputs.rendered_frame_id), UINT(inputs.rendered_frame_id >> 32u), history ? 1u : 0u};
     constants.options = {inputs.active_view_mask & 15u, storage->maximum_depth, 0, 0}; constants.views = inputs.views;
     std::memcpy(storage->mapped + offset, &constants, sizeof(constants));
-    auto members = storage->members_cpu;
-    if (inputs.members.size() == members.size())
-        for (std::size_t m = 0; m < members.size(); ++m)
-        { members[m].instance_slot = inputs.members[m].instance_slot; members[m].instance_generation = inputs.members[m].instance_generation; }
-    if (!members.empty()) std::memcpy(storage->mapped + offset + storage->snapshot_offsets[0], members.data(), members.size() * sizeof(GpuMember));
+    auto *members = reinterpret_cast<GpuMember *>(storage->mapped + offset + storage->snapshot_offsets[0]);
+    if (!storage->members_cpu.empty())
+        std::memcpy(members, storage->members_cpu.data(), storage->members_cpu.size() * sizeof(GpuMember));
+    if (inputs.members.size() == storage->members_cpu.size())
+        for (std::size_t m = 0; m < storage->members_cpu.size(); ++m)
+        {
+            members[m].instance_slot = inputs.members[m].instance_slot;
+            members[m].instance_generation = inputs.members[m].instance_generation;
+        }
     if (inputs.proxies.size() == scene.proxies.size() && !inputs.proxies.empty())
         std::memcpy(storage->mapped + offset + storage->snapshot_offsets[1], inputs.proxies.data(), inputs.proxies.size_bytes());
     if (bucket_count) std::memcpy(storage->mapped + offset + storage->snapshot_offsets[2], inputs.buckets.data(), inputs.buckets.size_bytes());
     auto *previous = history ? &storage->frames[previous_slot] : nullptr;
-    const std::array<ID3D12Resource *, kSrvCount> srvs{storage->groups.resource.Get(), frame.buffers[Members].resource.Get(),
-        storage->proxies.resource.Get(), frame.buffers[Bindings].resource.Get(), frame.buffers[Buckets].resource.Get(),
+    const std::array<ID3D12Resource *, 6> srvs{
         previous ? previous->buffers[Choice].resource.Get() : nullptr, previous ? previous->buffers[Leaves].resource.Get() : nullptr,
         previous ? previous->buffers[Bindings].resource.Get() : nullptr, inputs.static_scene.resource,
         External(inputs.geometry_records, 64) ? inputs.geometry_records.resource : nullptr,
         External(inputs.proxy_refs, 16) ? inputs.proxy_refs.resource : nullptr};
-    constexpr std::array<std::uint32_t, kSrvCount> strides{64, 32, 48, 48, 16, 16, 16, 48, 0, 0, 16};
-    constexpr std::array<std::uint32_t, kUavCount> uav_buffers{Choice, Leaves, Selection, Indexed, Mesh, Counts, Demand, Status};
-    constexpr std::array<std::uint32_t, kUavCount> uav_strides{16, 16, 16, 0, 0, 0, 4, 0};
-    for (std::uint32_t stage = 0; stage < kStages; ++stage)
-    {
-        for (std::uint32_t i = 0; i < kSrvCount; ++i) Srv(storage->device.Get(), srvs[i], strides[i], storage->Cpu(slot, stage, i));
-        for (std::uint32_t i = 0; i < kUavCount; ++i)
-            Uav(storage->device.Get(), frame.buffers[uav_buffers[i]].resource.Get(), uav_strides[i], storage->Cpu(slot, stage, kSrvCount + i));
-    }
+    constexpr std::array<std::uint32_t, 6> strides{16, 16, 48, 0, 0, 16};
+    for (std::uint32_t i = 0; i < srvs.size(); ++i)
+        Srv(storage->device.Get(), srvs[i], strides[i], storage->Cpu(slot, 5 + i));
     Impl::Pending pending; pending.graph = &graph; pending.storage = storage; pending.slot = slot;
     pending.previous = previous_slot; pending.frame_id = inputs.rendered_frame_id;
     pending.static_generation = inputs.static_scene_generation; pending.enabled = enabled; pending.uploaded = !storage->metadata_ready;
@@ -439,7 +472,7 @@ Result HlodSystem::Register(RenderGraphBuilder &graph, const HlodFrameInputs &in
         ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; list->SetDescriptorHeaps(1, heaps);
         list->SetComputeRootSignature(storage->root.Get()); list->SetPipelineState(storage->pipelines[stage].Get());
         list->SetComputeRootConstantBufferView(0, storage->upload.resource->GetGPUVirtualAddress() + offset);
-        list->SetComputeRootDescriptorTable(1, storage->Gpu(slot, stage)); Dispatch(list, std::max(elements, 1u));
+        list->SetComputeRootDescriptorTable(1, storage->Gpu(slot)); Dispatch(list, std::max(elements, 1u));
     };
     const auto read_tables = [&](PassBuilder &pass, bool previous_leaf) {
         pass.Read(groups, Access::ComputeRead); pass.Read(proxies, Access::ComputeRead);

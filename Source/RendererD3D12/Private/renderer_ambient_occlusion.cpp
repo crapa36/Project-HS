@@ -53,6 +53,20 @@ DirectX::XMFLOAT4 SizeConstants(ViewExtent extent)
     return {static_cast<float>(extent.width), static_cast<float>(extent.height),
             1.0f / static_cast<float>(extent.width), 1.0f / static_cast<float>(extent.height)};
 }
+bool SupportsFastAoUnprojection(const DirectX::XMFLOAT4X4 &inverse) noexcept
+{
+    for (const auto &row : inverse.m)
+        for (const float value : row)
+            if (!std::isfinite(value)) return false;
+    if (inverse._12 != 0.0f || inverse._13 != 0.0f || inverse._14 != 0.0f ||
+        inverse._21 != 0.0f || inverse._23 != 0.0f || inverse._24 != 0.0f ||
+        inverse._31 != 0.0f || inverse._32 != 0.0f)
+        return false;
+    const double depth_determinant = static_cast<double>(inverse._33) * inverse._44 -
+        static_cast<double>(inverse._34) * inverse._43;
+    return inverse._11 != 0.0f && inverse._22 != 0.0f && depth_determinant != 0.0 &&
+        std::isfinite(depth_determinant);
+}
 bool FitsGuide(const AmbientOcclusionGuide &guide, ViewExtent active, DXGI_FORMAT format)
 {
     if (!guide.resource || !guide.version.resource || guide.version.resource.kind != ResourceKind::Texture)
@@ -338,6 +352,10 @@ Result AmbientOcclusionSystem::Register(RenderGraphBuilder &graph, const Ambient
         !std::isfinite(constants.contact_parameters.y) || constants.contact_parameters.y <= 0.0f ||
         !std::isfinite(constants.contact_parameters.z) || constants.contact_parameters.z < 0.0f)
         return AoFailure(ErrorCode::InvalidArgument, "AO physical radius, strength or contact parameters are invalid.");
+    // The shader's fast path is exact for axis-aligned homogeneous inverse
+    // projections (including off-axis and jittered perspective and orthographic
+    // projections). Keep arbitrary matrices on the original general multiply.
+    constants.gtao_parameters.w = SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f;
     const auto aoActive = AoExtent(active, storage->profile);
     const auto writeIndex = 1u - storage->read_index;
     const bool historyValid = storage->history_valid && !inputs.reset_history;

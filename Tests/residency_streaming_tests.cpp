@@ -1,15 +1,115 @@
 #include "residency_manager.hpp"
+#include "renderer_asset_io.hpp"
 #include "streaming_manager.hpp"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
 
 namespace
 {
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
+}
+
+void CheckAsyncAssetPreparation()
+{
+    const std::array<std::byte, 4> contents{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const auto path = std::filesystem::temp_directory_path() /
+        ("hs_stream_prepare_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
+    struct RemoveFile { std::filesystem::path path; ~RemoveFile() { std::error_code error; std::filesystem::remove(path, error); } } cleanup{path};
+    {
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char *>(contents.data()),
+                    static_cast<std::streamsize>(contents.size()));
+        Check(file.good(), "could not create async preparation fixture");
+    }
+
+    hs::ResidencyManager residency;
+    residency.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
+    hs::StreamingManager streaming;
+    hs::RendererAssetIo io;
+    Check(static_cast<bool>(io.Initialize(false, 0, residency)), "async asset IO initialization failed");
+    const auto caller = std::this_thread::get_id();
+    const auto enqueue = [&](std::string id, std::function<void(std::span<const std::byte>)> prepare) {
+        const auto request = streaming.Request(id, id, "generation", 1);
+        const auto storage = residency.ReserveHost(contents.size() * 2);
+        Check(request && storage, "async asset request reservation failed");
+        bool submitted{};
+        const auto result = io.Enqueue({request, "generation", id, path, contents.size(),
+            std::make_shared<int>(1), std::move(prepare)}, streaming, residency, storage, submitted);
+        Check(static_cast<bool>(result) && submitted, "async asset read was not submitted");
+        return std::pair{request, storage};
+    };
+    const auto poll = [&](hs::StreamingRequestId request, hs::AssetReadCompletion &output) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (auto result = io.Poll(request, streaming, residency, output); !result) return result;
+            if (output.ready) return hs::Result::Success();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        throw std::runtime_error("async asset preparation did not complete");
+    };
+
+    std::atomic_bool prepared{};
+    std::thread::id worker{};
+    const auto [success, success_storage] = enqueue("prepared-success", [&](std::span<const std::byte> bytes) {
+        worker = std::this_thread::get_id();
+        prepared.store(bytes.size() == contents.size() && std::equal(bytes.begin(), bytes.end(), contents.begin()),
+                       std::memory_order_release);
+    });
+    hs::AssetReadCompletion success_output;
+    Check(static_cast<bool>(poll(success, success_output)) && success_output.ready && !success_output.cancelled &&
+        prepared.load(std::memory_order_acquire) && worker != caller,
+        "asset preparation did not run asynchronously before read publication");
+    Check(streaming.CompleteRead(success, "generation"), "prepared read did not enter Decoded");
+    Check(residency.ReleaseNow(success_output.storage) && !residency.Contains(success_storage),
+        "prepared read storage was not reclaimed");
+
+    auto started = std::make_shared<std::promise<void>>();
+    auto release = std::make_shared<std::promise<void>>();
+    const auto release_gate = release->get_future().share();
+    const auto canceled_done = std::make_shared<std::atomic_bool>();
+    const auto [cancelled, cancelled_storage] = enqueue("prepared-cancelled", [started, release_gate, canceled_done](std::span<const std::byte>) {
+        started->set_value();
+        release_gate.wait();
+        canceled_done->store(true, std::memory_order_release);
+    });
+    if (started->get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+    {
+        release->set_value();
+        throw std::runtime_error("cancellable preparation did not start");
+    }
+    io.Cancel(cancelled, streaming);
+    release->set_value();
+    hs::AssetReadCompletion cancelled_output;
+    Check(static_cast<bool>(poll(cancelled, cancelled_output)) && cancelled_output.ready &&
+        cancelled_output.cancelled && cancelled_output.bytes.empty() &&
+        canceled_done->load(std::memory_order_acquire) && !residency.Contains(cancelled_storage),
+        "cancelled preparation published bytes or leaked its reservation");
+
+    const auto [failed, failed_storage] = enqueue("prepared-failure", [](std::span<const std::byte>) {
+        throw std::runtime_error("intentional preparation failure");
+    });
+    hs::AssetReadCompletion failed_output;
+    Check(!poll(failed, failed_output) && !failed_output.ready && !residency.Contains(failed_storage),
+        "failed preparation published data or retained its reservation");
+    const auto *failed_request = streaming.Find(failed);
+    Check(failed_request && failed_request->state == hs::StreamingPageState::Cancelled,
+        "failed preparation did not cancel its streaming request");
 }
 }
 
@@ -155,7 +255,8 @@ int main()
         const auto after_reset = streaming.Request("render/geometry/trunk_0.rpage", "page", "generation-f", 100);
         Check(after_reset.value > cancelled.value && !streaming.BeginRead(geometry),
             "reset aliased an old asynchronous request identity");
-        std::cout << "residency budget, concurrent generation-aware streaming and CompletionSet retirement passed\n";
+        CheckAsyncAssetPreparation();
+        std::cout << "residency budget, generation-aware streaming, async preparation and CompletionSet retirement passed\n";
         return EXIT_SUCCESS;
     }
     catch (const std::exception &error)

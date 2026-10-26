@@ -1581,6 +1581,12 @@ void TestSurfaceClosure()
     Require(masked_hlsl.find("float HsMaterialEvaluateOpacity") != std::string::npos &&
             masked_hlsl.find("ctx.sampled_alpha") != std::string::npos,
             "masked typed closure opacity evaluator missing");
+    const auto covered_begin = masked_hlsl.find("HsMaterialSurface HsMaterialEvaluateCoveredSurface");
+    const auto covered_end = masked_hlsl.find("float HsMaterialEvaluateOpacity", covered_begin);
+    const auto covered = masked_hlsl.substr(covered_begin, covered_end - covered_begin);
+    Require(covered.find("ctx.sampled_alpha") < covered.find("discard;") &&
+            covered.find("discard;") < covered.find("HsMaterialMakeSurfaceClosure"),
+            "masked closure must reject opacity before evaluating the remaining surface nodes");
 
     rd::MaterialGraph constant_closures;
     constant_closures.kind = rd::MaterialGraphKind::Opaque;
@@ -1980,6 +1986,16 @@ void TestLegacyMaterialContextLowering()
             opacity.find("HsMaterialTexture1") == std::string::npos &&
             opacity.find("ctx.sampled_alpha") == std::string::npos,
             "legacy masked opacity lowering lost typed sampling or pruning");
+    const auto covered_begin = leaf_hlsl.find("HsMaterialSurface HsMaterialEvaluateCoveredSurface");
+    const auto covered_end = leaf_hlsl.find("float HsMaterialEvaluateOpacity", covered_begin);
+    const auto covered = leaf_hlsl.substr(covered_begin, covered_end - covered_begin);
+    const std::string base_sample = "HsTextureSampleGrad(HsMaterialTexture0, 18u, FoliageClamp,";
+    const auto first_base = covered.find(base_sample);
+    const auto discard = covered.find("discard;");
+    Require(first_base < discard && covered.find(base_sample, first_base + 1) == std::string::npos &&
+            discard < covered.find("HsTextureSampleGrad(HsMaterialTexture1,") &&
+            discard < covered.find("HsTextureSampleGrad(HsMaterialTexture2,"),
+            "masked raster must reuse its alpha/base sample and defer roughness/normal until coverage passes");
 }
 
 rd::GeometryData GeometryFixture()

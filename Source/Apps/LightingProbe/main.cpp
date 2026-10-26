@@ -1,5 +1,6 @@
 #include "../AssetPipeline/action.hpp"
 #include "radiance_hdr.hpp"
+#include "../Content/bake_sampling.hpp"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/lighting_probe.hpp>
@@ -209,9 +210,42 @@ std::array<double,9> ShBasis(Vec3 n)
             0.5462742152960396*(n.x*n.x-n.y*n.y)};
 }
 double SolidAngle(double x,double y) { return std::atan2(x*y,std::sqrt(x*x+y*y+1)); }
+struct TangentKernelSample { double tangent_x{},tangent_y{},normal_z{}; };
+struct BakeKernelTables
+{
+    std::vector<double> cube_solid_angles;
+    std::vector<std::vector<TangentKernelSample>> tangent_samples_by_mip;
+};
+BakeKernelTables PrepareBakeKernelTables(const Source& source)
+{
+    BakeKernelTables tables;
+    const auto edge=source.edge;
+    tables.cube_solid_angles.resize(std::size_t(edge)*edge);
+    for(std::uint32_t y=0;y<edge;++y) for(std::uint32_t x=0;x<edge;++x) {
+        const double x0=2*double(x)/edge-1,x1=2*double(x+1)/edge-1;
+        const double y0=2*double(y)/edge-1,y1=2*double(y+1)/edge-1;
+        tables.cube_solid_angles[std::size_t(y)*edge+x]=
+            SolidAngle(x1,y1)-SolidAngle(x0,y1)-SolidAngle(x1,y0)+SolidAngle(x0,y0);
+    }
+    const auto mip_count=std::bit_width(source.edge);
+    tables.tangent_samples_by_mip.resize(mip_count);
+    const auto hammersley=hs::content::MakeHammersleySamples(source.samples);
+    for(std::uint32_t mip=1;mip<mip_count;++mip) {
+        const double roughness=double(mip)/(mip_count-1),alpha=roughness*roughness;
+        auto& samples=tables.tangent_samples_by_mip[mip];
+        samples.reserve(source.samples);
+        for(const auto sample:hammersley) {
+            const double phi=2*kPi*sample.u;
+            const double cos_theta=std::sqrt((1-sample.v)/(1+(alpha*alpha-1)*sample.v));
+            const double sin_theta=std::sqrt(std::max(0.0,1-cos_theta*cos_theta));
+            samples.push_back({sin_theta*std::cos(phi),sin_theta*std::sin(phi),cos_theta});
+        }
+    }
+    return tables;
+}
 // Integrates each cubemap texel's exact solid angle, rather than treating corner
     // texels like center texels. Cosine convolution multipliers: pi,2pi/3,pi/4.
-rd::LightingProbeIrradiance ProjectIrradiance(const std::vector<hs::Float4> &cube,std::uint32_t edge)
+rd::LightingProbeIrradiance ProjectIrradiance(const std::vector<hs::Float4> &cube,std::uint32_t edge,const BakeKernelTables& tables)
 {
     std::array<Vec3,9> coefficients{}; double total=0;
     for(std::uint32_t face=0;face<6;++face)
@@ -219,7 +253,7 @@ rd::LightingProbeIrradiance ProjectIrradiance(const std::vector<hs::Float4> &cub
         {
             const double x0=2*double(x)/edge-1,x1=2*double(x+1)/edge-1;
             const double y0=2*double(y)/edge-1,y1=2*double(y+1)/edge-1;
-            const double omega=SolidAngle(x1,y1)-SolidAngle(x0,y1)-SolidAngle(x1,y0)+SolidAngle(x0,y0);
+            const double omega=tables.cube_solid_angles[std::size_t(y)*edge+x];
             const auto basis=ShBasis(Direction(face,(x0+x1)*0.5,(y0+y1)*0.5));
             const auto color=Color(cube[(std::size_t(face)*edge+y)*edge+x]); total+=omega;
             for(std::size_t i=0;i<9;++i) coefficients[i]=coefficients[i]+color*(basis[i]*omega);
@@ -234,16 +268,7 @@ rd::LightingProbeIrradiance ProjectIrradiance(const std::vector<hs::Float4> &cub
     }
     return result;
 }
-double RadicalInverse(std::uint32_t bits)
-{
-    bits=(bits<<16)|(bits>>16);
-    bits=((bits&0x55555555u)<<1)|((bits&0xaaaaaaaau)>>1);
-    bits=((bits&0x33333333u)<<2)|((bits&0xccccccccu)>>2);
-    bits=((bits&0x0f0f0f0fu)<<4)|((bits&0xf0f0f0f0u)>>4);
-    bits=((bits&0x00ff00ffu)<<8)|((bits&0xff00ff00u)>>8);
-    return double(bits)*2.3283064365386963e-10;
-}
-std::vector<hs::Float4> Prefilter(const std::vector<hs::Float4> &raw,const Source &source)
+std::vector<hs::Float4> Prefilter(const std::vector<hs::Float4> &raw,const Source &source,const BakeKernelTables& tables)
 {
     const auto mips=std::bit_width(source.edge);
     std::vector<hs::Float4> result;
@@ -253,19 +278,15 @@ std::vector<hs::Float4> Prefilter(const std::vector<hs::Float4> &raw,const Sourc
     for(std::uint32_t face=0;face<6;++face) for(std::uint32_t mip=0;mip<mips;++mip)
     {
         const auto edge=std::max(1u,source.edge>>mip);
-        const double roughness=double(mip)/(mips-1),alpha=roughness*roughness;
         for(std::uint32_t y=0;y<edge;++y) for(std::uint32_t x=0;x<edge;++x)
         {
             const auto n=Direction(face,2*(double(x)+0.5)/edge-1,2*(double(y)+0.5)/edge-1);
             if(mip==0) { result.push_back(raw[(std::size_t(face)*edge+y)*edge+x]); continue; }
             const auto tangent=Normalize(Cross(std::abs(n.z)<0.999?Vec3{0,0,1}:Vec3{1,0,0},n));
             const auto bitangent=Cross(n,tangent); Vec3 sum{}; double total=0;
-            for(std::uint32_t i=0;i<source.samples;++i)
+            for(const auto& sample:tables.tangent_samples_by_mip[mip])
             {
-                const double phi=2*kPi*(double(i)+0.5)/source.samples,u=RadicalInverse(i);
-                const double cosTheta=std::sqrt((1-u)/(1+(alpha*alpha-1)*u));
-                const double sinTheta=std::sqrt(std::max(0.0,1-cosTheta*cosTheta));
-                const auto h=tangent*(sinTheta*std::cos(phi))+bitangent*(sinTheta*std::sin(phi))+n*cosTheta;
+                const auto h=tangent*sample.tangent_x+bitangent*sample.tangent_y+n*sample.normal_z;
                 const auto l=h*(2*Dot(n,h))-n; const double nl=std::max(0.0,Dot(n,l));
                 if(nl>0) { sum=sum+SampleCube(raw,source.edge,l)*nl; total+=nl; }
             }
@@ -277,6 +298,7 @@ std::vector<hs::Float4> Prefilter(const std::vector<hs::Float4> &raw,const Sourc
 }
 std::vector<std::byte> Bake(const Source &source,const hs::lighting_probe::RadianceHdrPanorama *panorama)
 {
+    const auto tables=PrepareBakeKernelTables(source);
     std::vector<hs::Float4> raw; raw.reserve(std::size_t(source.edge)*source.edge*6);
     for(std::uint32_t face=0;face<6;++face)
         for(std::uint32_t y=0;y<source.edge;++y) for(std::uint32_t x=0;x<source.edge;++x)
@@ -289,8 +311,8 @@ std::vector<std::byte> Bake(const Source &source,const hs::lighting_probe::Radia
                 raw.push_back(Texel((source.bottom*(1-blend)+source.top*blend)*source.scale));
             }
         }
-    const auto filtered=Prefilter(raw,source);
-    const auto sh=ProjectIrradiance(raw,source.edge);
+    const auto filtered=Prefilter(raw,source,tables);
+    const auto sh=ProjectIrradiance(raw,source.edge,tables);
     return rd::BuildLightingProbePackage(hs::MakeAssetId(kProduct),{},
         {source.edge,float(source.yaw)},raw,filtered,sh);
 }

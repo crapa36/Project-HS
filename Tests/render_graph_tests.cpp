@@ -1,5 +1,6 @@
 #include "render_graph.hpp"
 #include "render_graph_membership.hpp"
+#include "renderer_hlod.hpp"
 #include "renderer_post_subgraphs.hpp"
 #include <D3D12MemAlloc.h>
 #include <Windows.h>
@@ -34,6 +35,10 @@ struct RenderGraphTestAccess
     static std::uint64_t Reuses(const RenderGraphBuilder &graph)
     {
         return graph.PlanReuseCount();
+    }
+    static std::uint64_t InputBuilds(const RenderGraphBuilder &graph)
+    {
+        return graph.PlanInputBuildCount();
     }
 };
 }
@@ -113,6 +118,23 @@ void BatchResourceMembership()
           first.front() == 0 && first.back() == 1040 && second.front() == 1039 && second.back() == 0,
           "interleaved batch membership remains independent and ordered");
 }
+
+void HlodSlotSetTest()
+{
+    hs::HlodSlotSet slots;
+    slots.Resize(130);
+    for (const auto slot : {0u, 63u, 64u, 129u})
+        Check(slots.Insert(slot), "first valid HLOD member slot must be inserted");
+    for (const auto slot : {0u, 63u, 64u, 129u})
+        Check(slots.Contains(slot), "inserted HLOD member slot must be found for resident proxy overlap");
+    Check(!slots.Insert(64u), "duplicate HLOD member slot must be rejected");
+    Check(!slots.Insert(130u) && !slots.Contains(130u), "out-of-capacity HLOD slot must be rejected");
+    slots.Clear();
+    for (const auto slot : {0u, 63u, 64u, 129u})
+        Check(!slots.Contains(slot), "per-registration clear must remove prior member slots");
+    Check(slots.Insert(64u), "cleared HLOD slot may be rebound for a later frame");
+}
+
 struct Fixture
 {
     ComPtr<IDXGIFactory4> factory;
@@ -592,7 +614,10 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
                     Check(context.Resolve(handles[index]) == plan_imports[import_base + index].Get(),
                           "cached plan resolves current frame imports");
             });
+            const auto input_builds = hs::RenderGraphTestAccess::InputBuilds(plan_graph);
             Check(plan_graph.Prepare(first).Succeeded(), "prepare rotating exact plan shape");
+            Check(hs::RenderGraphTestAccess::InputBuilds(plan_graph) == input_builds + (cycle == 0 ? 1u : 0u),
+                  "warm topology skips compiler inputs and immutable use validation");
             Check(plan_graph.Execute(f.commands.Get(), enhanced, mode).Succeeded(),
                   "execute rotating exact plan shape");
             f.Submit();
@@ -603,6 +628,37 @@ void Run(Fixture &f, hs::BarrierMode mode, ID3D12GraphicsCommandList7 *enhanced)
     Check(hs::RenderGraphTestAccess::Reuses(plan_graph) - plan_reuses_before == 4,
           "second cycle reuses all four retained exact plans");
     Check(fresh_callback_calls == 8, "cached plans invoke each current callback");
+    hs::RenderGraphBuilder contract_graph;
+    const auto declare_contract = [&](hs::BufferRange range, hs::Access incoming = hs::Access::Common) {
+        contract_graph.Reset();
+        const auto imported = contract_graph.ImportBuffer({plan_imports[0].Get()}, incoming, "current binding");
+        auto reader = contract_graph.AddPass(0, "retained range", hs::QueueHint::Direct);
+        reader.Read(contract_graph.Version(imported), hs::Access::CopySource, range);
+        auto record_owner = std::make_shared<int>(0);
+        std::weak_ptr<int> record_lease = record_owner;
+        reader.SetExecute([record_owner](hs::RenderPassContext &) { ++*record_owner; });
+        return record_lease;
+    };
+    auto old_record = declare_contract({0, 64});
+    Check(contract_graph.Prepare(first).Succeeded(), "prepare initial retained range");
+    (void)declare_contract({64, 64});
+    Check(old_record.expired(), "retained topology does not own an old record callback");
+    Check(contract_graph.Prepare(first).Succeeded(), "changed use range builds another topology");
+    (void)declare_contract({0, 64});
+    Check(contract_graph.Prepare(first).Succeeded() && hs::RenderGraphTestAccess::InputBuilds(contract_graph) == 2,
+          "returning range reuses its retained compiler inputs");
+    (void)declare_contract({plan_buffer_desc.Width, 1});
+    Check(!contract_graph.Prepare(first).Succeeded(), "changed out-of-bounds range is still validated");
+    const auto failed_input_builds = hs::RenderGraphTestAccess::InputBuilds(contract_graph);
+    (void)declare_contract({0, 64}, hs::Access::UnorderedWrite);
+    Check(!contract_graph.Prepare(first).Succeeded() &&
+          hs::RenderGraphTestAccess::InputBuilds(contract_graph) == failed_input_builds,
+          "warm topology rejects incompatible current incoming access before compiler preparation");
+    (void)declare_contract({0, 64});
+    Check(contract_graph.Prepare(first).Succeeded() &&
+          hs::RenderGraphTestAccess::InputBuilds(contract_graph) == failed_input_builds &&
+          hs::RenderGraphTestAccess::Compilations(contract_graph) == 2,
+          "failed binding and topology candidates leave retained plans reusable");
     first.ResetClaims();
 
     auto dependency=graph.CreateBuffer({1024,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS},"uav dependency");
@@ -805,6 +861,7 @@ int main(int argc, char **argv)
     try
     {
         BatchResourceMembership();
+        HlodSlotSetTest();
         const bool hardware = argc == 2 && std::string_view(argv[1]) == "--hardware";
         Fixture fixture(hardware); Run(fixture,hs::BarrierMode::Legacy,nullptr);
         std::puts("Legacy range/readback checks passed.");

@@ -4,18 +4,212 @@
 #include <hs/core/presentation_event.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include "vfx_typed_entity_surface_commands.hpp"
+#include "vfx_typed_mote_commands.hpp"
 #include "vfx_typed_screen_commands.hpp"
 #include <hs/renderer/vfx_frame_input.hpp>
 #include <hs/renderer/vfx_spawn_command.hpp>
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <unordered_set>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace hs::runtime_detail
 {
+struct RetainedVfxEntitySurfaceCapture
+{
+    std::uint32_t row{std::numeric_limits<std::uint32_t>::max()};
+    RenderInstance instance;
+    bool retained_instance{};
+    bool has_animation_pose{};
+    AnimationPoseRef animation_pose{};
+    std::shared_ptr<const void> generation_lease;
+};
+
+class ActiveEffectStore
+{
+  public:
+    enum class Profile : std::uint8_t
+    {
+        Ground, Ribbon, Light, Distortion, Decal, Volume, Screen,
+        EntitySurface, PointRate, Count
+    };
+    using Row = std::uint32_t;
+
+    [[nodiscard]] Row Intern(const VfxEventInput &input)
+    {
+        const EventKey key = KeyFor(input);
+        if (const auto found = event_rows_.find(key); found != event_rows_.end())
+            return found->second;
+        const auto row = static_cast<Row>(rows_.size());
+        rows_.push_back({input});
+        event_rows_.try_emplace(key, row);
+        return row;
+    }
+
+    [[nodiscard]] bool Add(Profile profile, Row row)
+    {
+        if (row >= rows_.size()) return false;
+        auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        if (std::ranges::find(refs, row) != refs.end()) return false;
+        refs.push_back(row);
+        return true;
+    }
+
+    void Append(Profile profile, const VfxEventInput &input,
+                std::vector<VfxEventInput> &scratch)
+    {
+        const auto row = Intern(input);
+        if (Add(profile, row)) scratch.push_back(rows_[row].input);
+    }
+
+    [[nodiscard]] const VfxEventInput *Get(Row row) const noexcept
+    { return row < rows_.size() ? &rows_[row].input : nullptr; }
+    [[nodiscard]] VfxEventInput *Get(Row row) noexcept
+    { return row < rows_.size() ? &rows_[row].input : nullptr; }
+    [[nodiscard]] Row Find(const VfxEventInput &input) const noexcept
+    {
+        const auto found = event_rows_.find(KeyFor(input));
+        return found == event_rows_.end() ? std::numeric_limits<Row>::max() : found->second;
+    }
+
+    void Materialize(Profile profile, std::vector<VfxEventInput> &scratch) const
+    {
+        const auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        scratch.clear();
+        scratch.reserve(refs.size());
+        for (const auto row : refs) if (row < rows_.size()) scratch.push_back(rows_[row].input);
+    }
+
+    void Commit(Profile profile, std::span<const VfxEventInput> scratch)
+    {
+        auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        std::vector<Row> surviving;
+        surviving.reserve(scratch.size());
+        for (const auto &input : scratch)
+            if (const auto found = event_rows_.find(KeyFor(input)); found != event_rows_.end() &&
+                std::ranges::find(surviving, found->second) == surviving.end())
+                surviving.push_back(found->second);
+        refs.swap(surviving);
+    }
+
+    void RebindRows(auto &&rebind, std::vector<RetainedVfxEntitySurfaceCapture> &captures)
+    {
+        std::vector<std::uint8_t> live(rows_.size(), 1);
+        for (std::size_t i = 0; i < rows_.size(); ++i)
+            if (!rebind(rows_[i].input)) live[i] = 0;
+        for (auto &profile : profiles_)
+            std::erase_if(profile, [&](Row row) { return row >= live.size() || !live[row]; });
+        std::erase_if(captures, [&](const auto &capture) {
+            return capture.row >= live.size() || !live[capture.row];
+        });
+        Compact(captures);
+    }
+
+    void RebindProfile(Profile profile, std::span<const VfxEventInput> rebound)
+    {
+        auto &refs = profiles_[static_cast<std::size_t>(profile)];
+        std::vector<Row> surviving;
+        surviving.reserve(rebound.size());
+        for (const auto &input : rebound)
+            for (const auto row : refs)
+                if (row < rows_.size() && SameEpisode(rows_[row].input, input))
+                {
+                    rows_[row].input = input;
+                    if (std::ranges::find(surviving, row) == surviving.end()) surviving.push_back(row);
+                    break;
+                }
+        refs.swap(surviving);
+        RebuildIndex();
+    }
+
+    void Compact(std::span<RetainedVfxEntitySurfaceCapture> captures = {})
+    {
+        std::vector<std::uint8_t> live(rows_.size());
+        for (const auto &profile : profiles_) for (const auto row : profile)
+            if (row < live.size()) live[row] = 1;
+        for (const auto &capture : captures) if (capture.row < live.size()) live[capture.row] = 1;
+        std::vector<Row> remap(rows_.size(), std::numeric_limits<Row>::max());
+        std::vector<StoredRow> compacted;
+        compacted.reserve(rows_.size());
+        for (std::size_t i = 0; i < rows_.size(); ++i)
+            if (live[i])
+            {
+                remap[i] = static_cast<Row>(compacted.size());
+                compacted.push_back(std::move(rows_[i]));
+            }
+        for (auto &profile : profiles_) for (auto &row : profile) row = remap[row];
+        for (auto &capture : captures) capture.row = remap[capture.row];
+        rows_.swap(compacted);
+        RebuildIndex();
+    }
+
+    void RebuildIndex()
+    {
+        event_rows_.clear();
+        event_rows_.reserve(rows_.size());
+        for (std::size_t i = 0; i < rows_.size(); ++i)
+            event_rows_.try_emplace(KeyFor(rows_[i].input), static_cast<Row>(i));
+    }
+
+    void Clear() noexcept
+    {
+        rows_.clear(); event_rows_.clear();
+        for (auto &profile : profiles_) profile.clear();
+    }
+    void Swap(ActiveEffectStore &other) noexcept
+    {
+        rows_.swap(other.rows_); event_rows_.swap(other.event_rows_);
+        profiles_.swap(other.profiles_);
+    }
+    [[nodiscard]] std::size_t Size() const noexcept { return rows_.size(); }
+
+  private:
+    struct EventKey
+    {
+        std::uint64_t sequence{}, episode{}, owner{}, geometry_effect{};
+        std::uint64_t event_tick{};
+        std::uint32_t effect_handle{};
+        bool operator==(const EventKey &) const = default;
+    };
+    struct EventKeyHash
+    {
+        std::size_t operator()(const EventKey &key) const noexcept
+        {
+            auto hash = std::hash<std::uint64_t>{}(key.sequence);
+            const auto mix = [&](std::uint64_t value) {
+                hash ^= std::hash<std::uint64_t>{}(value) + 0x9e3779b97f4a7c15ull +
+                    (hash << 6) + (hash >> 2);
+            };
+            mix(key.episode); mix(key.owner); mix(key.geometry_effect);
+            mix(key.event_tick); mix(key.effect_handle);
+            return hash;
+        }
+    };
+    struct StoredRow { VfxEventInput input; };
+    static EventKey KeyFor(const VfxEventInput &input) noexcept
+    {
+        return {input.sequence, input.status_episode_generation,
+            input.geometry_owner_id, input.geometry_effect_id, input.event_tick,
+            input.effect_handle};
+    }
+    static bool SameEpisode(const VfxEventInput &a, const VfxEventInput &b) noexcept
+    {
+        return a.sequence == b.sequence && a.status_episode_generation == b.status_episode_generation &&
+            a.geometry_owner_id == b.geometry_owner_id && a.geometry_effect_id == b.geometry_effect_id &&
+            a.event_tick == b.event_tick;
+    }
+    std::vector<StoredRow> rows_;
+    std::unordered_map<EventKey, Row, EventKeyHash> event_rows_;
+    std::array<std::vector<Row>, static_cast<std::size_t>(Profile::Count)> profiles_;
+};
+
 struct DecodedVfxState
 {
     std::vector<ParticleSpawnCommand> particle_spawns;
@@ -29,7 +223,7 @@ struct DecodedVfxState
     std::vector<VfxEventInput> volume_events;
     std::vector<VfxEventInput> screen_events;
     std::vector<VfxEventInput> entity_surface_events;
-    std::vector<VfxEntitySurfaceEventCapture> entity_surface_captures;
+    std::vector<RetainedVfxEntitySurfaceCapture> entity_surface_captures;
     std::vector<VfxEventInput> point_rate_events;
 
     // Member swaps preserve the original allocation-free publication operation,
@@ -67,6 +261,13 @@ struct DecodedVfxState
         entity_surface_captures.clear();
         point_rate_events.clear();
     }
+
+    void ClearEventScratch() noexcept
+    {
+        ground_events.clear(); ribbon_events.clear(); light_events.clear();
+        distortion_events.clear(); decal_events.clear(); volume_events.clear();
+        screen_events.clear(); entity_surface_events.clear(); point_rate_events.clear();
+    }
 };
 
 struct TerminalPresentationClock
@@ -80,6 +281,85 @@ struct TerminalPresentationClock
 // a session ID keeps a reset simulation clock from replaying the previous run.
 struct VfxSessionState
 {
+    // Due order is stable across equal ticks and pending storage remains bounded.
+    struct RawEventScheduler
+    {
+        static constexpr std::size_t kCapacity = 4096;
+        struct Entry
+        {
+            PresentationEvent event;
+            std::uint64_t ordinal{};
+        };
+        struct ReadyBatch
+        {
+            std::vector<Entry> entries;
+        };
+
+        // std::push_heap uses a max-heap; invert the key for earliest due first.
+        static bool Later(const Entry &a, const Entry &b) noexcept
+        {
+            if (a.event.tick != b.event.tick) return a.event.tick > b.event.tick;
+            return a.ordinal > b.ordinal;
+        }
+
+        [[nodiscard]] bool HasCapacity() const noexcept
+        {
+            return pending.size() + in_flight.entries.size() < kCapacity &&
+                next_ordinal != std::numeric_limits<std::uint64_t>::max();
+        }
+
+        [[nodiscard]] bool Enqueue(PresentationEvent event)
+        {
+            if (!HasCapacity()) return false;
+            pending.push_back({std::move(event), next_ordinal++});
+            std::push_heap(pending.begin(), pending.end(), Later);
+            return true;
+        }
+
+        [[nodiscard]] const ReadyBatch &Prepare(Tick tick, std::uint64_t session)
+        {
+            if (!in_flight.entries.empty()) return in_flight;
+            std::vector<Entry> deferred;
+            while (!pending.empty())
+            {
+                if (pending.front().event.tick > tick) break;
+                std::pop_heap(pending.begin(), pending.end(), Later);
+                auto entry = std::move(pending.back());
+                pending.pop_back();
+                if (entry.event.session_id < session) continue;
+                if (entry.event.session_id > session) deferred.push_back(std::move(entry));
+                else in_flight.entries.push_back(std::move(entry));
+            }
+            for (auto &entry : deferred)
+            {
+                pending.push_back(std::move(entry));
+                std::push_heap(pending.begin(), pending.end(), Later);
+            }
+            return in_flight;
+        }
+
+        // A failed preparation/render leaves this owned batch ready to retry.
+        void Acknowledge() noexcept
+        {
+            in_flight.entries.clear();
+            if (pending.empty()) next_ordinal = 0;
+        }
+
+        void DiscardBeforeSession(std::uint64_t session)
+        {
+            std::erase_if(pending, [session](const Entry &entry) {
+                return entry.event.session_id < session;
+            });
+            std::erase_if(in_flight.entries, [session](const Entry &entry) {
+                return entry.event.session_id < session;
+            });
+            std::make_heap(pending.begin(), pending.end(), Later);
+        }
+
+        std::vector<Entry> pending;
+        ReadyBatch in_flight;
+        std::uint64_t next_ordinal{};
+    };
     struct PersistentBurstKey
     {
         std::uint64_t stable_id{};
@@ -98,7 +378,9 @@ struct VfxSessionState
     std::uint64_t session_id{};
     VfxLowHealthPulseState low_health_pulse;
     std::optional<TerminalPresentationClock> terminal_clock;
-    std::vector<PresentationEvent> pending_events;
+    RawEventScheduler raw_events;
+    VfxPersistentMoteBirthWindow persistent_mote_births;
+    ActiveEffectStore active_effects;
     DecodedVfxState decoded;
     std::unordered_set<PersistentBurstKey, PersistentBurstHash> seen_persistent_bursts;
 
@@ -149,24 +431,12 @@ struct VfxSessionState
         session_id = current_session;
         low_health_pulse.Clear();
         terminal_clock.reset();
+        persistent_mote_births.Clear();
+        active_effects.Clear();
         ClearDecoded();
         seen_persistent_bursts.clear();
-        std::erase_if(pending_events, [&](const PresentationEvent &event) {
-            return event.session_id < session_id;
-        });
+        raw_events.DiscardBeforeSession(session_id);
         return true;
-    }
-
-    std::vector<PresentationEvent> TakeReady(Tick tick)
-    {
-        std::vector<PresentationEvent> ready;
-        std::erase_if(pending_events, [&](const PresentationEvent &event) {
-            if (event.session_id < session_id) return true;
-            if (event.session_id != session_id || event.tick > tick) return false;
-            ready.push_back(event);
-            return true;
-        });
-        return ready;
     }
 };
 } // namespace hs::runtime_detail

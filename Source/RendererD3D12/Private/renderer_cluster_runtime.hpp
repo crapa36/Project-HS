@@ -62,6 +62,7 @@ struct ClusterPageStream
     std::future<std::vector<std::byte>> read_future;
     std::vector<std::byte> read_storage;
     render_data::GeometryData decoded;
+    std::shared_ptr<render_data::GeometryData> decoded_result;
     ResidencyTicket decoded_residency, read_residency, upload_residency;
     std::unique_ptr<renderer_detail::GeometryPageGpu> page;
     AllocationResource upload;
@@ -77,6 +78,10 @@ struct ClusterCatalogRange
 struct ClusterCutBuffers
 {
     AllocationResource candidates, constants, occlusion_constants;
+    // Published only after validation and successful upload to this allocation.
+    std::shared_ptr<const std::vector<GpuClusterCandidate>> candidate_owner;
+    std::uint32_t candidate_generation{};
+    bool candidate_static_error{};
     AllocationResource counts, offsets, block_sums, block_offsets, demand, status;
     AllocationResource draw_commands, mesh_commands, command_counts;
     AllocationResource history_bits, history_generations;
@@ -118,7 +123,7 @@ struct ClusterFrameRuntime
 // generation. These are candidates, never a CPU visible-list or selected cut.
 struct ClusterCutInput
 {
-    std::span<const GpuClusterCandidate> candidates;
+    std::shared_ptr<const std::vector<GpuClusterCandidate>> candidates;
     GpuClusterRefinementConstants constants;
     std::uint32_t max_instance_count{};
 };

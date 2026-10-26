@@ -669,18 +669,38 @@ target_compile_definitions(
                           $<$<NOT:$<CONFIG:Release>>:HS_DEVELOPMENT_TOOLS=1>
 )
 hs_configure_target(hs_experiment)
+if(MSVC)
+    target_sources(hs_experiment PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+endif()
 add_dependencies(hs_experiment hs_runtime_assets)
 
-add_executable(hs_render_test_runner Source/Apps/RenderTestRunner/main.cpp)
+add_executable(hs_render_test_runner
+    Source/Apps/RenderTestRunner/main.cpp
+    Source/Apps/Common/world_transport_scene.cpp)
 target_link_libraries(hs_render_test_runner PRIVATE hs_vfx_program_io)
 target_link_libraries(
     hs_render_test_runner PRIVATE hs_renderer_d3d12 hs_render_data hs_asset_manifest hs_jobs hs_game_rules_io hs_environment_layout nlohmann_json::nlohmann_json
 )
 target_compile_definitions(hs_render_test_runner PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+if(MSVC)
+    target_sources(hs_render_test_runner PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+endif()
 if(HS_BUILD_CONTENT_TOOLS)
-    target_sources(hs_render_test_runner PRIVATE Source/Apps/RenderTestRunner/static_shadow_action.cpp)
+    target_sources(hs_render_test_runner PRIVATE Source/Apps/RenderTestRunner/scene_probe_action.cpp)
     target_link_libraries(hs_render_test_runner PRIVATE hs_asset_pipeline)
-    target_compile_definitions(hs_render_test_runner PRIVATE HS_STATIC_SHADOW_ACTION_ENABLED=1)
+    target_compile_definitions(hs_render_test_runner PRIVATE HS_SCENE_PROBE_ACTION_ENABLED=1)
+    add_executable(hs_static_shadow_bake
+        Source/Apps/StaticShadowBake/main.cpp
+        Source/Apps/Common/world_transport_scene.cpp
+        Source/Apps/RenderTestRunner/static_shadow_action.cpp)
+    target_link_libraries(hs_static_shadow_bake PRIVATE hs_asset_pipeline hs_renderer_d3d12 hs_render_data
+        hs_asset_manifest hs_game_rules_io hs_environment_layout nlohmann_json::nlohmann_json)
+    target_compile_definitions(hs_static_shadow_bake PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    hs_configure_target(hs_static_shadow_bake)
+    if(MSVC)
+        target_sources(hs_static_shadow_bake PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/ProjectHS.manifest")
+    endif()
+    add_dependencies(hs_static_shadow_bake hs_runtime_assets)
 endif()
 hs_configure_target(hs_render_test_runner)
 add_dependencies(hs_render_test_runner hs_runtime_assets)
@@ -948,19 +968,15 @@ add_executable(hs_environment
 target_link_libraries(hs_environment PRIVATE hs_asset_pipeline)
 target_include_directories(hs_environment PRIVATE Source/Apps/Content)
 target_link_libraries(hs_environment PRIVATE
-    hs_core nlohmann_json::nlohmann_json DirectXTex d3d11 ole32 bcrypt)
+    hs_core nlohmann_json::nlohmann_json DirectXTex d3d11 dxgi ole32 bcrypt)
 target_compile_definitions(hs_environment PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 hs_configure_target(hs_environment)
 set(HS_ENVIRONMENT_MANIFEST
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/project_hs_environment_materials_v9_LEAN.json")
-foreach(mode IN ITEMS histogram meshes)
-    if(mode STREQUAL "meshes")
-        set(action_inputs
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json"
-            "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/meadow_surface_meshes.json")
-    else()
-        set(action_inputs "${HS_ENVIRONMENT_MANIFEST}")
-    endif()
+foreach(mode IN ITEMS meshes)
+    set(action_inputs
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/environment_meshes.json"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Models/Environment/meadow_surface_meshes.json")
     hs_add_asset_action(
         NAME "hs_environment_${mode}"
         BUILDER hs_environment
@@ -971,6 +987,8 @@ foreach(mode IN ITEMS histogram meshes)
             --build-root "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS hs_environment_texture=1)
+set(HS_ENVIRONMENT_TEXTURE_BYPRODUCTS
+    "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/histogram/result.json")
 set(HS_ENVIRONMENT_TEXTURE_RESULTS)
 foreach(group IN ITEMS terrain rock bark grass leaf ground_detail)
     if(group STREQUAL "terrain")
@@ -984,31 +1002,45 @@ foreach(group IN ITEMS terrain rock bark grass leaf ground_detail)
     endif()
     foreach(role IN LISTS roles)
         set(action_result "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/${group}/${role}/result.json")
-        set(action_depfile "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/${group}/${role}/result.d")
-        set(action_inputs "${HS_ENVIRONMENT_MANIFEST}")
-        if(group STREQUAL "rock" OR group STREQUAL "bark" OR group STREQUAL "ground_detail" OR
-                (group STREQUAL "grass" OR group STREQUAL "leaf") AND NOT role STREQUAL "base_color")
-            list(APPEND action_inputs
-                "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/baked_materials.json")
-        endif()
-        add_custom_command(
-            OUTPUT "${action_result}"
-            COMMAND "$<TARGET_FILE:hs_environment>" --texture-role "${group}" "${role}"
-                --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
-                --build-root "${CMAKE_CURRENT_BINARY_DIR}"
-            DEPENDS hs_environment ${action_inputs}
-            DEPFILE "${action_depfile}"
-            BYPRODUCTS "${action_depfile}"
-            JOB_POOL hs_environment_texture
-            VERBATIM)
-        add_custom_target("hs_environment_texture_${group}_${role}" DEPENDS "${action_result}")
+        list(APPEND HS_ENVIRONMENT_TEXTURE_BYPRODUCTS "${action_result}")
         list(APPEND HS_ENVIRONMENT_TEXTURE_RESULTS "${action_result}")
     endforeach()
 endforeach()
+set(HS_ENVIRONMENT_TEXTURE_FAMILY_STAMP
+    "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/family.stamp")
+set(HS_ENVIRONMENT_TEXTURE_FAMILY_DEPFILE
+    "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/textures/family.d")
+add_custom_command(
+    OUTPUT "${HS_ENVIRONMENT_TEXTURE_FAMILY_STAMP}"
+    COMMAND "$<TARGET_FILE:hs_environment>" --texture-batch
+        --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+        --build-root "${CMAKE_CURRENT_BINARY_DIR}"
+    DEPENDS hs_environment "${HS_ENVIRONMENT_MANIFEST}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/Textures/Environment/baked_materials.json"
+    DEPFILE "${HS_ENVIRONMENT_TEXTURE_FAMILY_DEPFILE}"
+    BYPRODUCTS ${HS_ENVIRONMENT_TEXTURE_BYPRODUCTS}
+    JOB_POOL hs_environment_texture
+    VERBATIM)
+foreach(group IN ITEMS terrain rock bark grass leaf ground_detail)
+    if(group STREQUAL "terrain")
+        set(roles base_color surface_ra normal detail_normal height)
+    elseif(group STREQUAL "ground_detail")
+        set(roles base_color surface_ra normal)
+    elseif(group STREQUAL "rock" OR group STREQUAL "bark")
+        set(roles base_color surface_ra normal detail_normal)
+    else()
+        set(roles base_color normal roughness)
+    endif()
+    foreach(role IN LISTS roles)
+        add_custom_target("hs_environment_texture_${group}_${role}"
+            DEPENDS "${HS_ENVIRONMENT_TEXTURE_FAMILY_STAMP}")
+    endforeach()
+endforeach()
+add_custom_target(hs_environment_histogram
+    DEPENDS "${HS_ENVIRONMENT_TEXTURE_FAMILY_STAMP}")
 add_custom_target(hs_environment_products
     DEPENDS
-        "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/histogram/result.json"
-        ${HS_ENVIRONMENT_TEXTURE_RESULTS}
+        "${HS_ENVIRONMENT_TEXTURE_FAMILY_STAMP}"
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/environment/meshes/result.json")
 add_executable(hs_lighting_probe
     Source/Apps/LightingProbe/main.cpp)
@@ -1428,6 +1460,7 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
             --build-root "${CMAKE_CURRENT_BINARY_DIR}")
 endforeach()
 set(HS_GROUND_DETAIL_GEOMETRY_RESULTS)
+set(HS_HLOD_GROUND_DETAIL_GEOMETRY_RESULTS)
 list(APPEND HS_GROUND_DETAIL_MESH_NAMES meadow_ground meadow_water)
 foreach(name IN LISTS HS_GROUND_DETAIL_MESH_NAMES)
     if(name STREQUAL "meadow_ground")
@@ -1447,6 +1480,10 @@ foreach(name IN LISTS HS_GROUND_DETAIL_MESH_NAMES)
         ARGS --name "${name}" --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
             --build-root "${CMAKE_CURRENT_BINARY_DIR}")
     list(APPEND HS_GROUND_DETAIL_GEOMETRY_RESULTS "${action_result}")
+    # Meadow surfaces have no eligible HLOD members in the environment layout.
+    if(NOT name STREQUAL "meadow_ground" AND NOT name STREQUAL "meadow_water")
+        list(APPEND HS_HLOD_GROUND_DETAIL_GEOMETRY_RESULTS "${action_result}")
+    endif()
 endforeach()
 list(APPEND HS_RENDER_ACTION_RESULTS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
 set(HS_HERO_MATERIAL_RESULTS)
@@ -1469,7 +1506,7 @@ foreach(name IN LISTS HS_AUTHORED_MATERIAL_NAMES)
     endif()
 endforeach()
 list(APPEND HS_SCENE_PROBE_UPSTREAMS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
-list(APPEND HS_SCENE_HLOD_UPSTREAMS ${HS_GROUND_DETAIL_GEOMETRY_RESULTS})
+list(APPEND HS_SCENE_HLOD_UPSTREAMS ${HS_HLOD_GROUND_DETAIL_GEOMETRY_RESULTS})
 hs_add_asset_action(NAME hs_render_scene_hlod BUILDER hs_render_scene_package
     RESULT "${HS_SCENE_HLOD_RESULT}"
     DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/hlod/arena/result.d"
@@ -1879,6 +1916,7 @@ list(REMOVE_ITEM HS_RENDER_TEST_RESULTS
     "${CMAKE_CURRENT_BINARY_DIR}/Actions/game-data/finalize-presentation/result.json")
 hs_add_test_generation(render RESULTS ${HS_RENDER_TEST_RESULTS})
 if(TARGET hs_render_test_runner)
+    if(TARGET hs_static_shadow_bake)
     # Keep the bake input independent of its output; runtime quality is not selected here.
     set(HS_STATIC_SHADOW_INPUT_LIST
         "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/static-shadow-input-results.txt")
@@ -1894,7 +1932,7 @@ if(TARGET hs_render_test_runner)
             --result-list "${HS_STATIC_SHADOW_INPUT_LIST}"
         DEPENDS hs_generation "${HS_STATIC_SHADOW_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
         VERBATIM)
-    hs_add_asset_action(NAME hs_render_static_shadow_candidate BUILDER hs_render_test_runner
+    hs_add_asset_action(NAME hs_render_static_shadow_candidate BUILDER hs_static_shadow_bake
         RESULT "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/arena-static-shadow/result.json"
         DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/arena-static-shadow/result.d"
         STATIC_INPUTS "${HS_STATIC_SHADOW_INPUT}" "${HS_STATIC_SHADOW_INPUT_LIST}"
@@ -1903,6 +1941,36 @@ if(TARGET hs_render_test_runner)
             --result-list "${HS_STATIC_SHADOW_INPUT_LIST}")
     list(APPEND HS_RUNTIME_FULL_RESULTS
         "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/arena-static-shadow/result.json")
+    endif()
+
+    # Bake from the layout-only selection. The output Action replaces that
+    # product only in runtime-full, after static-shadow input has been formed.
+    set(HS_SCENE_PROBE_BAKE_INPUT_LIST
+        "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/scene-probe-bake-input-results.txt")
+    set(HS_SCENE_PROBE_BAKE_INPUT
+        "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/scene-probe-bake-input.json")
+    list(JOIN HS_RENDER_TEST_RESULTS "\n" HS_SCENE_PROBE_BAKE_INPUT_LINES)
+    file(GENERATE OUTPUT "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
+        CONTENT "${HS_SCENE_PROBE_BAKE_INPUT_LINES}\n")
+    add_custom_command(
+        OUTPUT "${HS_SCENE_PROBE_BAKE_INPUT}"
+        COMMAND "$<TARGET_FILE:hs_generation>" --compose
+            --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope scene-probe-bake-input
+            --result-list "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
+        DEPENDS hs_generation "${HS_SCENE_PROBE_BAKE_INPUT_LIST}" ${HS_RENDER_TEST_RESULTS}
+        VERBATIM)
+    set(HS_SCENE_PROBE_BAKED_RESULT
+        "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/scene-probes-baked/result.json")
+    hs_add_asset_action(NAME hs_render_scene_probe_bake BUILDER hs_render_test_runner
+        RESULT "${HS_SCENE_PROBE_BAKED_RESULT}"
+        DEPFILE "${CMAKE_CURRENT_BINARY_DIR}/Actions/render/lighting/scene-probes-baked/result.d"
+        STATIC_INPUTS "${HS_SCENE_PROBE_BAKE_INPUT}" "${HS_SCENE_PROBE_BAKE_INPUT_LIST}"
+        ARGS --produce-scene-probe --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+            --build-root "${CMAKE_CURRENT_BINARY_DIR}" --generation "${HS_SCENE_PROBE_BAKE_INPUT}"
+            --result-list "${HS_SCENE_PROBE_BAKE_INPUT_LIST}")
+    add_dependencies(hs_render_scene_probe_bake hs_render_static_shadow_candidate)
+    list(REMOVE_ITEM HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_RESULT}")
+    list(APPEND HS_RUNTIME_FULL_RESULTS "${HS_SCENE_PROBE_BAKED_RESULT}")
 endif()
 if(HS_BUILD_TESTS)
     # The full verify workflow builds ALL before running CTest directly.
@@ -1949,7 +2017,7 @@ if(HS_BUILD_RUNTIME AND NOT HS_BUILD_CONTENT_TOOLS)
     add_dependencies(ProjectHS hs_content_generation)
 endif()
 
-if(HS_BUILD_RUNTIME)
+if(HS_BUILD_RUNTIME AND HS_BUILD_CONTENT_TOOLS)
     add_library(hs_shipping_content STATIC EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/Shipping/content.generated.cpp")
     target_include_directories(hs_shipping_content PRIVATE Source/Runtime/Public Source/RendererD3D12/Public)
     target_link_libraries(hs_shipping_content PUBLIC hs_presentation hs_game_rules)
@@ -1958,6 +2026,8 @@ if(HS_BUILD_RUNTIME)
     endif()
     hs_configure_target(hs_shipping_content)
     target_link_libraries(hs_runtime PRIVATE $<$<CONFIG:Release>:hs_shipping_content>)
+elseif(HS_BUILD_RUNTIME AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    message(FATAL_ERROR "Release requires HS_BUILD_CONTENT_TOOLS=ON to produce matching shipping tables and content.hsp. Tools OFF supports development/compile-only configurations.")
 endif()
 
 if(HS_BUILD_TESTS)
@@ -2244,6 +2314,14 @@ if(HS_BUILD_TESTS)
         add_test(NAME content.environment-mesh-cooker COMMAND hs_environment_mesh_cooker_tests)
         set_tests_properties(content.environment-mesh-cooker PROPERTIES TIMEOUT 30)
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
+        add_test(NAME content.environment-family-batch-action
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_environment_family_batch.py"
+                --producer "$<TARGET_FILE:hs_environment>"
+                --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+                --build-root "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/environment-family-batch"
+            BUILD_DEPENDS hs_environment)
+        set_tests_properties(content.environment-family-batch-action PROPERTIES TIMEOUT 1800)
         add_test(NAME content.material-parameter-actions
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_material_parameter_actions.py"
@@ -2254,6 +2332,18 @@ if(HS_BUILD_TESTS)
                 --build-root "${CMAKE_CURRENT_BINARY_DIR}"
             BUILD_DEPENDS hs_render_material_shader hs_render_package hs_content_generation)
         set_tests_properties(content.material-parameter-actions PROPERTIES TIMEOUT 180)
+        if(TARGET hs_static_shadow_bake)
+            add_test(NAME content.static-shadow-action
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_static_shadow_action.py"
+                    --producer "$<TARGET_FILE:hs_static_shadow_bake>"
+                    --source-root "${CMAKE_CURRENT_SOURCE_DIR}"
+                    --build-root "${CMAKE_CURRENT_BINARY_DIR}"
+                    --generation "${HS_STATIC_SHADOW_INPUT}"
+                    --result-list "${HS_STATIC_SHADOW_INPUT_LIST}"
+                BUILD_DEPENDS hs_render_static_shadow_candidate)
+            set_tests_properties(content.static-shadow-action PROPERTIES TIMEOUT 90)
+        endif()
         if(TARGET hs_render_scene_probe)
             add_test(NAME content.scene-probe-action
                 COMMAND "${Python3_EXECUTABLE}"
@@ -2637,7 +2727,7 @@ if(HS_BUILD_TESTS)
     hs_configure_target(hs_vfx_persistent_tests)
     add_test(NAME rendering.vfx-persistent-lifetime COMMAND hs_vfx_persistent_tests)
     add_executable(hs_render_graph_tests Tests/render_graph_tests.cpp)
-    target_link_libraries(hs_render_graph_tests PRIVATE hs_renderer_d3d12 D3D12MemoryAllocator d3d12 dxgi)
+    target_link_libraries(hs_render_graph_tests PRIVATE hs_renderer_d3d12 hs_render_data D3D12MemoryAllocator d3d12 dxgi)
     target_include_directories(hs_render_graph_tests PRIVATE Source/RendererD3D12/Private)
     target_compile_definitions(hs_render_graph_tests PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
     hs_configure_target(hs_render_graph_tests)
@@ -2714,6 +2804,7 @@ if(HS_BUILD_TESTS)
         Source/RendererD3D12/Public Source/RendererD3D12/Private)
     hs_configure_target(hs_vfx_ribbon_state_tests)
     add_test(NAME runtime.vfx-ribbon-state COMMAND hs_vfx_ribbon_state_tests)
+    if(TARGET hs_shipping_content)
     add_executable(hs_runtime_tests Tests/runtime_tests.cpp Tests/shipping_image_tests.cpp)
     target_sources(hs_runtime_tests PRIVATE
         $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_audio_io>>
@@ -2730,6 +2821,7 @@ if(HS_BUILD_TESTS)
         BUILD_DEPENDS ${HS_RUNTIME_TEST_GENERATION_TARGET})
     set_tests_properties(runtime.integration PROPERTIES TIMEOUT 30 ENVIRONMENT
         "HS_TEST_GENERATION_POINTER=${CMAKE_CURRENT_BINARY_DIR}/GenerationState/${HS_RUNTIME_TEST_GENERATION_SCOPE}.json;HS_TEST_GENERATION_SCOPE=${HS_RUNTIME_TEST_GENERATION_SCOPE}")
+    endif()
     if(HS_BUILD_CONTENT_TOOLS)
         set(HS_UI_TEXT_GENERATION_TARGET hs_test_gameplay_generation)
         set(HS_UI_TEXT_GENERATION_SCOPE test-gameplay)

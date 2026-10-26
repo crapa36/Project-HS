@@ -190,12 +190,15 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
             left.font_pixels == right.font_pixels && left.utf8_text == right.utf8_text;
     };
     const auto &cached = ui_raster_models[frame_index];
+    auto &surface = ui_surfaces[frame_index];
+    if (surface.copy_completion.IsSatisfiedBy(graph_queue_executor.Completed()))
+        surface.completed_version = surface.submitted_version;
     if (ui_surfaces[frame_index].bitmap_valid &&
-        (frames[frame_index].ui_initialized || ui_dirty[frame_index]) &&
+        (surface.completed_version == surface.bitmap_version || ui_dirty[frame_index]) &&
         cached.size() == models.size() && std::equal(cached.begin(), cached.end(), models.begin(), equal))
         return Result::Success();
-    ui_text_layouts.resize(models.size());
-    auto &surface = ui_surfaces[frame_index];
+    auto candidate_layouts = ui_text_layouts;
+    candidate_layouts.resize(models.size());
     // A failed raster cannot make the old model a valid bitmap on the next retry.
     surface.bitmap_valid = false;
     ui_dirty[frame_index] = false;
@@ -255,7 +258,11 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
 
         const auto end = std::find(model.utf8_text.begin(), model.utf8_text.end(), '\0');
         const auto byte_count = static_cast<int>(end - model.utf8_text.begin());
-        if (byte_count == 0) continue;
+        if (byte_count == 0)
+        {
+            candidate_layouts[model_index] = {};
+            continue;
+        }
         const auto font_size = static_cast<float>(
             std::clamp<std::uint16_t>(model.font_pixels, 8, 128));
         const auto inset_x = model.kind == UiModel::Kind::Button ||
@@ -277,7 +284,7 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                                     : D2D1_COLOR_F{1, 1, 1, 1});
         const auto text_width = std::max(text_rectangle.right - text_rectangle.left, 1.0f);
         const auto text_height = std::max(text_rectangle.bottom - text_rectangle.top, 1.0f);
-        auto &cached_layout = ui_text_layouts[model_index];
+        auto &cached_layout = candidate_layouts[model_index];
         const std::string_view utf8{model.utf8_text.data(), static_cast<std::size_t>(byte_count)};
         if (!cached_layout.layout || cached_layout.utf8 != utf8 || cached_layout.kind != model.kind ||
             cached_layout.font_size != font_size || cached_layout.width != text_width ||
@@ -374,7 +381,9 @@ Result D3D12Renderer::Impl::RasterizeUi(std::uint32_t frame_index,
                     pixels + static_cast<std::size_t>(row) * stride, static_cast<std::size_t>(ui_row_bytes));
     }
     ui_raster_models[frame_index].assign(models.begin(), models.end());
+    ui_text_layouts.swap(candidate_layouts);
     ui_dirty[frame_index] = true;
+    ++surface.bitmap_version;
     surface.bitmap_valid = true;
     return Result::Success();
 }

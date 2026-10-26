@@ -12,11 +12,15 @@
 #include "graphics_settings_commit.hpp"
 #include "runtime_diagnostics.hpp"
 #include "main_wake.hpp"
+#include "ui_draw_packet.hpp"
 
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <mutex>
 #include <memory>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace hs
@@ -67,6 +71,7 @@ struct RenderPorts
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &renderer_graphics_ui;
     const std::atomic<std::uint8_t> &session_phase;
     const std::atomic<std::uint8_t> &ui_page;
+    runtime_detail::UiDrawPackets &ui_packets;
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
 };
@@ -85,7 +90,7 @@ struct SimulationPorts
     BoundedSpscQueue<PresentationEvent, 8192> &presentation_events;
     BoundedSpscQueue<QueuedAudioEvent, 1024> &sim_audio_events;
     BoundedSpscQueue<SettingsData, 8> &presentation_settings;
-    BoundedSpscQueue<UiAction, 64> &ui_actions;
+    BoundedSpscQueue<runtime_detail::UiActionEnvelope, 64> &ui_actions;
     BoundedSpscQueue<DebugCommand, 64> &debug_commands;
     std::atomic<Tick> &completed_tick;
     std::atomic<GameplayChecksum> &gameplay_checksum;
@@ -105,7 +110,10 @@ struct SimulationPorts
     std::atomic<std::uint8_t> &settings_page;
     std::atomic<std::uint8_t> &character_details_page;
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> &presentation_graphics_ui;
-    const std::atomic<bool> &ui_input_rejected;
+    std::atomic<bool> &ui_input_rejected;
+    std::atomic<std::uint64_t> &current_session_id;
+    std::atomic<std::uint64_t> &stale_ui_action_drops;
+    runtime_detail::UiDrawPackets &ui_packets;
     runtime_detail::DiagnosticClock capture_clock{};
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
@@ -148,10 +156,11 @@ struct SimulationPorts
         }
     }
 
-    void PublishSessionProbe(const SessionProbe &probe)
+    void PublishSessionProbe(const SessionProbe &probe, std::uint64_t session_id = 0)
     {
         std::scoped_lock lock(session_probe_mutex);
         session_probe = probe;
+        current_session_id.store(session_id, std::memory_order_release);
     }
 };
 
@@ -185,9 +194,10 @@ struct RuntimeChannels
     BoundedSpscQueue<GraphicsSettingsCommitRequest, 8> renderer_settings;
     BoundedSpscQueue<GraphicsSettingsAck, 8> renderer_settings_acks;
     BoundedSpscQueue<SettingsData, 8> presentation_settings;
-    BoundedSpscQueue<UiAction, 64> ui_actions;
+    BoundedSpscQueue<runtime_detail::UiActionEnvelope, 64> ui_actions;
     BoundedSpscQueue<UiCommand, 64> ui_commands;
     std::uint64_t rejected_ui_commands{}; // Main-thread admission counter.
+    std::atomic<std::uint64_t> stale_ui_action_drops{};
     std::atomic<bool> ui_input_rejected{};
     BoundedSpscQueue<NativeWindowMessage, 256> window_messages;
     BoundedSpscQueue<DebugCommand, 64> debug_commands;
@@ -196,6 +206,7 @@ struct RuntimeChannels
     std::atomic<std::uint8_t> session_phase{};
     mutable std::mutex session_probe_mutex;
     SessionProbe session_probe{};
+    std::atomic<std::uint64_t> current_session_id{};
     std::atomic<std::uint8_t> ui_page{};
     std::atomic<std::uint8_t> collection_skill{};
     std::atomic<std::uint8_t> character_skill{};
@@ -218,11 +229,13 @@ struct RuntimeChannels
     // Main combines it with validated requested intent; simulation only reads it.
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> renderer_graphics_ui;
     std::atomic<std::shared_ptr<const GraphicsSettingsUiModel>> presentation_graphics_ui;
+    runtime_detail::UiDrawPackets ui_packets;
 
-    void PublishSessionProbe(const SessionProbe &probe)
+    void PublishSessionProbe(const SessionProbe &probe, std::uint64_t session_id = 0)
     {
         std::scoped_lock lock(session_probe_mutex);
         session_probe = probe;
+        current_session_id.store(session_id, std::memory_order_release);
     }
 
     [[nodiscard]] SessionProbe ReadSessionProbe() const
@@ -237,7 +250,7 @@ struct RuntimeChannels
                 presentation_events, render_audio_events, resize_commands, renderer_settings,
                 renderer_settings_acks, window_messages, debug_commands, rendered_frames, rendered_particles,
                 dropped_input_edges, dropped_presentation_events, devtools_capture_mouse,
-                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, main_wake};
+                devtools_capture_keyboard, renderer_graphics_ui, session_phase, ui_page, ui_packets, main_wake};
     }
 
     [[nodiscard]] SimulationPorts ForSimulation() noexcept
@@ -252,7 +265,7 @@ struct RuntimeChannels
                 pending_rebind_slot, best_level, completed_run_kills,
                 completed_run_wins, dropped_presentation_events,
                 settings_group, settings_page, character_details_page, presentation_graphics_ui,
-                ui_input_rejected, capture_clock, main_wake};
+                ui_input_rejected, current_session_id, stale_ui_action_drops, ui_packets, capture_clock, main_wake};
     }
 };
 

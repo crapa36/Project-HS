@@ -136,14 +136,27 @@ class MainAudioSession
         { Fail(MainAudioFailure::Native, {}, "listener_update"); return; }
         if (pending_music_ && Prepared(music_ready, pending_music_->asset, "music_prepare"))
         {
-            // Keep the previous track while the next required complete chunk loads.
-            if (active_music_.value) { audio_.Stop(active_music_); active_music_ = {}; }
+            const auto previous_music = active_music_;
+            const bool must_stop_before_play = pending_music_restart_ ||
+                (previous_music.value && previous_music.value == pending_music_->asset.value);
+            // For a different cue, admission is the commit point: a Limited result
+            // leaves the current track and its owner intent intact for the next Update.
+            if (must_stop_before_play && previous_music.value)
+            { audio_.Stop(previous_music); active_music_ = {}; }
             const auto result = audio_.Play(*pending_music_, pending_music_dequeued_qpc_);
             if (result != AudioPlayResult::Limited)
             {
                 CheckPlay(result, pending_music_->asset, "music_play");
-                if (failure_ == MainAudioFailure::None) active_music_ = pending_music_->asset;
+                if (failure_ == MainAudioFailure::None)
+                {
+                    active_music_ = pending_music_->asset;
+                    if (!must_stop_before_play && previous_music.value &&
+                        previous_music.value != active_music_.value)
+                        audio_.Stop(previous_music);
+                }
                 pending_music_.reset();
+                pending_music_restart_ = false;
+                pending_music_dequeued_qpc_ = 0;
             }
         }
         if (failure_ != MainAudioFailure::None) return;
@@ -162,11 +175,17 @@ class MainAudioSession
         if (pending_music_ && pending_music_->asset.value == event.asset.value)
         {
             if (!pending_music_dequeued_qpc_) pending_music_dequeued_qpc_ = dequeued_qpc;
+            pending_music_restart_ = pending_music_restart_ || restart;
             return;
         }
-        if (pending_music_) { audio_.Stop(pending_music_->asset); pending_music_.reset(); }
+        if (pending_music_)
+        {
+            audio_.Stop(pending_music_->asset); pending_music_.reset();
+            pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0;
+        }
         if (!restart && active_music_.value == event.asset.value) return;
         pending_music_ = event;
+        pending_music_restart_ = restart;
         pending_music_dequeued_qpc_ = dequeued_qpc;
         (void)audio_.RequestCue(event.asset);
     }
@@ -185,7 +204,10 @@ class MainAudioSession
         if (new_session)
         {
             if (pending_music_ && (initialized_ || facts.phase != SessionPhase::MainMenu))
-            { audio_.Stop(pending_music_->asset); pending_music_.reset(); }
+            {
+                audio_.Stop(pending_music_->asset); pending_music_.reset();
+                pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0;
+            }
             CancelAmbience(); // Close old-session active/pending SFX ownership before its first new sound.
             audio_.BeginSession(facts.session_id);
             session_id_ = facts.session_id; initialized_ = true;
@@ -263,8 +285,11 @@ class MainAudioSession
     {
         if (DecodeAudioAction(event.parameters) == AudioEventAction::Stop)
         {
-            if (pending_music_ && pending_music_->asset.value == event.asset.value) pending_music_.reset();
+            if (pending_music_ && pending_music_->asset.value == event.asset.value)
+            { pending_music_.reset(); pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0; }
             if (pending_ambience_ && pending_ambience_->asset.value == event.asset.value) pending_ambience_.reset();
+            if (active_music_.value == event.asset.value) active_music_ = {};
+            if (active_ambience_.value == event.asset.value) active_ambience_ = {};
             audio_.Stop(event.asset);
         }
         else if (audio_.IsTransitionTrack(event.asset)) RequestMusic(event, false, dequeued_qpc);
@@ -276,6 +301,7 @@ class MainAudioSession
     std::optional<PresentationEvent> pending_music_, pending_ambience_;
     std::uint64_t pending_music_dequeued_qpc_{};
     AssetId active_music_{}, active_ambience_{};
+    bool pending_music_restart_{};
     Float3 listener_{};
     std::uint64_t session_id_{};
     Tick tick_{};

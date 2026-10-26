@@ -40,7 +40,11 @@ struct CombatState
                                        std::size_t, HitKeyHash>;
     DamageCommandBuffer combat;
     std::vector<ScheduledAction> scheduled_actions;
+    std::uint64_t next_scheduled_sequence{};
+    bool scheduled_actions_dirty{};
     std::vector<BossAction> boss_actions;
+    std::uint64_t next_boss_schedule_sequence{};
+    bool boss_actions_dirty{};
     std::vector<CastHitRecord> cast_hits;
     std::vector<AreaHitRecord> area_hits;
     // Derived lookup only; authoritative traversal and checksums use the vectors above.
@@ -57,10 +61,9 @@ struct CombatState
     std::array<BossDeathVisualView, kCosmeticOwnerCapacity> boss_death_visuals{};
     std::size_t boss_death_visual_count{};
     EnemySpatialGrid enemy_grid;
-    EnemyQuery nearest_query, area_query, chain_query;
+    EnemyQuery nearest_query, area_query, chain_query, collision_query;
     // Transient compact working set for the ordered separation pass; never authoritative.
     std::vector<Float2> separation_positions;
-    std::vector<std::size_t> collision_candidates;
     struct CollisionHit { std::size_t enemy; float time; };
     std::vector<CollisionHit> collision_hits;
 };

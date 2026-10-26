@@ -452,6 +452,7 @@ class RenderGraphBuilder
   private:
     [[nodiscard]] std::uint64_t PlanCompilationCount() const noexcept;
     [[nodiscard]] std::uint64_t PlanReuseCount() const noexcept;
+    [[nodiscard]] std::uint64_t PlanInputBuildCount() const noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 

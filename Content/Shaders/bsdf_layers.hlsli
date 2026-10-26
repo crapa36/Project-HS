@@ -205,7 +205,7 @@ HsSurfaceClosure HsBsdfCoatSurface(HsSurfaceClosure surface)
 
 float HsBsdfCoatFresnel(float cosine)
 {
-    return 0.04 + 0.96 * pow(1.0 - saturate(cosine), 5.0);
+    return 0.04 + 0.96 * HsBsdfPow5(1.0 - saturate(cosine));
 }
 
 bool HsBsdfCanUseCoatedIbl(HsSurfaceClosure surface, float no_v)

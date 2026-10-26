@@ -1,4 +1,6 @@
 #include <hs/render_data/triangle_sample.hpp>
+#include <hs/render_data/scene_probe.hpp>
+#include <hs/core/cooked_format.hpp>
 
 #include <array>
 #include <cmath>
@@ -192,6 +194,57 @@ void TestDegenerateScaleAndNonfinite()
                  .valid,
             "nonpositive viewport extent accepted");
 }
+
+void TestSceneProbeInputIdentity()
+{
+    const auto asset=hs::MakeAssetId("render/lighting/local_probes.spkg");
+    const std::array<std::string,4> dependencies{
+        "environment.spkg","layout.spkg","lights.spkg","materials.spkg"};
+    rd::SceneProbeDescription description;
+    description.edge=16; description.ggx_samples=64; description.revisions={1,2,3,4};
+    description.environment_dependency=0; description.static_layout_dependency=1;
+    description.light_dependency=2; description.material_dependency=3;
+    rd::SceneProbeRecord probe; probe.stable_id=1;
+    probe.influence_min=probe.projection_min={-1,-1,-1};
+    probe.influence_max=probe.projection_max={1,1,1};
+    const std::array probes{probe};
+    const std::array<std::string,4> input_digests{
+        std::string(64,'1'),std::string(64,'2'),std::string(64,'3'),std::string(64,'4')};
+    const std::array inputs{
+        rd::SceneProbeRevisionInput{"environment.spkg",input_digests[0]},
+        rd::SceneProbeRevisionInput{"layout.spkg",input_digests[1]},
+        rd::SceneProbeRevisionInput{"lights.spkg",input_digests[2]},
+        rd::SceneProbeRevisionInput{"materials.spkg",input_digests[3]}};
+    const auto layout=rd::BuildSceneProbePackage(asset,dependencies,description,probes);
+    const auto layout_view=rd::ReadSceneProbePackage(layout,asset);
+    const auto identity=rd::DeriveSceneProbeInputIdentity(layout_view.description,layout_view.probes,
+        layout_view.dependencies,inputs);
+
+    auto baked_description=description; baked_description.revisions={41,42,43,44};
+    const std::vector<hs::Float4> raw(6*16*16,{1,1,1,1});
+    const std::vector<hs::Float4> filtered(6*(256+64+16+4+1),{0.5f,0.5f,0.5f,1});
+    const std::vector<hs::Float4> sh(9,{0.25f,0.25f,0.25f,0});
+    const std::vector<float> distance(raw.size(),probe.capture_distance);
+    const auto baked=rd::BuildSceneProbePackage(asset,dependencies,baked_description,probes,
+        {raw,filtered,sh,distance});
+    const auto baked_view=rd::ReadSceneProbePackage(baked,asset);
+    Require(baked_view.payload==rd::SceneProbePayload::Baked,"fixture must contain real four-payload SPB1");
+    Require(rd::DeriveSceneProbeInputIdentity(baked_view.description,baked_view.probes,
+        baked_view.dependencies,inputs)==identity,
+        "baked payload bytes and replacement revisions must not affect probe input identity");
+
+    auto changed=probe; changed.weight=0.5f;
+    const std::array changed_probes{changed};
+    Require(rd::DeriveSceneProbeInputIdentity(description,changed_probes,dependencies,inputs)!=identity,
+        "semantic probe record changes must affect probe input identity");
+    auto changed_description=description; changed_description.edge=32;
+    Require(rd::DeriveSceneProbeInputIdentity(changed_description,probes,dependencies,inputs)!=identity,
+        "capture description changes must affect probe input identity");
+    const std::string changed_digest(64,'a');
+    auto changed_inputs=inputs; changed_inputs[1].sha256=changed_digest;
+    Require(rd::DeriveSceneProbeInputIdentity(description,probes,dependencies,changed_inputs)!=identity,
+        "source dependency changes must affect probe input identity");
+}
 } // namespace
 
 int main()
@@ -202,7 +255,8 @@ int main()
         TestUnequalWDerivatives();
         TestCrossingAndZeroW();
         TestDegenerateScaleAndNonfinite();
-        std::puts("Triangle sample tests passed.");
+        TestSceneProbeInputIdentity();
+        std::puts("Render-data CPU tests passed.");
         return 0;
     }
     catch (const std::exception &error)

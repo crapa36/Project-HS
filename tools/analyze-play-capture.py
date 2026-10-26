@@ -474,7 +474,7 @@ def analyze(directory):
                 pass_id = int(row["pass_id"])
                 if pass_id in seen: raise ValueError(f"Duplicate GPU pass {pass_id} in completed frame {identity}")
                 seen.add(pass_id)
-                if row["pass_name"].startswith("RenderCriticalPath"): continue
+                if (row["pass_name"].startswith("RenderCriticalPath") or row["pass_name"] == "SourceRenderOutputReady"): continue
                 frequency, ns = number(row.get("timestamp_frequency")), number(row.get("nanoseconds"))
                 valid = row.get("measured") == "1" and frequency is not None and frequency > 0 and ns is not None and ns >= 0
                 duration = ns / 1e6 if valid else None

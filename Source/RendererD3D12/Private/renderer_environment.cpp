@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <bit>
 #include <cmath>
+#include <cstring>
 
 namespace hs
 {
@@ -502,6 +503,17 @@ void D3D12Renderer::Impl::WriteEnvironmentMaterialTextureDescriptor(
 {
     StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+    auto &bank = environment_descriptor_banks[frame_slot];
+    if (bank.heap.Get() != srv_cpu_heap.Get() || bank.first.ptr != handle.ptr || bank.stride != srv_stride)
+    {
+        bank = {};
+        bank.heap = srv_cpu_heap;
+        bank.first = handle;
+        bank.stride = srv_stride;
+    }
+    auto &entry = bank.entries[material * render_data::kMaterialTextureSlots + slot];
+    // This fixed SRV depends only on the retained resource's immutable native description.
+    if (entry.written && entry.resource.Get() == resource) return;
     handle.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
                    kMaterialTextureDescriptorOffset +
                    material * render_data::kMaterialTextureSlots + slot) * srv_stride;
@@ -519,6 +531,8 @@ void D3D12Renderer::Impl::WriteEnvironmentMaterialTextureDescriptor(
         view.Texture2DArray.ArraySize = description.DepthOrArraySize;
     }
     device->CreateShaderResourceView(resource, &view, handle);
+    entry.resource = resource;
+    entry.written = true;
 }
 
 void D3D12Renderer::Impl::PublishEnvironmentMaterialTextures(std::uint32_t frame_slot) const noexcept

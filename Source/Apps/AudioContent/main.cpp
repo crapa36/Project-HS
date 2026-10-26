@@ -127,6 +127,8 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
 {
     const auto result_path = build_root / "Actions/audio/result.json";
     if (!fs::exists(result_path)) return false;
+    try
+    {
     const ap::ActionResultSnapshot snapshot(build_root, "audio");
     Require(snapshot.ActionId() == spec.action_id, "cached audio Action ID changed");
     if (snapshot.ActionKeyValue() != key) return false;
@@ -164,6 +166,12 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec, std::string
     if (!fs::exists(result_path.parent_path() / "result.d")) return false;
     RequireRegularFile(result_path.parent_path() / "result.d");
     return true;
+    }
+    catch (const std::exception &)
+    {
+        // Invalid cached products must reach Publish's lease-aware repair path.
+        return false;
+    }
 }
 
 void Produce(const fs::path &source_root, const fs::path &build_root)

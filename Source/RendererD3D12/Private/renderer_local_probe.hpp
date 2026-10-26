@@ -7,6 +7,7 @@
 #include <d3d12.h>
 
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <span>
@@ -100,6 +101,9 @@ class LocalProbeSystem
     [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *,
         std::span<const std::byte> package_bytes, const ShaderReader &, LocalProbeCandidate &) const;
     [[nodiscard]] Result Commit(LocalProbeCandidate &&, const CompletionSet &completed);
+    [[nodiscard]] Result PrepareCapture(const ShaderReader &, const CompletionSet &completed);
+    [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
+        std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeInputs &, LocalProbeOutputs &);
     // Lets the concrete draw adapter allocate private face bindings only while
     // actual capture can advance. Publication/pause frames need no such upload.

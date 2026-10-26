@@ -7,7 +7,6 @@
 #include <iterator>
 #include <optional>
 #include <span>
-#include <stdexcept>
 #include <utility>
 
 namespace hs
@@ -57,6 +56,7 @@ template <typename Value> class TickRows
         using iterator_category = std::input_iterator_tag;
         using reference = const Value &;
         using pointer = const Value *;
+        // The reference/pointer belongs to this iterator and expires at increment or destruction.
         Iterator() = default;
         Iterator(const TickRows &rows, std::size_t index) : rows_(&rows), index_(index) { Seek(); }
         reference operator*() const { assert(value_); return *value_; }
@@ -84,13 +84,6 @@ template <typename Value> class TickRows
     Iterator end() const { return {*this, stored_}; }
     std::size_t size() const noexcept { return visible_; }
     bool empty() const noexcept { return visible_ == 0; }
-    Value operator[](std::size_t ordinal) const
-    {
-        auto row = begin();
-        while (ordinal-- && row != end()) ++row;
-        if (row == end()) throw std::out_of_range("Tick read row is outside its scope range.");
-        return *row;
-    }
   private:
     const void *owner_{};
     std::size_t stored_{}, visible_{};

@@ -1952,6 +1952,50 @@ void TestProcStampedProjectileBindings()
 
 }
 
+void TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity()
+{
+    using namespace hs;
+    using runtime_detail::PreparedPairFacts;
+    PersistentVfxVisual prior;
+    prior.stable_id = 7;
+    prior.kind = PersistentVfxKind::ProjectileHead;
+    prior.position.x = 1.0f;
+    auto duplicate_prior = prior;
+    duplicate_prior.position.x = 2.0f;
+    const std::array previous{prior, duplicate_prior};
+    auto current_owner = prior;
+    current_owner.position.x = 4.0f;
+    const std::array current{current_owner, duplicate_prior};
+    RenderInstance instance_a; instance_a.stable_id = 91; instance_a.position.x = 3.0f;
+    RenderInstance instance_b = instance_a; instance_b.position.x = 5.0f;
+    const std::array instances{instance_a, instance_b};
+    CapturedRenderInstance capture_a;
+    capture_a.session_id = 11; capture_a.sequence = 22; capture_a.tick = 33;
+    capture_a.source_entity_id = 44; capture_a.instance.position.x = 6.0f;
+    CapturedRenderInstance capture_b = capture_a; capture_b.instance.position.x = 8.0f;
+    const std::array captures{capture_a, capture_b};
+
+    PreparedPairFacts facts;
+    PreparedPairFacts::Key key{.session_id = 11, .previous_publication = 2,
+        .current_publication = 3, .quality = 1, .binding_revision = 5,
+        .geometry_revision = 6};
+    facts.Prepare(key, previous, current, instances, captures);
+    Check(facts.Previous(current_owner, previous)->position.x == 1.0f &&
+          facts.Current(7, PersistentVfxKind::ProjectileHead, current)->position.x == 4.0f,
+          "pair facts changed source-order first-match semantics");
+    Check(facts.Instance(91, instances)->position.x == 3.0f &&
+          facts.Capture(11, 22, 33, 44, captures)->instance.position.x == 6.0f,
+          "pair facts changed first instance/capture match");
+
+    auto changed_prior = prior; changed_prior.position.x = 9.0f;
+    const std::array republished_previous{changed_prior};
+    key.previous_publication = 3;
+    key.current_publication = 4;
+    facts.Prepare(key, republished_previous, current, instances, captures);
+    Check(facts.Previous(current_owner, republished_previous)->position.x == 9.0f,
+          "new publication pair reused stale adaptation indexes");
+}
+
 int main()
 {
     try
@@ -1965,6 +2009,7 @@ int main()
         TestPlayerStampedEntityBindings();
         TestChargedOverchargeOwner();
         TestProcStampedProjectileBindings();
+        TestPreparedPairFactsKeepFirstMatchAndPublicationIdentity();
         TestStatusTickIdentity();
         TestOwnedVisualLinks();
         TestPointEvent();

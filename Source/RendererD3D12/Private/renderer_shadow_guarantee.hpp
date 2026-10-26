@@ -69,6 +69,7 @@ struct ShadowCommandDemand
     std::array<std::uint64_t,256> coarse{},weights{};
     std::uint32_t maximum{};
     VirtualShadowCsmReason reason{VirtualShadowCsmReason::Guaranteed};
+    bool uses_spatial_facts{};
 };
 // Fixed native command storage, partitioned without overlap. Coarse commands
 // reserve first; remaining capacity follows actual segment populations. Empty
@@ -213,6 +214,13 @@ struct ShadowRootCoverageDomain
     Float4 right{},up{},forward{};
     double minimum_x{},minimum_y{},maximum_x{},maximum_y{},minimum_z{},maximum_z{};
 };
+[[nodiscard]] inline bool ShadowRootReceiverBoundsValid(Float4 minimum,Float4 maximum) noexcept
+{
+    return std::isfinite(minimum.x)&&std::isfinite(minimum.y)&&std::isfinite(minimum.z)&&std::isfinite(minimum.w)&&
+        std::isfinite(maximum.x)&&std::isfinite(maximum.y)&&std::isfinite(maximum.z)&&std::isfinite(maximum.w)&&
+        minimum.x<=maximum.x&&minimum.y<=maximum.y&&minimum.z<=maximum.z&&
+        (minimum.w==0.0f||minimum.w==1.0f)&&(maximum.w==0.0f||maximum.w==1.0f);
+}
 [[nodiscard]] inline bool ShadowRootContainsXY(Float3 point,const ShadowRootCoverageDomain &domain) noexcept
 {
     if(!std::isfinite(point.x)||!std::isfinite(point.y)||!std::isfinite(point.z))return false;
@@ -235,9 +243,12 @@ struct ShadowRootCoverageDomain
         z-ez-radius>=domain.minimum_z&&z+ez+radius<=domain.maximum_z;
 }
 template<typename Casters>
-[[nodiscard]] ShadowCommandDemand ComputeShadowCommandDemand(const ShadowGuaranteeFacts &f,const Casters &casters)
+[[nodiscard]] ShadowCommandDemand ComputeShadowCommandDemand(const ShadowGuaranteeFacts &f,const Casters &casters,
+    ShadowCommandDemand result={})
 {
-    ShadowCommandDemand result;
+    // A retained prefix must have been evaluated with the same relevant demand facts.
+    // Preserve the original first-failure result before visiting the suffix.
+    if(result.reason!=VirtualShadowCsmReason::Guaranteed)return result;
     const auto groups=f.draw_group_count;
     if(groups>result.coarse.size()/2) { result.reason=VirtualShadowCsmReason::CommandGroupLimit;return result; }
     const double side=f.page_world_size,guard=double(f.world_texel)*2;
@@ -254,6 +265,7 @@ template<typename Casters>
         const auto segment=(is_static?0:groups)+caster.draw_group;
         ++result.weights[segment]; // Seeded static geometry still renders requested fine pages.
         if(seeded)continue;
+        result.uses_spatial_facts=true;
         const auto [x,ex]=ShadowProjectCoordinate(bounds,f.right);
         const auto [y,ey]=ShadowProjectCoordinate(bounds,f.up);
         const auto [z,ez]=ShadowProjectCoordinate(bounds,f.forward);

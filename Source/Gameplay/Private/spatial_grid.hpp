@@ -26,6 +26,8 @@ struct EnemySpatialGrid
     std::array<std::size_t, kGridCellCount + 1> offsets{};
     std::vector<Entry> entries;
     std::vector<std::size_t> rows;
+    Tick build_tick{};
+    std::uint64_t actor_generation{};
 
     void BeginBuild()
     {
@@ -52,6 +54,10 @@ struct EnemySpatialGrid
                 for (auto x = entry.minimum_x; x <= entry.maximum_x; ++x)
                     rows[cursor[static_cast<std::size_t>(y * kGridDimension + x)]++] = entry.actor;
     }
+    void MarkBuilt(Tick tick, std::uint64_t generation) noexcept
+    { build_tick=tick; actor_generation=generation; }
+    bool IsCurrent(Tick tick, std::uint64_t generation) const noexcept
+    { return build_tick==tick && actor_generation==generation; }
     std::span<const std::size_t> operator[](std::size_t cell) const noexcept
     {
         return std::span(rows).subspan(offsets[cell], offsets[cell + 1] - offsets[cell]);
@@ -91,7 +97,7 @@ struct EnemyQuery
     std::vector<std::uint8_t> visited;
 
     void Collect(const EnemySpatialGrid &grid, Float2 minimum, Float2 maximum,
-                 float arena_half_extent, std::size_t actor_count)
+                 float arena_half_extent, std::size_t actor_count, bool canonical_order = true)
     {
         for (const auto row : rows) visited[row] = 0;
         rows.clear();
@@ -104,7 +110,7 @@ struct EnemyQuery
             for (auto x = x0; x <= x1; ++x)
                 for (const auto row : grid[static_cast<std::size_t>(y * kGridDimension + x)])
                     if (!visited[row]) { visited[row] = 1; rows.push_back(row); }
-        std::ranges::sort(rows);
+        if(canonical_order) std::ranges::sort(rows);
     }
 };
 

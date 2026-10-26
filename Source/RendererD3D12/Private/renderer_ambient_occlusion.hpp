@@ -32,7 +32,7 @@ struct alignas(16) AmbientOcclusionConstants
     DirectX::XMFLOAT4 history_size{};
     DirectX::XMFLOAT4 previous_depth_parameters{}; // P33,P34,P43,P44.
     DirectX::XMFLOAT4 jitter_uv{}; // Current xy, previous zw; logical viewport UV.
-    DirectX::XMFLOAT4 gtao_parameters{1.0f, 1.0f, 0.8f, 0.0f}; // Radius m, strength, falloff start.
+    DirectX::XMFLOAT4 gtao_parameters{1.0f, 1.0f, 0.8f, 0.0f}; // Radius, strength, falloff start, CPU-validated inverse-projection fast path.
     DirectX::XMFLOAT4 filter_parameters{0.03f, 0.85f, 0.9f, 0.02f}; // Depth, normal, history, bilateral.
     DirectX::XMFLOAT4 contact_parameters{0.75f, 0.1f, 0.02f, 0.0f}; // Reach, thickness, bias in m.
     DirectX::XMFLOAT4 toward_light{}; // Normalized world direction toward sun.

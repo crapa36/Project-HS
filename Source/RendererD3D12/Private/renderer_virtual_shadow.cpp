@@ -33,10 +33,6 @@ struct alignas(16) GpuCaster
     DirectX::XMUINT4 draw, indexed, properties;
 };
 static_assert(sizeof(GpuCaster) == 80);
-struct RootIndexedCommand { std::uint32_t pass; D3D12_DRAW_INDEXED_ARGUMENTS draw; };
-struct RootMeshCommand { std::uint32_t pass; D3D12_DISPATCH_MESH_ARGUMENTS draw; };
-static_assert(sizeof(RootIndexedCommand)==kIndexedStride);
-static_assert(sizeof(RootMeshCommand)==kMeshStride);
 static_assert(sizeof(VirtualShadowReceiver) == 32);
 Result Invalid(std::string_view message)
 {
@@ -109,28 +105,32 @@ void Uav(ID3D12Device *device, ID3D12Resource *resource, std::uint32_t stride, D
     if (!stride) { d.Format = DXGI_FORMAT_R32_TYPELESS; d.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW; }
     device->CreateUnorderedAccessView(resource, nullptr, &d, handle);
 }
+ShadowGuaranteeFacts ShadowDemandFacts(const VirtualShadowInputs &in,const VirtualShadowConstants &c)
+{
+    ShadowGuaranteeFacts facts;
+    const auto copy=[](DirectX::XMFLOAT4 v) { return Float4{v.x,v.y,v.z,v.w}; };
+    facts.right=copy(c.light_right); facts.up=copy(c.light_up); facts.forward=copy(c.light_forward);
+    facts.depth=copy(c.depth);
+    facts.minimum_x=c.windows[2].x; facts.minimum_y=c.windows[2].y;
+    facts.page_world_size=c.clipmaps[2].x; facts.world_texel=c.clipmaps[2].y;
+    facts.draw_group_count=static_cast<std::uint32_t>(in.draw_groups.size());
+    facts.compatible_bake=in.baked_static && c.baked_depth.z!=0 && c.options.y!=0;
+    return facts;
+}
 }
 
 VirtualShadowGuarantee CheckVirtualShadowGuarantee(const VirtualShadowInputs &in,
     const VirtualShadowConstants &c, std::uint32_t physical_pages, bool seed_available,
-    std::span<ShadowCommandSegment> command_segments,std::uint32_t command_capacity)
+    std::span<ShadowCommandSegment> command_segments,std::uint32_t command_capacity,bool fixed_root_eligible,
+    const ShadowCommandDemand &commands)
 {
-    ShadowGuaranteeFacts facts;
-    const auto copy = [](DirectX::XMFLOAT4 v) { return Float4{v.x,v.y,v.z,v.w}; };
-    facts.right = copy(c.light_right); facts.up = copy(c.light_up); facts.forward = copy(c.light_forward);
-    facts.depth = copy(c.depth);
+    auto facts=ShadowDemandFacts(in,c);
     for (unsigned i=0;i<3;++i) facts.window_sides[i] = static_cast<std::uint32_t>(c.windows[i].z);
-    facts.minimum_x = c.windows[2].x; facts.minimum_y = c.windows[2].y;
-    facts.page_world_size = c.clipmaps[2].x; facts.world_texel = c.clipmaps[2].y;
     facts.physical_pages = physical_pages; facts.filter_samples = c.options.w;
-    facts.segment_capacity = c.options.z; facts.draw_group_count = static_cast<std::uint32_t>(in.draw_groups.size());
-    facts.command_capacity=command_capacity;
-    facts.compatible_bake = in.baked_static && c.baked_depth.z != 0 && c.options.y != 0;
+    facts.segment_capacity = c.options.z; facts.command_capacity=command_capacity;
     facts.seed_available = seed_available;
     facts.required_receiver_domains=in.required_receiver_domains;facts.closed_receiver_domains=in.closed_receiver_domains;
     facts.frustum_receiver_index=in.frustum_receiver_index;
-    facts.csm_query_frusta_valid=in.main_csm_view_projection_valid &&
-        BuildShadowCsmQueryFrusta(in.main_csm_view_projection,facts.csm_query_frusta);
     const auto &matrix=in.receiver_view_projection;
     for(unsigned face=0;face<6;++face) for(unsigned row=0;row<4;++row)
     {
@@ -146,9 +146,8 @@ VirtualShadowGuarantee CheckVirtualShadowGuarantee(const VirtualShadowInputs &in
         const float w = DirectX::XMVectorGetW(homogeneous);
         if (!std::isfinite(w) || !(w > 0)) { facts.camera_valid = false; break; }
     }
-    // One current-caster walk supplies both the partition and the proof. Even
-    // fallback frames need a bounded layout for their normal GPU page admission.
-    const auto commands=ComputeShadowCommandDemand(facts,in.casters);
+    // The retained stable prefix plus current dynamic suffix supplies both
+    // the partition and proof, including normal fallback page admission.
     const auto count=std::size_t(facts.draw_group_count)*2;
     if(command_segments.size()!=count)return {true,VirtualShadowCsmReason::CommandGroupLimit};
     if(count<=commands.coarse.size())
@@ -156,6 +155,20 @@ VirtualShadowGuarantee CheckVirtualShadowGuarantee(const VirtualShadowInputs &in
             std::span(commands.weights).first(count),command_segments));
     else static_cast<void>(PlanShadowCommandSegments(command_capacity,{},{},command_segments));
     facts.command_segments=command_segments;
+    if(fixed_root_eligible)
+    {
+        VirtualShadowGuarantee result;
+        result.csm_required=false; result.reason=VirtualShadowCsmReason::Guaranteed;
+        result.maximum_coarse_commands=commands.maximum;
+        result.command_capacity=command_capacity;
+        for(const auto value:commands.coarse)result.coarse_command_total+=value;
+        return result;
+    }
+    auto csm_matrices = in.main_csm_view_projection;
+    const bool csm_matrices_valid = in.prepare_main_csm
+        ? in.prepare_main_csm(csm_matrices) : in.main_csm_view_projection_valid;
+    facts.csm_query_frusta_valid = csm_matrices_valid &&
+        BuildShadowCsmQueryFrusta(csm_matrices, facts.csm_query_frusta);
     auto result=CheckVirtualShadowGuaranteeFacts(facts,in.casters,in.receivers,in.surface_receivers,&commands);
     result.command_capacity=command_capacity;
     result.coarse_command_total=0;
@@ -193,14 +206,14 @@ struct VirtualShadowTargets
         std::uint64_t stable_revision{}, pending_stable_revision{};
         std::vector<VirtualShadowDrawBatch> batches;
         std::vector<VirtualShadowDrawBatch> root_batches;
-        std::uint32_t root_draw_count{};
+        struct RootGroup { std::uint32_t count{},command_first{}; };
+        std::vector<RootGroup> root_groups;
         std::array<std::size_t,2> batch_begins{},batch_counts{};
     };
     VirtualShadowProfile profile;
     ViewExtent extent;
     std::uint32_t columns{}, entries{}, words{}, descriptor_stride{}, dsv_stride{};
     std::uint64_t allocated{}, upload_bytes{}, caster_offset{512}, receiver_offset{},segment_offset{};
-    std::uint64_t root_draw_offset{},root_indexed_offset{},root_mesh_offset{},root_counts_offset{},root_page_offset{};
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     VirtualShadowSystem::ShaderReader reader;
@@ -222,6 +235,24 @@ struct VirtualShadowTargets
 
 namespace
 {
+ShadowRootCoverageDomain RootCoverageDomain(const VirtualShadowProfile &profile,const VirtualShadowConstants &constants)
+{
+    const auto &archive=profile.baked->description;
+    const auto &coarse=archive.levels[2];
+    const double page=coarse.page_world_size, texel=page/render_data::kStaticShadowPageInner;
+    ShadowRootCoverageDomain domain;
+    domain.right={constants.light_right.x,constants.light_right.y,constants.light_right.z,constants.light_right.w};
+    domain.up={constants.light_up.x,constants.light_up.y,constants.light_up.z,constants.light_up.w};
+    domain.forward={constants.light_forward.x,constants.light_forward.y,constants.light_forward.z,constants.light_forward.w};
+    domain.minimum_x=double(coarse.minimum_x)*page+render_data::kStaticShadowPageGuard*texel;
+    domain.minimum_y=double(coarse.minimum_y)*page+render_data::kStaticShadowPageGuard*texel;
+    domain.maximum_x=(double(coarse.minimum_x)+coarse.width)*page-render_data::kStaticShadowPageGuard*texel;
+    domain.maximum_y=(double(coarse.minimum_y)+coarse.height)*page-render_data::kStaticShadowPageGuard*texel;
+    const double z_min=profile.baked->root_depth_minimum;
+    const double z_max=z_min+profile.baked->root_depth_span;
+    domain.minimum_z=z_min;domain.maximum_z=z_max;
+    return domain;
+}
 Result Allocate(VirtualShadowTargets &t, AllocationResource &r, const D3D12_RESOURCE_DESC &description, bool upload = false)
 {
     D3D12MA::ALLOCATION_DESC allocation{};
@@ -369,9 +400,76 @@ struct VirtualShadowSystem::Impl
     bool qualified_layout{};
     std::uint64_t stable_revision{}, stable_bounds_revision{};
     std::vector<GpuCaster> stable_words;
+    std::uint64_t stable_demand_revision{};
+    std::size_t stable_demand_size{};
+    std::array<double,15> stable_demand_spatial{};
+    std::uint32_t stable_demand_groups{};
+    bool stable_demand_bake{},stable_demand_valid{};
+    ShadowCommandDemand stable_demand;
+    std::uint64_t stable_root_revision{};
+    std::size_t stable_root_size{};
+    std::array<double,18> stable_root_domain{};
+    std::uint32_t stable_root_capacity{},stable_root_group_capacity{},stable_root_required_groups{};
+    std::vector<std::uint32_t> stable_root_counts;
+    std::uint32_t stable_root_count{};
+    bool stable_root_valid{},stable_root_eligible{};
     std::uint32_t stable_head{UINT32_MAX}, stable_changes{};
     DirectX::XMFLOAT4 stable_forward{};
     double stable_minimum{}, stable_maximum{};
+    ShadowCommandDemand PrepareCommandDemand(const VirtualShadowInputs &in,const ShadowGuaranteeFacts &facts)
+    {
+        const std::array<double,15> spatial{facts.right.x,facts.right.y,facts.right.z,
+            facts.up.x,facts.up.y,facts.up.z,facts.forward.x,facts.forward.y,facts.forward.z,
+            facts.depth.x,facts.depth.w,double(facts.minimum_x),double(facts.minimum_y),
+            facts.page_world_size,facts.world_texel};
+        if(!stable_demand_valid || !in.stable_caster_revision || stable_demand_revision!=in.stable_caster_revision ||
+            stable_demand_size!=in.casters.stable.size() || stable_demand_groups!=facts.draw_group_count ||
+            stable_demand_bake!=facts.compatible_bake ||
+            (stable_demand.uses_spatial_facts && stable_demand_spatial!=spatial))
+        {
+            stable_demand=ComputeShadowCommandDemand(facts,in.casters.stable);
+            stable_demand_revision=in.stable_caster_revision; stable_demand_size=in.casters.stable.size();
+            stable_demand_groups=facts.draw_group_count; stable_demand_bake=facts.compatible_bake;
+            stable_demand_spatial=spatial; stable_demand_valid=true;
+        }
+        // Seeded static geometry contributes fine-page weights even when it needs
+        // no coarse commands. Dynamic/wind/alpha contributions retain exact order.
+        return ComputeShadowCommandDemand(facts,in.casters.dynamic,stable_demand);
+    }
+    bool PrepareStableRoot(const VirtualShadowInputs &in,const ShadowRootCoverageDomain &domain,
+                           std::uint32_t capacity,std::uint32_t group_capacity)
+    {
+        const std::array<double,18> key{domain.right.x,domain.right.y,domain.right.z,domain.right.w,
+            domain.up.x,domain.up.y,domain.up.z,domain.up.w,
+            domain.forward.x,domain.forward.y,domain.forward.z,domain.forward.w,
+            domain.minimum_x,domain.minimum_y,domain.maximum_x,domain.maximum_y,domain.minimum_z,domain.maximum_z};
+        if(!stable_root_valid || !in.stable_caster_revision || stable_root_revision!=in.stable_caster_revision ||
+            stable_root_size!=in.casters.stable.size() || stable_root_domain!=key ||
+            stable_root_capacity!=capacity || stable_root_group_capacity!=group_capacity)
+        {
+            stable_root_count=0; stable_root_counts.assign(group_capacity,0);
+            stable_root_required_groups=0; stable_root_eligible=true;
+            // The same immutable revision already owns stable_words and bounds.
+            // Wind/animated-alpha entries stay fresh; only their conservative classification is retained.
+            for(std::size_t index=0;index<in.casters.stable.size();++index)
+            {
+                const auto &caster=in.casters.stable[index];
+                if(!caster.present || IsCompleteBakedStaticCaster(caster.present,caster.immutable_source,
+                    caster.baked_source,caster.skin,caster.wind,caster.animated_alpha))continue;
+                if(caster.draw_group>=group_capacity || stable_root_count>=capacity ||
+                    !ShadowRootContainsCaster({caster.current_bounds.x,caster.current_bounds.y,
+                        caster.current_bounds.z,caster.current_bounds.w},domain))
+                { stable_root_eligible=false;break; }
+                ++stable_root_count;
+                ++stable_root_counts[caster.draw_group];
+                stable_root_required_groups=std::max(stable_root_required_groups,caster.draw_group+1);
+            }
+            stable_root_revision=in.stable_caster_revision; stable_root_size=in.casters.stable.size();
+            stable_root_domain=key; stable_root_capacity=capacity; stable_root_group_capacity=group_capacity;
+            stable_root_valid=true;
+        }
+        return stable_root_eligible && stable_root_required_groups<=in.draw_groups.size();
+    }
     void Collect(const CompletionSet &completed)
     {
         std::erase_if(retired, [&](const auto &t) { return t->lease.IsSatisfiedBy(completed); });
@@ -556,24 +654,14 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
     t->words = (t->entries+31)/32;
     t->receiver_offset = t->caster_offset+UINT64(profile.max_casters)*sizeof(GpuCaster);
     t->segment_offset=t->receiver_offset+UINT64(profile.max_receivers)*sizeof(VirtualShadowReceiver);
-    const auto segment_bytes=UINT64(profile.max_draw_groups)*2*sizeof(ShadowCommandSegment);
-    t->upload_bytes=t->segment_offset+segment_bytes;
     const bool has_fixed_root=profile.baked && !profile.baked->root_static_pixels.empty();
-    if(has_fixed_root)
-    {
-        t->root_draw_offset=t->upload_bytes;
-        if(!Add(t->upload_bytes,UINT64(profile.max_casters)*sizeof(GpuShadowDrawRecord)))
-            return Invalid("Fixed-root draw snapshot exceeds native addressing.");
-        t->root_indexed_offset=t->upload_bytes;
-        if(!Add(t->upload_bytes,UINT64(profile.max_casters)*kIndexedStride))return Invalid("Fixed-root indexed commands exceed native addressing.");
-        t->root_mesh_offset=t->upload_bytes;
-        if(!Add(t->upload_bytes,UINT64(profile.max_casters)*kMeshStride))return Invalid("Fixed-root mesh commands exceed native addressing.");
-        t->root_counts_offset=t->upload_bytes;
-        if(!Add(t->upload_bytes,UINT64(profile.max_draw_groups)*sizeof(std::uint32_t)))return Invalid("Fixed-root group counts exceed native addressing.");
-        t->root_page_offset=t->upload_bytes;
-        if(!Add(t->upload_bytes,sizeof(GpuShadowPageEntry)) || t->upload_bytes>UINT32_MAX)
-            return Invalid("Fixed-root upload snapshot exceeds the shader address range.");
-    }
+    const auto segment_bytes=UINT64(profile.max_draw_groups)*(has_fixed_root?3u:2u)*sizeof(ShadowCommandSegment);
+    t->upload_bytes=t->segment_offset+segment_bytes;
+    // Root draw-record slots use caster IDs, including absent/baked holes.
+    // Check the combined allocation, not only the number of emitted commands.
+    if(has_fixed_root && (UINT64(profile.command_capacity)+profile.max_casters)*sizeof(GpuShadowDrawRecord)>UINT32_MAX)
+        return Invalid("Fixed-root command and draw-record addressing exceeds the shader ABI.");
+    if(t->upload_bytes>UINT32_MAX) return Invalid("Virtual shadow upload exceeds the shader address range.");
     t->descriptor_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     t->dsv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
     t->frames.resize(profile.frame_slots);
@@ -678,6 +766,7 @@ Result VirtualShadowSystem::Commit(VirtualShadowCandidate &&candidate, const Com
     impl_->Collect(completed);
     if (impl_->active && !impl_->active->lease.IsSatisfiedBy(completed)) impl_->retired.push_back(impl_->active);
     impl_->active = std::move(candidate.targets_);
+    impl_->stable_root_valid=false; impl_->stable_demand_valid=false;
     BeginFramePolicy();
     impl_->qualified_scene.reset(); impl_->qualified_layout=false; impl_->has_success = false; impl_->faulted = false;
     impl_->successful = {}; impl_->pending = {}; impl_->last_guarantee = {}; return Result::Success();
@@ -798,12 +887,16 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
     }
     minimum=std::min(minimum,impl_->stable_minimum); maximum=std::max(maximum,impl_->stable_maximum);
     if(auto result=qualify(in.casters.dynamic,minimum,maximum);!result) return result;
+    bool root_receivers_valid=true;
     for (const auto &receiver : in.receivers)
     {
         if (!Finite(receiver.minimum) || !Finite(receiver.maximum) ||
             (receiver.minimum.w != 0.0f && receiver.minimum.w != 1.0f) || receiver.minimum.x > receiver.maximum.x ||
             receiver.minimum.y > receiver.maximum.y || receiver.minimum.z > receiver.maximum.z)
             return Invalid("Virtual shadow receiver has invalid world bounds.");
+        // XYZ/finite/minimum.w are already validated above. maximum.w is a
+        // root-only qualification; failure must preserve the ordinary fallback.
+        root_receivers_valid &= receiver.maximum.w==0.0f || receiver.maximum.w==1.0f;
         for (std::uint32_t corner = 0; corner < 8; ++corner)
         {
             const double z = Dot({corner&1u ? receiver.maximum.x : receiver.minimum.x,
@@ -819,6 +912,7 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
                !std::isfinite(r.maximum.x)||!std::isfinite(r.maximum.y)||!std::isfinite(r.maximum.z)||
                r.minimum.x>r.maximum.x||r.minimum.y>r.maximum.y||r.minimum.z>r.maximum.z)
                 return Invalid("Camera shadow surface has invalid conservative bounds.");
+            root_receivers_valid &= r.minimum.w==0.0f && r.maximum.w==1.0f;
             for(unsigned corner=0;corner<8;++corner)
             {
                 const double z=Dot({corner&1?r.maximum.x:r.minimum.x,corner&2?r.maximum.y:r.minimum.y,
@@ -889,9 +983,6 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
             t->root_static_upload_completion.IsSatisfiedBy(in.completed);
         constants.root_options={1u,root_ready?1u:0u,in.baked_static?1u:0u,0u};
     }
-    plan.guarantee = CheckVirtualShadowGuarantee(in, constants, t->profile.physical_pages,
-        t->profile.baked && t->baked_staging.resource && t->seed_pso.Get() &&
-        (t->baked_initialized || t->baked_upload.resource),plan.command_segments,t->profile.command_capacity);
     const auto root_coverage=[&]() {
         constexpr auto known_domains=ShadowReceiverCamera|ShadowReceiverWorld|ShadowReceiverSoftwareGi;
         if(!t->root_static.resource || !t->root_dynamic.resource || !in.baked_static ||
@@ -903,26 +994,9 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
             t->profile.max_casters>kVirtualShadowPassBit-t->profile.command_capacity ||
             t->profile.fixed_root_depth_span<in.depth_span)
             return false;
-        const auto &archive=t->profile.baked->description;
-        const auto &coarse=archive.levels[2];
-        const double page=coarse.page_world_size, texel=page/render_data::kStaticShadowPageInner;
-        ShadowRootCoverageDomain domain;
-        domain.right={constants.light_right.x,constants.light_right.y,constants.light_right.z,constants.light_right.w};
-        domain.up={constants.light_up.x,constants.light_up.y,constants.light_up.z,constants.light_up.w};
-        domain.forward={constants.light_forward.x,constants.light_forward.y,constants.light_forward.z,constants.light_forward.w};
-        domain.minimum_x=double(coarse.minimum_x)*page+render_data::kStaticShadowPageGuard*texel;
-        domain.minimum_y=double(coarse.minimum_y)*page+render_data::kStaticShadowPageGuard*texel;
-        domain.maximum_x=(double(coarse.minimum_x)+coarse.width)*page-render_data::kStaticShadowPageGuard*texel;
-        domain.maximum_y=(double(coarse.minimum_y)+coarse.height)*page-render_data::kStaticShadowPageGuard*texel;
-        const auto ordered_bounds=[](const auto &minimum,const auto &maximum) {
-            return std::isfinite(minimum.x)&&std::isfinite(minimum.y)&&std::isfinite(minimum.z)&&std::isfinite(minimum.w)&&
-                std::isfinite(maximum.x)&&std::isfinite(maximum.y)&&std::isfinite(maximum.z)&&std::isfinite(maximum.w)&&
-                minimum.x<=maximum.x&&minimum.y<=maximum.y&&minimum.z<=maximum.z;
-        };
-        const double z_min=t->profile.baked->root_depth_minimum;
-        const double z_max=z_min+t->profile.baked->root_depth_span;
-        domain.minimum_z=z_min;domain.maximum_z=z_max;
-        std::uint32_t root_caster_count{};
+        const auto domain=RootCoverageDomain(t->profile,constants);
+        if(!impl_->PrepareStableRoot(in,domain,t->profile.max_casters,t->profile.max_draw_groups))return false;
+        auto root_caster_count=impl_->stable_root_count;
         const auto caster_range=[&](std::span<const VirtualShadowCaster> casters) {
             for(const auto &caster:casters)
             {
@@ -935,41 +1009,15 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
             }
             return true;
         };
-        if(!caster_range(in.casters.stable)||!caster_range(in.casters.dynamic))return false;
-        for(const auto &receiver:in.receivers)
-        {
-            if(!ordered_bounds(receiver.minimum,receiver.maximum) ||
-                (receiver.minimum.w!=0.0f&&receiver.minimum.w!=1.0f) ||
-                (receiver.maximum.w!=0.0f&&receiver.maximum.w!=1.0f))return false;
-            if(receiver.minimum.w==1.0f || receiver.maximum.w==1.0f)continue; // Private capture / feedback-only envelope.
-            for(unsigned corner=0;corner<8;++corner)
-            {
-                const auto point=DirectX::XMFLOAT3(corner&1?receiver.maximum.x:receiver.minimum.x,
-                    corner&2?receiver.maximum.y:receiver.minimum.y,corner&4?receiver.maximum.z:receiver.minimum.z);
-                if(!ShadowRootContainsXY({point.x,point.y,point.z},domain))return false;
-            }
-        }
-        const auto surface_range=[&](std::span<const ShadowSurfaceReceiver> surfaces) {
-            for(const auto &receiver:surfaces)
-            {
-                if(!ordered_bounds(receiver.minimum,receiver.maximum) || receiver.minimum.w!=0.0f || receiver.maximum.w!=1.0f)
-                    return false;
-                for(unsigned corner=0;corner<8;++corner)
-                {
-                    const auto point=DirectX::XMFLOAT3(corner&1?receiver.maximum.x:receiver.minimum.x,
-                        corner&2?receiver.maximum.y:receiver.minimum.y,corner&4?receiver.maximum.z:receiver.minimum.z);
-                    if(!ShadowRootContainsXY({point.x,point.y,point.z},domain))return false;
-                }
-            }
-            return true;
-        };
-        const auto stable_surfaces=in.surface_receivers.stable_aggregate.empty()
-            ?in.surface_receivers.stable:in.surface_receivers.stable_aggregate;
-        return surface_range(stable_surfaces)&&surface_range(in.surface_receivers.dynamic);
+        if(!caster_range(in.casters.dynamic))return false;
+        return root_receivers_valid;
     };
     plan.fixed_root=root_coverage();
-    constants.root_options.w=plan.fixed_root?1u:0u;
-    if(plan.fixed_root)plan.guarantee.csm_required=false;
+    const auto commands=impl_->PrepareCommandDemand(in,ShadowDemandFacts(in,constants));
+    plan.guarantee = CheckVirtualShadowGuarantee(in, constants, t->profile.physical_pages,
+        t->profile.baked && t->baked_staging.resource && t->seed_pso.Get() &&
+        (t->baked_initialized || t->baked_upload.resource),plan.command_segments,t->profile.command_capacity,plan.fixed_root,commands);
+    constants.root_options.w=plan.fixed_root?t->profile.max_draw_groups*2+2:0u;
     constants.baked_depth.w = plan.guarantee.csm_required ? 1.0f : 0.0f;
     plan.constants = constants;
     plan.targets = t;
@@ -1027,10 +1075,13 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     if (!f.completion.IsSatisfiedBy(in.completed)) return Invalid("Virtual shadow frame slot still has GPU readers.");
     auto constants = plan.constants;
     const auto group_count = static_cast<std::uint32_t>(in.draw_groups.size());
+    if(plan.fixed_root && !impl_->PrepareStableRoot(in,RootCoverageDomain(t->profile,constants),
+            t->profile.max_casters,t->profile.max_draw_groups))
+        return Invalid("Fixed-root stable casters no longer satisfy the prepared root domain.");
     const auto segment_count = group_count*2;
-    if(plan.command_segments.size()!=segment_count||
-       !ValidateShadowCommandSegments(plan.command_segments,t->profile.command_capacity))
-        return Invalid("Virtual shadow command partition exceeds or overlaps its fixed allocation.");
+    // PrepareFrame owns this private partition. Its bounded planner (or equal
+    // fallback partition) already establishes the layout; the snapshot checks
+    // above keep the same target capacity and group span through registration.
     const bool reset = constants.options.x != 0;
     const auto rounded_width = UINT64((in.render_active.width+7u)&~7u);
     const auto feedback_rows = std::max<UINT64>(in.render_active.height, (in.receivers.size()+rounded_width-1)/rounded_width);
@@ -1096,51 +1147,44 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     std::memcpy(bytes, &constants, sizeof(constants));
     if (!in.receivers.empty()) std::memcpy(bytes+t->receiver_offset, in.receivers.data(), in.receivers.size_bytes());
     if(segment_count)std::memcpy(bytes+t->segment_offset,plan.command_segments.data(),segment_count*sizeof(ShadowCommandSegment));
-    f.root_batches.clear(); f.root_draw_count=0;
+    f.root_batches.clear();
     if(plan.fixed_root)
     {
-        auto *root_records=reinterpret_cast<GpuShadowDrawRecord *>(bytes+t->root_draw_offset);
-        auto *root_indexed=reinterpret_cast<RootIndexedCommand *>(bytes+t->root_indexed_offset);
-        auto *root_mesh=reinterpret_cast<RootMeshCommand *>(bytes+t->root_mesh_offset);
-        auto *root_counts=reinterpret_cast<std::uint32_t *>(bytes+t->root_counts_offset);
-        std::fill_n(root_counts,in.draw_groups.size(),0u);
-        std::uint32_t draw_cursor{},indexed_cursor{},mesh_cursor{};
-        const auto append_group=[&](std::uint32_t group) -> Result {
-            const auto frontend=in.draw_groups[group].frontend;
-            const auto first=frontend==VirtualShadowFrontend::Indexed?indexed_cursor:mesh_cursor;
-            std::uint32_t command_count{};
-            const auto append=[&](std::span<const VirtualShadowCaster> casters) {
-                for(const auto &caster:casters)
-                {
-                    if(!caster.present || IsCompleteBakedStaticCaster(caster.present,caster.immutable_source,
-                        caster.baked_source,caster.skin,caster.wind,caster.animated_alpha) || caster.draw_group!=group)continue;
-                    if(draw_cursor>=t->profile.max_casters)return false;
-                    const auto record_index=t->profile.command_capacity+draw_cursor;
-                    root_records[draw_cursor]={caster.geometry_record,caster.source_ref,caster.instance_index,
-                        caster.instance_generation,t->entries,2u,group,0u};
-                    const auto pass=kVirtualShadowPassBit|record_index;
-                    if(frontend==VirtualShadowFrontend::Indexed)
-                        root_indexed[indexed_cursor++]={pass,{caster.index_count,1u,caster.first_index,caster.base_vertex,0u}};
-                    else root_mesh[mesh_cursor++]={pass,{caster.meshlet_count,1u,1u}};
-                    ++draw_cursor; ++command_count;
-                }
-                return true;
-            };
-            if(!append(in.casters.stable)||!append(in.casters.dynamic))
-                return Invalid("Fixed-root caster commands exceed their preflight reservation.");
-            if(!command_count)return Result::Success();
-            root_counts[group]=command_count;
-            const auto stride=frontend==VirtualShadowFrontend::Indexed?kIndexedStride:kMeshStride;
-            f.root_batches.push_back({in.draw_groups[group],group,2u,command_count,
-                (UINT64(t->profile.command_capacity)+first)*stride,
-                (UINT64(t->profile.max_draw_groups)*2+2+group)*sizeof(std::uint32_t)});
-            return Result::Success();
+        auto *root_segments=reinterpret_cast<ShadowCommandSegment *>(bytes+t->segment_offset)+segment_count;
+        f.root_groups.assign(in.draw_groups.size(),{});
+        const auto fresh=[](const VirtualShadowCaster &caster) {
+            return caster.present && !IsCompleteBakedStaticCaster(caster.present,caster.immutable_source,
+                caster.baked_source,caster.skin,caster.wind,caster.animated_alpha);
         };
+        // Stable counts are revision-owned; only the dynamic suffix is counted here.
+        // Current GPU caster records supply IDs and native command payloads.
+        auto draw_count=impl_->stable_root_count;
+        for(std::size_t group=0;group<f.root_groups.size();++group)
+            f.root_groups[group].count=impl_->stable_root_counts[group];
+        for(const auto &caster:in.casters.dynamic)
+            if(fresh(caster))
+            {
+                if(caster.draw_group>=f.root_groups.size() || draw_count>=t->profile.max_casters)
+                    return Invalid("Fixed-root caster commands exceed their preflight reservation.");
+                ++f.root_groups[caster.draw_group].count;
+                ++draw_count;
+            }
+        std::uint32_t draw_cursor{},indexed_cursor{},mesh_cursor{};
         for(std::uint32_t group=0;group<in.draw_groups.size();++group)
-            if(auto result=append_group(group);!result)return result;
-        f.root_draw_count=draw_cursor;
-        const GpuShadowPageEntry root_page{0,0,3u,UINT32_MAX,constants.identity.w,16u,0u,0u};
-        std::memcpy(bytes+t->root_page_offset,&root_page,sizeof(root_page));
+        {
+            auto &layout=f.root_groups[group];
+            const auto frontend=in.draw_groups[group].frontend;
+            auto &command_cursor=frontend==VirtualShadowFrontend::Indexed?indexed_cursor:mesh_cursor;
+            layout.command_first=command_cursor;
+            draw_cursor+=layout.count; command_cursor+=layout.count;
+            root_segments[group]={layout.command_first,layout.count};
+            if(!layout.count)continue;
+            const auto stride=frontend==VirtualShadowFrontend::Indexed?kIndexedStride:kMeshStride;
+            f.root_batches.push_back({in.draw_groups[group],group,2u,layout.count,
+                (UINT64(t->profile.command_capacity)+layout.command_first)*stride,
+                (UINT64(t->profile.max_draw_groups)*2+2+group)*sizeof(std::uint32_t)});
+        }
+        assert(draw_cursor==draw_count);
     }
     const D3D12_RANGE written{0, static_cast<SIZE_T>(t->upload_bytes)}; f.upload.resource->Unmap(0, &written);
     f.batches.clear();
@@ -1214,7 +1258,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         casters = pass.Write(casters, Access::CopyDest);
         receivers = pass.Write(receivers, Access::CopyDest);
         pass.SetExecute([t, slot=in.frame_slot, caster_bytes=in.casters.size()*sizeof(GpuCaster)-caster_copy_offset, caster_copy_offset,
-            receiver_bytes=in.receivers.size_bytes(),segment_bytes=UINT64(segment_count)*sizeof(ShadowCommandSegment)](RenderPassContext &ctx)
+            receiver_bytes=in.receivers.size_bytes(),segment_bytes=UINT64(segment_count+(plan.fixed_root?group_count:0))*sizeof(ShadowCommandSegment)](RenderPassContext &ctx)
         {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList()); auto &frame=t->frames[slot];
             list->CopyBufferRegion(frame.metadata.resource.Get(), 0, frame.upload.resource.Get(), 0, sizeof(VirtualShadowConstants));
@@ -1307,28 +1351,20 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
     }
     if(plan.fixed_root)
     {
-        std::uint32_t indexed_count{},mesh_count{};
-        for(const auto &batch:f.root_batches)
-            (batch.group.frontend==VirtualShadowFrontend::Indexed?indexed_count:mesh_count)+=batch.maximum_commands;
-        auto pass=graph.AddPass(228,"VirtualShadow.FixedRootCurrentSnapshot",QueueHint::Copy);
-        draws=pass.Write(draws,Access::CopyDest); indexed=pass.Write(indexed,Access::CopyDest);
-        mesh=pass.Write(mesh,Access::CopyDest); counts=pass.Write(counts,Access::CopyDest);
-        pages=pass.Write(pages,Access::CopyDest);
-        pass.SetExecute([t,slot=in.frame_slot,draw_bytes=UINT64(f.root_draw_count)*sizeof(GpuShadowDrawRecord),
-            indexed_bytes=UINT64(indexed_count)*kIndexedStride,mesh_bytes=UINT64(mesh_count)*kMeshStride,
-            group_bytes=UINT64(in.draw_groups.size())*sizeof(std::uint32_t)](RenderPassContext &ctx) {
+        auto pass=graph.AddPass(228,"VirtualShadow.FixedRootCurrentCommands",QueueHint::Compute);
+        pass.Read(metadata,Access::ComputeRead); pass.Read(casters,Access::ComputeRead);
+        draws=pass.ReadWrite(draws,Access::UnorderedWrite); indexed=pass.ReadWrite(indexed,Access::UnorderedWrite);
+        mesh=pass.ReadWrite(mesh,Access::UnorderedWrite); counts=pass.ReadWrite(counts,Access::UnorderedWrite);
+        pages=pass.ReadWrite(pages,Access::UnorderedWrite);
+        pass.SetExecute([t,slot=in.frame_slot,group_count,caster_count=std::uint32_t(in.casters.size()),
+            count_handle=counts.resource,page_handle=pages.resource](RenderPassContext &ctx) {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
-            auto &frame=t->frames[slot];
-            if(draw_bytes)list->CopyBufferRegion(frame.draws.resource.Get(),
-                UINT64(t->profile.command_capacity)*sizeof(GpuShadowDrawRecord),frame.upload.resource.Get(),t->root_draw_offset,draw_bytes);
-            if(indexed_bytes)list->CopyBufferRegion(frame.indexed.resource.Get(),
-                UINT64(t->profile.command_capacity)*kIndexedStride,frame.upload.resource.Get(),t->root_indexed_offset,indexed_bytes);
-            if(mesh_bytes)list->CopyBufferRegion(frame.mesh.resource.Get(),
-                UINT64(t->profile.command_capacity)*kMeshStride,frame.upload.resource.Get(),t->root_mesh_offset,mesh_bytes);
-            if(group_bytes)list->CopyBufferRegion(frame.counts.resource.Get(),
-                (UINT64(t->profile.max_draw_groups)*2+2)*sizeof(std::uint32_t),frame.upload.resource.Get(),t->root_counts_offset,group_bytes);
-            list->CopyBufferRegion(frame.pages.resource.Get(),UINT64(t->entries)*sizeof(GpuShadowPageEntry),
-                frame.upload.resource.Get(),t->root_page_offset,sizeof(GpuShadowPageEntry));
+            BindCompute(list,*t,t->frames[slot],slot,3);
+            list->SetComputeRoot32BitConstant(3,3,0);
+            list->Dispatch((std::max(group_count,1u)+63)/64,1,1);
+            ctx.UavBarrier(count_handle); ctx.UavBarrier(page_handle);
+            list->SetComputeRoot32BitConstant(3,4,0);
+            if(caster_count)list->Dispatch((caster_count+63)/64,1,1);
         });
     }
     out.metadata = metadata; out.page_table = pages; out.draw_records = draws;
@@ -1390,7 +1426,7 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
         if(in.draw&&!in.draw_groups.empty()&&in.declare_material_sampling)in.declare_material_sampling(pass);
         root_dynamic=pass.Write(root_dynamic,Access::DepthWrite);
         graph.AddOrderingDependency(152,229); graph.AddOrderingDependency(153,229);
-        pass.SetExecuteChecked([callback=in.draw,outputs=out,batches=f.root_batches](RenderPassContext &ctx) -> Result {
+        pass.SetExecuteChecked([t,slot=in.frame_slot,callback=in.draw,outputs=out](RenderPassContext &ctx) -> Result {
             auto *list=static_cast<ID3D12GraphicsCommandList *>(ctx.NativeCommandList());
             const auto dsv=outputs.depth_views[2];
             list->ClearDepthStencilView(dsv,D3D12_CLEAR_FLAG_DEPTH,0.0f,0,0,nullptr);
@@ -1398,7 +1434,9 @@ Result VirtualShadowSystem::Register(RenderGraphBuilder &graph, const VirtualSha
             const D3D12_VIEWPORT viewport{0,0,float(outputs.root_extent.width),float(outputs.root_extent.height),0,1};
             const D3D12_RECT scissor{0,0,LONG(outputs.root_extent.width),LONG(outputs.root_extent.height)};
             list->RSSetViewports(1,&viewport); list->RSSetScissorRects(1,&scissor);
-            return callback(ctx,outputs,batches);
+            // Like the fine-page batches, the waited frame owns these current
+            // bindings until Execute has joined all recording callbacks.
+            return callback(ctx,outputs,t->frames[slot].root_batches);
         });
     }
     {

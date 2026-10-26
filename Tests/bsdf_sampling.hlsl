@@ -283,7 +283,8 @@ float HsProbeLocalBlendError(uint case_index)
 
 static const uint HsProbeLegacyCaseCount = 7u;
 static const uint HsProbeCoatedCaseCount = 32u;
-static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount;
+static const uint HsProbeFresnelCaseCount = 14u;
+static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount + HsProbeFresnelCaseCount;
 static const uint HsProbeCoatedReferenceSamples = 65536u;
 
 struct HsProbeCoatedCase
@@ -510,6 +511,20 @@ void main(uint3 dispatch_thread_id : SV_DispatchThreadID)
         return;
     }
 
+    if (case_index >= HsProbeLegacyCaseCount + HsProbeCoatedCaseCount)
+    {
+        // Raw production outputs; the host compares against independent double
+        // pow applied to the rounded float32 subtraction. The last two cover
+        // normalized-dot rounding outside [0,1] and coat's existing clamp.
+        const uint bits[14] = {0u, 0x00800000u, 0x38d1b717u, 0x3c800000u,
+            0x3e7fffffu, 0x3e800000u, 0x3e800001u,
+            0x3effffffu, 0x3f000000u, 0x3f000001u,
+            0x3f7fffffu, 0x3f800000u, 0xb4000000u, 0x3f800001u};
+        const float cosine = asfloat(bits[case_index-HsProbeLegacyCaseCount-HsProbeCoatedCaseCount]);
+        output[case_index] = float4(HsBsdfSchlickFresnel(float3(0.0,0.04,1.0),cosine),
+            HsBsdfCoatFresnel(cosine));
+        return;
+    }
     if (case_index >= HsProbeLegacyCaseCount)
     {
         output[case_index]=HsProbeCoatedIbl(case_index-HsProbeLegacyCaseCount);

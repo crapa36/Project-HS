@@ -240,6 +240,7 @@ struct ScheduledAction
     Tick visual_started{};
     // Scheduled member angle used to recover the frozen fan center at release.
     float visual_fan_angle{};
+    std::uint64_t schedule_sequence{};
 };
 
 enum class BossActionKind : std::uint8_t
@@ -274,6 +275,7 @@ struct BossAction
     // Presentation metadata for the warning signal emitted when this action is scheduled.
     Sequence warning_sequence{};
     Tick warning_started{};
+    std::uint64_t schedule_sequence{};
 };
 
 struct CastHitRecord
@@ -667,6 +669,8 @@ struct GameSimulation::SimulationWorld
     void ConsumeBufferedSkill();
     void ReleaseChargedShot();
     void CollectEnemies(Float2 position, float radius, EnemyQuery &query) const;
+    void CollectEnemies(Float2 minimum, Float2 maximum, EnemyQuery &query,
+                        bool canonical_order = true) const;
     std::optional<EnemyRow> NearestEnemy(Float2 position, float radius,
                             std::span<const std::uint64_t> excluded = {});
     std::optional<ConstEnemyRow> NearestEnemy(Float2 position, float radius) const;
@@ -713,6 +717,7 @@ struct GameSimulation::SimulationWorld
     void CommitSpawnBarrier();
     void CommitAbilitySpawnBarrier();
     void CommitCleanupBarrier();
+    void RetireBalanceHitCauses();
     GameplayChecksum CalculateChecksum() const;
     [[nodiscard]] EnemyView EnemyReadView(ConstEnemyRow enemy) const;
     [[nodiscard]] BossActionView BossActionReadView(const BossAction &action) const;
@@ -752,7 +757,7 @@ struct GameSimulation::SimulationWorld
     Float2 SpawnPosition(std::uint64_t salt, bool &used_fallback) const noexcept;
     EnemyKind ChooseEnemyKind(std::uint64_t salt) const noexcept;
     void SpawnPhase();
-    float SlowMultiplier(EnemyRow enemy);
+    float SlowMultiplier(ConstEnemyRow enemy) const;
     void BossAi(EnemyRow boss);
     void AiIntentPhase();
 };

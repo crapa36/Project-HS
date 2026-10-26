@@ -1,5 +1,6 @@
 #include "environment_texture_cooker.hpp"
 #include "environment_histogram_cooker.hpp"
+#include "../AssetPipeline/action.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <list>
 #include <map>
 #include <set>
 #include <queue>
@@ -170,6 +172,43 @@ std::vector<Pixel> Load(const std::filesystem::path& path, const std::string& ro
     for (size_t y=0; y<2048; ++y) std::memcpy(pixels.data()+y*2048, image->pixels+y*image->rowPitch, 2048*sizeof(Pixel));
     return pixels;
 }
+class DecodedImageCache
+{
+public:
+    const std::vector<Pixel>& Get(const std::filesystem::path& path, const std::string& role)
+    {
+        ValidatePngRole(path, role);
+        const auto key=path.lexically_normal().generic_string()+"#"+hs::asset_pipeline::Sha256File(path)+
+            "#"+role+"#rgba32-ignore-srgb-wic-directxtex-v1";
+        auto found=images_.find(key);
+        if(found==images_.end()) {
+            constexpr size_t max_images=3; // One role plus its optional normal and alpha inputs.
+            if(images_.size()==max_images) images_.erase(order_.front()),order_.pop_front();
+            order_.push_back(key);
+            found=images_.emplace(key,Load(path,role)).first;
+        } else {
+            order_.remove(key);
+            order_.push_back(key);
+        }
+        return found->second;
+    }
+    size_t CoveredAlphaCount(const std::filesystem::path& path,const std::vector<Pixel>& alpha,const Rect& rect)
+    {
+        const auto key=hs::asset_pipeline::Sha256File(path)+"#"+std::to_string(rect.page)+"#"+
+            std::to_string(rect.x)+"#"+std::to_string(rect.y)+"#"+std::to_string(rect.w)+"#"+std::to_string(rect.h)+"#alpha-ge-half-v1";
+        if(const auto found=coverage_counts_.find(key);found!=coverage_counts_.end()) return found->second;
+        size_t covered=0;
+        for(int y=rect.y;y<rect.y+rect.h;++y)
+            for(int x=rect.x;x<rect.x+rect.w;++x)
+                if(alpha[static_cast<size_t>(y)*2048+x].a>=.5f) ++covered;
+        coverage_counts_.emplace(key,covered);
+        return covered;
+    }
+private:
+    std::map<std::string,std::vector<Pixel>> images_;
+    std::list<std::string> order_;
+    std::map<std::string,size_t> coverage_counts_;
+};
 float Linear(float x) { return x <= .04045f ? x/12.92f : std::pow((x+.055f)/1.055f,2.4f); }
 float Srgb(float x) { return x <= .0031308f ? x*12.92f : 1.055f*std::pow(x,1.f/2.4f)-.055f; }
 float Length(const Pixel& p) { return std::sqrt(p.r*p.r+p.g*p.g+p.b*p.b); }
@@ -215,7 +254,7 @@ Group FindRoleGroup(const Json& manifest, const std::string& name, const std::st
     }
     throw std::runtime_error("Unknown environment texture group/role: " + name + "/" + role);
 }
-void CookRole(const std::filesystem::path& root,const std::filesystem::path& output,const Group& group,const std::string& role,ID3D11Device* device)
+void CookRole(const std::filesystem::path& root,const std::filesystem::path& output,const Group& group,const std::string& role,ID3D11Device* device,DecodedImageCache& decoded)
 {
     const bool normal=role=="normal"||role=="detail_normal", color=role=="base_color";
     const bool rough=role=="surface_ra"||role=="roughness";
@@ -224,17 +263,14 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
     Check(array.Initialize2D(DXGI_FORMAT_R8G8B8A8_UNORM,2048,2048,group.pages.size(),mips),"Allocate environment array");
     std::memset(array.GetPixels(),0,array.GetPixelsSize());
     for(size_t page=0;page<group.pages.size();++page) {
-        std::map<std::filesystem::path,std::vector<Pixel>> decoded;
         const auto load=[&](const std::string& requested_role)->const std::vector<Pixel>& {
             const auto path=TexturePath(root,group.pages[page],requested_role);
-            auto it=decoded.find(path);
-            if(it==decoded.end()) it=decoded.emplace(path,Load(path,requested_role)).first;
-            else ValidatePngRole(path,requested_role);
-            return it->second;
+            return decoded.Get(path,requested_role);
         };
         const auto& source=load(role);
         const auto* normals=rough?&load("normal"):nullptr;
         const auto* alpha=group.foliage?&load("base_color"):nullptr;
+        const auto alpha_path=group.foliage?TexturePath(root,group.pages[page],"base_color"):std::filesystem::path{};
         std::vector<Rect> rects;
         if(group.foliage) {for(const auto& r:group.rects) if(r.page==static_cast<int>(page)) rects.push_back(r);}
         else rects.push_back(Rect{0,0,0,2048,2048});
@@ -259,8 +295,7 @@ void CookRole(const std::filesystem::path& root,const std::filesystem::path& out
                 }
                 // Coverage is measured per entry; a scale is fitted before alpha quantization.
                 if(group.foliage&&mip>0) {
-                    size_t covered=0;
-                    for(int y=rect.y;y<rect.y+rect.h;++y) for(int x=rect.x;x<rect.x+rect.w;++x) if((*alpha)[static_cast<size_t>(y)*2048+x].a>=.5f) ++covered;
+                    const size_t covered=decoded.CoveredAlphaCount(alpha_path,*alpha,rect);
                     const float goal=static_cast<float>(covered)/(rect.w*rect.h);
                     float lo=0,hi=16;
                     for(int iteration=0;iteration<20;++iteration) {
@@ -359,13 +394,31 @@ void CookEnvironmentTextureRole(const std::filesystem::path& source,
 {
     const auto group=FindRoleGroup(Read(source),group_name,role);
     std::filesystem::create_directories(output);
-    CookRole(source,output,group,role,device);
+    DecodedImageCache decoded;
+    CookRole(source,output,group,role,device,decoded);
+}
+void CookEnvironmentTextureRoles(const std::filesystem::path& source,
+                                const std::vector<EnvironmentTextureRoleRequest>& requests,
+                                ID3D11Device* device)
+{
+    const auto manifest=Read(source);
+    DecodedImageCache decoded;
+    std::set<std::pair<std::string,std::string>> seen;
+    for(const auto& request:requests) {
+        if(!seen.emplace(request.group,request.role).second)
+            throw std::runtime_error("Duplicate environment texture role in batch");
+        const auto group=FindRoleGroup(manifest,request.group,request.role);
+        std::filesystem::create_directories(request.output);
+        CookRole(source,request.output,group,request.role,
+                 request.role=="base_color"?device:nullptr,decoded);
+    }
 }
 void CookEnvironmentTextures(const std::filesystem::path& source,const std::filesystem::path& output,
                              ID3D11Device* device, bool use_cache)
 {
     const auto manifest=Read(source);
     const auto groups=Groups(manifest);
+    DecodedImageCache decoded;
     std::filesystem::create_directories(output);
     for(const auto& group:groups) for(const auto& role:Roles(group)) {
         const auto path=OutputPath(output,group,role);
@@ -375,7 +428,7 @@ void CookEnvironmentTextures(const std::filesystem::path& source,const std::file
             continue;
         }
         std::cout<<"Environment "<<group.name<<" "<<role<<": cooking"<<std::endl;
-        CookRole(source,output,group,role,device);
+        CookRole(source,output,group,role,device,decoded);
         if (use_cache) {
             std::ofstream cache(path.string()+".cache.json",std::ios::trunc);
             cache<<Json{{"input",inputHash},{"output",HashFile(path)}}.dump()<<'\n';

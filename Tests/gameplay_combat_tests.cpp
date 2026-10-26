@@ -42,6 +42,7 @@ void TestTenMinuteBossGroundAreasStaySeparated();
 void TestRangedWarningAndExplosiveArea();
 void TestCombatUpgradeCombinations();
 void TestUpgradeDamageAttribution();
+void TestDetailedBalanceSwitchPreservesSimulation();
 void TestSelectiveUpgradeInheritance();
 void TestHighFanoutChainsTerminate();
 void TestRetreatSlowTrailUsesPath();
@@ -1275,6 +1276,7 @@ void RunGameplayCombatTests()
     TestIncomingDamageRelics();
     TestSameTickLethalDamageAttribution();
     TestUpgradeDamageAttribution();
+    TestDetailedBalanceSwitchPreservesSimulation();
     TestSelectiveUpgradeInheritance();
     TestHighFanoutChainsTerminate();
     TestRetreatSlowTrailUsesPath();

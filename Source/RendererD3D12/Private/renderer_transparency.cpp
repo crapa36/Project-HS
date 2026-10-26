@@ -255,6 +255,9 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
     std::vector<std::byte> vertex;
     if (auto read = readShader("render/shader/hero_transparency_vs.dxil", vertex); !read) return read;
     if (vertex.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency indexed vertex shader is empty.");
+    std::vector<std::byte> current_vertex;
+    if (auto read = readShader("render/shader/hero_transparency_current_vs.dxil", current_vertex); !read) return read;
+    if (current_vertex.empty()) return Failure(ErrorCode::TaskFailed, "Hero current-pose vertex shader is empty.");
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
         {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -270,7 +273,8 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         if (auto read = readShader(product, pixel); !read) return read;
         if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Hero transparency pixel product is empty: " + std::string(product));
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
-        pipeline.pRootSignature = root; pipeline.VS = {vertex.data(), vertex.size()}; pipeline.PS = {pixel.data(), pixel.size()};
+        const auto &phase_vertex = index == 3 ? vertex : current_vertex;
+        pipeline.pRootSignature = root; pipeline.VS = {phase_vertex.data(), phase_vertex.size()}; pipeline.PS = {pixel.data(), pixel.size()};
         pipeline.SampleMask = UINT_MAX; pipeline.SampleDesc.Count = 1;
         pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         // Exit selects back faces; every other phase selects front faces.
@@ -331,7 +335,7 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         else { pipeline.NumRenderTargets = 1; pipeline.RTVFormats[0] = kColor; }
         if (index >= 3)
         {
-            // Same vertex shader/rasterization as the front peel. Keep the
+            // Shared current-position evaluation with the front peel. Keep the
             // identity check in the PS to reject coincident other instances.
             pipeline.DepthStencilState.DepthEnable = TRUE;
             pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL;
@@ -339,7 +343,7 @@ Result HeroTransparencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator 
         }
         const auto native = pipelineCache.CreateGraphics(&pipeline, IID_PPV_ARGS(&next->pipelines[index]));
         if (FAILED(native)) return NativeFailure("Create hero transparency pipeline " + std::string(product), native);
-        if (next->work) next->work->Pipeline(index, pipeline, vertex, pixel, product);
+        if (next->work) next->work->Pipeline(index, pipeline, phase_vertex, pixel, product);
     }
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -499,14 +503,15 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
     for (std::uint32_t index = 0; index < guides.size(); ++index) guides[index] = import(storage->guides[index], "Hero.NearestFrontGuide");
     auto overflow = import(storage->overflow, "Hero.LayerOverflow");
     storage->FillTable(inputs, kTailPhase, 0, HeroTransparencyPhase::Tail, inputs.hdr.resource);
-    auto readScene = [&](PassBuilder &pass, Access depthAccess = Access::ShaderRead) {
+    auto readScene = [&](PassBuilder &pass, bool shading, Access depthAccess = Access::ShaderRead) {
         pass.Read(inputs.opaque_depth.version, depthAccess);
-        for (const auto &read : pending.scene_reads) pass.Read(read.version, read.access);
+        for (const auto &read : shading ? std::span<const HeroTransparencySceneRead>(pending.scene_reads) : inputs.peel_reads)
+            pass.Read(read.version, read.access);
     };
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
     {
         auto front = graph.AddPass(90 + layer * 2, "HeroPeelFront", QueueHint::Direct);
-        readScene(front);
+        readScene(front, false);
         if (layer) front.Read(pending.front[layer - 1], Access::ShaderRead);
         pending.front[layer] = front.Write(pending.front[layer], Access::DepthWrite);
         pending.identity[layer] = front.Write(pending.identity[layer], Access::RenderTarget);
@@ -522,7 +527,7 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
             else inputs.draw(commands, storage->pipelines[0].Get(), HeroTransparencyPhase::Front, layer, storage->Gpu(inputs, layer));
         });
         auto exit = graph.AddPass(91 + layer * 2, "HeroPeelExit", QueueHint::Direct);
-        readScene(exit); exit.Read(pending.front[layer], Access::ShaderRead); exit.Read(pending.identity[layer], Access::ShaderRead);
+        readScene(exit, false); exit.Read(pending.front[layer], Access::ShaderRead); exit.Read(pending.identity[layer], Access::ShaderRead);
         pending.exit[layer] = exit.Write(pending.exit[layer], Access::DepthWrite);
         if (storage->work) storage->work->DeclarePhase(graph, exit, inputs.frame_slot, 4 + layer);
         exit.SetExecute([storage, inputs, layer](RenderPassContext &context) {
@@ -544,7 +549,7 @@ Result HeroTransparencySystem::RegisterLayers(RenderGraphBuilder &graph, const H
             storage->Cpu(inputs.frame_slot, kTailPhase, kUavOffset), storage->overflow.resource.Get(), zero, 0, nullptr);
     });
     auto tail = graph.AddPass(99, "HeroOitTail", QueueHint::Direct);
-    readScene(tail, Access::DepthShaderRead); tail.Read(inputs.hdr.version, Access::ShaderRead);
+    readScene(tail, true, Access::DepthShaderRead); tail.Read(inputs.hdr.version, Access::ShaderRead);
     for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
     {
         tail.Read(pending.front[layer], Access::ShaderRead); tail.Read(pending.identity[layer], Access::ShaderRead);

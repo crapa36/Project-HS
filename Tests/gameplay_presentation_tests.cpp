@@ -1412,9 +1412,12 @@ void TestProjectileUpgradeAttachmentEpisodes()
         const auto owned = model.View();
         const auto borrowed = hs::development::BorrowOwnedReadModel(owned);
         if (owned.projectiles.size() > 1)
-            Check(borrowed.projectiles[1].bleed_extend_ticks.data() ==
-                      owned.projectiles[1].bleed_extend_ticks.data(),
+        {
+            auto projectile=borrowed.projectiles.begin(); ++projectile;
+            Check(projectile!=borrowed.projectiles.end()&&
+                      projectile->bleed_extend_ticks.data()==owned.projectiles[1].bleed_extend_ticks.data(),
                   "projection borrows complete original episode history without copying or renumbering");
+        }
         Check(hs::ProjectTick(borrowed, DefaultContent().presentation,
             test_ui, hs::SettingsData{}, snapshot,
             hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(borrowed, {}))), "projectile upgrade owner snapshot");

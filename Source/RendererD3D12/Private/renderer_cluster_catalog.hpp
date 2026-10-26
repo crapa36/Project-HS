@@ -64,7 +64,7 @@ struct alignas(16) GpuClusterRefinementConstants
     std::uint32_t candidate_count{}, group_count{}, cluster_count{}, child_count{};
     std::uint32_t page_count{}, output_capacity{}, geometry_draw_base{}, generation{};
     std::uint32_t prefix_stage{}, prefix_block_count{}, max_ancestor_steps{}, geometry_frontend_flags{};
-    std::uint32_t cluster_ref_base{}, raster_record_base{}, material_word{}, reserved{};
+    std::uint32_t cluster_ref_base{}, raster_record_base{}, material_word{}, active_view_mask{15u};
     std::array<float, 4> camera_origin_near{};
     std::array<float, 4> view_right{}, view_up{}, view_forward{};
     std::array<float, 4> projection_scale{}; // output pixels: perspective camera, three orthographic cascades
@@ -80,6 +80,7 @@ static_assert(sizeof(GpuClusterPage) == 32);
 static_assert(sizeof(GpuClusterCandidate) == 48);
 static_assert(sizeof(GpuClusterCutStatus) == 48);
 static_assert(sizeof(GpuClusterRefinementConstants) == 576);
+static_assert(offsetof(GpuClusterRefinementConstants, active_view_mask) == 60);
 
 struct ClusterGpuTables
 {

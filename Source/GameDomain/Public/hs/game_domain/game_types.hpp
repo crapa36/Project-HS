@@ -17,7 +17,7 @@ inline constexpr std::size_t kRelicCount = 20;
 inline constexpr std::size_t kStatCount = 6;
 inline constexpr std::size_t kEnemyArchetypeCount = 6;
 inline constexpr std::size_t kPickupKindCount = 4;
-inline constexpr std::uint32_t kSimulationVersion = 5;
+inline constexpr std::uint32_t kSimulationVersion = 6;
 inline constexpr std::uint32_t kGameplayHashVersion = 7;
 inline constexpr std::uint32_t kDeterminismProfile = 1;
 using RelicMask = std::uint32_t;
@@ -202,6 +202,8 @@ struct UpgradeRelicSynergyTelemetry
 
 struct BalanceTelemetry
 {
+    // False means optional detailed synergy fields were deliberately not captured.
+    bool detailed_balance_captured{true};
     std::array<std::uint64_t, kCombatSkillCount> skill_uses{};
     std::array<std::uint64_t, kCombatSkillCount> skill_casts_with_hit{};
     std::array<std::uint64_t, kCombatSkillCount> skill_hit_events{};

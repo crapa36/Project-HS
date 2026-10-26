@@ -1013,13 +1013,36 @@ Result D3D12Renderer::Impl::CreateGpuData()
         if (auto budget = UpdateResidencyBudget(); !budget) return budget;
     D3D12MA::ALLOCATION_DESC upload_allocation{};
     upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-    std::byte *mapped{};
     D3D12_RANGE no_read{};
     auto result = frames[0].allocator->Reset();
     if (FAILED(result)) return HResultFailure("Reset character geometry upload allocator", result);
     result = command_list->Reset(frames[0].allocator.Get(), nullptr);
     if (FAILED(result)) return HResultFailure("Reset character geometry upload list", result);
     std::vector<AllocationResource> geometry_uploads;
+    const auto upload_immutable = [&](AllocationResource &target, std::span<const std::byte> bytes) -> Result {
+        D3D12MA::ALLOCATION_DESC allocation{};
+        allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+        if (auto created = CreateAllocation(target, allocation, BufferDescription(bytes.size()),
+                D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
+        AllocationResource staging;
+        if (auto created = CreateAllocation(staging, upload_allocation, BufferDescription(bytes.size()),
+                D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+        void *destination{};
+        const auto mapped_result = staging.resource->Map(0, &no_read, &destination);
+        if (FAILED(mapped_result)) return HResultFailure("Map immutable GPU buffer staging", mapped_result);
+        std::memcpy(destination, bytes.data(), bytes.size());
+        staging.resource->Unmap(0, nullptr);
+        command_list->CopyBufferRegion(target.resource.Get(), 0, staging.resource.Get(), 0, bytes.size());
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition = {target.resource.Get(), D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+            D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+        command_list->ResourceBarrier(1, &barrier);
+        target.graph_access = Access::AllShaderRead;
+        geometry_uploads.push_back(std::move(staging));
+        return Result::Success();
+    };
     if (auto created = CreateProceduralGeometry(command_list.Get(), geometry_uploads); !created)
         return created;
     const auto load_character_geometry = [&](const std::string &logical_id,
@@ -1121,17 +1144,8 @@ Result D3D12Renderer::Impl::CreateGpuData()
             std::memcpy(&stored, matrix.data(), sizeof(stored));
         }
     }
-    const auto skin_bytes = skin_matrices.size() * sizeof(skin_matrices.front());
-    if (auto created = CreateAllocation(monster_skin_matrices, upload_allocation,
-                                        BufferDescription(skin_bytes),
-                                        D3D12_RESOURCE_STATE_GENERIC_READ);
-        !created)
-        return created;
-    result = monster_skin_matrices.resource->Map(0, &no_read,
-                                                 reinterpret_cast<void **>(&mapped));
-    if (FAILED(result)) return HResultFailure("Map monster skin buffer", result);
-    std::memcpy(mapped, skin_matrices.data(), skin_bytes);
-    monster_skin_matrices.resource->Unmap(0, nullptr);
+    if (auto uploaded = upload_immutable(monster_skin_matrices, std::as_bytes(std::span(skin_matrices))); !uploaded)
+        return uploaded;
 
     // The atlas is cooked from Blender-authored triangle-expanded meshes.
     std::filesystem::path atlas_path;
@@ -1196,13 +1210,8 @@ Result D3D12Renderer::Impl::CreateGpuData()
         std::memcpy(&value, &atlas_words[word], sizeof(value));
         if (!std::isfinite(value)) return atlas_failure();
     }
-    if (auto created = CreateAllocation(vfx_mesh_atlas, upload_allocation,
-            BufferDescription(static_cast<std::size_t>(atlas_size)), D3D12_RESOURCE_STATE_GENERIC_READ);
-        !created) return created;
-    result = vfx_mesh_atlas.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
-    if (FAILED(result)) return HResultFailure("Map VFX mesh atlas", result);
-    std::memcpy(mapped, atlas_words.data(), static_cast<std::size_t>(atlas_size));
-    vfx_mesh_atlas.resource->Unmap(0, nullptr);
+    if (auto uploaded = upload_immutable(vfx_mesh_atlas, std::as_bytes(std::span(atlas_words))); !uploaded)
+        return uploaded;
 
     const std::string archer_logical_id = "render/character/archer.rpkg";
     render_data::CharacterMetadataPackageData archer_package;

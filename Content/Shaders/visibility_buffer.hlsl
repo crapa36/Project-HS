@@ -161,11 +161,19 @@ HsVisibilityOutput HsVisibilityPSImpl(SceneOutput input, bool front,
         geometry.IndexCount == 0u)
         clip(-1.0);
     const bool meshPrimitive = (geometry.Flags & 2u) != 0u;
-    const uint canonicalPrimitive = meshPrimitive
+    uint canonicalPrimitive = meshPrimitive
         ? primitiveId : geometry.FirstIndex / 3u + primitiveId;
     if (canonicalPrimitive < geometry.FirstIndex / 3u ||
         canonicalPrimitive - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u)
         clip(-1.0);
+    if (!meshPrimitive && (geometry.Flags & 64u) != 0u)
+    {
+        canonicalPrimitive = GeometryBuffers[NonUniformResourceIndex(1u + geometry.PageSlot * 4u + 3u)].Load(
+            geometry.RemapOffset + canonicalPrimitive * 4u);
+        if (canonicalPrimitive < geometry.FirstIndex / 3u ||
+            canonicalPrimitive - geometry.FirstIndex / 3u >= geometry.IndexCount / 3u)
+            clip(-1.0);
+    }
     output.visibility = uint2(rasterId, canonicalPrimitive);
     output.frontFace = front ? 1u : 0u;
     return output;

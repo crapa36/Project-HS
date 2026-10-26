@@ -199,6 +199,68 @@ std::uint64_t DeriveSceneProbeRevision(SceneProbeRevisionDomain domain,
     return revision|std::uint64_t(1);
 }
 
+std::string DeriveSceneProbeInputIdentity(const SceneProbeDescription &description,
+    std::span<const SceneProbeRecord> probes, std::span<const std::string> dependencies,
+    std::span<const SceneProbeRevisionInput> source_inputs)
+{
+    Require(!probes.empty() && probes.size()<=kSceneProbeMaximumCount,"invalid semantic probe count");
+    (void)ValidateDescription(description,dependencies);
+    Require(source_inputs.size()==dependencies.size(),"source identity count differs from dependencies");
+    for(std::size_t i=0;i<source_inputs.size();++i)
+        Require(source_inputs[i].logical_id==dependencies[i],"source identities must match canonical dependencies");
+
+    hs::Sha256Stream hash;
+    constexpr std::string_view tag="HSSPROBE-INPUT-IDENTITY-1";
+    auto bytes=[&](std::string_view value) { hash.Add(std::as_bytes(std::span(value.data(),value.size()))); };
+    auto integer=[&](std::uint64_t value,std::size_t count=8) {
+        std::array<std::byte,8> encoded{};
+        for(std::size_t i=0;i<count;++i) encoded[i]=std::byte((value>>(8*i))&255);
+        hash.Add(std::span(encoded).first(count));
+    };
+    auto text=[&](std::string_view value) { integer(value.size()); bytes(value); };
+    auto floating=[&](float value) {
+        Require(std::isfinite(value),"nonfinite semantic probe input");
+        integer(std::bit_cast<std::uint32_t>(value),4);
+    };
+    auto vector=[&](Float3 value) { floating(value.x); floating(value.y); floating(value.z); };
+    bytes(tag);
+    integer(description.edge,4); integer(description.ggx_samples,4);
+    integer(static_cast<std::uint32_t>(description.blend),4);
+    integer(probes.size());
+    for(const auto &probe:probes)
+    {
+        ValidateRecord(probe);
+        integer(probe.stable_id); vector(probe.position); floating(probe.weight);
+        vector(probe.influence_min); floating(probe.influence_fade);
+        vector(probe.influence_max); floating(probe.visibility_bias);
+        vector(probe.projection_min); floating(probe.visibility_fade);
+        vector(probe.projection_max); floating(probe.capture_distance);
+    }
+    text(dependencies[description.environment_dependency]);
+    text(dependencies[description.material_dependency]);
+    text(dependencies[description.light_dependency]);
+    text(dependencies[description.static_layout_dependency]);
+    integer(source_inputs.size()); std::string_view previous;
+    for(const auto &input:source_inputs)
+    {
+        Require(ValidDependency(input.logical_id) && (previous.empty() || previous<input.logical_id),
+            "source identities must be canonical sorted unique logical IDs");
+        Require(input.sha256.size()==64,"invalid source identity SHA256 length");
+        std::array<std::byte,32> digest{};
+        auto nibble=[](char c)->unsigned {
+            Require((c>='0' && c<='9') || (c>='a' && c<='f'),"source identity SHA256 must be lowercase hex");
+            return c<='9'?unsigned(c-'0'):unsigned(c-'a'+10);
+        };
+        for(std::size_t i=0;i<digest.size();++i)
+            digest[i]=std::byte((nibble(input.sha256[2*i])<<4)|nibble(input.sha256[2*i+1]));
+        text(input.logical_id); hash.Add(digest); previous=input.logical_id;
+    }
+    const auto digest=hash.Finish(); constexpr char digits[]="0123456789abcdef";
+    std::string result="sha256:"; result.reserve(71);
+    for(const auto byte:digest) { const auto value=std::to_integer<unsigned>(byte); result+=digits[value>>4]; result+=digits[value&15]; }
+    return result;
+}
+
 std::vector<std::byte> BuildSceneProbePackage(AssetId asset,std::span<const std::string> dependencies,
     const SceneProbeDescription &d,std::span<const SceneProbeRecord> probes,SceneProbeBakeData bake)
 {

@@ -3,6 +3,7 @@
 #include <hs/core/render_view_input.hpp>
 #include <hs/core/render_scene_ref.hpp>
 #include <hs/renderer/renderer.hpp>
+#include <cstdint>
 #include <optional>
 
 namespace hs
@@ -11,8 +12,8 @@ struct RenderVfxFrameInput
 {
     std::span<const ParticleSpawnCommand> particle_spawns;
     std::span<const VfxLineSpawnCommand> effect_lines;
-    std::span<const VfxEventInput> events;
-    std::span<const VfxPersistentInput> persistent;
+    std::uint32_t event_count{};
+    std::uint32_t persistent_count{};
     std::span<const VfxGroundSpawnInput> ground;
     std::span<const VfxFlashSpawnInput> flashes;
     std::span<const VfxOwnedMeshInput> meshes;
@@ -44,5 +45,6 @@ struct RenderFrameInput
     // Offline lockstep: complete prior GPU work and await admitted asset reads
     // so publication boundaries depend on frames rather than wall-clock speed.
     bool wait_for_streaming{};
+    std::uint64_t ui_packet_generation{};
 };
 } // namespace hs

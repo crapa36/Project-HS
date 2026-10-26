@@ -39,7 +39,10 @@ struct FeedbackFrame
     ResidencyTicket metadata_ticket;
     std::vector<FeedbackOwner> owners;
     std::array<std::uint32_t, kTextureFeedbackBindingCount> aliases;
-    ComPtr<ID3D12DescriptorHeap> heap, clear_descriptors;
+    ComPtr<ID3D12DescriptorHeap> heap, cpu_heap, clear_descriptors;
+    D3D12_CPU_DESCRIPTOR_HANDLE written_cpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE written_gpu{};
+    UINT written_stride{};
     CompletionSet completion;
     bool scheduled{}, pending{};
 };
@@ -230,14 +233,22 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
     impl_->frames[slot] = std::move(candidate); return Result::Success();
 }
 Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12DescriptorHeap *heap,
+    ID3D12DescriptorHeap *cpu_heap,
     D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first, UINT stride)
 {
-    if (slot >= impl_->frames.size() || !impl_->frames[slot] || !heap || !stride ||
-        stride != impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) ||
+    if (slot >= impl_->frames.size() || !impl_->frames[slot] || !heap || !cpu_heap || !stride)
+        return FeedbackFailure("Sampler feedback descriptor bank is not prepared.");
+    auto &frame = *impl_->frames[slot];
+    // Metadata and target/alias owners are immutable for this bank. PrepareFrame
+    // replaces the bank when they change, after its existing lease checks.
+    if (frame.heap.Get() == heap && frame.cpu_heap.Get() == cpu_heap && frame.written_cpu.ptr == first.ptr &&
+        frame.written_gpu.ptr == gpu_first.ptr && frame.written_stride == stride) return Result::Success();
+    if (stride != impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) ||
         heap->GetDesc().Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         !(heap->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
         return FeedbackFailure("Sampler feedback descriptor bank is not prepared.");
-    auto &frame = *impl_->frames[slot]; frame.heap = heap;
+    frame.heap = heap;
+    frame.cpu_heap = cpu_heap;
     D3D12_SHADER_RESOURCE_VIEW_DESC metadata{}; metadata.Format = DXGI_FORMAT_UNKNOWN;
     metadata.ViewDimension = D3D12_SRV_DIMENSION_BUFFER; metadata.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     metadata.Buffer.NumElements = kTextureFeedbackBindingCount; metadata.Buffer.StructureByteStride = sizeof(TextureMipMetadata);
@@ -262,6 +273,9 @@ Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12Descr
             impl_->device->CreateUnorderedAccessView(nullptr, nullptr, &empty, cpu);
         }
     }
+    frame.written_cpu = first;
+    frame.written_gpu = gpu_first;
+    frame.written_stride = stride;
     return Result::Success();
 }
 Result RendererTextureFeedback::AddClearPass(RenderGraphBuilder &graph, std::uint32_t slot,

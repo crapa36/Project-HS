@@ -50,19 +50,25 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration)
     }
 
     ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred_settings;
+    const bool diagnostic_device = configuration.validation || configuration.capture_timing_stream;
+    dred_enabled = false;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred_settings))))
     {
-        dred_settings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        dred_settings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        dred_settings->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-        dred_enabled = true;
+        // Ordinary play leaves crash instrumentation to Windows policy.
+        const auto mode = diagnostic_device ? D3D12_DRED_ENABLEMENT_FORCED_ON
+                                            : D3D12_DRED_ENABLEMENT_SYSTEM_CONTROLLED;
+        dred_settings->SetAutoBreadcrumbsEnablement(mode);
+        dred_settings->SetPageFaultEnablement(mode);
+        dred_settings->SetBreadcrumbContextEnablement(mode);
+        dred_enabled = diagnostic_device;
     }
     std::ofstream(config.artifact_directory / "dred_config.json", std::ios::trunc)
         << std::format(
                "{{\"enabled\":{},\"auto_breadcrumbs\":{},\"page_fault\":{},"
-               "\"breadcrumb_context\":{}}}\n",
+               "\"breadcrumb_context\":{},\"system_controlled\":{}}}\n",
                dred_enabled ? "true" : "false", dred_enabled ? "true" : "false",
-               dred_enabled ? "true" : "false", dred_enabled ? "true" : "false");
+               dred_enabled ? "true" : "false", dred_enabled ? "true" : "false",
+               diagnostic_device ? "false" : "true");
 
     const auto factory_flags = configuration.validation ? DXGI_CREATE_FACTORY_DEBUG : 0u;
     auto result = CreateDXGIFactory2(factory_flags, IID_PPV_ARGS(&factory));
@@ -437,6 +443,12 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     timings.fence_completed = true;
     timings.completed_frame_id = frame.submitted_frame_id;
     timings.view_id = frame.submitted_view_id;
+    timings.metric_kind = frame.timing_kind;
+    timings.metric_generation = frame.timing_generation;
+    timings.resize_epoch = frame.timing_resize_epoch;
+    timings.render_active = frame.timing_render_active;
+    timings.main_view = frame.timing_main_view;
+    timings.frame_generation_enabled = frame.timing_frame_generation_enabled;
     timings.cpu_recording_ms = frame.cpu_recording_ms;
     timings.cpu_recording_valid = frame.cpu_recording_ms_valid &&
         std::isfinite(frame.cpu_recording_ms) && frame.cpu_recording_ms >= 0.0f;
@@ -530,6 +542,26 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     // Preserve independent pass diagnostics even when the critical-path sample
     // is unavailable. DRS requires critical_path_valid as well as completion.
     timings.valid = pass_timings_valid;
+    if (timings.metric_kind == GpuFrameTimingKind::SourceOutputReady)
+    {
+        if (!duplicate_endpoint && end_slot != timings.passes.size())
+        {
+            const auto &ready = timings.passes[end_slot];
+            if (ready.queue == RenderQueue::Direct && ready.measured && ready.timestamp_frequency)
+            {
+                timings.output_ready_ticks = ready.end_ticks;
+                timings.output_ready_frequency = ready.timestamp_frequency;
+                timings.output_ready_valid = true;
+                timings.output_ready_qpc = ready.end_qpc;
+                timings.output_ready_qpc_frequency = ready.qpc_frequency;
+                timings.output_ready_clock_calibrated = ready.clock_calibrated;
+            }
+        }
+        // A single ready endpoint cannot establish dependency span, GPU backlog,
+        // pacing exclusion or clock drift. Do not turn it into a DRS sample.
+        return publish();
+    }
+    if (timings.metric_kind != GpuFrameTimingKind::ReferenceGraphSpan) return publish();
     if (!timings.valid || duplicate_endpoint || begin_slot == timings.passes.size() ||
         end_slot == timings.passes.size())
         return publish();

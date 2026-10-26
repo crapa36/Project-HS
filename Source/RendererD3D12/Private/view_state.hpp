@@ -35,12 +35,19 @@ struct DynamicResolutionConfig
     double max_scale_change_percent{2.0};
 };
 
+enum class DynamicResolutionMetricKind : std::uint8_t
+{
+    Unavailable,
+    ReferenceGraphSpan,
+};
+
 struct DynamicResolutionSample
 {
     bool completed{};
     bool generated{};
     bool gpu_limited{};
     double render_critical_path_ms{};
+    DynamicResolutionMetricKind metric_kind{DynamicResolutionMetricKind::Unavailable};
 };
 
 struct DynamicResolutionSelection
@@ -54,7 +61,7 @@ struct DynamicResolutionSelection
 class DynamicResolutionController
 {
   public:
-    // The caller supplies a completed, ungenerated render critical-path sample,
+    // The caller supplies an explicitly qualified reference graph-span sample,
     // once per newly completed render frame, excluding present/limiter/idle waits.
     // Selection never allocates resources.
     [[nodiscard]] DynamicResolutionSelection Select(

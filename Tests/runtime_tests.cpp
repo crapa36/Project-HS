@@ -1,4 +1,5 @@
 #include "vfx_light_reference.hpp"
+#include "startup_graphics_settings.hpp"
 #include <hs/runtime/experiment_spec.hpp>
 #include <hs/runtime/shipping_content.hpp>
 #include <hs/core/shipped_content_owner.hpp>
@@ -13,6 +14,7 @@
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/core/fixed_step_clock.hpp>
+#include <hs/renderer/renderer.hpp>
 #include "vfx_catalog.hpp"
 #include "runtime_channels.hpp"
 #include "session_music.hpp"
@@ -242,11 +244,23 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
               hs::ApplyExperimentOverrides(loaded, diagnostic) && diagnostic.diagnostic_enemy_count == 200 && diagnostic.capture_diagnostics,
           "diagnostic enemy population round trips and applies as a number");
+    Check(hs::ApplicationConfig{}.capture_gpu_timings, "existing diagnostic captures retain GPU timings by default");
+    source.config_overrides_json = R"({"diagnostic_enemy_count":200,"capture_gpu_timings":false})";
+    hs::ApplicationConfig cpu_capture;
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              hs::ApplyExperimentOverrides(loaded, cpu_capture) && cpu_capture.capture_diagnostics &&
+              cpu_capture.diagnostic_enemy_count == 200 && !cpu_capture.capture_gpu_timings,
+          "CPU cadence capture can omit GPU queries without changing the enemy fixture");
+    source.config_overrides_json = R"({"capture_gpu_timings":"false"})";
+    Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+          "GPU timing capture rejects a nonboolean override");
     source.config_overrides_json = "{\"diagnostic_enemy_count\":10001}";
     Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
           "diagnostic enemy population above the fixture bound is rejected");
     Check(!hs::ApplicationConfig{}.graphics_preset,
           "graphics preset override is absent by default");
+    Check(!hs::ApplicationConfig{}.surface_frontend,
+          "surface frontend override is absent by default");
     for (const auto &[name, expected] : std::array{
              std::pair{"low", hs::GraphicsPreset::Low},
              std::pair{"medium", hs::GraphicsPreset::Medium},
@@ -268,6 +282,25 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
         Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
               "graphics preset rejects custom, unknown, and nonstring values");
     }
+    for (const auto &[name, expected] : std::array{
+             std::pair{"compact", hs::SurfaceFrontend::CompactDeferred},
+             std::pair{"visibility", hs::SurfaceFrontend::VisibilityBuffer}})
+    {
+        source.config_overrides_json = std::string("{\"surface_frontend\":\"") + name + "\"}";
+        hs::ApplicationConfig frontend;
+        Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+                  hs::ApplyExperimentOverrides(loaded, frontend) && frontend.surface_frontend == expected,
+              "surface frontend override accepts typed compact and visibility modes");
+    }
+    for (const auto invalid : {"{\"surface_frontend\":\"deferred\"}",
+                               "{\"surface_frontend\":\"unknown\"}",
+                               "{\"surface_frontend\":true}",
+                               "{\"surface_frontend\":1}"})
+    {
+        source.config_overrides_json = invalid;
+        Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+              "surface frontend rejects unknown and nonstring values");
+    }
     source.config_overrides_json = R"({"graphics_preset":"ultra","width":1920,"height":1080,"vsync":false,"frame_cap":30,"render_scale_percent":75,"shadow_resolution":1024,"particle_percentage":50,"borderless":true,"bloom":false,"outline":false})";
     hs::ApplicationConfig explicit_graphics;
     Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
@@ -277,6 +310,34 @@ void TestExperimentSpecRoundTrip(const std::filesystem::path &root)
               explicit_graphics.shadow_resolution_explicit && explicit_graphics.particle_percentage_explicit &&
               explicit_graphics.borderless_explicit && explicit_graphics.bloom_explicit && explicit_graphics.outline_explicit,
           "experiment preset preserves explicit field precedence metadata");
+    source.config_overrides_json = R"({"graphics_preset":"ultra","pom_quality":"off","geometry_frontend":"indexed"})";
+    hs::ApplicationConfig ablation;
+    Check(hs::SaveExperimentSpec(path, source) && hs::LoadExperimentSpec(path, loaded) &&
+              hs::ApplyExperimentOverrides(loaded, ablation) && ablation.graphics_preset == hs::GraphicsPreset::Ultra &&
+              ablation.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation.geometry_frontend == hs::GeometryFrontend::Indexed,
+          "experiment preset retains explicit POM and geometry overrides");
+    hs::SettingsDocument ablation_document;
+    (void)hs::PrepareStartupGraphicsSettings(ablation_document, ablation);
+    Check(ablation_document.graphics.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation_document.graphics.material_quality == hs::GraphicsQuality::Ultra &&
+              ablation_document.graphics.geometry_quality == hs::GraphicsQuality::Ultra,
+          "individual POM override preserves the other preset quality settings at startup");
+    for (const auto invalid : {R"({"pom_quality":true})", R"({"pom_quality":"fast"})",
+                               R"({"geometry_frontend":1})", R"({"geometry_frontend":"fast"})"})
+    {
+        source.config_overrides_json = invalid;
+        Check(!hs::SaveExperimentSpec(path, source) || !hs::LoadExperimentSpec(path, loaded),
+              "invalid POM/geometry override rejected by input boundary");
+        Check(!hs::ApplyExperimentOverrides(source, ablation), "invalid direct POM/geometry override rejected");
+    }
+    source.config_overrides_json = "{}";
+    hs::ApplicationConfig unspecified;
+    Check(hs::ApplyExperimentOverrides(source, unspecified) && !unspecified.pom_quality && !unspecified.geometry_frontend,
+          "missing POM/geometry overrides preserve defaults");
+    Check(hs::ApplyExperimentOverrides(source, ablation) && ablation.pom_quality == hs::GraphicsOptionalQuality::Off &&
+              ablation.geometry_frontend == hs::GeometryFrontend::Indexed,
+          "missing overrides preserve existing explicit choices");
     hs::ApplicationConfig hero;
     Check(!hero.capture_hero_work, "isolated Hero work capture defaults off");
     source.config_overrides_json = "{\"capture_hero_work\":true}";
@@ -1206,6 +1267,17 @@ void TestPreparedNonLoopTransition(const std::filesystem::path &root)
           "cold nonloop stinger starts only after verified Ready instead of being silently dropped");
     Check(WaitForSingleObject(wake.Handle(), 0) == WAIT_OBJECT_0,
           "worker Ready notifies Main independently of rendering or another simulation sound");
+    auto stop = event;
+    stop.parameters = hs::EncodeAudioAction(hs::AudioEventAction::Stop);
+    Check(channels->sim_audio_events.TryPush({stop, 0}), "queue transition-track stop");
+    owner->Drain(channels->sim_audio_events, channels->render_audio_events, [](const auto &, std::size_t) {});
+    Check(owner->ActiveMusic().value == 0 && !owner->HasPendingMusic(),
+          "Stop clears the matching active music intent as well as pending intent");
+    owner->RequestMusic(event);
+    Check(owner->HasPendingMusic(), "the same cue can be requested again after Stop");
+    owner->Update();
+    Check(!owner->HasPendingMusic() && owner->ActiveMusic().value == id.value,
+          "same cue starts again after Stop instead of being suppressed by stale ownership");
     owner.reset();
     engine.Shutdown();
 }
@@ -1640,6 +1712,7 @@ void TestPlaytestRecordAndReplay(const std::filesystem::path &root)
               "obsolete replay version preserves the previous valid output");
     };
     reject_version("simulation_version", hs::kSimulationVersion, 4);
+    reject_version("simulation_version", hs::kSimulationVersion, 5);
     reject_version("gameplay_hash_version", hs::kGameplayHashVersion, 6);
     {
         std::ofstream output(directory / "metadata.json", std::ios::trunc);
@@ -1790,6 +1863,77 @@ void TestCameraPoseContinuity()
           "close camera reaches third person endpoint");
 }
 
+void TestVfxActiveEffectStoreOwnsPayloadOnce()
+{
+    using Profile = hs::runtime_detail::ActiveEffectStore::Profile;
+    hs::runtime_detail::ActiveEffectStore store;
+    hs::VfxEventInput input;
+    input.effect_handle = 3; input.sequence = 9; input.event_tick = 12;
+    input.world_transform[12] = 5.0f;
+    std::vector<hs::VfxEventInput> ground, light;
+    store.Append(Profile::Ground, input, ground);
+    store.Append(Profile::Light, input, light);
+    Check(store.Size() == 1 && ground.size() == 1 && light.size() == 1,
+          "profile memberships duplicated the active event payload");
+    ground[0].world_transform[12] = 99.0f;
+    store.Commit(Profile::Ground, ground);
+    Check(store.Get(0)->world_transform[12] == 5.0f,
+          "frame scratch mutation replaced the authoritative event payload");
+    store.Commit(Profile::Ground, {});
+    store.Compact();
+    Check(store.Size() == 1, "active profile failed to retain shared event row");
+    store.Commit(Profile::Light, {});
+    store.Compact();
+    Check(store.Size() == 0, "stable compaction retained an unreferenced event row");
+    const auto retired = store.Intern(input);
+    input.sequence = 10;
+    const auto retained = store.Intern(input);
+    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> captures(2);
+    captures[0].row = retired;
+    captures[1].row = retained;
+    store.RebindRows([](hs::VfxEventInput &event) {
+        if (event.sequence == 9) return false;
+        event.effect_handle = 7;
+        return true;
+    }, captures);
+    Check(store.Size() == 1 && captures.size() == 1 && captures[0].row == 0 &&
+              store.Get(captures[0].row)->sequence == 10 &&
+              store.Get(captures[0].row)->effect_handle == 7,
+          "catalog rebind retires incompatible captures and remaps retained canonical rows");
+}
+
+void TestUiPacketReceiptFollowsExactPresentedFrame()
+{
+    auto channel_storage = std::make_unique<hs::RuntimeChannels>();
+    auto &channels = *channel_storage;
+    auto simulation = channels.ForSimulation();
+    auto rendering = channels.ForRender();
+    hs::runtime_detail::UiDrawPacketFacts older;
+    older.generation = 10; older.session_id = 7;
+    older.session.phase = hs::SessionPhase::CardSelection;
+    older.session.card_count = 1;
+    older.session.cards[0] = {hs::CardKind::LearnSkill, 1, 0};
+    older.selection_epoch = hs::runtime_detail::UiSelectionEpoch(older.session);
+    auto newer = older;
+    newer.generation = 11; newer.session.cards[0].subject = 2;
+    newer.selection_epoch = hs::runtime_detail::UiSelectionEpoch(newer.session);
+    simulation.ui_packets.StageUiPacket(0, older);
+    simulation.ui_packets.StageUiPacket(1, newer);
+    const std::array layout{hs::UiModel{hs::UiModel::Kind::Button, {360, 300}, {360, 420}}};
+    Check(rendering.ui_packets.AcceptPresentedUiPacket(10, 10, 7, layout, {1920, 1080}),
+          "accepted older frame resolves its own staged UI facts despite a newer pending snapshot");
+    auto shown = channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire);
+    Check(shown && shown->generation == 10 && shown->session.cards[0].subject == 1 &&
+          shown->draw_models.size() == 1 && shown->presented_extent == hs::ViewExtent{1920, 1080},
+          "present receipt owns the exact frame's layout, choice facts and extent");
+    Check(!channels.ui_packets.AcceptPresentedUiPacket(11, 10, 7, layout, {1920, 1080}) &&
+          channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire) == shown,
+          "mismatched or stale receipt cannot replace the last accepted UI packet");
+    Check(channels.ui_packets.AcceptPresentedUiPacket(11, 11, 7, layout, {1280, 720}) &&
+          channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire)->generation == 11,
+          "new accepted resized frame replaces the bounded latest receipt");
+}
+
 void TestVfxSessionReset()
 {
     hs::runtime_detail::VfxSessionState state;
@@ -1801,11 +1945,16 @@ void TestVfxSessionReset()
     next_event.session_id = 2;
     next_event.tick = 2;
     next_event.sequence = 10;
-    state.pending_events = {old_event, next_event};
+    Check(state.raw_events.Enqueue(old_event) && state.raw_events.Enqueue(next_event),
+          "VFX events enqueue");
     Check(state.Synchronize(1), "first VFX session begins");
-    Check(state.TakeReady(99).empty(), "future tick or session event played early");
-    const auto first = state.TakeReady(100);
-    Check(first.size() == 1 && first[0].sequence == 9, "current VFX event was lost");
+    (void)state.persistent_mote_births.GetOrCreate(77, 3, 12, 4, 0, 0, 21);
+    Check(state.persistent_mote_births.size() == 1, "initial session should retain its mote birth window");
+    Check(state.raw_events.Prepare(99, 1).entries.empty(), "future tick or session event played early");
+    const auto &first = state.raw_events.Prepare(100, 1);
+    Check(first.entries.size() == 1 && first.entries[0].event.sequence == 9,
+          "current VFX event was lost");
+    state.raw_events.Acknowledge();
     Check(state.MarkPersistentBurst(77, 3), "first persistent burst was lost");
     state.ClearDecoded(); // A successful catalog reload retains semantic episode history.
     Check(!state.MarkPersistentBurst(77, 3) && state.MarkPersistentBurst(77, 4),
@@ -1821,14 +1970,17 @@ void TestVfxSessionReset()
     Check(state.Synchronize(2) && state.decoded.flashes.empty() && state.decoded.ground_events.empty() &&
               state.decoded.particle_spawns.empty() && state.decoded.effect_lines.empty() && state.decoded.ribbon_events.empty() && state.decoded.light_events.empty() && state.decoded.distortion_events.empty() && state.decoded.decal_events.empty(),
           "session restart retained an old visual");
+    Check(state.persistent_mote_births.size() == 0,
+          "session restart retained previous-session mote unit data");
     Check(state.MarkPersistentBurst(77, 3),
           "new simulation session retained an old burst episode");
-    state.pending_events.push_back(old_event); // Delayed cross-thread delivery.
-    Check(state.TakeReady(1).empty(), "reset clock replayed an old/future event");
-    const auto second = state.TakeReady(2);
-    Check(second.size() == 1 && second[0].sequence == 10,
+    Check(state.raw_events.Enqueue(old_event), "delayed old event enqueue"); // Delayed cross-thread delivery.
+    Check(state.raw_events.Prepare(1, 2).entries.empty(), "reset clock replayed an old/future event");
+    const auto &second = state.raw_events.Prepare(2, 2);
+    Check(second.entries.size() == 1 && second.entries[0].event.sequence == 10,
           "event arriving before its session snapshot was dropped");
-    Check(!state.Synchronize(2) && state.TakeReady(100).empty(),
+    state.raw_events.Acknowledge();
+    Check(!state.Synchronize(2) && state.raw_events.Prepare(100, 2).entries.empty(),
           "old VFX replayed when the next session caught up to its tick");
 }
 
@@ -1841,9 +1993,10 @@ void TestSessionProbeUiBridge()
     published.skill_levels[1] = 2;
     published.skill_loadout[0] = hs::SkillKind::BasicAttack;
     published.skill_loadout[1] = hs::SkillKind::Count;
-    channels.PublishSessionProbe(published);
+    channels.ForSimulation().PublishSessionProbe(published, 17);
     const auto session = channels.ReadSessionProbe();
-    Check(session.skill_levels[1] == 2 &&
+    Check(channels.current_session_id.load(std::memory_order_acquire) == 17 &&
+              session.skill_levels[1] == 2 &&
               session.skill_loadout[0] == hs::SkillKind::BasicAttack &&
               session.skill_loadout[1] == hs::SkillKind::Count,
           "session probe bridge preserves skills and loadout");
@@ -2481,6 +2634,8 @@ int main(int argc, char **argv)
         TestSessionProbeUiBridge();
         TestSimulationSignalFanout();
         TestVfxSessionReset();
+        TestVfxActiveEffectStoreOwnsPayloadOnce();
+        TestUiPacketReceiptFollowsExactPresentedFrame();
         TestCameraPoseContinuity();
         TestDpiWindowCoordinates();
         std::filesystem::remove_all(root, error);

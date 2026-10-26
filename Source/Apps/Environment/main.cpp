@@ -13,8 +13,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <fstream>
 #include <iostream>
 #include <iterator>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -88,6 +91,23 @@ std::string EncoderIdentity(ID3D11Device *device)
            std::to_string(static_cast<std::uint64_t>(driver.QuadPart));
 }
 
+std::string DefaultEncoderIdentity()
+{
+    Microsoft::WRL::ComPtr<IDXGIFactory> factory;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC description{};
+    LARGE_INTEGER driver{};
+    if(FAILED(CreateDXGIFactory(IID_PPV_ARGS(&factory))) ||
+       FAILED(factory->EnumAdapters(0,&adapter)) ||
+       FAILED(adapter->GetDesc(&description)) ||
+       FAILED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice),&driver)))
+        return ".cpu-bc7";
+    return ".d3d11-bc7."+std::to_string(description.VendorId)+"."+
+        std::to_string(description.DeviceId)+"."+std::to_string(description.SubSysId)+"."+
+        std::to_string(description.Revision)+"."+
+        std::to_string(static_cast<std::uint64_t>(driver.QuadPart));
+}
+
 void AddInputs(ap::ActionSpec& spec, const fs::path& source_root,
                const std::vector<fs::path>& paths)
 {
@@ -122,6 +142,142 @@ bool IsCurrent(const fs::path& build_root, const ap::ActionSpec& spec,
     return true;
 }
 
+struct PendingAction
+{
+    ap::ActionSpec spec;
+    std::vector<std::string> names;
+    fs::path stage;
+    std::string group;
+    std::string role;
+    bool needs_cook{};
+};
+
+void AddRoleAction(PendingAction& action, const fs::path& source_root,
+                   const fs::path& texture_source, const std::string& group,
+                   const std::string& role, const std::string& gpu_identity)
+{
+    action.group=group;
+    action.role=role;
+    action.spec.action_id="environment.texture."+group+"."+role;
+    action.spec.recipe_id="project-hs.environment.texture-role"+
+        (role=="base_color"?gpu_identity:".cpu-bc7");
+    action.spec.recipe_version=1;
+    action.spec.namespace_path="environment/textures/"+group+"/"+role;
+    AddInputs(action.spec,source_root,hs::content::EnvironmentTextureRoleInputs(texture_source,group,role));
+    action.names={hs::content::EnvironmentTextureRoleProduct(texture_source,group,role)};
+}
+
+std::string EscapeDepfile(const fs::path& path)
+{
+    std::string result;
+    for(const char ch:path.generic_string()) {
+        Require(ch!='\n'&&ch!='\r',"newline in environment batch depfile path");
+        if(ch==' '||ch=='#'||ch==':'||ch=='\\') result.push_back('\\');
+        result.push_back(ch=='$'?'$':ch);
+        if(ch=='$') result.push_back('$');
+    }
+    return result;
+}
+
+void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
+{
+    const auto texture_source=source_root/"ContentSource/Textures/Environment";
+    const std::array<std::pair<const char*,std::vector<const char*>>,6> roles{{
+        {"terrain",{"base_color","surface_ra","normal","detail_normal","height"}},
+        {"rock",{"base_color","surface_ra","normal","detail_normal"}},
+        {"bark",{"base_color","surface_ra","normal","detail_normal"}},
+        {"grass",{"base_color","normal","roughness"}},
+        {"leaf",{"base_color","normal","roughness"}},
+        {"ground_detail",{"base_color","surface_ra","normal"}}}};
+    const auto guessed_gpu_identity=DefaultEncoderIdentity();
+    std::vector<PendingAction> actions;
+    actions.reserve(23);
+    for(const auto& [group,group_roles]:roles) for(const auto* role:group_roles) {
+        PendingAction action;
+        AddRoleAction(action,source_root,texture_source,group,role,guessed_gpu_identity);
+        actions.push_back(std::move(action));
+    }
+    PendingAction histogram;
+    histogram.spec.action_id="environment.histogram";
+    histogram.spec.recipe_id="project-hs.environment.histogram"+guessed_gpu_identity;
+    histogram.spec.recipe_version=1;
+    histogram.spec.namespace_path="environment/histogram";
+    AddInputs(histogram.spec,source_root,hs::content::EnvironmentHistogramInputs(texture_source));
+    histogram.names={"environment_terrain_gaussian.dds","environment_terrain_histogram.dds","environment_terrain_histogram.qa.json"};
+    actions.push_back(std::move(histogram));
+    Require(actions.size()==23,"environment family batch must contain 22 texture roles and histogram");
+
+    std::vector<hs::content::EnvironmentTextureRoleRequest> requests;
+    std::vector<std::string> all_inputs;
+    std::vector<bool> current(actions.size());
+    try {
+    for(size_t i=0;i<actions.size();++i) {
+        std::ranges::sort(actions[i].spec.inputs,{},&ap::Input::logical_id);
+        current[i]=IsCurrent(build_root,actions[i].spec,actions[i].names);
+    }
+    bool need_gpu=false;
+    for(size_t i=0;i<actions.size();++i)
+        if(!current[i] && (actions[i].role=="base_color" || actions[i].spec.action_id=="environment.histogram"))
+            need_gpu=true;
+    Microsoft::WRL::ComPtr<ID3D11Device> device;
+    if(need_gpu) {
+        device=HardwareCompressor();
+        const auto actual_identity=EncoderIdentity(device.Get());
+        if(actual_identity!=guessed_gpu_identity) {
+            for(auto& action:actions) {
+                if(action.role=="base_color") action.spec.recipe_id="project-hs.environment.texture-role"+actual_identity;
+                else if(action.spec.action_id=="environment.histogram")
+                    action.spec.recipe_id="project-hs.environment.histogram"+actual_identity;
+            }
+            for(size_t i=0;i<actions.size();++i)
+                current[i]=IsCurrent(build_root,actions[i].spec,actions[i].names);
+        }
+    }
+    for(size_t i=0;i<actions.size();++i) {
+        auto& action=actions[i];
+        for(const auto& input:action.spec.inputs) all_inputs.push_back(input.path.generic_string());
+        if(current[i]) {
+            ap::TouchActionResult(build_root/"Actions"/action.spec.namespace_path/"result.json");
+            std::cout<<action.spec.action_id<<" current\n";
+            continue;
+        }
+        action.needs_cook=true;
+        action.stage=ap::CreateStage(build_root/"Actions"/action.spec.namespace_path);
+        if(action.spec.action_id.starts_with("environment.texture.")) {
+            requests.push_back({action.group,action.role,action.stage});
+        }
+    }
+        if(!requests.empty()) hs::content::CookEnvironmentTextureRoles(texture_source,requests,device.Get());
+        for(auto& action:actions) if(action.needs_cook&&action.spec.action_id=="environment.histogram")
+            hs::content::CookEnvironmentHistogram(texture_source,action.stage,device.Get(),false);
+        for(auto& action:actions) if(action.needs_cook) {
+            std::vector<ap::Product> products;
+            for(const auto& name:action.names)
+                products.push_back(ap::HashProduct("environment/"+name,name,action.stage/name));
+            Require(std::distance(fs::directory_iterator(action.stage),fs::directory_iterator{})==
+                    static_cast<std::ptrdiff_t>(action.names.size()),"unexpected environment batch stage files");
+            ap::Publish(build_root,action.spec,action.stage,std::move(products));
+            ap::RemoveStage(action.stage);
+            action.stage.clear();
+            std::cout<<action.spec.action_id<<" published\n";
+        }
+
+        std::ranges::sort(all_inputs);
+        all_inputs.erase(std::unique(all_inputs.begin(),all_inputs.end()),all_inputs.end());
+        const auto completion=build_root/"Actions/environment/textures/family.stamp";
+        const auto depfile=build_root/"Actions/environment/textures/family.d";
+        std::string dep=EscapeDepfile(completion)+":";
+        for(const auto& input:all_inputs) dep+=" "+EscapeDepfile(input);
+        dep+='\n';
+        ap::AtomicWriteIfDifferent(depfile,dep);
+        const auto timestamp=std::chrono::steady_clock::now().time_since_epoch().count();
+        ap::AtomicWriteIfDifferent(completion,"environment-texture-family-v1\n"+std::to_string(timestamp)+"\n");
+    } catch(...) {
+        for(auto& action:actions) if(!action.stage.empty()) ap::RemoveStage(action.stage);
+        throw;
+    }
+}
+
 void Produce(std::string_view mode, const fs::path& source_root,
              const fs::path& build_root, const std::string& group = {},
              const std::string& role = {})
@@ -130,6 +286,11 @@ void Produce(std::string_view mode, const fs::path& source_root,
             "source and build roots must be absolute");
     ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
+
+    if(mode=="texture-batch") {
+        ProduceTextureBatch(source_root,build_root);
+        return;
+    }
 
     const auto texture_source = source_root / "ContentSource/Textures/Environment";
     const auto mesh_source = source_root /
@@ -236,13 +397,13 @@ int wmain(int argc, wchar_t** argv)
                 for (const auto ch : group_arg) group += static_cast<char>(ch);
                 for (const auto ch : role_arg) role += static_cast<char>(ch);
             }
-            else if ((arg == L"--histogram" || arg == L"--textures" || arg == L"--meshes") && mode.empty())
+            else if ((arg == L"--histogram" || arg == L"--textures" || arg == L"--meshes" || arg == L"--texture-batch") && mode.empty())
                 mode.assign(arg.begin() + 2, arg.end());
             else
                 throw std::runtime_error("hs_environment: invalid command line");
         }
         Require(!mode.empty() && !source_root.empty() && !build_root.empty(),
-                "usage: hs_environment --histogram|--textures|--texture-role <group> <role>|--meshes --source-root <absolute> --build-root <absolute>");
+                "usage: hs_environment --histogram|--textures|--texture-role <group> <role>|--texture-batch|--meshes --source-root <absolute> --build-root <absolute>");
         action_id = mode == "texture-role"
             ? "environment.texture." + group + "." + role
             : "environment." + mode;

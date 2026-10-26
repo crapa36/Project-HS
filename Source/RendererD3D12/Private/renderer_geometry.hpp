@@ -3,9 +3,27 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <span>
 
 namespace hs
 {
+// The package boundary validates the remap permutation and material subranges.
+// Byte spans avoid alignment assumptions about the portable package storage.
+inline bool WriteGeometryRasterIndexSuffix(std::span<std::byte> destination,
+    std::span<const std::byte> canonical, std::span<const std::byte> remap) noexcept
+{
+    if (canonical.empty() || canonical.size() % 12 || destination.size() != canonical.size() ||
+        remap.size() != canonical.size() / 3) return false;
+    for (std::size_t triangle = 0; triangle < remap.size() / 4; ++triangle)
+    {
+        std::uint32_t primitive{};
+        std::memcpy(&primitive, remap.data() + triangle * 4, 4);
+        if (primitive >= canonical.size() / 12) return false;
+        std::memcpy(destination.data() + triangle * 12, canonical.data() + primitive * 12, 12);
+    }
+    return true;
+}
 // Four existing raw descriptors address aligned slices of one immutable page.
 constexpr bool GeometryPageLayout(const std::array<std::uint64_t, 4> &sizes,
     std::array<std::uint64_t, 4> &offsets, std::uint64_t &total) noexcept
@@ -30,6 +48,7 @@ inline constexpr std::uint32_t kGeometryStaticInstances = 4u;
 inline constexpr std::uint32_t kGeometryPreviousPage = 8u;
 inline constexpr std::uint32_t kGeometryBuiltin = 16u;
 inline constexpr std::uint32_t kGeometryExplicitMaterialBinding = 32u;
+inline constexpr std::uint32_t kGeometryRasterPrimitiveRemap = 64u;
 inline constexpr std::uint32_t kGeometryArgumentStride = 24;
 inline constexpr std::uint32_t kGeometryMeshDispatchDimension = 65535;
 inline constexpr std::uint32_t kGeometryMeshDispatchGroupLimit = 1u << 22;

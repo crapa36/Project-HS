@@ -232,11 +232,14 @@ void TestSnapshotExchange()
               "snapshot grows beyond its initial reserve");
         exchange.Publish(*slot, sequence);
         const auto pair = consumer.AcquireLatest();
-        Check(pair.has_current && pair.current.header.tick == sequence, "snapshot newest");
+        Check(pair.has_current && pair.current.header.tick == sequence &&
+                  pair.current_publication_sequence == sequence,
+              "snapshot newest publication identity");
         if (sequence > 1)
         {
-            Check(pair.has_previous && pair.previous.header.tick == sequence - 1,
-                  "snapshot previous");
+            Check(pair.has_previous && pair.previous.header.tick == sequence - 1 &&
+                      pair.previous_publication_sequence == sequence - 1,
+                  "snapshot previous publication identity");
         }
     }
     Check(exchange.DroppedPublishes() == 0, "snapshot no drops");
@@ -263,6 +266,8 @@ void TestSnapshotExchangeQueuedPublications()
     auto pair = consumer.AcquireLatest();
     Check(pair.current.header.tick == 0 && pair.has_previous && pair.previous.header.tick == 3,
           "publication order is independent of session ticks");
+    Check(pair.current_publication_sequence == 4 && pair.previous_publication_sequence == 3,
+          "snapshot pair exposes retained publication identities");
     for (const hs::Sequence stale : {hs::Sequence{4}, hs::Sequence{2}})
     {
         publish(stale, 99);

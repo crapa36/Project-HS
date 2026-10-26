@@ -1,4 +1,5 @@
 #include "simulation_world.hpp"
+#include <limits>
 #include <set>
 #include <tuple>
 
@@ -8,6 +9,13 @@ namespace hs
 using namespace gameplay_detail;
 namespace
 {
+float MaximumEnemyCollisionRadius(const SimulationRules &rules) noexcept
+{
+    auto maximum=rules.boss_common.collision_radius;
+    for(const auto &enemy:rules.enemies) maximum=std::max(maximum,enemy.collision_radius);
+    return maximum;
+}
+
 void BeginStatusEpisode(EnemyRow enemy, std::size_t index, Tick tick) noexcept
 {
     bool active=false;
@@ -139,6 +147,7 @@ void GameSimulation::SimulationWorld::RecordUpgradeRelicSynergy(SkillKind skill,
                                UpgradeRelicSynergyMetric metric,
                                std::uint64_t amount) noexcept
 {
+    if (!Metrics().detailed_balance_captured) return;
     if (skill >= SkillKind::Count || upgrade >= kUpgradeCount ||
         relic >= RelicKind::Count || amount == 0)
         return;
@@ -421,6 +430,9 @@ AreaActor *GameSimulation::SimulationWorld::SpawnArea(AreaKind kind, SkillKind s
 void GameSimulation::SimulationWorld::ScheduleAction(const ScheduledAction &action)
 {
     auto scheduled = action;
+    if(combat_state->next_scheduled_sequence==std::numeric_limits<std::uint64_t>::max())
+        throw std::overflow_error("Scheduled action ordering sequence exhausted.");
+    scheduled.schedule_sequence=combat_state->next_scheduled_sequence++;
     if (action.kind == ScheduledKind::Area && action.skill == SkillKind::ArrowRain &&
         action.origin == EffectOrigin::Derived && action.source_upgrade == 0)
     {
@@ -458,6 +470,7 @@ void GameSimulation::SimulationWorld::ScheduleAction(const ScheduledAction &acti
         }
     }
     combat_state->scheduled_actions.push_back(scheduled);
+    combat_state->scheduled_actions_dirty=true;
 }
 
 void GameSimulation::SimulationWorld::QueueDamage(std::uint64_t target, std::int32_t amount, SkillKind skill,
@@ -649,6 +662,8 @@ bool GameSimulation::SimulationWorld::CastSkill(SkillKind skill)
                           return action.skill == SkillKind::BasicAttack &&
                                  action.cast_id == basic_cast;
                       });
+        if (combat_state->scheduled_actions.empty())
+            combat_state->next_scheduled_sequence = 0;
         actors->player.basic_attack_cast_id = 0;
         actors->player.basic_attack_release_tick = 0;
     }
@@ -1019,6 +1034,8 @@ bool GameSimulation::SimulationWorld::TryBeginSkill(SkillKind skill)
             std::erase_if(combat_state->scheduled_actions, [basic_cast](const auto &action) {
                 return action.cast_id == basic_cast;
             });
+            if (combat_state->scheduled_actions.empty())
+                combat_state->next_scheduled_sequence = 0;
             actors->player.basic_attack_cast_id = 0;
             actors->player.basic_attack_release_tick = 0;
         }
@@ -1155,7 +1172,13 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
 {
     CastBasicAttack();
     auto boss_actions_timing = Measure(SimulationTimingId::ScheduledBossActions);
-    std::ranges::sort(combat_state->boss_actions, {}, &BossAction::due);
+    if(combat_state->boss_actions_dirty)
+    {
+        std::ranges::sort(combat_state->boss_actions,[](const BossAction &a,const BossAction &b) {
+            return a.due!=b.due?a.due<b.due:a.schedule_sequence<b.schedule_sequence;
+        });
+        combat_state->boss_actions_dirty=false;
+    }
     std::size_t boss_actions_executed{};
     while (boss_actions_executed < combat_state->boss_actions.size() &&
            combat_state->boss_actions[boss_actions_executed].due <= tick)
@@ -1272,9 +1295,16 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
     }
     combat_state->boss_actions.erase(combat_state->boss_actions.begin(),
                        combat_state->boss_actions.begin() + boss_actions_executed);
+    if(combat_state->boss_actions.empty()) combat_state->next_boss_schedule_sequence=0;
     boss_actions_timing.Finish();
     auto scheduled_actions_timing = Measure(SimulationTimingId::ScheduledActions);
-    std::ranges::sort(combat_state->scheduled_actions, {}, &ScheduledAction::due);
+    if(combat_state->scheduled_actions_dirty)
+    {
+        std::ranges::sort(combat_state->scheduled_actions,[](const ScheduledAction &a,const ScheduledAction &b) {
+            return a.due!=b.due?a.due<b.due:a.schedule_sequence<b.schedule_sequence;
+        });
+        combat_state->scheduled_actions_dirty=false;
+    }
     std::size_t executed{};
     std::set<std::tuple<std::uint64_t, SkillKind, std::uint8_t>> emitted_fan_casts;
     while (executed < combat_state->scheduled_actions.size() && combat_state->scheduled_actions[executed].due <= tick)
@@ -1515,6 +1545,7 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
         }
     }
     combat_state->scheduled_actions.erase(combat_state->scheduled_actions.begin(), combat_state->scheduled_actions.begin() + executed);
+    if(combat_state->scheduled_actions.empty()) combat_state->next_scheduled_sequence=0;
 }
 
 void GameSimulation::SimulationWorld::MovementPhase()
@@ -1909,6 +1940,7 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
     separation_timing.Finish();
     auto swept_timing = Measure(SimulationTimingId::SweptGridBuild);
     rebuild(true);
+    combat_state->enemy_grid.MarkBuilt(tick,actors->enemies.StructuralGeneration());
 }
 
 bool GameSimulation::SimulationWorld::AlreadyHit(ConstProjectileRow projectile, std::uint64_t target) const noexcept
@@ -2817,25 +2849,24 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                              std::max(rules.enemies[static_cast<std::size_t>(EnemyKind::Ranged)].collision_radius,
                                       rules.enemies[static_cast<std::size_t>(EnemyKind::Suicide)].collision_radius)));
                 const auto margin = projectile.motion.radius + largest_enemy_radius;
-                CollectSpatialGridCandidates(
-                    combat_state->enemy_grid,
+                CollectEnemies(
                     {std::min(segment_start.x, reachable_end.x) - margin,
                      std::min(segment_start.y, reachable_end.y) - margin},
                     {std::max(segment_start.x, reachable_end.x) + margin,
                      std::max(segment_start.y, reachable_end.y) + margin},
-                    rules.arena_half_extent, combat_state->collision_candidates);
-                auto &candidates = combat_state->collision_candidates;
-                std::ranges::sort(candidates);
-                candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+                    combat_state->collision_query,false);
+                const auto &candidates = combat_state->collision_query.rows;
                 auto &hits = combat_state->collision_hits;
                 hits.clear();
                 for (const auto index : candidates)
                 {
                     const auto enemy = actors->enemies[index];
+                    if(enemy.life.dead||AlreadyHit(projectile,enemy.id.value)) continue;
                     const auto radius = enemy.life.boss ? rules.boss_common.collision_radius
                         : rules.enemies[static_cast<std::size_t>(enemy.life.kind)].collision_radius;
-                    hits.push_back({index, MovingDiscHitTime(segment_start, segment_end,
-                        enemy.motion.tick_motion, projectile.motion.radius + radius, elapsed_fraction)});
+                    const auto hit_time=MovingDiscHitTime(segment_start,segment_end,
+                        enemy.motion.tick_motion,projectile.motion.radius+radius,elapsed_fraction);
+                    if(hit_time<=1.0f&&hit_time<wall_time) hits.push_back({index,hit_time});
                 }
                 std::ranges::sort(hits, [&](const auto &left, const auto &right) {
                     if (left.time != right.time) return left.time < right.time;
@@ -3110,8 +3141,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
         {
             std::optional<EnemyRow> visible_target{};
             auto nearest_distance = area.radius * area.radius;
-            for (auto candidate : actors->enemies)
+            CollectEnemies(area.position,area.radius,combat_state->area_query);
+            for (const auto row:combat_state->area_query.rows)
             {
+                auto candidate=actors->enemies[row];
                 const auto distance = DistanceSquared(area.position, candidate.motion.position);
                 if (!candidate.life.dead && distance <= nearest_distance &&
                     SegmentClear2D(area.position, candidate.motion.position, 0.0f,
@@ -3128,8 +3161,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 {
                     EmitVfx(DomainSignalKind::Pull, area.position, {},
                             area.effect_radius, 0.12f);
-                    for (auto enemy : actors->enemies)
+                    CollectEnemies(area.position,area.effect_radius,combat_state->area_query);
+                    for (const auto row:combat_state->area_query.rows)
                     {
+                        auto enemy=actors->enemies[row];
                         if (!enemy.life.dead && !enemy.life.boss &&
                             DistanceSquared(area.position, enemy.motion.position) <=
                                 area.effect_radius * area.effect_radius &&
@@ -3240,8 +3275,13 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                 area.position, Multiply(area.direction, area.half_length));
             const auto trail_to = Add(
                 area.position, Multiply(area.direction, area.half_length));
-            for (auto enemy : actors->enemies)
+            const auto margin=area.radius+MaximumEnemyCollisionRadius(rules);
+            CollectEnemies({std::min(trail_from.x,trail_to.x)-margin,std::min(trail_from.y,trail_to.y)-margin},
+                {std::max(trail_from.x,trail_to.x)+margin,std::max(trail_from.y,trail_to.y)+margin},
+                combat_state->area_query);
+            for (const auto row:combat_state->area_query.rows)
             {
+                auto enemy=actors->enemies[row];
                 if (enemy.life.dead) continue;
                 Float2 visibility_origin = area.position;
                 bool inside = DistanceSquared(area.position, enemy.motion.position) <=
@@ -3305,8 +3345,10 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                                         area.interval);
                 auto &runtime = FindOrCreateCastRuntime(area.cast_id, area.skill);
                 bool pull_cue_emitted = false;
-                for (auto enemy : actors->enemies)
+                CollectEnemies(area.position,area.radius,combat_state->area_query);
+                for (const auto row:combat_state->area_query.rows)
                 {
+                    auto enemy=actors->enemies[row];
                     if (enemy.life.dead || DistanceSquared(area.position, enemy.motion.position) >
                                           area.radius * area.radius ||
                         !SegmentClear2D(area.position, enemy.motion.position, 0.0f,
@@ -3434,8 +3476,12 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
                         area.position, Multiply(area.direction, area.half_length));
                     const auto to = Add(
                         area.position, Multiply(area.direction, area.half_length));
-                    for (const auto &enemy : actors->enemies)
+                    const auto margin=area.radius+MaximumEnemyCollisionRadius(rules);
+                    CollectEnemies({std::min(from.x,to.x)-margin,std::min(from.y,to.y)-margin},
+                        {std::max(from.x,to.x)+margin,std::max(from.y,to.y)+margin},combat_state->area_query);
+                    for (const auto row:combat_state->area_query.rows)
                     {
+                        const auto enemy=actors->enemies[row];
                         if (enemy.life.dead) continue;
                         const auto enemy_radius = enemy.life.boss
                                                       ? rules.boss_common.collision_radius
@@ -3658,9 +3704,8 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
             }
             if (source_enemy < kEnemyArchetypeCount)
             {
-                if (BalanceObserver::RecordHit(
-                        telemetry->balance_observer.enemy_hit_casts[source_enemy],
-                        event.cast_id & 0x00FFFFFFFFFFFFFFull))
+                if (telemetry->balance_observer.RecordEnemyHit(
+                        source_enemy, event.cast_id & 0x00FFFFFFFFFFFFFFull))
                 {
                     ++Metrics().enemy_hits[source_enemy];
                 }
@@ -4269,6 +4314,8 @@ void GameSimulation::SimulationWorld::DeathDropPhase()
             std::erase_if(combat_state->boss_actions, [&](const BossAction &action) {
                 return action.boss_id == enemy.id.value;
             });
+            if (combat_state->boss_actions.empty())
+                combat_state->next_boss_schedule_sequence = 0;
             if (transition.remove_enemy_projectiles)
                 actors->projectiles.EraseIf([](ConstProjectileRow projectile) {
                     return !projectile.combat.player_owned;

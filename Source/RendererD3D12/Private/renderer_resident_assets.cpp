@@ -440,6 +440,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
 
 void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate) noexcept
 {
+    environment_descriptor_banks = {};
     struct Range { std::uint32_t first, count; };
     constexpr auto environment_first = kPostTextureDescriptorCount + kCharacterDescriptorCount + kMonsterPbrDescriptorCount;
     constexpr auto vfx_first = environment_first + kEnvironmentDescriptorCount;

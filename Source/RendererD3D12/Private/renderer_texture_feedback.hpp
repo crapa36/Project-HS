@@ -27,7 +27,7 @@ class RendererTextureFeedback
     [[nodiscard]] Result PrepareFrame(std::uint32_t, const CompletionSet &completed,
         std::span<const TextureStreamId> material_slots, const RendererTextureStreaming &,
         ResidencyManager &);
-    [[nodiscard]] Result WriteDescriptors(std::uint32_t, ID3D12DescriptorHeap *,
+    [[nodiscard]] Result WriteDescriptors(std::uint32_t, ID3D12DescriptorHeap *, ID3D12DescriptorHeap *,
         D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first, UINT stride);
     [[nodiscard]] ResourceVersion ImportMetadata(RenderGraphBuilder &, std::uint32_t frame) const;
     [[nodiscard]] Result AddClearPass(RenderGraphBuilder &, std::uint32_t frame,

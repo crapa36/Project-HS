@@ -76,6 +76,16 @@ double NormalQuantile(double p)
     const double q = p - .5, r = q*q;
     return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q / (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
 }
+const std::array<double,512>& NormalQuadrature()
+{
+    static const auto samples=[] {
+        std::array<double,512> values{};
+        for(size_t i=0;i<values.size();++i)
+            values[i]=NormalQuantile((static_cast<double>(i)+.5)/static_cast<double>(values.size()));
+        return values;
+    }();
+    return samples;
+}
 std::vector<F3> LoadLinear(const std::filesystem::path& path)
 {
     DirectX::ScratchImage source, converted;
@@ -207,8 +217,7 @@ LayerData CookLayer(const std::filesystem::path& path, size_t layer, DirectX::Sc
     pixels.clear(); pixels.shrink_to_fit(); sorted.clear(); sorted.shrink_to_fit();
     V3 baseSecondMoment{};
     for (const auto& pixel:transformed) for (size_t c=0;c<3;++c) baseSecondMoment[c]+=static_cast<double>(pixel[c])*pixel[c]/static_cast<double>(count);
-    std::array<double,512> quadrature{};
-    for (size_t i=0;i<quadrature.size();++i) quadrature[i]=NormalQuantile((static_cast<double>(i)+.5)/static_cast<double>(quadrature.size()));
+    const auto& quadrature=NormalQuadrature();
     Json variances=Json::array();
     size_t width=kSize;
     for (size_t mip=0;mip<kMips;++mip) {

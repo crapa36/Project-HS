@@ -118,12 +118,6 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderFrameInput &input) co
         return ViewFailure("Frame scene generation must match the resident GPU asset generation.");
     if (input.scene && !input.scene->content_generation_id.empty() && input.scene->content_generation_id != resource_generation_id)
         return ViewFailure("Frame scene association must match the resident GPU asset generation.");
-    for (const auto &event : input.vfx.events)
-        if (event.effect_handle == kInvalidVfxEffectHandle) return ViewFailure("Typed VFX event has an invalid effect handle.");
-    // Admission is transactional: validation of the persistent set uses a copy.
-    auto persistent = typed_vfx_persistent_state;
-    std::string error;
-    if (!persistent.Update(input.vfx.persistent, error)) return ViewFailure(error);
     return ValidateFramePayload(input);
 }
 
@@ -194,6 +188,9 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
     {
         const auto finite = std::isfinite(source.position.x) &&
             std::isfinite(source.position.y) && std::isfinite(source.position.z) &&
+            (!source.interpolate_owner_position ||
+             (std::isfinite(source.previous_position.x) && std::isfinite(source.previous_position.y) &&
+              std::isfinite(source.previous_position.z))) &&
             std::isfinite(source.color.x) && std::isfinite(source.color.y) &&
             std::isfinite(source.color.z) && std::isfinite(source.color.w) &&
             std::isfinite(source.size) && source.size > 0.0f &&
@@ -529,18 +526,24 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
         return ViewFailure("Authored VFX upload counts exceed their native index capacity.");
     auto snapshot = input.snapshots.has_current ? input.snapshots.current : RenderSnapshot{};
     if (input.scene) snapshot.static_scene = input.scene->lease;
-    std::vector<RenderInstance> render_instances(snapshot.instances.begin(), snapshot.instances.end());
-    for (const auto &command : input.vfx.entity_surfaces)
+    auto render_instances = snapshot.instances;
+    std::vector<RenderInstance> retained_instances;
+    if (!input.vfx.entity_surfaces.empty())
     {
-        if (!command.has_retained_instance || std::ranges::any_of(render_instances,
-                [&](const auto &instance) { return instance.stable_id == command.render_instance_id; })) continue;
-        const auto &instance = command.retained_instance;
-        if (instance.stable_id != command.render_instance_id ||
-            instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
-            instance.asset_id.value == 0 || instance.material_id.value == 0 ||
-            (instance.animation_clip_id.value == 0 && !command.has_retained_animation_pose))
-            return ViewFailure("Entity surface retention requires its actual boss mesh and captured pose.");
-        render_instances.push_back(instance);
+        retained_instances.assign(render_instances.begin(), render_instances.end());
+        for (const auto &command : input.vfx.entity_surfaces)
+        {
+            if (!command.has_retained_instance || std::ranges::any_of(retained_instances,
+                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; })) continue;
+            const auto &instance = command.retained_instance;
+            if (instance.stable_id != command.render_instance_id ||
+                instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
+                instance.asset_id.value == 0 || instance.material_id.value == 0 ||
+                (instance.animation_clip_id.value == 0 && !command.has_retained_animation_pose))
+                return ViewFailure("Entity surface retention requires its actual boss mesh and captured pose.");
+            retained_instances.push_back(instance);
+        }
+        render_instances = retained_instances;
     }
     std::vector<VfxEntitySurfaceCommand> admitted_surfaces;
     for (const auto &command : input.vfx.entity_surfaces)
@@ -592,13 +595,15 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderFrameInput &frame_i
                     instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
                 return ViewFailure("Dynamic render identity collides with the immutable process scene.");
     if (render_instances.size() > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
-    auto ribbon_validation = ribbon_state;
     std::string ribbon_error;
+    if (config.ribbon_history_points < kRibbonHistorySamples)
+        return ViewFailure("Ribbon point budget must provide at least one 64-sample slot");
     const auto &camera = input.views.front();
     const Float3 camera_scene_position{static_cast<float>(camera.camera.position.x-camera.scene_origin.x),
         static_cast<float>(camera.camera.position.y-camera.scene_origin.y), static_cast<float>(camera.camera.position.z-camera.scene_origin.z)};
-    if (!ribbon_validation.Update(input.vfx.ribbons.sources, snapshot.header.tick, snapshot.header.session_id,
-        input.vfx.ribbons.catalog_generation, config.ribbon_history_points, 1.0f, camera_scene_position, ribbon_error))
+    if (!std::isfinite(camera_scene_position.x) || !std::isfinite(camera_scene_position.y) || !std::isfinite(camera_scene_position.z))
+        return ViewFailure("Ribbon interpolation and previous eye must be finite");
+    if (!VfxRibbonState::ValidateSources(input.vfx.ribbons.sources, ribbon_error))
         return ViewFailure(ribbon_error);
     return Result::Success();
 }
@@ -1003,6 +1008,22 @@ RenderViewInput D3D12Renderer::MainViewInput(const CameraView &source) const
 
 Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult &frame_result)
 {
+    // Rejected preflight keeps the last frame evidence, with no new submission receipt.
+    struct WorldStepReceipt
+    {
+        RendererFrameResult &output;
+        Tick tick{};
+        std::uint64_t session{};
+        bool submitted{};
+        std::uint64_t presented_ui_generation{};
+        ~WorldStepReceipt()
+        {
+            output.vfx_world_step_submitted = submitted;
+            output.vfx_world_tick = tick;
+            output.vfx_world_session_id = session;
+            output.presented_ui_packet_generation = presented_ui_generation;
+        }
+    } world_step_receipt{frame_result};
     const auto wrapper_start = std::chrono::steady_clock::now();
     std::chrono::steady_clock::duration view_render_time{};
     if (!impl_->initialized || impl_->frame_submission_faulted)
@@ -1148,9 +1169,17 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
         impl_->render_scene_inputs = first;
         const auto view_render_start = std::chrono::steady_clock::now();
         result = Render(snapshots, input.events, first ? v.particle_spawns : std::span<const ParticleSpawnCommand>{},
-            v.effect_lines, v.events, v.persistent, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
+            v.effect_lines, v.event_count, v.persistent_count, v.ground, v.flashes, v.meshes, v.fresnels, v.ribbons,
             v.lights, v.distortions, v.decals, input.devtools, rendered, v.volumes, v.screen, v.entity_surfaces);
         view_render_time += std::chrono::steady_clock::now() - view_render_start;
+        if (rendered.presented_ui_packet_generation)
+            world_step_receipt.presented_ui_generation = rendered.presented_ui_packet_generation;
+        if (rendered.vfx_world_step_submitted)
+        {
+            world_step_receipt.submitted = true;
+            world_step_receipt.tick = rendered.vfx_world_tick;
+            world_step_receipt.session = rendered.vfx_world_session_id;
+        }
         if (!result) break;
         rendered_any = true;
         if (view.camera_cut)
@@ -1189,6 +1218,8 @@ Result D3D12Renderer::Render(const RenderFrameInput &input, RendererFrameResult 
             std::chrono::steady_clock::now() - wrapper_start - view_render_time).count());
     if (!result)
     {
+        const auto removed = impl_->device->GetDeviceRemovedReason();
+        if (FAILED(removed)) return impl_->CheckDevice(removed, "Render view submission");
         // Successfully rendered views retain their histories. The failed view
         // cannot publish a partial camera/pose/native history on the next call.
         if (rendered_any && impl_->frame_submission_faulted) impl_->native_input_phase = 0;

@@ -93,14 +93,27 @@ void TestVirtualShadowGuarantees()
             !hs::IsCompleteBakedStaticCaster(true,true,false,false,false,false),
             "absent, mutable, or unbaked geometry is not classified as complete baked static");
     hs::ShadowRootCoverageDomain root_domain{{1,0,0,0},{0,1,0,0},{0,0,1,0},-10,-10,10,10,-20,20};
+    Require(hs::ShadowRootReceiverBoundsValid({100,100,-500,0},{120,130,800,0})&&
+            !hs::ShadowRootReceiverBoundsValid({121,100,0,0},{120,130,1,0})&&
+            !hs::ShadowRootReceiverBoundsValid({0,0,0,2},{1,1,1,0}),
+            "finite ordered receiver records remain valid outside root XY while malformed bounds or classes fail closed");
     Require(hs::ShadowRootContainsXY({0,0,500},root_domain)&&
             !hs::ShadowRootContainsXY({10,0,0},root_domain),
-            "root receiver XY admission is bounded by the guarded world domain but permits out-of-range receiver Z");
+            "root caster admission domain remains guarded while receiver positions can be outside it");
     Require(hs::ShadowRootContainsCaster({0,0,0,1},root_domain)&&
             !hs::ShadowRootContainsCaster({9.5f,0,0,1},root_domain)&&
             !hs::ShadowRootContainsCaster({0,0,20,0},root_domain)&&
             !hs::ShadowRootContainsCaster({0,0,0,std::numeric_limits<float>::infinity()},root_domain),
             "root dynamic admission encloses full caster radius in XY/Z and rejects depth/domain overflow");
+    const hs::Float4 admitted_caster{0,0,0,1};
+    const hs::Float3 outside_tap{10.25f,0,0};
+    const auto [tap_x,tap_error]=hs::ShadowProjectCoordinate(outside_tap,root_domain.right);
+    const auto [caster_x,caster_error]=hs::ShadowProjectCoordinate(
+        hs::Float3{admitted_caster.x,admitted_caster.y,admitted_caster.z},root_domain.right);
+    Require(hs::ShadowRootContainsCaster(admitted_caster,root_domain)&&
+            !hs::ShadowRootContainsXY(outside_tap,root_domain)&&
+            tap_x-tap_error>caster_x+caster_error+admitted_caster.w,
+            "certified fresh-caster bounds cannot occupy an exterior root filter tap, which is valid empty");
     const std::array casters{Caster{{0,0,0,0.25f},0,true,false,true}};
     const std::array receivers{Receiver{{-1,-1,-1,0},{1,1,1,0}}};
     const auto check = [&](const auto &facts, const auto &sources, const auto &domains) {
@@ -159,9 +172,16 @@ void TestVirtualShadowGuarantees()
     const std::array<std::uint64_t,2> zeros{};
     Require(hs::PlanShadowCommandSegments(8,zeros,zeros,partition)&&
                 hs::ValidateShadowCommandSegments(partition,8),"empty current supply has a bounded deterministic layout");
+    Require(!hs::PlanShadowCommandSegments(7,{},{},partition)&&
+                hs::ValidateShadowCommandSegments(partition,7)&&
+                partition.back().first+partition.back().capacity==7,
+            "unavailable demand still produces a complete bounded private frame partition");
+    Require(!hs::PlanShadowCommandSegments(0,{},{},partition)&&
+                hs::ValidateShadowCommandSegments(partition,0)&&partition.back().capacity==0,
+            "zero command storage retains a valid empty fallback partition");
     auto baked=casters;baked[0].immutable_source=true;baked[0].skin=false;baked[0].baked_source=true;
     const auto baked_demand=hs::ComputeShadowCommandDemand(CompleteFacts(),baked);
-    Require(baked_demand.coarse[0]==0&&baked_demand.weights[0]==1,
+    Require(baked_demand.coarse[0]==0&&baked_demand.weights[0]==1&&!baked_demand.uses_spatial_facts,
             "seeded static supply reserves no duplicate coarse draw but retains its real fine-page population");
     baked[0].wind=true;
     const auto wind_demand=hs::ComputeShadowCommandDemand(CompleteFacts(),baked);
@@ -189,6 +209,31 @@ void TestVirtualShadowGuarantees()
     const auto varied_demand=hs::ComputeShadowCommandDemand(CompleteFacts(),varied);
     Require(varied_demand.coarse[1]==reference&&varied_demand.weights[1]==varied.size(),
             "factored XY reservation exactly matches the prior64-page guarded predicate across inside/outside/boundary casters");
+    std::array mixed{baked[0],varied[0],varied[1],varied[2]};
+    mixed[1].immutable_source=mixed[1].baked_source=mixed[1].wind=true;
+    mixed[2].immutable_source=mixed[2].baked_source=mixed[2].animated_alpha=true;
+    mixed[1].skin=mixed[2].skin=false;
+    mixed[3].skin=true;
+    const auto verify_split_demand=[&](const hs::ShadowGuaranteeFacts &input) {
+        const auto full=hs::ComputeShadowCommandDemand(input,mixed);
+        for(std::size_t split=0;split<=mixed.size();++split)
+        {
+            const auto prefix=hs::ComputeShadowCommandDemand(input,std::span(mixed).first(split));
+            const auto combined=hs::ComputeShadowCommandDemand(input,std::span(mixed).subspan(split),prefix);
+            Require(combined.coarse==full.coarse&&combined.weights==full.weights&&
+                    combined.maximum==full.maximum&&combined.reason==full.reason&&
+                    combined.uses_spatial_facts==full.uses_spatial_facts,
+                    "retained stable prefix and current suffix preserve exact demand and first-failure semantics");
+        }
+    };
+    verify_split_demand(CompleteFacts());
+    auto moved_demand=CompleteFacts();moved_demand.minimum_x+=2;moved_demand.depth.w=40;
+    verify_split_demand(moved_demand);
+    moved_demand.compatible_bake=false;verify_split_demand(moved_demand);
+    Require(hs::ComputeShadowCommandDemand(CompleteFacts(),std::span(mixed).subspan(1,2)).uses_spatial_facts,
+            "baked-tagged wind and animated alpha still require current spatial command admission");
+    mixed[1].current_bounds.z=1000;verify_split_demand(CompleteFacts());
+    mixed[0].current_bounds.w=std::numeric_limits<float>::infinity();verify_split_demand(CompleteFacts());
     facts = CompleteFacts(); facts.physical_pages = 63;
     expect(facts,Reason::CoarseSlotBudget);
     facts = CompleteFacts(); facts.compatible_bake = false;

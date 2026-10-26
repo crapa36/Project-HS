@@ -1,4 +1,5 @@
 #include "../AssetPipeline/action.hpp"
+#include "../Content/bake_sampling.hpp"
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/ltc_lut.hpp>
 #include <algorithm>
@@ -63,26 +64,43 @@ rd::LtcLutDescription ParseSource(std::string_view text)
         "fit budget outside bounded contract");
     return {std::uint32_t(samples),std::uint32_t(iterations)};
 }
-double RadicalInverse(std::uint32_t bits)
-{
-    bits=(bits<<16)|(bits>>16);
-    bits=((bits&0x55555555u)<<1)|((bits&0xaaaaaaaau)>>1);
-    bits=((bits&0x33333333u)<<2)|((bits&0xccccccccu)>>2);
-    bits=((bits&0x0f0f0f0fu)<<4)|((bits&0xf0f0f0f0u)>>4);
-    bits=((bits&0x00ff00ffu)<<8)|((bits&0xff00ff00u)>>8);
-    return double(bits)*2.3283064365386963e-10;
-}
 // Heitz, JCGT 2018 visible GGX normal sampler. This matches the project's
 // HsBsdfSampleVisibleNormal, including null reflected directions below N.
-Vec3 VisibleNormal(Vec3 view,double alpha,double u,double v)
+struct VndfFrame { Vec3 stretched,t1,t2; double s{}; };
+VndfFrame PrepareVndfFrame(Vec3 view,double alpha)
 {
     const auto stretched=Normalize({alpha*view.x,alpha*view.y,view.z});
     const double lensq=stretched.x*stretched.x+stretched.y*stretched.y;
     const auto t1=lensq>0?Vec3{-stretched.y/std::sqrt(lensq),stretched.x/std::sqrt(lensq),0}:Vec3{1,0,0};
-    const auto t2=Cross(stretched,t1);
-    const double radius=std::sqrt(u),phi=2*kPi*v,one=radius*std::cos(phi),s=0.5*(1+stretched.z);
-    const double two=(1-s)*std::sqrt(std::max(0.0,1-one*one))+s*radius*std::sin(phi);
-    const auto n=t1*one+t2*two+stretched*std::sqrt(std::max(0.0,1-one*one-two*two));
+    return {stretched,t1,Cross(stretched,t1),0.5*(1+stretched.z)};
+}
+struct VndfSample { double u{},disk_x{},disk_y{}; };
+std::vector<VndfSample> PrepareVndfSamples(std::uint32_t count)
+{
+    std::vector<VndfSample> result;
+    result.reserve(count);
+    for(const auto sample:hs::content::MakeHammersleySamples(count)) {
+        const double radius=std::sqrt(sample.u),phi=2*kPi*sample.v;
+        result.push_back({sample.u,radius*std::cos(phi),radius*std::sin(phi)});
+    }
+    return result;
+}
+struct SphereSample { Vec3 direction; };
+std::vector<SphereSample> PrepareSphereSamples(std::uint32_t count)
+{
+    std::vector<SphereSample> result;
+    result.reserve(count);
+    for(const auto sample:hs::content::MakeHammersleySamples(count)) {
+        const double z=1-2*sample.u,r=std::sqrt(std::max(0.0,1-z*z)),phi=2*kPi*sample.v;
+        result.push_back({{r*std::cos(phi),r*std::sin(phi),z}});
+    }
+    return result;
+}
+Vec3 VisibleNormal(const VndfFrame& frame,const VndfSample& sample,double alpha)
+{
+    const double one=sample.disk_x;
+    const double two=(1-frame.s)*std::sqrt(std::max(0.0,1-one*one))+frame.s*sample.disk_y;
+    const auto n=frame.t1*one+frame.t2*two+frame.stretched*std::sqrt(std::max(0.0,1-one*one-two*two));
     return Normalize({alpha*n.x,alpha*n.y,std::max(0.0,n.z)});
 }
 double SmithDenominator(double cosine,double alpha)
@@ -138,12 +156,15 @@ struct FitContext
     std::vector<FitPoint> points;
     double energy{},schlick{};
 };
-FitContext Quadrature(Vec3 view,double alpha,std::uint32_t count)
+FitContext Quadrature(Vec3 view,double alpha,const std::vector<VndfSample>& full,
+                      const std::vector<VndfSample>& half,const std::vector<SphereSample>& sphere)
 {
     FitContext result;
+    const auto count=static_cast<std::uint32_t>(full.size());
+    const auto frame=PrepareVndfFrame(view,alpha);
     for(std::uint32_t i=0;i<count;++i)
     {
-        const auto h=VisibleNormal(view,alpha,(double(i)+0.5)/count,RadicalInverse(i));
+        const auto h=VisibleNormal(frame,full[i],alpha);
         const auto light=h*(2*Dot(view,h))+view*(-1);
         if(light.z<=0) continue; // Null samples retain the original denominator.
         const double weight=2*light.z/SmithDenominator(light.z,alpha);
@@ -154,19 +175,17 @@ FitContext Quadrature(Vec3 view,double alpha,std::uint32_t count)
     // Half uniform-sphere, half GGX VNDF samples form one deterministic MIS
     // integral. Sphere samples measure LTC leakage below the receiver horizon.
     result.points.reserve(count);
-    const auto half=count/2;
     for(std::uint32_t i=0;i<count;++i)
     {
-        const auto index=i%half; const double u=(double(index)+0.5)/half,v=RadicalInverse(index);
+        const auto index=i%static_cast<std::uint32_t>(half.size());
         Vec3 light;
-        if(i<half)
+        if(i<half.size())
         {
-            const double z=1-2*u,r=std::sqrt(std::max(0.0,1-z*z)),phi=2*kPi*v;
-            light={r*std::cos(phi),r*std::sin(phi),z};
+            light=sphere[index].direction;
         }
         else
         {
-            const auto h=VisibleNormal(view,alpha,u,v); light=h*(2*Dot(view,h))+view*(-1);
+            const auto h=VisibleNormal(frame,half[index],alpha); light=h*(2*Dot(view,h))+view*(-1);
         }
         const double proposal=0.5/(4*kPi)+0.5*ReflectionPdf(view,light,alpha);
         result.points.push_back({light,UnitFresnelCosine(view,light,alpha)/result.energy,1/(count*proposal)});
@@ -223,6 +242,9 @@ Parameters Fit(const FitContext &context,Parameters initial,std::uint32_t iterat
 std::vector<std::byte> Bake(rd::LtcLutDescription source)
 {
     const auto edge=rd::kLtcLutEdge; std::vector<hs::Float4> matrices(edge*edge),amplitudes(edge*edge);
+    const auto full_samples=PrepareVndfSamples(source.fit_samples);
+    const auto half_samples=PrepareVndfSamples(source.fit_samples/2);
+    const auto sphere_samples=PrepareSphereSamples(source.fit_samples/2);
     // Heitz et al., SIGGRAPH 2016: normalized LTC fit then inverse-transform
     // emitter geometry. This independently implemented fit uses the project's
     // uncorrelated Smith model, not downloaded reference fit coefficients.
@@ -233,7 +255,7 @@ std::vector<std::byte> Bake(rd::LtcLutDescription source)
         for(std::uint32_t reverse=0;reverse<edge;++reverse)
         {
             const auto x=edge-1-reverse; const double roughness=double(x)/(edge-1),alpha=std::max(kAlphaFloor,roughness*roughness);
-            const auto quadrature=Quadrature(view,alpha,source.fit_samples);
+            const auto quadrature=Quadrature(view,alpha,full_samples,half_samples,sphere_samples);
             // Warm start from the neighboring larger roughness. At normal
             // incidence the symmetry is also represented by this general fit.
             previous=Fit(quadrature,previous,source.fit_iterations); const auto matrix=Decode(previous);

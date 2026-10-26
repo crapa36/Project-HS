@@ -51,7 +51,7 @@ int main()
         Check(state.MarkPersistentBurst(88, 3), "first burst admitted");
         hs::PresentationEvent pending;
         pending.session_id = 10; pending.tick = 140; pending.sequence = 9;
-        state.pending_events.push_back(pending);
+        Check(state.raw_events.Enqueue(pending), "event enqueue");
         Resize(state.decoded, 1);
         const auto lease = std::make_shared<int>(1);
         state.decoded.entity_surface_captures[0].generation_lease = lease;
@@ -73,7 +73,7 @@ int main()
         CheckSize(candidate, 1);
         Check(state.decoded.entity_surface_captures[0].generation_lease == lease,
               "successful publication preserves the prepared capture lease");
-        Check(state.session_id == 10 && state.pending_events.size() == 1 &&
+        Check(state.session_id == 10 && state.raw_events.pending.size() == 1 &&
                   state.low_health_pulse.stable_id == 77 && !state.MarkPersistentBurst(88, 3),
               "generation publication must preserve semantic session state");
         Check(state.UpdateTerminalClock(120, SessionPhase::Victory,
@@ -81,11 +81,18 @@ int main()
               "generation publication must not restart terminal time");
         state.ClearDecoded();
         CheckSize(state.decoded, 0);
-        Check(state.terminal_clock.has_value() && state.pending_events.size() == 1 &&
+        Check(state.terminal_clock.has_value() && state.raw_events.pending.size() == 1 &&
                   !state.MarkPersistentBurst(88, 3),
               "decoded clear must preserve pending events, clock and burst tombstones");
-        Check(state.TakeReady(139).empty() && state.TakeReady(140).size() == 1,
-              "pending event consumes exactly once at its authoritative tick");
+        Check(state.raw_events.Prepare(139, 10).entries.empty(), "future event dispatched early");
+        const auto &batch = state.raw_events.Prepare(140, 10);
+        Check(batch.entries.size() == 1 && batch.entries[0].event.sequence == 9,
+              "pending event becomes ready at its authoritative tick");
+        Check(state.raw_events.Prepare(140, 10).entries.size() == 1,
+              "unacknowledged ready batch remains owned for retry");
+        state.raw_events.Acknowledge();
+        Check(state.raw_events.Prepare(140, 10).entries.empty(),
+              "acknowledged event consumes exactly once");
         Resize(state.decoded, 1);
         Check(state.Synchronize(11), "new session");
         CheckSize(state.decoded, 0);
@@ -108,6 +115,26 @@ int main()
         Check(state.UpdateTerminalClock(maximum - 1, SessionPhase::Victory,
                   start + Clock::kFixedStep * 4) == maximum,
               "terminal clock saturates without overflow");
+        hs::runtime_detail::VfxSessionState::RawEventScheduler scheduler;
+        for (std::uint64_t i = 1; i <= scheduler.kCapacity; ++i)
+        {
+            hs::PresentationEvent ordered;
+            ordered.session_id = 1;
+            ordered.tick = i % 2 ? 5 : 4;
+            ordered.sequence = i;
+            Check(scheduler.Enqueue(ordered), "bounded scheduler rejected in-capacity event");
+        }
+        hs::PresentationEvent overflow;
+        overflow.session_id = 1;
+        Check(!scheduler.Enqueue(overflow), "bounded scheduler exceeded capacity");
+        const auto &ordered = scheduler.Prepare(5, 1);
+        Check(ordered.entries.size() == scheduler.kCapacity, "due scheduler missed ready entries");
+        for (std::size_t i = 1; i < ordered.entries.size(); ++i)
+            Check(ordered.entries[i-1].event.tick < ordered.entries[i].event.tick ||
+                  (ordered.entries[i-1].event.tick == ordered.entries[i].event.tick &&
+                   ordered.entries[i-1].ordinal < ordered.entries[i].ordinal),
+                  "due scheduler did not preserve due/insertion ordering");
+        scheduler.Acknowledge();
         std::puts("VFX session state tests passed.");
         return 0;
     }

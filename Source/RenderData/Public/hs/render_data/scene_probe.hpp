@@ -3,6 +3,8 @@
 #include <hs/render_data/texture_package.hpp>
 
 #include <array>
+#include <span>
+#include <string>
 #include <string_view>
 
 namespace hs::render_data
@@ -66,6 +68,14 @@ struct SceneProbeDescription
     // environment, material catalog, light definition and static layout inputs.
     std::uint32_t environment_dependency{}, material_dependency{}, light_dependency{}, static_layout_dependency{};
 };
+
+// Payload-independent identity of authored bake inputs. It includes only the
+// semantic bake description/records and the selected source product identities;
+// revision values and payload bytes are excluded so replacing a layout package
+// with its baked form cannot feed the output digest back into its own inputs.
+[[nodiscard]] std::string DeriveSceneProbeInputIdentity(const SceneProbeDescription &description,
+    std::span<const SceneProbeRecord> probes, std::span<const std::string> dependencies,
+    std::span<const SceneProbeRevisionInput> source_inputs);
 
 struct SceneProbeBakeData
 {

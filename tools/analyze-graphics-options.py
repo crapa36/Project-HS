@@ -94,7 +94,7 @@ DEPENDENCIES = {
 
 def pass_feature_group(row):
     name, identity = row["pass_name"], int(row["pass_id"])
-    if name.startswith("RenderCriticalPath"): return None
+    if (name.startswith("RenderCriticalPath") or name == "SourceRenderOutputReady"): return None
     if identity == 169 or name == "RayTransportCompose": return "shared_ray_compose"
     if identity in (2, 177) or name.startswith(("VirtualShadow.", "LocalShadow.", "RayShadow.")): return "shadows"
     if name.startswith(("GTAO", "AdaptiveGTAO", "RTAO")): return "ao"
@@ -296,6 +296,7 @@ def self_test():
     except ValueError: pass
     assert pass_group({"pass_name": "GBuffer+Depth", "pass_id": "4"}) == "surface"
     assert pass_group({"pass_name": "RenderCriticalPathEnd", "pass_id": "38"}) is None
+    assert pass_group({"pass_name": "SourceRenderOutputReady", "pass_id": "38"}) is None
     assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "1000"}) == "texture_streaming"
     assert pass_group({"pass_name": "REBLUR temporal accumulation", "pass_id": "3000"}) == "denoising"
     assert pass_group({"pass_name": "RayTransportCompose", "pass_id": "169"}) == "shared_ray_compose"

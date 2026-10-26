@@ -136,13 +136,19 @@ bool HsVirtualShadowLookupRoot(float3 light, out float visibility)
     visibility=1.0;
     const uint4 root=HsShadowMetadata.Load4(416u);
     if(root.x==0u || root.y==0u || root.z==0u || root.w==0u) return false;
+    // Root emission uses the same overflow bit as fine pages. Never certify
+    // incomplete current-root depth if its preflight count contract is broken.
+    if ((HsShadowPageTable[HsShadowMetadata.Load(264u)].flags & 24u) != 16u) return false;
     const float4 bounds=HsShadowFloat4(368u);
     const float4 extent=HsShadowFloat4(384u);
     const float4 depth=HsShadowFloat4(400u);
     const float2 position=float2((light.x-bounds.x)/extent.z,(bounds.w-light.y)/extent.z);
-    const int2 center=int2(floor(position));
+    if(!all(isfinite(position))) return false;
     const int2 dimensions=int2(extent.xy);
-    if(any(center+int2(-2,-2)<0) || any(center+int2(2,2)>=dimensions)) return false;
+    // The fixed-root certificate proves every static and fresh caster is inside
+    // its guarded XY domain. Far-away receiver taps therefore have no caster.
+    if(any(position < -2.0) || any(position >= float2(dimensions)+2.0)) return true;
+    const int2 center=int2(floor(position));
     const float receiver=1.0-(light.z-depth.x)*depth.y;
     const float receiver_bias=max(HsShadowFloat4(128u).z,extent.z*0.35*depth.y);
     const uint samples=HsShadowMetadata.Load(332u);
@@ -150,12 +156,16 @@ bool HsVirtualShadowLookupRoot(float3 light, out float visibility)
     [loop] for(uint sample_index=0;sample_index<samples;++sample_index)
     {
         const int2 pixel=center+HsShadowFilterOffsets[sample_index];
-        const float static_caster=HsShadowRootStatic.Load(int3(pixel,0));
+        float caster=0.0;
+        if(all(pixel>=0) && all(pixel<dimensions))
+        {
+            const float static_caster=HsShadowRootStatic.Load(int3(pixel,0));
 #if defined(HS_LOCAL_PROBE_CAPTURE)
-        const float caster=static_caster;
+            caster=static_caster;
 #else
-        const float caster=max(static_caster,HsShadowRootDynamic.Load(int3(pixel,0)));
+            caster=max(static_caster,HsShadowRootDynamic.Load(int3(pixel,0)));
 #endif
+        }
         sum+=caster==0.0 || receiver+receiver_bias>=caster ? 1.0 : 0.0;
     }
     visibility=sum/float(samples);

@@ -1,10 +1,18 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 struct ID3D11Device;
 namespace hs::content
 {
+struct EnvironmentTextureRoleRequest
+{
+    std::string group;
+    std::string role;
+    std::filesystem::path output;
+};
+
 void ValidateEnvironmentTextures(const std::filesystem::path& source);
 void CookEnvironmentTextures(const std::filesystem::path& source, const std::filesystem::path& output);
 void CookEnvironmentTextures(const std::filesystem::path& source, const std::filesystem::path& output,
@@ -18,5 +26,8 @@ std::string EnvironmentTextureRoleProduct(
 void CookEnvironmentTextureRole(const std::filesystem::path& source,
                                 const std::filesystem::path& output,
                                 const std::string& group, const std::string& role,
+                                ID3D11Device* device);
+void CookEnvironmentTextureRoles(const std::filesystem::path& source,
+                                const std::vector<EnvironmentTextureRoleRequest>& requests,
                                 ID3D11Device* device);
 }

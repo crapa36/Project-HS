@@ -768,16 +768,27 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     channels.presentation_graphics_ui.store(std::make_shared<const GraphicsSettingsUiModel>(ui_click_model), std::memory_order_release);
     bool ui_command_queue_full{};
     bool ui_click_allocation_failed{};
+    std::uint64_t consumed_selection_packet_generation{};
     std::atomic graphics_ui_phase{GraphicsUiPhase::Applied};
     std::atomic settings_save_failed{false};
     std::atomic display_modal_phase{GraphicsUiPhase::Applied};
     bool display_confirm_clicked{};
     bool display_cancel_clicked{};
-    window.SetUiClickHandler([&](Float2 cursor) {
+    window.SetUiClickHandler([&](Float2 client_pixels, ViewExtent client_extent) {
         runtime_detail::DiagnosticScope scope(main_work[2], capture_clock);
         try
         {
-            const auto modal = display_modal_phase.load(std::memory_order_acquire);
+            const auto displayed = channels.ui_packets.presented_ui_packet.load(std::memory_order_acquire);
+            if (!displayed) return;
+            if (!runtime_detail::UiFrameExtentMatches(displayed->presented_extent, client_extent))
+            {
+                channels.ui_input_rejected.store(true, std::memory_order_release);
+                return; // Wait until the resized target has an accepted UI frame.
+            }
+            const auto cursor = ReferenceUiCursor(client_pixels,
+                {displayed->presented_extent.width, displayed->presented_extent.height});
+            if (!runtime_detail::PointHitsUiDrawButton(displayed->draw_models, cursor)) return;
+            const auto modal = static_cast<GraphicsUiPhase>(displayed->modal_phase);
             if (modal != GraphicsUiPhase::Applied)
             {
                 if (modal == GraphicsUiPhase::AwaitingDisplayConfirmation)
@@ -791,19 +802,54 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 return;
             }
-            const auto session = channels.ReadSessionProbe();
-            PresentationUiState ui{
-                static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire)),
+            const auto live_session = channels.ReadSessionProbe();
+            const auto live_page = static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire));
+            const PresentationUiState live_ui{
+                live_page,
                 channels.collection_skill.load(std::memory_order_acquire),
                 channels.character_skill.load(std::memory_order_acquire),
                 channels.loadout_source.load(std::memory_order_acquire),
                 channels.settings_group.load(std::memory_order_acquire),
                 channels.settings_page.load(std::memory_order_acquire),
                 channels.character_details_page.load(std::memory_order_acquire)};
+            const auto same_ui = [](const PresentationUiState &a, const PresentationUiState &b) {
+                return a.page == b.page &&
+                    a.selected_collection_skill == b.selected_collection_skill &&
+                    a.selected_character_skill == b.selected_character_skill &&
+                    a.loadout_source_slot == b.loadout_source_slot &&
+                    a.settings_group == b.settings_group && a.settings_page == b.settings_page &&
+                    a.character_details_page == b.character_details_page;
+            };
+            const bool selection_phase = displayed->session.phase == SessionPhase::CardSelection ||
+                displayed->session.phase == SessionPhase::RelicSelection ||
+                displayed->session.phase == SessionPhase::StatAllocation;
+            if (channels.current_session_id.load(std::memory_order_acquire) != displayed->session_id ||
+                live_session.phase != displayed->session.phase || !same_ui(live_ui, displayed->ui) ||
+                (selection_phase && (!runtime_detail::SameUiSelection(live_session, displayed->session) ||
+                    consumed_selection_packet_generation == displayed->generation)))
+            {
+                channels.ui_input_rejected.store(true, std::memory_order_release);
+                return;
+            }
+            auto ui = displayed->ui;
             const auto previous_ui = ui;
-            auto interaction = ResolveUiInteraction(session, ui, ui_click_settings, cursor, &ui_click_model);
-            const bool admitted = runtime_detail::AdmitUiInteraction(interaction, ui, previous_ui,
-                channels.ui_actions, channels.ui_commands, channels.rejected_ui_commands);
+            const auto current_graphics_ui = channels.presentation_graphics_ui.load(std::memory_order_acquire);
+            if ((displayed->graphics_model && current_graphics_ui &&
+                 displayed->graphics_model->generation != current_graphics_ui->generation) ||
+                ((displayed->ui.page == UiPage::MainMenuSettings ||
+                  displayed->ui.page == UiPage::PauseSettings) &&
+                 !runtime_detail::SameUiSettings(displayed->settings, ui_click_settings)))
+            {
+                channels.ui_input_rejected.store(true, std::memory_order_release);
+                return;
+            }
+            auto interaction = ResolveUiInteraction(displayed->session, ui, displayed->settings,
+                cursor, displayed->graphics_model.get());
+            const bool admitted = runtime_detail::AdmitPresentedUiInteraction(interaction, ui,
+                previous_ui, *displayed, channels.ui_actions, channels.ui_commands,
+                channels.rejected_ui_commands);
+            if (admitted && selection_phase && interaction.gameplay_action)
+                consumed_selection_packet_generation = displayed->generation;
             channels.ui_input_rejected.store(!admitted, std::memory_order_release);
             if (!admitted) ui_command_queue_full = true;
             channels.ui_page.store(static_cast<std::uint8_t>(ui.page),
@@ -1020,6 +1066,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             record_thread_failure(font_result);
             channels.render_ready.store(true, std::memory_order_release);
             channels.render_ready.notify_all();
+            channels.NotifyMain();
             return;
         }
         renderer_config.font_bytes = startup_font;
@@ -1041,7 +1088,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.warp = config.warp;
         renderer_config.validation = config.validation;
         renderer_config.gpu_validation = config.gpu_validation;
+        if (config.surface_frontend) renderer_config.surface_frontend = *config.surface_frontend;
+        if (config.geometry_frontend) renderer_config.geometry_frontend = *config.geometry_frontend;
         renderer_config.capture_timing_stream = config.capture_diagnostics;
+        renderer_config.capture_gpu_timings = config.capture_gpu_timings;
         renderer_config.capture_hero_work = config.capture_hero_work;
         renderer_config.hero_work_mode = config.hero_work_mode;
         renderer_config.frame_generation_allowed = false; // Startup/loading/menu are not gameplay frames.
@@ -1094,6 +1144,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             record_thread_failure(initialized);
             channels.render_ready.store(true, std::memory_order_release);
             channels.render_ready.notify_all();
+            channels.NotifyMain();
             return;
         }
         // Render-thread-owned copies: record resolved execution state only at
@@ -1226,6 +1277,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         bool telemetry_settings_open{};
         channels.render_ready.store(true, std::memory_order_release);
         channels.render_ready.notify_all();
+        channels.NotifyMain();
 
         auto active_frame_cap = initial_renderer_settings.frame_cap;
         auto active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
@@ -1245,6 +1297,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
         RenderSnapshotExchange::Consumer snapshot_consumer(channels.snapshots);
         runtime_detail::VfxSessionState vfx_session;
+        runtime_detail::PreparedPairFacts vfx_pair_facts;
+        auto &active_effects = vfx_session.active_effects;
+        using VfxEventProfile = runtime_detail::ActiveEffectStore::Profile;
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
         auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
@@ -1294,9 +1349,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                     "Could not initialize performance capture files."));
             performance_lines.emplace(performance_file, true,
-                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid\n", capture_clock);
+                "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,host_staging_bytes,direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc,graph_prepare_validation_us,graph_prepare_info_key_us,graph_prepare_compile_us,graph_prepare_transient_us,streamline_actual_present_count,streamline_actual_present_count_valid,streamline_actual_present_begin_qpc,streamline_actual_present_end_qpc,streamline_actual_present_qpc_frequency,native_latency_active,latency_begin_us,input_wait_us,simulation_wait_us,retained_vfx_us,ribbon_prepare_us,particle_spawn_prepare_us,typed_vfx_upload_prepare_us,particle_upload_prepare_us,local_vfx_prepare_us,palette_prepare_us,skin_prepare_us,scene_reconcile_us,scene_gpu_prepare_us,session_id,event_inputs,typed_event_inputs,persistent_inputs,particle_spawn_commands,effect_line_commands,ground_inputs,flash_inputs,mesh_inputs,fresnel_inputs,ribbon_inputs,light_inputs,distortion_inputs,decal_inputs,volume_inputs,screen_inputs,entity_surface_inputs,previous_capture_log_us,capture_log_io_us_total,capture_log_io_calls_total,capture_log_bytes_total" + TaskColumns(kVfxTaskNames) + ",ribbon_state_us,ribbon_wait_us,ribbon_allocation_us,ribbon_replacement_count,ribbon_allocation_bytes,ribbon_prepare_thread_cpu_us,ribbon_prepare_thread_cpu_valid,graph_resources_us,graph_base_passes_us,graph_shadows_us,graph_light_probes_us,graph_scene_selection_us,graph_ao_us,graph_opaque_us,graph_hero_us,graph_post_us,scene_skin_prepare_us,scene_shadow_prepare_us,scene_cluster_prepare_us,scene_geometry_demand_us,scene_texture_prepare_us,scene_upload_plan_us\n", capture_clock);
             gpu_live_lines.emplace(gpu_live_file, true,
-                "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid\n", capture_clock);
+                "observed_frame,completed_frame,view_id,critical_path_ms,critical_path_valid,cpu_recording_ms,cpu_recording_valid,gpu_limited,fence_completed,pass_id,queue,nanoseconds,measured,begin_ticks,end_ticks,timestamp_frequency,begin_qpc,end_qpc,qpc_frequency,clock_calibrated,pass_name,gpu_timings_valid,drained,cpu_qpc_frequency,cpu_record_begin_qpc,cpu_record_end_qpc,cpu_record_valid,cpu_provider_submit_begin_qpc,cpu_provider_submit_end_qpc,cpu_provider_submit_valid,cpu_callback_begin_qpc,cpu_callback_end_qpc,cpu_callback_valid,frame_metric_kind,metric_generation,timing_resize_epoch,timing_render_width,timing_render_height,timing_main_view,timing_frame_generation_enabled,output_ready_valid,output_ready_ticks,output_ready_frequency,output_ready_qpc,output_ready_qpc_frequency,output_ready_clock_calibrated\n", capture_clock);
         }
         bool gpu_drain_succeeded{true};
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1310,12 +1365,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
         std::uint64_t invalid_gpu_frames{};
         const auto append_gpu_capture = [&](const GpuPassTimings &gpu, std::uint64_t observed_frame, bool drained) {
-            if (!gpu_live_lines) return;
+            if (!gpu_live_lines || !config.capture_gpu_timings) return;
             if (!performance_state.AcceptGpuFrame(gpu.completed_frame_id, !gpu.passes.empty(), gpu.fence_completed)) return;
             if (!gpu.valid) ++invalid_gpu_frames;
             for (const auto &pass : gpu.passes)
                 gpu_live_lines->Append(std::format(
-                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
                     observed_frame,
                     gpu.completed_frame_id,
                     gpu.view_id,
@@ -1346,7 +1401,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     pass.cpu_provider_submit_begin_qpc,
                     pass.cpu_provider_submit_end_qpc,
                     static_cast<unsigned>(pass.cpu_provider_submit_valid),
-                    pass.cpu_callback_begin_qpc, pass.cpu_callback_end_qpc, static_cast<unsigned>(pass.cpu_callback_valid)));
+                    pass.cpu_callback_begin_qpc, pass.cpu_callback_end_qpc, static_cast<unsigned>(pass.cpu_callback_valid),
+                    gpu.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan ? "reference_graph_span" :
+                        gpu.metric_kind == GpuFrameTimingKind::SourceOutputReady ? "source_output_ready" : "unavailable",
+                    gpu.metric_generation, gpu.resize_epoch, gpu.render_active.width, gpu.render_active.height,
+                    static_cast<unsigned>(gpu.main_view), static_cast<unsigned>(gpu.frame_generation_enabled),
+                    static_cast<unsigned>(gpu.output_ready_valid), gpu.output_ready_ticks, gpu.output_ready_frequency,
+                    gpu.output_ready_qpc, gpu.output_ready_qpc_frequency, static_cast<unsigned>(gpu.output_ready_clock_calibrated)));
         };
         const auto collect_gpu_capture = [&](std::uint64_t observed_frame, bool drain) -> Result {
             if (!gpu_live_lines) return Result::Success();
@@ -1484,6 +1545,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             VfxCatalog replacement;
                             RendererVfxSpriteBindings sprite_bindings;
                             runtime_detail::DecodedVfxState prepared_decoded;
+                            runtime_detail::ActiveEffectStore prepared_active_effects = active_effects;
                             runtime_detail::VfxUpgradeMovementState prepared_movements;
                             runtime_detail::VfxPersistentSparkState prepared_sparks;
                             if (reloaded)
@@ -1532,34 +1594,28 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                         rebound.Record(runtime_detail::VfxGenerationRebindOutcome::Incompatible);
                                         return true;
                                     }
-                                    if (!catalog_changed) return false;
-                                    const auto outcome = runtime_detail::RebindVfxGenerationHandle(
-                                        previous, next, capture.input.effect_handle, 0u);
-                                    rebound.Record(outcome);
-                                    return outcome != runtime_detail::VfxGenerationRebindOutcome::Retained;
+                                    return false;
                                 });
                                 if (catalog_changed)
                                 {
-                                    prepared_decoded.ground_events = vfx_session.decoded.ground_events;
-                                    prepared_decoded.ribbon_events = vfx_session.decoded.ribbon_events;
-                                    prepared_decoded.light_events = vfx_session.decoded.light_events;
-                                    prepared_decoded.distortion_events = vfx_session.decoded.distortion_events;
-                                    prepared_decoded.decal_events = vfx_session.decoded.decal_events;
-                                    prepared_decoded.volume_events = vfx_session.decoded.volume_events;
-                                    prepared_decoded.screen_events = vfx_session.decoded.screen_events;
-                                    prepared_decoded.entity_surface_events = vfx_session.decoded.entity_surface_events;
-                                    prepared_decoded.point_rate_events = vfx_session.decoded.point_rate_events;
-                                    for (auto *events : {&prepared_decoded.ground_events, &prepared_decoded.ribbon_events,
-                                            &prepared_decoded.light_events, &prepared_decoded.distortion_events,
-                                            &prepared_decoded.decal_events, &prepared_decoded.volume_events,
-                                            &prepared_decoded.screen_events, &prepared_decoded.entity_surface_events,
-                                            &prepared_decoded.point_rate_events})
-                                        runtime_detail::RebindVfxGenerationEvents(previous, next, *events, rebound);
+                                    prepared_active_effects.RebindRows([&](VfxEventInput &input) {
+                                        std::vector<VfxEventInput> one{input};
+                                        runtime_detail::RebindVfxGenerationEvents(previous, next, one, rebound);
+                                        if (one.empty()) return false;
+                                        input = std::move(one.front());
+                                        return true;
+                                    }, prepared_decoded.entity_surface_captures);
+                                    prepared_active_effects.Materialize(
+                                        runtime_detail::ActiveEffectStore::Profile::Ground,
+                                        prepared_decoded.ground_events);
                                     const auto ground_count = prepared_decoded.ground_events.size();
                                     runtime_detail::RebindVfxGroundEventOwners(next, prepared_decoded.ground_events);
                                     const auto retired_ground = ground_count - prepared_decoded.ground_events.size();
                                     rebound.retained -= retired_ground;
                                     rebound.incompatible += retired_ground;
+                                    prepared_active_effects.RebindProfile(
+                                        runtime_detail::ActiveEffectStore::Profile::Ground,
+                                        prepared_decoded.ground_events);
                                     prepared_movements = vfx_upgrade_movements;
                                     retired_movements = prepared_movements.Rebind(previous, next);
                                     prepared_sparks = persistent_sparks;
@@ -1610,6 +1666,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     if (catalog_changed)
                                     {
                                         vfx_catalog.Swap(replacement);
+                                        active_effects.Swap(prepared_active_effects);
                                         vfx_session.SwapDecoded(prepared_decoded);
                                         vfx_upgrade_movements.Swap(prepared_movements);
                                         persistent_sparks.Swap(prepared_sparks);
@@ -1882,13 +1939,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             // AcquireLatest below observes the simulation's completed publication.
             runtime_detail::DiagnosticScope event_drain_scope(vfx_work[0], capture_clock);
             std::size_t event_count{};
+            bool vfx_event_overflow{};
             PresentationEvent event;
-            while (event_count < 256 &&
+            while (event_count < 256 && vfx_session.raw_events.HasCapacity() &&
                    channels.presentation_events.TryPop(event))
             {
                 ++event_count;
                 if (event.kind == PresentationKind::Vfx)
-                    vfx_session.pending_events.push_back(event);
+                    if (!vfx_session.raw_events.Enqueue(event))
+                    {
+                        vfx_event_overflow = true;
+                        record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                            "Bounded VFX raw-event scheduler is full."));
+                        break;
+                    }
                 if (capture_diagnostics) event_lines.Append(
                     std::format("{{\"sequence\":{},\"tick\":{},\"kind\":{},"
                                 "\"asset\":{},\"position\":[{},{},{}]}}\n",
@@ -1897,6 +1961,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 event.position.z));
             }
             event_drain_scope.Stop();
+            if (vfx_event_overflow) break;
             runtime_detail::DiagnosticScope snapshot_scope(vfx_work[1], capture_clock);
             auto snapshots = snapshot_consumer.AcquireLatest();
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1920,7 +1985,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     previous_foot_tick = 0;
                     vfx_showcase_injected = false;
                 }
-                const auto ready_events = vfx_session.TakeReady(current_snapshot.header.tick);
+                const auto &ready_batch = vfx_session.raw_events.Prepare(
+                    current_snapshot.header.tick, vfx_session.session_id);
+                std::vector<PresentationEvent> ready_events;
+                ready_events.reserve(ready_batch.entries.size());
+                for (const auto &entry : ready_batch.entries) ready_events.push_back(entry.event);
                 std::vector<PresentationEvent> frame_events;
                 if (auto dispatched = runtime_detail::DispatchVfxUpgradeEvents(
                         vfx_catalog.Program(), ready_events, frame_events); !dispatched)
@@ -2092,11 +2161,35 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     snapshots.previous.header.session_id == snapshots.current.header.session_id
                     ? snapshots.previous.persistent_vfx
                     : std::span<const PersistentVfxVisual>{};
+                const auto geometry_revision = snapshots.current.static_scene
+                    ? static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+                          snapshots.current.static_scene.get()))
+                    : 0;
+                vfx_pair_facts.Prepare({
+                    .session_id = snapshots.current.header.session_id,
+                    .previous_publication = snapshots.has_previous
+                        ? snapshots.previous_publication_sequence : Sequence{},
+                    .current_publication = snapshots.current_publication_sequence,
+                    .quality = static_cast<std::uint32_t>(active_vfx_quality),
+                    .binding_revision = renderer.PipelineRevision(),
+                    .geometry_revision = geometry_revision},
+                    previous_vfx, current_vfx, snapshots.current.instances,
+                    snapshots.current.captured_instances);
+                active_effects.Materialize(VfxEventProfile::Ground, active_vfx_ground_events);
+                active_effects.Materialize(VfxEventProfile::Ribbon, active_vfx_ribbon_events);
+                active_effects.Materialize(VfxEventProfile::Light, vfx_session.decoded.light_events);
+                active_effects.Materialize(VfxEventProfile::Distortion, vfx_session.decoded.distortion_events);
+                active_effects.Materialize(VfxEventProfile::Decal, vfx_session.decoded.decal_events);
+                active_effects.Materialize(VfxEventProfile::Volume, vfx_session.decoded.volume_events);
+                active_effects.Materialize(VfxEventProfile::Screen, vfx_session.decoded.screen_events);
+                active_effects.Materialize(VfxEventProfile::EntitySurface, vfx_session.decoded.entity_surface_events);
+                active_effects.Materialize(VfxEventProfile::PointRate, vfx_session.decoded.point_rate_events);
                 runtime_detail::DiagnosticScope frame_adapter_scope(vfx_work[5], capture_clock);
                 auto typed_vfx = runtime_detail::BuildVfxTypedFrameInputs(
                     vfx_catalog.Program(), frame_events,
                     current_vfx, previous_vfx,
-                    snapshots.has_current ? snapshots.current.header.tick : Tick{});
+                    snapshots.has_current ? snapshots.current.header.tick : Tick{},
+                    &vfx_pair_facts);
                 frame_adapter_scope.Stop();
                 runtime_detail::DiagnosticScope surface_scope(vfx_work[6], capture_clock);
                 const Tick surface_tick = snapshots.current.header.tick;
@@ -2109,19 +2202,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 for (const auto &input : typed_vfx.events)
                 {
                     if (is_effect(input, "particle.boss.phase_change") || is_effect(input, "particle.boss.death"))
-                        vfx_session.decoded.entity_surface_events.push_back(input);
-                    if (is_effect(input, "particle.skill.trap")) vfx_session.decoded.point_rate_events.push_back(input);
+                        active_effects.Append(VfxEventProfile::EntitySurface, input,
+                            vfx_session.decoded.entity_surface_events);
+                    if (is_effect(input, "particle.skill.trap"))
+                        active_effects.Append(VfxEventProfile::PointRate, input,
+                            vfx_session.decoded.point_rate_events);
                 }
                 const auto terminal_phase = static_cast<SessionPhase>(
                     channels.session_phase.load(std::memory_order_acquire));
                 const Tick death_current_tick = vfx_session.UpdateTerminalClock(
                     surface_tick, terminal_phase, FixedStepClock::Clock::now());
                 std::erase_if(vfx_session.decoded.entity_surface_captures, [&](const auto &capture) {
-                    const auto &effect = surface_program.effects[capture.input.effect_handle - 1];
-                    const Tick current_tick = is_effect(capture.input, "particle.boss.death")
+                    const auto *input = active_effects.Get(capture.row);
+                    if (!input || input->effect_handle == 0 || input->effect_handle > surface_program.effects.size())
+                        return true;
+                    const auto &effect = surface_program.effects[input->effect_handle - 1];
+                    const Tick current_tick = is_effect(*input, "particle.boss.death")
                         ? death_current_tick : surface_tick;
-                    return current_tick >= capture.input.event_tick &&
-                        static_cast<double>(current_tick - capture.input.event_tick) >= static_cast<double>(effect.seconds) * 60.0;
+                    return current_tick >= input->event_tick &&
+                        static_cast<double>(current_tick - input->event_tick) >= static_cast<double>(effect.seconds) * 60.0;
                 });
                 std::erase_if(vfx_session.decoded.entity_surface_events, [&](const auto &input) {
                     const auto &effect = surface_program.effects[input.effect_handle - 1];
@@ -2131,46 +2230,54 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         static_cast<double>(current_tick - input.event_tick) >= static_cast<double>(effect.seconds) * 60.0) return true;
                     const auto *context = std::get_if<VfxContextPayload>(&input.payload);
                     if (!context || context->owner_id == 0) return true;
-                    runtime_detail::VfxEntitySurfaceEventCapture capture;
-                    capture.input = input;
+                    runtime_detail::RetainedVfxEntitySurfaceCapture capture;
+                    capture.row = active_effects.Find(input);
+                    if (capture.row == std::numeric_limits<runtime_detail::ActiveEffectStore::Row>::max())
+                        return false;
                     capture.generation_lease = render_generation;
                     if (is_effect(input, "particle.boss.death"))
                     {
-                        const auto actual = std::ranges::find_if(snapshots.current.captured_instances, [&](const auto &value) {
-                            return value.session_id == snapshots.current.header.session_id && value.sequence == input.sequence &&
-                                value.tick == input.event_tick && value.source_entity_id == context->owner_id;
-                        });
-                        if (actual == snapshots.current.captured_instances.end()) return false;
+                        const auto *actual = vfx_pair_facts.Capture(
+                            snapshots.current.header.session_id, input.sequence,
+                            input.event_tick, context->owner_id,
+                            snapshots.current.captured_instances);
+                        if (!actual) return false;
                         capture.instance = actual->instance;
                         capture.animation_pose = actual->animation_pose;
                         capture.retained_instance = capture.has_animation_pose = true;
                     }
                     else
                     {
-                        const auto actual = std::ranges::find_if(snapshots.current.instances, [&](const auto &value) {
-                            return value.stable_id == ((2ull << 60) | context->owner_id);
-                        });
-                        if (actual == snapshots.current.instances.end()) return false;
+                        const auto *actual = vfx_pair_facts.Instance(
+                            (2ull << 60) | context->owner_id, snapshots.current.instances);
+                        if (!actual) return false;
                         capture.instance = *actual;
                     }
                     vfx_session.decoded.entity_surface_captures.push_back(std::move(capture));
                     return true;
                 });
+                std::vector<runtime_detail::VfxEntitySurfaceEventCapture> surface_capture_inputs;
+                surface_capture_inputs.reserve(vfx_session.decoded.entity_surface_captures.size());
+                for (const auto &capture : vfx_session.decoded.entity_surface_captures)
+                    if (const auto *input = active_effects.Get(capture.row))
+                        surface_capture_inputs.push_back({*input, capture.instance,
+                            capture.retained_instance, capture.has_animation_pose,
+                            capture.animation_pose, capture.generation_lease});
                 std::vector<runtime_detail::VfxEntitySurfacePersistentCapture> surface_persistent;
                 for (const auto &input : typed_vfx.persistent)
                 {
                     if (input.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::BossPhaseTransition)) continue;
                     const auto *entity = std::get_if<VfxEntityPayload>(&input.payload);
                     if (!entity) continue;
-                    const auto actual = std::ranges::find_if(snapshots.current.instances,
-                        [&](const auto &value) { return value.stable_id == entity->render_instance_id; });
-                    const auto visual = std::ranges::find_if(current_vfx,
-                        [&](const auto &value) { return value.stable_id == input.stable_id && value.kind == PersistentVfxKind::BossPhaseTransition; });
-                    if (actual != snapshots.current.instances.end() && visual != current_vfx.end())
+                    const auto *actual = vfx_pair_facts.Instance(
+                        entity->render_instance_id, snapshots.current.instances);
+                    const auto *visual = vfx_pair_facts.Current(
+                        input.stable_id, PersistentVfxKind::BossPhaseTransition, current_vfx);
+                    if (actual && visual)
                         surface_persistent.push_back({input, *actual, visual->active_tick, visual->expires});
                 }
                 const auto typed_surfaces = runtime_detail::BuildVfxTypedEntitySurfaceCommands(surface_program,
-                    vfx_session.decoded.entity_surface_captures, surface_persistent, surface_tick,
+                    surface_capture_inputs, surface_persistent, surface_tick,
                     death_current_tick);
                 surface_scope.Stop();
                 runtime_detail::DiagnosticScope movement_scope(vfx_work[7], capture_clock);
@@ -2239,13 +2346,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             has_distortion |= output.profile == VfxOutputProfile::Distortion;
                             has_decal |= output.profile == VfxOutputProfile::Decal;
                         }
-                    if (has_light) vfx_session.decoded.light_events.push_back(input);
-                    if (has_distortion) vfx_session.decoded.distortion_events.push_back(input);
-                    if (has_decal) vfx_session.decoded.decal_events.push_back(input);
+                    if (has_light) active_effects.Append(VfxEventProfile::Light, input,
+                        vfx_session.decoded.light_events);
+                    if (has_distortion) active_effects.Append(VfxEventProfile::Distortion, input,
+                        vfx_session.decoded.distortion_events);
+                    if (has_decal) active_effects.Append(VfxEventProfile::Decal, input,
+                        vfx_session.decoded.decal_events);
                     if (runtime_detail::IsVfxTypedVolumeEffect(program, input.effect_handle))
-                        vfx_session.decoded.volume_events.push_back(input);
+                        active_effects.Append(VfxEventProfile::Volume, input,
+                            vfx_session.decoded.volume_events);
                     if (runtime_detail::IsVfxTypedScreenEffect(program, input.effect_handle))
-                        vfx_session.decoded.screen_events.push_back(input);
+                        active_effects.Append(VfxEventProfile::Screen, input,
+                            vfx_session.decoded.screen_events);
                 }
                 const auto light_tick = current_snapshot.header.tick;
                 std::erase_if(vfx_session.decoded.screen_events, [&](const VfxEventInput &input) {
@@ -2369,7 +2481,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 std::get<VfxContextPayload>(older.payload).owner_id ==
                                     std::get<VfxContextPayload>(input.payload).owner_id;
                         });
-                    active_vfx_ground_events.push_back(input);
+                    active_effects.Append(VfxEventProfile::Ground, input, active_vfx_ground_events);
                     const auto initial = runtime_detail::BuildVfxTypedEventGroundCommands(
                         program, std::span(&input, 1), input.event_tick);
                     if (charged_pulse && std::ranges::any_of(initial, [](const auto &command) {
@@ -2488,7 +2600,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_catalog.Program(), active_vfx_ground_events, ground_tick);
                 visible_flashes.insert(visible_flashes.end(), owned_motes.begin(), owned_motes.end());
                 const auto persistent_motes = runtime_detail::BuildVfxPersistentMoteCommands(
-                    vfx_catalog.Program(), typed_vfx.persistent);
+                    vfx_catalog.Program(), typed_vfx.persistent,
+                    vfx_session.persistent_mote_births, ground_tick);
                 visible_flashes.insert(visible_flashes.end(), persistent_motes.begin(),
                                        persistent_motes.end());
                 const auto fire_flames = runtime_detail::BuildVfxPersistentFireFlameCommands(
@@ -2528,7 +2641,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                          std::holds_alternative<VfxEntityPayload>(input.payload) ||
                          std::holds_alternative<VfxContextPayload>(input.payload) ||
                          std::holds_alternative<VfxLinkPayload>(input.payload)))
-                        active_vfx_ribbon_events.push_back(input);
+                        active_effects.Append(VfxEventProfile::Ribbon, input, active_vfx_ribbon_events);
                 }
                 std::erase_if(active_vfx_ribbon_events, [&](const VfxEventInput &input) {
                     const auto seconds = vfx_catalog.Program().effects[input.effect_handle - 1].seconds;
@@ -2567,8 +2680,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     .vfx = {
                         .particle_spawns = std::span(pending_particle_spawns.data(), particle_spawn_count),
                         .effect_lines = std::span(pending_effect_lines.data(), effect_line_count),
-                        .events = typed_vfx.events,
-                        .persistent = typed_vfx.persistent,
+                        .event_count = static_cast<std::uint32_t>(typed_vfx.events.size()),
+                        .persistent_count = static_cast<std::uint32_t>(typed_vfx.persistent.size()),
                         .ground = typed_ground_spawns,
                         .flashes = visible_flashes,
                         .meshes = typed_mesh_spawns,
@@ -2596,6 +2709,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         : std::nullopt,
                     .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
                     .wait_for_streaming = config.smoke_render_lockstep,
+                    .ui_packet_generation = snapshots.current_publication_sequence,
                 };
                 // GPU completion is delayed; offline attribution joins this revision through its own frame ID.
                 // Simulation/input can enter Pause or a menu after this loop's
@@ -2606,12 +2720,44 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto frame_config_revision = graphics_config_revision;
                 const auto frame_settings_generation = active_settings_generation;
                 const auto frame_pipeline_revision = renderer.PipelineRevision();
-                if (auto rendered = renderer.Render(render_input, frame);
-                    !rendered)
+                const auto rendered = renderer.Render(render_input, frame);
+                if (frame.presented_ui_packet_generation != 0 &&
+                    frame.presented_ui_packet_generation == snapshots.current_publication_sequence)
+                {
+                    if (!channels.ui_packets.AcceptPresentedUiPacket(frame.presented_ui_packet_generation,
+                        snapshots.current_publication_sequence, snapshots.current.header.session_id,
+                        snapshots.current.ui, frame.rendered_view.output_extent))
+                        OutputDebugStringA("Presented UI receipt did not match the retained packet; prior accepted frame retained.\n");
+                }
+                const bool vfx_world_step_accepted = frame.vfx_world_step_submitted &&
+                    frame.vfx_world_tick == snapshots.current.header.tick &&
+                    frame.vfx_world_session_id == snapshots.current.header.session_id;
+                if (vfx_world_step_accepted)
+                    vfx_session.raw_events.Acknowledge();
+                if (!rendered)
                 {
                     record_thread_failure(rendered);
                     break;
                 }
+                if ((!ready_batch.entries.empty() || particle_spawn_count != 0 || effect_line_count != 0) &&
+                    !vfx_world_step_accepted)
+                {
+                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                        "Renderer completed VFX inputs without acknowledging the matching world step."));
+                    break;
+                }
+                active_effects.Commit(VfxEventProfile::Ground, active_vfx_ground_events);
+                active_effects.Commit(VfxEventProfile::Ribbon, active_vfx_ribbon_events);
+                active_effects.Commit(VfxEventProfile::Light, vfx_session.decoded.light_events);
+                active_effects.Commit(VfxEventProfile::Distortion, vfx_session.decoded.distortion_events);
+                active_effects.Commit(VfxEventProfile::Decal, vfx_session.decoded.decal_events);
+                active_effects.Commit(VfxEventProfile::Volume, vfx_session.decoded.volume_events);
+                active_effects.Commit(VfxEventProfile::Screen, vfx_session.decoded.screen_events);
+                active_effects.Commit(VfxEventProfile::EntitySurface,
+                    vfx_session.decoded.entity_surface_events);
+                active_effects.Commit(VfxEventProfile::PointRate, vfx_session.decoded.point_rate_events);
+                active_effects.Compact(vfx_session.decoded.entity_surface_captures);
+                vfx_session.decoded.ClearEventScratch();
                 if (performance_lines)
                 {
                     const auto render_end_qpc = read_performance_qpc();
@@ -2721,10 +2867,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         cpu.ribbon_state_us, cpu.ribbon_wait_us, cpu.ribbon_allocation_us,
                         cpu.ribbon_replacement_count, cpu.ribbon_allocation_bytes, cpu.ribbon_prepare_thread_cpu_us,
                         static_cast<unsigned>(cpu.ribbon_prepare_thread_cpu_valid));
+                    performance_row += std::format(",{},{},{},{},{},{},{},{},{}",
+                        cpu.graph_resources_us, cpu.graph_base_passes_us, cpu.graph_shadows_us,
+                        cpu.graph_light_probes_us, cpu.graph_scene_selection_us, cpu.graph_ao_us,
+                        cpu.graph_opaque_us, cpu.graph_hero_us, cpu.graph_post_us);
+                    performance_row += std::format(",{},{},{},{},{},{}",
+                        cpu.scene_skin_prepare_us, cpu.scene_shadow_prepare_us, cpu.scene_cluster_prepare_us,
+                        cpu.scene_geometry_demand_us, cpu.scene_texture_prepare_us, cpu.scene_upload_plan_us);
                     performance_row += '\n';
                     performance_lines->Append(performance_row);
                     // The sampler waits for nonempty performance.csv before opening GPU counters.
-                    if (!performance_ready_published && gpu.valid && gpu.fence_completed)
+                    if (!performance_ready_published && (!config.capture_gpu_timings || (gpu.valid && gpu.fence_completed)))
                     {
                         performance_ready_published = true;
                         if (!performance_lines->Flush())
@@ -2990,7 +3143,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 !event_file.fail() && !timeline_file.fail() && !gpu_file.fail() &&
                 (!performance_lines || (!performance_file.fail() && !gpu_live_file.fail())) &&
                 (!graphics_settings_lines || !graphics_settings_file.fail());
-            const auto expected_gpu_frames = performance_lines ? performance_lines->Records() : 0;
+            const auto expected_gpu_frames = performance_lines && config.capture_gpu_timings ? performance_lines->Records() : 0;
             const bool gpu_frame_coverage_complete = !performance_lines ||
                 performance_state.GpuFrameCoverageComplete(expected_gpu_frames);
             const bool complete = io_ok && gpu_drain_succeeded && gpu_frame_coverage_complete &&
@@ -3003,7 +3156,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 "\"event_records\":{},\"event_dropped\":{},\"timeline_records\":{},"
                 "\"timeline_dropped\":{},\"gpu_records\":{},\"gpu_dropped\":{},"
                 "\"performance_records\":{},\"gpu_live_records\":{},\"graphics_settings_records\":{},"
-                "\"gpu_frames_written\":{},\"gpu_expected_frames\":{},\"gpu_last_frame\":{},"
+                "\"gpu_frames_written\":{},\"gpu_expected_frames\":{},\"gpu_last_frame\":{},\"gpu_timing_requested\":{},"
                 "\"gpu_frame_coverage_complete\":{},\"gpu_drain_succeeded\":{},\"gpu_invalid_frames\":{},"
                 "\"graphics_capture_complete\":{}}}\n",
                 "capture", complete ? "true" : "false",
@@ -3013,6 +3166,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 gpu_live_lines ? gpu_live_lines->Records() : 0,
                 graphics_settings_lines ? graphics_settings_lines->Records() : 0,
                 performance_state.GpuFrames(), expected_gpu_frames, performance_state.LastGpuFrame(),
+                config.capture_diagnostics && config.capture_gpu_timings ? "true" : "false",
                 gpu_frame_coverage_complete ? "true" : "false", gpu_drain_succeeded ? "true" : "false", invalid_gpu_frames,
                 graphics_capture_complete ? "true" : "false"));
             if (!status_started || !status_written || !complete)
@@ -3063,7 +3217,41 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
     });
 
-    channels.render_ready.wait(false, std::memory_order_acquire);
+    // Renderer initialization may call DXGI with this HWND from the render
+    // thread. Keep its owner thread dispatching window/system messages until
+    // the renderer publishes readiness instead of blocking in atomic::wait.
+    while (!channels.render_ready.load(std::memory_order_acquire))
+    {
+        const auto processed_wake_sequence = main_wake.Sequence();
+        Result window_failure = Result::Success();
+        if (!window.PumpMessages(&window_failure, false))
+        {
+            if (!window_failure) record_thread_failure(std::move(window_failure));
+            channels.stop_requested.store(true, std::memory_order_release);
+            native_input_frame.Cancel();
+        }
+        if (channels.render_ready.load(std::memory_order_acquire)) break;
+
+        const auto pending_startup = [&]() noexcept {
+            MSG pending{};
+            return channels.render_ready.load(std::memory_order_acquire) ||
+                runtime_detail::PeekMainMessage(pending, false, PM_NOREMOVE);
+        };
+        if (main_wake.PrepareWait(pending_startup, processed_wake_sequence) &&
+            !pending_startup())
+        {
+            const auto handle = main_wake.Handle();
+            const auto wait_result = MsgWaitForMultipleObjectsEx(1, &handle, INFINITE,
+                runtime_detail::MainMessageMask(false),
+                runtime_detail::MainMessageFlags(false));
+            if (wait_result == WAIT_FAILED)
+                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                    std::format("Main startup message/event wait failed: {}.", GetLastError())));
+        }
+        if (const auto error = main_wake.Error())
+            record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                std::format("Main startup wake event failed: {}.", error)));
+    }
     {
         std::lock_guard lock(result_mutex);
         result = thread_result;
@@ -3092,7 +3280,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                               .automatic_spawning = config.diagnostic_enemy_count == 0},
                  .capture_checksums = config.diagnostic_enemy_count == 0 &&
                                       (config.smoke || config.record_playtest || replaying),
-                 .capture_timings = config.capture_diagnostics},
+                 .capture_timings = config.capture_diagnostics,
+                 .capture_detailed_balance = config.record_playtest ||
+                                             config.capture_diagnostics ||
+                                             config.smoke || replaying},
                 simulation_rules);
             !initialized)
         {
@@ -3258,10 +3449,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     updated_presentation_settings))
                     projection_settings = updated_presentation_settings;
                 std::size_t ui_action_count{};
-                UiAction ui_action;
-                while (ui_action_count < ui_action_storage.size() &&
-                       channels.ui_actions.TryPop(ui_action))
-                    ui_action_storage[ui_action_count++] = ui_action;
+                runtime_detail::UiActionEnvelope queued_ui_action;
+                if (channels.ui_actions.TryPop(queued_ui_action))
+                {
+                    const auto authoritative_session = simulation.GetSessionProbe();
+                    const auto authoritative_session_id = channels.current_session_id.load(
+                        std::memory_order_acquire);
+                    if (runtime_detail::UiActionCurrent(queued_ui_action, authoritative_session_id,
+                                                        authoritative_session))
+                        ui_action_storage[ui_action_count++] = queued_ui_action.action;
+                    else
+                    {
+                        channels.stale_ui_action_drops.fetch_add(1, std::memory_order_relaxed);
+                        channels.ui_input_rejected.store(true, std::memory_order_release);
+                    }
+                }
                 const auto focus_epoch = channels.focus_epoch.load(std::memory_order_acquire);
                 if (focus_epoch != observed_focus_epoch)
                 {
@@ -3449,7 +3651,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         captured_signals = model.domain_signals.size();
                     }
                     runtime_detail::DiagnosticScope replay_scope(simulation_work[11], replaying ? capture_clock : nullptr);
-                    channels.PublishSessionProbe(probe);
+                    channels.PublishSessionProbe(probe, model.session_id);
                     if (replaying && !config.replay_compare && tick.checksum !=
                                          replay.frames[replay_frame_index].expected_checksum)
                     {
@@ -3540,6 +3742,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     {
                         runtime_detail::DiagnosticScope project_scope(simulation_work[9], capture_clock);
                         const auto graphics_ui = channels.presentation_graphics_ui.load(std::memory_order_acquire);
+                        const PresentationUiState ui_draw_state{
+                            static_cast<UiPage>(channels.ui_page.load(std::memory_order_acquire)),
+                            channels.collection_skill.load(std::memory_order_acquire),
+                            channels.character_skill.load(std::memory_order_acquire),
+                            channels.loadout_source.load(std::memory_order_acquire),
+                            channels.settings_group.load(std::memory_order_acquire),
+                            channels.settings_page.load(std::memory_order_acquire),
+                            channels.character_details_page.load(std::memory_order_acquire)};
+                        const auto modal_phase = display_modal_phase.load(std::memory_order_acquire);
                         slot->storage->camera.yaw_degrees = presentation_catalog.camera.yaw_degrees;
                         const auto zoom_percent = static_cast<float>(channels.camera_zoom_percent.load(std::memory_order_acquire));
                         const auto pose = ComputeRuntimeCameraPose(presentation_catalog.camera.distance_m, presentation_catalog.camera.pitch_degrees, zoom_percent);
@@ -3547,15 +3758,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         slot->storage->camera.vertical_fov_degrees =
                             presentation_catalog.camera.vertical_fov_degrees;
                         slot->storage->camera.distance = pose.distance_m;
-                        if (ProjectTick(model, presentation_catalog,
-                                                  {static_cast<UiPage>(channels.ui_page.load(
-                                                       std::memory_order_acquire)),
-                                                   channels.collection_skill.load(std::memory_order_acquire),
-                                                   channels.character_skill.load(std::memory_order_acquire),
-                                                   channels.loadout_source.load(std::memory_order_acquire),
-                                                   channels.settings_group.load(std::memory_order_acquire),
-                                                   channels.settings_page.load(std::memory_order_acquire),
-                                                   channels.character_details_page.load(std::memory_order_acquire)},
+                        if (ProjectTick(model, presentation_catalog, ui_draw_state,
                                                   projection_settings,
                                                   *slot->storage,
                                                    environment_cache.Resolve(model),
@@ -3564,14 +3767,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                    &enemy_animations,
                                                    graphics_ui.get()))
                         {
-                            const auto page = static_cast<UiPage>(channels.ui_page.load(
-                                std::memory_order_acquire));
+                            const auto page = ui_draw_state.page;
                             if (page == UiPage::MainMenuSettings ||
                                 page == UiPage::PauseSettings)
                             {
-                                const auto modal = display_modal_phase.load(
-                                    std::memory_order_acquire);
-                                if (modal != GraphicsUiPhase::Applied)
+                                if (modal_phase != GraphicsUiPhase::Applied)
                                 {
                                     UiModel backdrop;
                                     backdrop.kind = UiModel::Kind::Panel;
@@ -3579,14 +3779,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     backdrop.size_pixels = {820, 360};
                                     backdrop.color_rgba = 0xF0202430u;
                                     const auto title = SettingsStatusText(
-                                        modal == GraphicsUiPhase::AwaitingDisplayConfirmation
+                                        modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation
                                             ? "화면 모드를 유지하시겠습니까? (15초 안에 확인)"
-                                            : modal == GraphicsUiPhase::RestoringDisplay
+                                            : modal_phase == GraphicsUiPhase::RestoringDisplay
                                                 ? "이전 화면 모드로 복원 중..."
                                                 : "화면 모드 적용 중...", {620, 440});
                                     bool modal_complete = slot->storage->AddUi(backdrop) &&
                                         slot->storage->AddUi(title);
-                                    if (modal == GraphicsUiPhase::AwaitingDisplayConfirmation)
+                                    if (modal_phase == GraphicsUiPhase::AwaitingDisplayConfirmation)
                                         modal_complete = modal_complete &&
                                             slot->storage->AddUi(SettingsConfirmButton("유지", {650, 600})) &&
                                             slot->storage->AddUi(SettingsConfirmButton("취소", {1010, 600}));
@@ -3610,6 +3810,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                                           slot->storage->camera.target.z}) : 0.0f);
                             project_scope.Stop();
                             runtime_detail::DiagnosticScope publication_scope(simulation_work[10], capture_clock);
+                            const auto ui_generation = publish_sequence + 1;
+                            runtime_detail::UiDrawPacketFacts ui_facts;
+                            ui_facts.generation = ui_generation;
+                            ui_facts.session_id = model.session_id;
+                            ui_facts.selection_epoch = runtime_detail::UiSelectionEpoch(model.session);
+                            ui_facts.session = model.session;
+                            ui_facts.ui = ui_draw_state;
+                            ui_facts.settings = projection_settings;
+                            ui_facts.graphics_model = graphics_ui;
+                            ui_facts.modal_phase = static_cast<std::uint8_t>(modal_phase);
+                            channels.ui_packets.StageUiPacket(slot->index, std::move(ui_facts));
                             channels.snapshots.Publish(*slot, ++publish_sequence);
                             snapshot_published = true;
                         }

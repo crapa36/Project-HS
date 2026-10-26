@@ -163,6 +163,7 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
         return Result::Failure(ErrorCode::InvalidArgument, "hs_gameplay",
                                "Movement echo history age exceeds storage capacity.");
     impl_->config = config;
+    impl_->telemetry->balance_observer.Reset(config.capture_detailed_balance);
     impl_->timings = {};
     if (config.capture_timings)
         for (std::size_t sample = 0; sample < 64; ++sample)

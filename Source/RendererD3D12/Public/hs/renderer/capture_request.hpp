@@ -17,6 +17,8 @@ enum class CaptureKind : std::uint8_t
     // Reconstructed scene-linear HDR before post processing/display encoding;
     // the published source includes transparent and VFX composition.
     HdrColor,
+    // Completed native SPB1 radiance, filtered radiance, SH9 and first-hit payloads.
+    SceneProbePackage,
 };
 
 struct CaptureRequest

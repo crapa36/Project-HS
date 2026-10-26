@@ -11,7 +11,7 @@ cbuffer VirtualShadowConstants : register(b0, space21)
     float4 RootBounds; // Fixed light-space XY minimum and maximum of the flattened root.
     float4 RootExtent; // Texel width/height, world texel size, filter guard.
     float4 RootDepth; // Fixed root Z minimum, inverse span, span.
-    uint4 RootOptions; // Root resource present, ready, compatible.
+    uint4 RootOptions; // Root resource present, ready, compatible, current-root counter base.
 };
 cbuffer ClearConstants : register(b1, space21) { uint ClearEntry; };
 struct PageEntry
@@ -369,7 +369,58 @@ void CullPageCaster(uint entry, uint caster_index)
 [numthreads(64, 1, 1)]
 void CullCS(uint3 tid : SV_DispatchThreadID)
 {
-    // The existing b1 root constant selects count0, admission1, scatter2.
+    // The existing b1 root constant selects fine count/admission/scatter (0..2)
+    // or current-root initialization/emission (3..4).
+    if (ClearEntry == 3u)
+    {
+        if (tid.x < Frame.w / 2u) CommandCounts.Store((RootOptions.w + tid.x) * 4u, 0u);
+        if (tid.x == 0u)
+        {
+            PageEntry root = {0, 0, 3u, 0xffffffffu, Identity.w, 16u, 0u, 0u};
+            PageTable[Counts.z] = root;
+        }
+        return;
+    }
+    if (ClearEntry == 4u)
+    {
+        if (tid.x >= Counts.x) return;
+        const Caster caster = Casters[tid.x];
+        // Identical to IsCompleteBakedStaticCaster: wind/skin/animated alpha
+        // never carry static bit 4, so they remain fresh root contributors.
+        if ((caster.properties.x & 1u) == 0u || (caster.properties.x & 68u) == 68u) return;
+        const uint group = caster.indexed.x;
+        if (group >= Frame.w / 2u)
+        {
+            uint ignored; InterlockedOr(PageTable[Counts.z].flags, 8u, ignored);
+            return;
+        }
+        const uint2 layout = CommandSegments.Load2((Frame.w + group) * 8u);
+        uint slot;
+        CommandCounts.InterlockedAdd((RootOptions.w + group) * 4u, 1u, slot);
+        if (slot >= layout.y || layout.x >= Counts.x || slot >= Counts.x - layout.x)
+        {
+            uint ignored; InterlockedOr(PageTable[Counts.z].flags, 8u, ignored);
+            return;
+        }
+        // Fixed caster slots keep draw-record identity independent of atomic
+        // order; commands retain the CPU's per-frontend group partition.
+        const uint record_index = Options.z + tid.x;
+        const uint command_index = Options.z + layout.x + slot;
+        DrawRecord record;
+        record.geometry_record = caster.draw.w; record.source_ref = caster.draw.z;
+        record.instance_index = caster.draw.x; record.instance_generation = caster.draw.y;
+        record.page_entry = Counts.z; record.layer = 2u; record.draw_group = group; record.reserved = 0u;
+        DrawRecords[record_index] = record;
+        if (caster.properties.z == 0u)
+        {
+            const uint offset = command_index * 24u;
+            IndexedCommands.Store4(offset, uint4(0x80000000u | record_index, caster.indexed.y, 1u, caster.indexed.z));
+            IndexedCommands.Store2(offset + 16u, uint2(caster.indexed.w, 0u));
+        }
+        else MeshCommands.Store4(command_index * 16u,
+            uint4(0x80000000u | record_index, caster.properties.y, 1u, 1u));
+        return;
+    }
     if (ClearEntry == 1u)
     {
         const uint segment = tid.x;

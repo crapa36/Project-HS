@@ -327,7 +327,7 @@ void Window::CancelSkillRebind() noexcept
     pending_rebind_slot_.reset();
 }
 
-void Window::SetUiClickHandler(std::function<void(Float2)> handler)
+void Window::SetUiClickHandler(std::function<void(Float2, ViewExtent)> handler)
 {
     ui_click_handler_ = std::move(handler);
 }
@@ -514,6 +514,21 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
             return rollback(GetLastError());
         if (dpi_error_) return rollback(dpi_error_);
     }
+    if (!borderless)
+    {
+        RECT actual_client{};
+        if (!GetClientRect(window_, &actual_client)) return rollback(GetLastError());
+        const auto actual_width = actual_client.right - actual_client.left;
+        const auto actual_height = actual_client.bottom - actual_client.top;
+        if (actual_width != static_cast<LONG>(client_width) ||
+            actual_height != static_cast<LONG>(client_height))
+        {
+            const auto restored = rollback(ERROR_INVALID_DATA);
+            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                std::format("Window placement requested a {}x{} client extent but produced {}x{}; {}",
+                    client_width, client_height, actual_width, actual_height, restored.Message()));
+        }
+    }
     if (borderless && !borderless_)
     {
         windowed_rect_ = previous_rect;
@@ -625,7 +640,7 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
         {
             const auto x = static_cast<float>(static_cast<short>(LOWORD(lparam)));
             const auto y = static_cast<float>(static_cast<short>(HIWORD(lparam)));
-            ui_click_handler_(ReferenceUiCursor({x, y}, {client_width_, client_height_}));
+            ui_click_handler_({x, y}, {client_width_, client_height_});
         }
         return 0;
     case WM_INPUT:

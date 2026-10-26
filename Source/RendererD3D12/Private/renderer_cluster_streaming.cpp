@@ -5,6 +5,7 @@
 
 #include <bit>
 #include <numeric>
+#include <stdexcept>
 #include <tuple>
 
 namespace hs
@@ -410,12 +411,20 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
                 return StreamFailure("Could not begin/account hierarchy page read.");
             }
             stream.read_bytes = file_bytes;
+            stream.decoded_result = std::make_shared<render_data::GeometryData>();
+            const auto decoded_result = stream.decoded_result;
+            const auto decode = stream.decode;
             bool submitted{};
             const auto queued = asset_io.Enqueue({stream.request, runtime.content_generation,
-                    stream.logical_id, stream.path, file_bytes, resident_generation_lease},
+                    stream.logical_id, stream.path, file_bytes, resident_generation_lease,
+                    [decoded_result, decode](std::span<const std::byte> bytes) {
+                        if (auto result = decode(bytes, *decoded_result); !result)
+                            throw std::runtime_error(std::string(result.Message()));
+                    }},
                     streaming, residency, ticket, submitted);
             if (!submitted)
             {
+                stream.decoded_result.reset();
                 static_cast<void>(residency.ReleaseNow(ticket));
                 static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
                 stream.decoded_residency = {};
@@ -432,11 +441,17 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
             {
                 AssetReadCompletion read;
                 if (auto result = asset_io.Poll(stream.request, streaming, residency, read); !result) return result;
-                if (!read.ready || read.cancelled) continue;
+                if (!read.ready || read.cancelled)
+                {
+                    if (read.ready) stream.decoded_result.reset();
+                    continue;
+                }
                 stream.read_storage = std::move(read.bytes);
                 stream.read_residency = read.storage;
+                if (!stream.decoded_result) return StreamFailure("Hierarchy decode result owner is missing.");
+                stream.decoded = std::move(*stream.decoded_result);
+                stream.decoded_result.reset();
             }
-            if (auto result = stream.decode(stream.read_storage, stream.decoded); !result) return result;
             const auto decoded_bytes = DecodedBytes(stream.decoded);
             if (!residency.CommitHost(stream.decoded_residency, decoded_bytes) ||
                 !streaming.CompleteRead(stream.request, runtime.content_generation))

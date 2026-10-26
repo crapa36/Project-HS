@@ -460,8 +460,12 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
     for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
     {
         const auto &input = inputs[ordinal];
-        if (input.candidates.size() > input.max_instance_count)
+        const auto candidates = input.candidates ? std::span<const GpuClusterCandidate>(*input.candidates)
+            : std::span<const GpuClusterCandidate>{};
+        if (candidates.size() > input.max_instance_count)
             return ClusterFailure("Cluster candidate count exceeds its persistent scene slot capacity.");
+        if (input.constants.active_view_mask & ~15u)
+            return ClusterFailure("Cluster active view mask exceeds its four-view ABI.");
         if (!input.max_instance_count)
         {
             native.cuts[ordinal].candidate_count = 0;
@@ -490,7 +494,13 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         }
         if (input.constants.material_word != ((material_parameter_bases[render_data::EnvironmentGeometryMaterialOrdinal(ordinal)] << 1u) | 1u))
             return ClusterFailure("Cluster material word disagrees with its authored environment surface.");
-        for (const auto &candidate : input.candidates)
+        const auto &previous_upload = native.cuts[ordinal];
+        const bool reused_candidates = input.candidates && previous_upload.candidate_owner == input.candidates &&
+            previous_upload.candidate_generation == runtime.generation &&
+            previous_upload.candidate_static_error == runtime.catalogs[ordinal].static_error;
+        if (reused_candidates)
+            history_capacities[ordinal] = previous_upload.history_instance_capacity;
+        else for (const auto &candidate : candidates)
         {
             const auto &range = runtime.catalogs[ordinal];
             if (candidate.catalog_index != ordinal || candidate.first_group != range.group_base ||
@@ -653,7 +663,7 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
             cut = std::move(next);
         }
         cut.output_capacity = output_capacity;
-        cut.candidate_count = static_cast<std::uint32_t>(input.candidates.size());
+        cut.candidate_count = input.candidates ? static_cast<std::uint32_t>(input.candidates->size()) : 0u;
         cut.geometry_draw_base = static_cast<std::uint32_t>(record_base + ref_base);
         cut.generation = runtime.generation;
         cut.actual_frame_id = cut.candidate_count ? actual_frame_id : 0u;
@@ -668,8 +678,15 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
                 previous_cut.history_words_per_instance == history_words)
                 cut.previous_history_slot = last_presented_index;
         }
-        if (!input.candidates.empty())
-            if (auto result = MapCopy(cut.candidates, std::as_bytes(input.candidates)); !result) return result;
+        if (cut.candidate_owner != input.candidates || cut.candidate_generation != runtime.generation ||
+            cut.candidate_static_error != runtime.catalogs[ordinal].static_error)
+        {
+            if (input.candidates && !input.candidates->empty())
+                if (auto result = MapCopy(cut.candidates, std::as_bytes(std::span<const GpuClusterCandidate>(*input.candidates))); !result) return result;
+            cut.candidate_owner = input.candidates;
+            cut.candidate_generation = runtime.generation;
+            cut.candidate_static_error = runtime.catalogs[ordinal].static_error;
+        }
         auto constants = input.constants;
         constants.candidate_count = cut.candidate_count;
         constants.group_count = static_cast<std::uint32_t>(runtime.cpu.groups.size());
@@ -701,7 +718,6 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(std::uint32_t frame_slot,
         if (constants.geometry_frontend_flags != 0u && constants.geometry_frontend_flags != kGeometryMeshEligible)
             return ClusterFailure("Cluster frontend must select pulling DRAW or Mesh.");
         cut.geometry_frontend_flags = constants.geometry_frontend_flags;
-        constants.reserved = 0;
         void *mapped{};
         const D3D12_RANGE no_read{};
         auto hr = cut.constants.resource->Map(0, &no_read, &mapped);

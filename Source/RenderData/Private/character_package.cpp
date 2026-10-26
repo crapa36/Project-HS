@@ -358,7 +358,7 @@ CharacterPackageData DecodeCommon(
     Require(package.chunks.size() == (embedded ? 7u : monster ? 11u : 8u) &&
             (embedded ? chunks[1] && !chunks[13] && !chunks[25] : chunks[13] && !chunks[1] && chunks[25]) && chunks[3] && chunks[4] &&
             chunks[5] && chunks[6] && chunks[7] && !chunks[2] &&
-            (monster ? !chunks[8] && chunks[37] && chunks[38] && chunks[39] && chunks[40] : chunks[8]),
+            (monster ? !chunks[8] && chunks[37] && chunks[38] && chunks[39] && chunks[40] : chunks[8] != nullptr),
             "missing or unexpected character chunk");
     for (const auto &chunk : package.chunks)
         Require(chunk.required, "optional character field is unsupported");

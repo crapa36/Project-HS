@@ -204,26 +204,36 @@ auto PersistentMotes(const hs::VfxProgramData &program,
         program, std::span(&owner, 1));
 }
 
-void PersistentMotesAreStatelessAndOwnerBound()
+void PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry()
 {
     auto program = PersistentMoteProgram();
+    hs::runtime_detail::VfxPersistentMoteBirthWindow births;
     auto owner = PersistentMoteOwner(20);
-    const auto at20 = PersistentMotes(program, owner);
+    const auto at20 = hs::runtime_detail::BuildVfxPersistentMoteCommands(
+        program, std::span(&owner, 1), births, 120);
     Require(at20.size() == 2 && at20[0].stable_seed != at20[1].stable_seed,
             "persistent mote birth cadence or indexed identity missing");
-    const auto repeat = PersistentMotes(program, owner);
+    const auto repeat = hs::runtime_detail::BuildVfxPersistentMoteCommands(
+        program, std::span(&owner, 1), births, 120);
     Require(repeat.size() == at20.size() && repeat[0].stable_seed == at20[0].stable_seed &&
             repeat[0].normalized_age == at20[0].normalized_age,
-            "repeated persistent frame accumulated or changed births");
+            "retained birth window accumulated or changed births");
     owner = PersistentMoteOwner(40);
-    const auto at40 = PersistentMotes(program, owner);
+    const auto at40 = hs::runtime_detail::BuildVfxPersistentMoteCommands(
+        program, std::span(&owner, 1), births, 140);
     Require(at40.size() == 2 && at40[0].stable_seed == at20[1].stable_seed,
             "skipped persistent frame changed the live ordinal");
     owner.current_transform[12] = 12.0f;
-    const auto moved = PersistentMotes(program, owner);
+    const auto moved = hs::runtime_detail::BuildVfxPersistentMoteCommands(
+        program, std::span(&owner, 1), births, 140);
     Require(moved.size() == at40.size() && moved[0].stable_seed == at40[0].stable_seed &&
             Near(moved[0].position.x, 12.0f),
             "persistent motes did not use the current owner transform");
+    Require(births.size() == 2, "birth window retained expired unit-space records");
+    births.Prune(159);
+    Require(births.size() == 1, "birth window did not retire the 39-tick-old record");
+    births.Prune(180);
+    Require(births.size() == 0, "birth window retained records beyond their live interval");
 
     auto reordered = program;
     auto extra_effect = reordered.effects.front();
@@ -274,6 +284,10 @@ void PersistentMotesRejectMalformedOwners()
     owner = PersistentMoteOwner(20);
     owner.current_transform[12] = std::numeric_limits<float>::quiet_NaN();
     Require(PersistentMotes(program, owner).empty(), "nonfinite owner transform accepted");
+    owner = PersistentMoteOwner(20);
+    owner.elapsed_seconds = 2.0e9f;
+    Require(PersistentMotes(program, owner).empty(),
+            "persistent mote ordinal overflow was narrowed into a repeated seed");
     program = PersistentMoteProgram();
     owner = PersistentMoteOwner(20);
     std::get<hs::VfxEntityPayload>(owner.payload).render_instance_id = 0;
@@ -853,6 +867,6 @@ void CookedPersistentSparksConvertWhenAvailable()
 }
 int RunVfxMoteTests()
 {
-    try {BurstAndScale();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();OwnedMalformedAndQuality();PersistentMotesAreStatelessAndOwnerBound();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
+    try {BurstAndScale();CatalogOrderAndMotions();Malformed();AuthoredMask();OwnedRateAndClock();OwnedMalformedAndQuality();PersistentMotesUseBoundedBirthWindowAndOwnerBoundGeometry();PersistentMotesRejectMalformedOwners();ChargedOverchargeMotesUseAuthoredMediumRecipe();PickupIdleMotesFollowPresentEntity();PickupIdleMotesRejectMalformedRecipes();EventTrapMotesUsePointClock();PersistentTrapMotesUseCircleClockGeometry();PersistentTrapMotesRejectMalformedRecipesAndQuality();CookedPersistentTrapMotesConvert();CookedPickupIdleMotesConvert();PersistentSparksUseOnlyLiveBirthPositions();PersistentSparksSkipMissedTicksAndReset();PersistentSparksRejectWrongContracts();PersistentSparksFollowCookedTuning();CookedPersistentSparksConvertWhenAvailable();std::cout<<"VFX typed mote commands passed\n";return 0;}
     catch(const std::exception &e){std::cerr<<e.what()<<'\n';return 1;}
 }

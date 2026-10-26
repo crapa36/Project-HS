@@ -492,12 +492,35 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Geometry stream host reservation failed.");
             }
             stream.read_bytes = file_bytes;
+            const auto logical_id = stream.logical_id;
+            const auto source_id = stream.source_id;
+            const auto metadata = stream.metadata;
+            stream.preparation = std::make_shared<PreparedEnvironmentGeometry>();
+            const auto preparation = stream.preparation;
             bool submitted{};
             const auto queued = asset_io.Enqueue({stream.request, stream.content_generation,
-                    stream.logical_id, stream.path, file_bytes, resident_generation_lease},
+                    stream.logical_id, stream.path, file_bytes, resident_generation_lease,
+                    [logical_id, source_id, metadata, preparation](std::span<const std::byte> bytes) {
+                        try
+                        {
+                            preparation->package = render_data::ReadPackage(bytes, MakeAssetId(logical_id));
+                            if (preparation->package.dependencies != std::vector<std::string>{source_id})
+                                throw std::runtime_error(
+                                    "Streamed environment geometry page has an unexpected source dependency.");
+                            preparation->geometry = render_data::DecodeGeometryPage(
+                                bytes, MakeAssetId(logical_id), metadata);
+                            preparation->digest = render_data::Sha256(bytes);
+                        }
+                        catch (const std::exception &error)
+                        {
+                            throw std::runtime_error("Environment geometry stream read/decode failed for " +
+                                logical_id + ": " + error.what());
+                        }
+                    }},
                     streaming, residency, stream.decoded_residency, submitted);
             if (!submitted)
             {
+                stream.preparation.reset();
                 static_cast<void>(residency.ReleaseNow(stream.decoded_residency));
                 static_cast<void>(residency.ReleaseNow(stream.decode_reservation));
                 stream.decode_reservation = {};
@@ -510,27 +533,16 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         {
             AssetReadCompletion read;
             if (auto result = asset_io.Poll(stream.request, streaming, residency, read); !result) return result;
-            if (!read.ready || read.cancelled) return Result::Success();
+            if (!read.ready || read.cancelled)
+            {
+                if (read.ready) stream.preparation.reset();
+                return Result::Success();
+            }
             stream.decoded_storage = std::move(read.bytes);
             stream.decoded_residency = read.storage;
-            try
-            {
-                const auto page_package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadPackage(
-                    stream.decoded_storage, MakeAssetId(stream.logical_id)); });
-                if (page_package.dependencies != std::vector<std::string>{stream.source_id})
-                    throw std::runtime_error(
-                        "Streamed environment geometry page has an unexpected source dependency.");
-                static_cast<void>(MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeGeometryPage(
-                    stream.decoded_storage, MakeAssetId(stream.logical_id), stream.metadata); }));
-            }
-            catch (const std::exception &error)
-            {
-                static_cast<void>(streaming.Cancel(stream.request));
-                std::vector<std::byte>{}.swap(stream.decoded_storage);
+            if (!stream.preparation)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Environment geometry stream read/decode failed for " + stream.logical_id +
-                    ": " + error.what());
-            }
+                                       "Environment geometry decode result owner is missing.");
             if (!streaming.CompleteRead(stream.request, resource_generation_id))
             {
                 std::vector<std::byte>{}.swap(stream.decoded_storage);
@@ -573,9 +585,11 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         candidate.generation = static_cast<std::uint32_t>(stream.generation + 1u);
         AllocationResource upload;
         if (auto prepared = PrepareGeometryPageUpload(candidate, metadata, stream.decoded_storage,
-                MakeAssetId(stream.logical_id), stream.target_index, upload); !prepared)
+                MakeAssetId(stream.logical_id), stream.target_index, upload,
+                stream.preparation.get()); !prepared)
         {
             static_cast<void>(streaming.Cancel(stream.request));
+            stream.preparation.reset();
             return prepared;
         }
         const auto upload_ticket = residency.Register(
@@ -599,6 +613,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         stream.decoded_residency = {};
         stream.decode_reservation = {}; stream.read_bytes = 0;
         std::vector<std::byte>{}.swap(stream.decoded_storage);
+        stream.preparation.reset();
         stream.candidate = std::move(candidate);
         stream.upload = std::move(upload);
         stream.upload_residency = upload_ticket;

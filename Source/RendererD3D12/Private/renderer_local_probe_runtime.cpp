@@ -260,7 +260,7 @@ struct LocalProbeCaptureState
     ComPtr<ID3D12PipelineState> sky;
     rd::SceneProbeRevisions baseline;
     std::vector<rd::SceneProbeRecord> probes;
-    std::string scene_generation,probe_digest;
+    std::string scene_generation,input_identity;
     Identities environment,material_products;
     std::shared_ptr<const StaticRenderScene> revision_scene;
     std::uint32_t revision_instance_generation{};
@@ -485,7 +485,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         const auto bytes=ReadProduct(config,kProduct); const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadSceneProbePackage(bytes,MakeAssetId(kProduct)); });
         auto capture=std::make_shared<LocalProbeCaptureState>(); capture->device=device; capture->allocator=allocator; capture->root=root;
         capture->baseline=package.description.revisions; capture->probes=package.probes;
-        capture->scene_generation=scene_generation; capture->probe_digest=config.product_digests.at(std::string(kProduct));
+        capture->scene_generation=scene_generation;
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
         (void)renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return rd::ReadLightingProbePackage(environment,MakeAssetId(kEnvironment)); });
@@ -497,13 +497,23 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
             std::filesystem::path path; const auto found=config.product_digests.find(id);
             Require(found!=config.product_digests.end() && static_cast<bool>(config.ResolveProduct(id,path)),"Local package dependency is absent from Generation: "+id);
         }
+        std::vector<rd::SceneProbeRevisionInput> source_inputs; source_inputs.reserve(package.dependencies.size());
+        for(const auto &id:package.dependencies)
+        {
+            const auto &digest=config.product_digests.at(id);
+            Require(digest.starts_with("sha256:") && digest.size()==71,"Invalid local-probe source dependency digest: "+id);
+            source_inputs.push_back({id,std::string_view(digest).substr(7)});
+        }
+        capture->input_identity=rd::DeriveSceneProbeInputIdentity(package.description,package.probes,
+            package.dependencies,source_inputs);
         // Source-file light/layout identities are unavailable in RendererConfig.
         // Keep the four validated package baselines; native revisions below fold
         // real retained scene/lights/parameters/products rather than forging them.
         for(const auto &[id,digest]:config.product_digests)
             if(MaterialIdentity(id)) capture->material_products.emplace(id,digest);
-        capture->material_products[std::string(kProduct)]=capture->probe_digest;
-        PrepareCapturePipelines(capture,config,pipeline_cache,true);
+        capture->material_products["scene-probe/semantic-inputs"]=capture->input_identity;
+        if(package.payload!=rd::SceneProbePayload::Baked)
+            PrepareCapturePipelines(capture,config,pipeline_cache,true);
         const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
             try { output=ReadProduct(config,id); return Result::Success(); }
             catch(const std::exception &error) { return Failure(error.what()); }
@@ -534,8 +544,12 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         if(capture->revision_scene!=in.scene || capture->revision_instance_generation!=in.static_instance_generation ||
             capture->revision_foliage_density!=in.foliage_density)
         {
-            Identity layout; layout.Text("local-probe.actual-static-scene.v1"); layout.Text(in.scene->content_generation_id);
-            layout.Integer(in.static_instance_generation,4); layout.Integer(in.scene->layout_abi,4);
+            // Native Generation/instance ids validate resource compatibility but
+            // are not inputs to the sampled static layout. The baked package is
+            // adopted across the layout-only/baked Generation boundary, whose
+            // product closure and geometry are already hashed below.
+            Identity layout; layout.Text("local-probe.actual-static-scene.v2");
+            layout.Integer(in.scene->layout_abi,4);
             layout.Integer(in.scene->instances.size()); layout.Float(in.foliage_density);
             for(const auto &instance:in.scene->instances)
             {
@@ -550,15 +564,15 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             capture->revision_instance_generation=in.static_instance_generation;
             capture->revision_foliage_density=in.foliage_density;
         }
-        Identity material; material.Text("local-probe.actual-material-state.v1");
+        Identity material; material.Text("local-probe.actual-material-state.v2");
         material.Integer(in.material_parameter_revision); material.Integer(in.pipeline_revision);
         for(const auto &page:in.pages)
         {
             Require(page.complete && page.generation && page.index_count,"Capture geometry is not an actual complete page");
-            material.Integer(page.generation,4); material.Integer(page.page_slot,4); material.Integer(page.first_index,4); material.Integer(page.index_count,4);
-            material.Integer(std::bit_cast<std::uint32_t>(page.base_vertex),4);
-            material.Integer(page.vertex_view.StrideInBytes,4); material.Integer(page.vertex_view.SizeInBytes,4);
-            material.Integer(static_cast<std::uint32_t>(page.index_view.Format),4); material.Integer(page.index_view.SizeInBytes,4);
+            // Selected page content changes capture; native repacking and adoption ids do not.
+            Require(std::ranges::any_of(page.source_digest,[](std::byte value) { return value!=std::byte{}; }),
+                "Capture geometry is missing its decoded source digest");
+            material.Text(Hex(page.source_digest)); material.Integer(page.index_count,4);
             ValidateBounds(page.bounds);
             for(float value:page.bounds.minimum) material.Float(value);
             for(float value:page.bounds.maximum) material.Float(value);
@@ -576,7 +590,9 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         }
         if(in.frame_constants)
         {
-            material.Vector(in.frame_constants->material_quality_options);
+            const auto &quality=in.frame_constants->material_quality_options;
+            // Static capture evaluates surface lighting, never screen-space refraction (w).
+            material.Float(quality.x); material.Float(quality.y); material.Float(quality.z);
             lights.Vector(in.frame_constants->light_direction_intensity); lights.Vector(in.frame_constants->light_color);
         }
         const auto material_identity=material.Finish();
@@ -605,13 +621,15 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         const auto light_identity=lights.Finish();
         if(capture->light_revision_identity!=light_identity)
         {
-            const Identities light_inputs{{std::string(kProduct),capture->probe_digest},{"native/authoritative-light-view",light_identity}};
+            const Identities light_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
+                {"native/authoritative-light-view",light_identity}};
             capture->derived_revisions.light=Revision(rd::SceneProbeRevisionDomain::Light,light_inputs);
             capture->light_revision_identity=light_identity;
         }
         if(capture->layout_revision_identity!=capture->layout_identity)
         {
-            const Identities layout_inputs{{std::string(kProduct),capture->probe_digest},{"native/immutable-static-scene",capture->layout_identity}};
+            const Identities layout_inputs{{"scene-probe/semantic-inputs",capture->input_identity},
+                {"native/immutable-static-scene",capture->layout_identity}};
             capture->derived_revisions.static_layout=Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout_inputs);
             capture->layout_revision_identity=capture->layout_identity;
         }
@@ -644,6 +662,14 @@ Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRun
     }
     try
     {
+        Require(in.config && in.pipeline_cache,"Native probe capture needs the selected pipeline inputs");
+        if(!impl_->capture->sky)
+            PrepareCapturePipelines(impl_->capture,*in.config,in.pipeline_cache,true);
+        const auto reader=[&](std::string_view id,std::vector<std::byte> &output)->Result {
+            try { output=ReadProduct(*in.config,id); return Result::Success(); }
+            catch(const std::exception &error) { return Failure(error.what()); }
+        };
+        if(auto prepared=impl_->service.PrepareCapture(reader,in.completed);!prepared) return prepared;
         Require(in.frame_constants && in.static_instances && in.static_version.resource && in.frame_srv_heap && in.sampler_heap &&
             in.frame_srv_base.ptr && in.sampler_table.ptr && in.bind_graphics && in.restore_graphics && !in.scene_reads.empty(),
             "Capture requires actual static/shared bindings, graph reads and parent restore callback");
@@ -785,6 +811,12 @@ Result LocalProbeRuntime::ResetAfterCompletion(const CompletionSet &completed)
     for(const auto &frame:impl_->retired_frames) if(!frame->completion.IsSatisfiedBy(completed)) return Failure("Cannot reset in-flight capture bindings");
     if(auto reset=impl_->service.ResetAfterCompletion(completed);!reset) return reset;
     impl_->capture.reset(); impl_->retired_frames.clear(); return Result::Success();
+}
+Result LocalProbeRuntime::ExportBakedPackage(RenderGraphQueueExecutor &executor,TransientResourcePool &pool,
+    std::uint32_t frame_slot,BarrierMode barriers,std::vector<std::byte> &package_bytes)
+{
+    if(impl_->pending_graph) return Failure("Cannot export a scene-probe package with pending graph work");
+    return impl_->service.ExportBakedPackage(executor,pool,frame_slot,barriers,package_bytes);
 }
 std::span<const rd::SceneProbeRecord> LocalProbeRuntime::Probes() const noexcept
 { return impl_->capture?std::span<const rd::SceneProbeRecord>(impl_->capture->probes):std::span<const rd::SceneProbeRecord>{}; }

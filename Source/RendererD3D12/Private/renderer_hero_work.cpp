@@ -157,7 +157,9 @@ void HeroWorkCapture::Pipeline(std::uint32_t index, const D3D12_GRAPHICS_PIPELIN
     std::span<const std::byte> vertex, std::span<const std::byte> pixel, std::string_view product)
 {
     auto &out = impl_->pipelines.at(index);
-    out.vertex_product = "render/shader/hero_transparency_vs.dxil"; out.pixel_product = product;
+    out.vertex_product = index == 3 ? "render/shader/hero_transparency_vs.dxil"
+                                    : "render/shader/hero_transparency_current_vs.dxil";
+    out.pixel_product = product;
     out.vertex_sha256 = Sha256(vertex); out.pixel_sha256 = Sha256(pixel);
     out.source_requested_flags = "RenderMaterialShader: -nologo -WX -O3 -Ges; VS vs_6_0 / PS ps_6_0; HS_GENERATED_HERO_MATERIAL=1; HS_CAPTURE_HERO_WORK=1; product/source flags, not binary attestation";
     out.cull_mode = desc.RasterizerState.CullMode; out.fill_mode = desc.RasterizerState.FillMode;

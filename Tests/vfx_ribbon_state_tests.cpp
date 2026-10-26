@@ -172,6 +172,30 @@ void TestRibbonLookupLifecycle()
             "session/catalog/rewind/capacity reset retained a stale key index");
     }
 }
+void TestRejectedResetKeepsState()
+{
+    const std::vector original{Source(10)};
+    for (unsigned reset = 0; reset != 4; ++reset)
+    {
+        VfxRibbonState state;
+        std::string error;
+        Check(VfxRibbonState::ValidateSources(original, error), error.c_str());
+        Check(state.Update(original, 10, 1, 1, 64, .5f, {}, error), error.c_str());
+        const auto identity = state.Updates()[0].identity;
+        auto rejected = original;
+        if (reset & 1) rejected.push_back(rejected.front());
+        else rejected.front().outputs[0].hdr = -1;
+        Check(!VfxRibbonState::ValidateSources(rejected, error), "ribbon admission accepted invalid input");
+        Check(!state.Update(rejected, reset == 2 ? 9 : 11, reset == 0 ? 2 : 1,
+            reset == 1 ? 2 : 1, reset == 3 ? 128 : 64, .5f, {}, error), "reset accepted invalid ribbon input");
+        Check(state.Capacity() == 1 && state.Updates().size() == 1 && state.Outputs().size() == 1 &&
+            state.Updates()[0].identity == identity, "invalid input consumed a ribbon state reset");
+        Check(state.Update(original, 11, 1, 1, 64, .5f, {}, error), error.c_str());
+        Check(state.Updates()[0].identity[2] == identity[2] && state.Updates()[0].identity[3] == 1,
+            "invalid input discarded the retained ribbon slot or generation");
+    }
+}
+
 void TestRibbonBufferFailureRecovery()
 {
     using namespace hs::renderer_detail;
@@ -280,6 +304,7 @@ int main()
     try
     {
         TestRibbonLookupLifecycle();
+        TestRejectedResetKeepsState();
         TestRibbonBufferFailureRecovery();
         std::string error;
         auto source = Source(10);

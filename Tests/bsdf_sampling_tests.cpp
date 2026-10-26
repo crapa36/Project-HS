@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -106,7 +107,8 @@ D3D12_RESOURCE_DESC PreintegrateDescription()
 
 constexpr UINT kLegacyCaseCount = 7;
 constexpr UINT kCoatedCaseCount = 32;
-constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount;
+constexpr UINT kFresnelCaseCount = 14;
+constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount + kFresnelCaseCount;
 
 ComPtr<ID3D12RootSignature> CreateProbeRootSignature(ID3D12Device *device)
 {
@@ -625,7 +627,7 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
         Check(metric.max_error <= 1e-4f, "BSDF or local-probe blend contract mismatch");
     }
     float max_spec_error=0.0f,max_diffuse_error=0.0f,max_kernel_error=0.0f;
-    for (UINT index=kLegacyCaseCount;index<kProbeCaseCount;++index)
+    for (UINT index=kLegacyCaseCount;index<kLegacyCaseCount+kCoatedCaseCount;++index)
     {
         const ProbeMetric metric=probe_metrics[index];
         Check(std::isfinite(metric.pdf_integral)&&std::isfinite(metric.valid_frequency)&&
@@ -641,6 +643,38 @@ void Run(Fixture &fixture, const std::filesystem::path &preintegrate_path,
     Check(max_spec_error<=0.02f,"coated split-sum specular exceeds the 0.02 reference tolerance");
     Check(max_diffuse_error<=0.002f,"coated split-sum diffuse exceeds the 0.002 reference tolerance");
     Check(max_kernel_error<=5e-5f,"coated diffuse SH kernel exceeds quadrature tolerance");
+    constexpr std::array<std::uint32_t,kFresnelCaseCount> cosine_bits{
+        0u,0x00800000u,0x38d1b717u,0x3c800000u,
+        0x3e7fffffu,0x3e800000u,0x3e800001u,
+        0x3effffffu,0x3f000000u,0x3f000001u,
+        0x3f7fffffu,0x3f800000u,0xb4000000u,0x3f800001u};
+    double max_fresnel_error{};
+    // Three rounded multiplies plus the affine Fresnel result/FMA contraction:
+    // eight float epsilons in the unit output range conservatively cover these
+    // operations. Existing energy/PDF/coated integration tolerances stay intact.
+    constexpr double fresnel_tolerance=8.0*std::numeric_limits<float>::epsilon();
+    for(UINT index=0;index<kFresnelCaseCount;++index)
+    {
+        const float cosine=std::bit_cast<float>(cosine_bits[index]);
+        const float x=1.0f-cosine;
+        const double reference=std::pow(static_cast<double>(x),5.0);
+        const float coat_x=1.0f-std::clamp(cosine,0.0f,1.0f);
+        const double coat_reference=std::pow(static_cast<double>(coat_x),5.0);
+        const auto metric=probe_metrics[kLegacyCaseCount+kCoatedCaseCount+index];
+        const std::array<float,4> actual{metric.pdf_integral,metric.valid_frequency,metric.energy,metric.max_error};
+        const std::array<double,4> expected{reference,
+            double(0.04f)+double(1.0f-0.04f)*reference,1.0,
+            double(0.04f)+double(0.96f)*coat_reference};
+        for(std::size_t channel=0;channel<actual.size();++channel)
+        {
+            Check(std::isfinite(actual[channel]),"Fresnel production output is not finite");
+            const auto error=std::abs(double(actual[channel])-expected[channel]);
+            max_fresnel_error=std::max(max_fresnel_error,error);
+            Check(error<=fresnel_tolerance,"Fresnel production output disagrees with independent pow reference");
+        }
+    }
+    std::printf("Fresnel boundary cases=%u max error=%.9g tolerance=%.9g\n",
+        kFresnelCaseCount,max_fresnel_error,fresnel_tolerance);
     resources.probe_readback->Unmap(0, nullptr);
 }
 } // namespace

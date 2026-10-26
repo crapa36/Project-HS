@@ -143,7 +143,7 @@ struct alignas(16) VirtualShadowConstants
     DirectX::XMFLOAT4 root_bounds{}; // Fixed light-space XY min/max of the flattened root.
     DirectX::XMFLOAT4 root_extent{}; // Root texel width/height, world texel, filter guard.
     DirectX::XMFLOAT4 root_depth{}; // Fixed root Z minimum, inverse span, span, reserved.
-    DirectX::XMUINT4 root_options{}; // Root resource present, ready, compatible, reserved.
+    DirectX::XMUINT4 root_options{}; // Root resource present, ready, compatible, current-root counter base (zero disables).
 };
 static_assert(sizeof(VirtualShadowConstants)==432);
 static_assert(offsetof(VirtualShadowConstants,clipmaps)==160);
@@ -215,13 +215,15 @@ struct VirtualShadowInputs
     // These are used only to prove where legacy CSM could affect a receiver.
     std::array<ShadowViewProjection,3> main_csm_view_projection{};
     bool main_csm_view_projection_valid{};
+    // Borrowed for this CPU preparation only; the fixed-root proof never calls it.
+    std::function<bool(std::array<ShadowViewProjection,3> &)> prepare_main_csm;
 };
 struct VirtualShadowTargets;
 // Pure CPU proof. No native/GPU counter or last-frame dynamic data is consulted.
 [[nodiscard]] VirtualShadowGuarantee CheckVirtualShadowGuarantee(
     const VirtualShadowInputs &, const VirtualShadowConstants &,
     std::uint32_t physical_pages, bool seed_available,std::span<ShadowCommandSegment> command_segments,
-    std::uint32_t command_capacity);
+    std::uint32_t command_capacity,bool fixed_root_eligible,const ShadowCommandDemand &commands);
 struct VirtualShadowFramePlan
 {
     VirtualShadowConstants constants;

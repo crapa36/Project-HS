@@ -1,4 +1,5 @@
 #include <hs/runtime/experiment_spec.hpp>
+#include <hs/renderer/renderer.hpp>
 
 #include <nlohmann/json.hpp>
 
@@ -120,12 +121,13 @@ void ValidateConfigOverrides(const Json &value)
         "bloom",         "outline",             "resize_test",    "borderless",
         "width",         "height",              "frame_cap",      "render_scale_percent",
         "shadow_resolution", "particle_percentage", "barrier_mode", "diagnostic_enemy_count",
-        "capture_hero_work", "capture_hero_work_mode", "graphics_preset"};
+        "capture_hero_work", "capture_hero_work_mode", "graphics_preset", "surface_frontend", "capture_gpu_timings",
+        "pom_quality", "geometry_frontend"};
     CheckKeys(value, "config_overrides", allowed, std::array<std::string_view, 0>{});
 
     constexpr std::array boolean_fields{
         "warp", "validation", "gpu_validation", "vsync", "bloom", "outline",
-        "resize_test", "borderless", "capture_hero_work"};
+        "resize_test", "borderless", "capture_hero_work", "capture_gpu_timings"};
     for (const auto field : boolean_fields)
     {
         if (value.contains(field))
@@ -185,6 +187,25 @@ void ValidateConfigOverrides(const Json &value)
         const auto preset = String(value.at("graphics_preset"), "config_overrides.graphics_preset");
         if (preset != "low" && preset != "medium" && preset != "high" && preset != "ultra")
             Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+    }
+
+    if (value.contains("pom_quality"))
+    {
+        const auto quality = String(value.at("pom_quality"), "config_overrides.pom_quality");
+        if (!ParseGraphicsEnumToken<GraphicsOptionalQuality>(quality))
+            Invalid("config_overrides.pom_quality", "must be off, low, medium, high, or ultra");
+    }
+    if (value.contains("geometry_frontend"))
+    {
+        const auto frontend = String(value.at("geometry_frontend"), "config_overrides.geometry_frontend");
+        if (frontend != "auto" && frontend != "indexed" && frontend != "mesh")
+            Invalid("config_overrides.geometry_frontend", "must be auto, indexed, or mesh");
+    }
+    if (value.contains("surface_frontend"))
+    {
+        const auto frontend = String(value.at("surface_frontend"), "config_overrides.surface_frontend");
+        if (frontend != "compact" && frontend != "visibility")
+            Invalid("config_overrides.surface_frontend", "must be compact or visibility");
     }
 
     if (value.contains("barrier_mode"))
@@ -652,6 +673,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("resize_test", config.resize_test);
         boolean("borderless", config.borderless);
         boolean("capture_hero_work", config.capture_hero_work);
+        boolean("capture_gpu_timings", config.capture_gpu_timings);
         if (overrides.contains("graphics_preset"))
         {
             const auto preset = overrides.at("graphics_preset").get<std::string>();
@@ -660,6 +682,28 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
             else if (preset == "high") config.graphics_preset = GraphicsPreset::High;
             else if (preset == "ultra") config.graphics_preset = GraphicsPreset::Ultra;
             else Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+        }
+        if (overrides.contains("pom_quality"))
+        {
+            const auto quality = ParseGraphicsEnumToken<GraphicsOptionalQuality>(
+                String(overrides.at("pom_quality"), "config_overrides.pom_quality"));
+            if (!quality) Invalid("config_overrides.pom_quality", "must be off, low, medium, high, or ultra");
+            config.pom_quality = *quality;
+        }
+        if (overrides.contains("geometry_frontend"))
+        {
+            const auto frontend = String(overrides.at("geometry_frontend"), "config_overrides.geometry_frontend");
+            if (frontend == "auto") config.geometry_frontend = GeometryFrontend::Automatic;
+            else if (frontend == "indexed") config.geometry_frontend = GeometryFrontend::Indexed;
+            else if (frontend == "mesh") config.geometry_frontend = GeometryFrontend::MeshShader;
+            else Invalid("config_overrides.geometry_frontend", "must be auto, indexed, or mesh");
+        }
+        if (overrides.contains("surface_frontend"))
+        {
+            const auto frontend = overrides.at("surface_frontend").get<std::string>();
+            if (frontend == "compact") config.surface_frontend = SurfaceFrontend::CompactDeferred;
+            else if (frontend == "visibility") config.surface_frontend = SurfaceFrontend::VisibilityBuffer;
+            else Invalid("config_overrides.surface_frontend", "must be compact or visibility");
         }
         if (overrides.contains("capture_hero_work_mode"))
         {

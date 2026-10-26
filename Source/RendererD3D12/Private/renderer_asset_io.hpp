@@ -4,7 +4,9 @@
 #include "streaming_manager.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,7 @@ struct ImmutableAssetRead
     std::filesystem::path path;
     std::uint64_t expected_bytes{};
     std::shared_ptr<const void> generation_lease;
+    std::function<void(std::span<const std::byte>)> prepare;
 };
 struct AssetReadCompletion
 {

@@ -213,6 +213,56 @@ void TestUpgradeDamageAttribution()
           "independent upgrade behavior shutdown");
 }
 
+void TestDetailedBalanceSwitchPreservesSimulation()
+{
+    auto data = QuietGameData();
+    data.enemies[0].health = 1'000;
+    data.enemies[0].move_speed = 0.0f;
+    data.enemies[0].damage = 0;
+    hs::SimulationConfig enabled_config{};
+    enabled_config.seed = 0xB41A'CEu;
+    hs::SimulationConfig disabled_config = enabled_config;
+    disabled_config.capture_detailed_balance = false;
+    hs::GameSimulation enabled, disabled;
+    Check(enabled.Initialize(enabled_config, data).Succeeded() &&
+              disabled.Initialize(disabled_config, data).Succeeded(),
+          "detailed balance mode initialize");
+    for (auto *simulation : {&enabled, &disabled})
+    {
+        Debug(*simulation, hs::DebugCommandKind::GrantUpgrade,
+              static_cast<std::uint64_t>(hs::SkillKind::BasicAttack), 0);
+        Debug(*simulation, hs::DebugCommandKind::SpawnEnemy, 0, 0, {5.0f, 0.0f});
+    }
+    hs::HeldInputState held;
+    held.basic_attack_held = true;
+    held.aim_world = {20.0f, 0.0f, 0.0f};
+    for (int tick = 0; tick < 180; ++tick)
+    {
+        (void)Tick(enabled, held);
+        (void)Tick(disabled, held);
+    }
+    const auto enabled_probe = enabled.GetObservation();
+    const auto disabled_probe = disabled.GetObservation();
+    Check(enabled.ComputeChecksum() == disabled.ComputeChecksum(),
+          "detailed balance capture does not change gameplay checksum");
+    Check(enabled_probe.balance.skill_uses == disabled_probe.balance.skill_uses &&
+              enabled_probe.balance.skill_casts_with_hit ==
+                  disabled_probe.balance.skill_casts_with_hit &&
+              enabled_probe.balance.skill_hit_events ==
+                  disabled_probe.balance.skill_hit_events &&
+              enabled_probe.balance.enemy_hits == disabled_probe.balance.enemy_hits &&
+              enabled_probe.balance.enemy_damage == disabled_probe.balance.enemy_damage &&
+              enabled_probe.damage_by_skill == disabled_probe.damage_by_skill,
+          "fixed UI balance aggregates are identical with detailed collection disabled");
+    Check(enabled_probe.balance.detailed_balance_captured &&
+              !disabled_probe.balance.detailed_balance_captured &&
+              enabled_probe.balance.upgrade_relic_synergy_count == 0 &&
+              disabled_probe.balance.upgrade_relic_synergy_count == 0,
+          "detailed collection state is explicit even when no synergy was observed");
+    Check(enabled.Shutdown().Succeeded() && disabled.Shutdown().Succeeded(),
+          "detailed balance mode shutdown");
+}
+
 void TestSelectiveUpgradeInheritance()
 {
     auto data = QuietGameData();

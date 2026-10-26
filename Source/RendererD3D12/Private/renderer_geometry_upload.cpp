@@ -20,7 +20,8 @@ std::span<const std::byte> GeometryChunk(const render_data::PackageView &package
 Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     GeometryPageGpu &page, const render_data::GeometryMetadata &metadata,
     std::span<const std::byte> package_bytes, AssetId page_asset,
-    std::uint32_t page_slot, AllocationResource &upload)
+    std::uint32_t page_slot, AllocationResource &upload,
+    PreparedEnvironmentGeometry *preparation)
 {
     if (page_slot >= kGeometryPageCapacity || page.storage.resource || upload.resource)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
@@ -29,12 +30,25 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     std::vector<std::byte> auxiliary;
     std::vector<render_data::GeometrySubmesh> submeshes;
     std::array<std::span<const std::byte>, kGeometryBuffersPerPage> bytes;
+    std::array<std::byte, 32> source_digest{};
     try
     {
-        // Decode validates canonical indices, meshlets, remap and metadata together.
-        auto decoded = render_data::DecodeGeometryPage(package_bytes, page_asset, metadata);
-        submeshes = std::move(decoded.submeshes);
-        package = render_data::ReadPackage(package_bytes, page_asset);
+        // Streaming workers validate before upload; startup callers decode and validate here.
+        if (preparation)
+        {
+            if (preparation->package.asset_id.value != page_asset.value)
+                throw std::runtime_error("prepared geometry page identity changed before upload");
+            submeshes = std::move(preparation->geometry.submeshes);
+            package = std::move(preparation->package);
+            source_digest = preparation->digest;
+        }
+        else
+        {
+            auto decoded = render_data::DecodeGeometryPage(package_bytes, page_asset, metadata);
+            submeshes = std::move(decoded.submeshes);
+            package = render_data::ReadPackage(package_bytes, page_asset);
+            source_digest = render_data::Sha256(package_bytes);
+        }
         bytes[0] = GeometryChunk(package, render_data::ChunkType::GeometryVertices);
         bytes[1] = GeometryChunk(package, render_data::ChunkType::GeometryIndices);
         bytes[2] = GeometryChunk(package, render_data::ChunkType::GeometryMeshlets);
@@ -54,12 +68,15 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     }
     std::array<std::uint64_t, 4> upload_offsets{};
     std::uint64_t upload_size{};
-    const std::array<std::uint64_t, 4> sizes{bytes[0].size(),bytes[1].size(),bytes[2].size(),bytes[3].size()};
+    const bool raster_suffix = page_slot >= kMonsterGeometryPage && page_slot < kProjectileGeometryPage &&
+        (metadata.flags & render_data::kGeometryFlagSkinned) != 0;
+    const std::array<std::uint64_t, 4> sizes{bytes[0].size(),
+        std::uint64_t(bytes[1].size()) * (raster_suffix ? 2u : 1u),bytes[2].size(),bytes[3].size()};
     if (!GeometryPageLayout(sizes, upload_offsets, upload_size))
         return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Geometry page GPU buffer size exceeds its ABI.");
     GeometryPageGpu next;
     next.source_asset = page_asset;
-    next.source_digest = render_data::Sha256(package_bytes);
+    next.source_digest = source_digest;
     for (const auto &[id, path] : config.product_paths)
         if ((id.starts_with("render/geometry/") || id.starts_with("render/hlod/")) &&
             id.ends_with(".rpage") && MakeAssetId(id).value == page_asset.value)
@@ -70,6 +87,7 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
         }
     next.offsets = upload_offsets;
     next.sizes = sizes;
+    next.raster_index_offset = raster_suffix ? static_cast<std::uint32_t>(bytes[1].size()) : 0;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
     if (auto result = CreateAllocation(next.storage, allocation, BufferDescription(upload_size),
@@ -89,6 +107,13 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
     for (std::size_t index = 0; index < bytes.size(); ++index)
         std::memcpy(static_cast<std::byte *>(mapped) + upload_offsets[index],
                     bytes[index].data(), bytes[index].size());
+    if (raster_suffix && !WriteGeometryRasterIndexSuffix(
+        {static_cast<std::byte *>(mapped) + upload_offsets[1] + next.raster_index_offset, bytes[1].size()},
+        bytes[1], GeometryChunk(package, render_data::ChunkType::GeometryCanonicalPrimitiveRemap)))
+    {
+        next_upload.resource->Unmap(0, nullptr);
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid geometry raster index suffix.");
+    }
     next_upload.resource->Unmap(0, nullptr);
     next.residency = residency.Register(ResidencyCategory::Geometry, resident_size,
         metadata.lod != 0 ||
@@ -110,7 +135,7 @@ Result D3D12Renderer::Impl::PrepareGeometryPageUpload(
             render_data::ChunkType::GeometryMeshletTriangles).size());
     next.vertex_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[0],
         static_cast<UINT>(bytes[0].size()), sizeof(Vertex)};
-    next.index_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[1],
+    next.index_view = {next.storage.resource->GetGPUVirtualAddress() + next.offsets[1] + next.raster_index_offset,
         static_cast<UINT>(bytes[1].size()), DXGI_FORMAT_R32_UINT};
     page = std::move(next);
     upload = std::move(next_upload);

@@ -8,11 +8,14 @@
 #include <unordered_map>
 #include <vector>
 
+namespace hs { class D3D12Renderer; }
+
 namespace hs::renderer_detail
 {
 class VfxRibbonState
 {
 public:
+    [[nodiscard]] static bool ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error);
     [[nodiscard]] bool Update(std::span<const VfxRibbonSourceInput> sources,
                                Tick tick, std::uint64_t session,
                                std::uint64_t catalog_generation,
@@ -27,6 +30,12 @@ public:
                                         std::size_t output_capacity) const;
 
 private:
+    friend class hs::D3D12Renderer;
+    [[nodiscard]] bool UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
+                                       Tick tick, std::uint64_t session,
+                                       std::uint64_t catalog_generation,
+                                       std::uint32_t point_budget, float interpolation,
+                                       Float3 previous_eye, std::string &error);
     using Key = std::tuple<std::uint64_t, VfxEffectHandle, std::uint32_t>;
     struct KeyHash
     {

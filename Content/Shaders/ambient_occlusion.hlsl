@@ -60,8 +60,17 @@ int2 AoClampPixel(int2 p, float2 size) { return clamp(p, int2(0, 0), int2(size) 
 float3 AoViewPosition(int2 pixel, float depth)
 {
     float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
-    float4 view = mul(float4(uv * float2(2.0, -2.0) + float2(-1.0, 1.0), depth, 1.0),
-                       AoInverseProjection);
+    float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    if (AoParameters.w > 0.5)
+    {
+        float4 view;
+        view.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]);
+        view.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]);
+        view.z = mad(depth, AoInverseProjection[2][2], AoInverseProjection[3][2]);
+        view.w = mad(depth, AoInverseProjection[2][3], AoInverseProjection[3][3]);
+        return view.xyz * rcp(view.w);
+    }
+    float4 view = mul(float4(ndc, depth, 1.0), AoInverseProjection);
     return view.xyz / view.w;
 }
 struct AoGuide

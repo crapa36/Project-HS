@@ -7,6 +7,8 @@
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
 
+#include <array>
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -29,10 +31,13 @@ struct LocalProbeCapturePage
     std::int32_t base_vertex{};
     render_data::GeometryBounds bounds; // Exact complete page.metadata.bounds.
     bool complete{};
+    std::array<std::byte, 32> source_digest{}; // Actual decoded complete geometry page bytes.
 };
 
 struct LocalProbeRuntimeFrameInputs
 {
+    const RendererConfig *config{};
+    RendererPipelineCache *pipeline_cache{};
     std::shared_ptr<const StaticRenderScene> scene;
     std::span<const LightView> lights; // Same authoritative static lights bound below.
     std::uint32_t static_instance_generation{};
@@ -94,6 +99,8 @@ class LocalProbeRuntime
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success,
         const std::shared_ptr<const StaticRenderScene> &, render_data::SceneProbeRevisions);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
+    [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
+        std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
     [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
     [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;

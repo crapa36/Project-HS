@@ -53,6 +53,7 @@ struct HeroTransparencyInputs
     D3D12_CPU_DESCRIPTOR_HANDLE table_cpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE table_gpu{};
     std::uint32_t descriptor_stride{};
+    std::span<const HeroTransparencySceneRead> peel_reads;
     std::span<const HeroTransparencySceneRead> scene_reads;
     HeroTransparencyDraw draw;
     // Optional original CPU descriptor owner with the same logical layout as shader_heap.

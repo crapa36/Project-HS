@@ -67,6 +67,9 @@ Result D3D12Renderer::Impl::CreateEnvironmentBrdfLut(const RendererConfig &lut_c
     if (FAILED(result)) return HResultFailure("Reset BSDF integration allocator", result);
     result = command_list->Reset(frames[0].allocator.Get(), nullptr);
     if (FAILED(result)) return HResultFailure("Reset BSDF integration list", result);
+    if (enhanced)
+        TransitionTexture(lut.resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST,
+            D3D12_BARRIER_LAYOUT_COMMON, D3D12_BARRIER_LAYOUT_COPY_DEST);
     D3D12_TEXTURE_COPY_LOCATION destination{};
     destination.pResource = lut.resource.Get();
     destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;

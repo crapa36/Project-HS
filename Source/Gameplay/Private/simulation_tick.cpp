@@ -33,7 +33,8 @@ GameSimulation::SimulationWorld::SimulationWorld()
     telemetry->balance_observer.player_hit_casts.reserve(256);
     combat_state->domain_signals.reserve(512);
     combat_state->visual_links.reserve(64);
-    combat_state->collision_candidates.reserve(128);
+    combat_state->collision_query.rows.reserve(1'024);
+    combat_state->collision_query.visited.reserve(1'024);
     combat_state->collision_hits.reserve(128);
     combat_state->live_area_ids.reserve(256);
 }
@@ -336,7 +337,7 @@ void GameSimulation::SimulationWorld::StartSession()
     next_enemy_random_key = 1;
     telemetry->damage_dealt = telemetry->damage_taken = telemetry->healing = 0;
     telemetry->damage_by_skill = {};
-    telemetry->balance_observer.Reset();
+    telemetry->balance_observer.Reset(config.capture_detailed_balance);
     actors->enemies.clear();
     actors->projectiles.clear();
     actors->pending_enemy_spawns.clear();
@@ -349,7 +350,11 @@ void GameSimulation::SimulationWorld::StartSession()
     progression->pickup_work.Reset();
     combat_state->combat.Clear();
     combat_state->scheduled_actions.clear();
+    combat_state->next_scheduled_sequence=0;
+    combat_state->scheduled_actions_dirty=false;
     combat_state->boss_actions.clear();
+    combat_state->next_boss_schedule_sequence=0;
+    combat_state->boss_actions_dirty=false;
     combat_state->cast_hits.clear();
     combat_state->area_hits.clear();
     combat_state->cast_hit_index.clear();
@@ -481,18 +486,22 @@ void GameSimulation::SimulationWorld::ProcessInput()
 void GameSimulation::SimulationWorld::CollectEnemies(Float2 position, float radius,
                                                        EnemyQuery &query) const
 {
-    // Only these phases share the post-movement swept grid; earlier queries see current actors.
-    if (pipeline_phase >= SimulationPhaseId::CollisionHit &&
-        pipeline_phase <= SimulationPhaseId::DeathDrop &&
-        std::isfinite(position.x) && std::isfinite(position.y) && std::isfinite(radius))
+    if(!std::isfinite(position.x)||!std::isfinite(position.y)||!std::isfinite(radius))
+    { CollectEnemies({}, {}, query); return; }
+    const auto extent=std::abs(radius),low=-rules.arena_half_extent;
+    const auto high=low+kGridDimension*kGridCellSize;
+    CollectEnemies({std::clamp(position.x-extent,low,high),std::clamp(position.y-extent,low,high)},
+        {std::clamp(position.x+extent,low,high),std::clamp(position.y+extent,low,high)},query);
+}
+
+void GameSimulation::SimulationWorld::CollectEnemies(Float2 minimum,Float2 maximum,EnemyQuery &query,bool canonical_order) const
+{
+    // Only the current post-movement grid is safe to use; every other case scans canonical rows.
+    if(pipeline_phase>=SimulationPhaseId::CollisionHit&&pipeline_phase<=SimulationPhaseId::DeathDrop&&
+        std::isfinite(minimum.x)&&std::isfinite(minimum.y)&&std::isfinite(maximum.x)&&std::isfinite(maximum.y)&&
+        combat_state->enemy_grid.IsCurrent(tick,actors->enemies.StructuralGeneration()))
     {
-        const auto extent = std::abs(radius);
-        const auto low = -rules.arena_half_extent;
-        const auto high = low + kGridDimension * kGridCellSize;
-        query.Collect(combat_state->enemy_grid,
-            {std::clamp(position.x - extent, low, high), std::clamp(position.y - extent, low, high)},
-            {std::clamp(position.x + extent, low, high), std::clamp(position.y + extent, low, high)},
-            rules.arena_half_extent, actors->enemies.size());
+        query.Collect(combat_state->enemy_grid,minimum,maximum,rules.arena_half_extent,actors->enemies.size(),canonical_order);
         return;
     }
     for (const auto row : query.rows) query.visited[row] = 0;
@@ -653,6 +662,70 @@ void GameSimulation::SimulationWorld::CommitCleanupBarrier()
             combat_state->area_hit_index.emplace(std::pair{record.area_id, record.target}, i);
         }
     }
+    RetireBalanceHitCauses();
+}
+
+void GameSimulation::SimulationWorld::RetireBalanceHitCauses()
+{
+    auto &observer = telemetry->balance_observer;
+    observer.active_player_casts.clear();
+    for (auto &casts : observer.active_enemy_casts) casts.clear();
+
+    const auto add_player = [&](std::uint64_t cast) {
+        BalanceObserver::AddCause(observer.active_player_casts, cast);
+    };
+    const auto add_enemy = [&](std::uint8_t source, std::uint64_t cast) {
+        if (source < kEnemyArchetypeCount)
+            BalanceObserver::AddCause(observer.active_enemy_casts[source],
+                                      cast & 0x00FFFFFFFFFFFFFFull);
+    };
+    const auto collect_projectile = [&](ConstProjectileRow projectile) {
+        if (projectile.combat.player_owned)
+            add_player(projectile.combat.cast_id);
+        else
+            add_enemy(projectile.combat.source_enemy, projectile.combat.cast_id);
+    };
+    const auto collect_area = [&](const AreaActor &area) {
+        if (area.source_enemy < kEnemyArchetypeCount)
+            add_enemy(area.source_enemy, area.cast_id);
+        else
+            add_player(area.cast_id);
+    };
+
+    for (const auto &projectile : actors->projectiles) collect_projectile(projectile);
+    for (const auto &projectile : actors->pending_projectile_spawns)
+        collect_projectile(projectile);
+    for (const auto &area : actors->areas) collect_area(area);
+    for (const auto &area : actors->pending_area_spawns) collect_area(area);
+
+    // Scheduled actions are player skill causes; boss actions are enemy causes.
+    for (const auto &action : combat_state->scheduled_actions) add_player(action.cast_id);
+    for (const auto &action : combat_state->boss_actions)
+    {
+        if (const auto boss = FindEnemy(action.boss_id))
+            add_enemy(static_cast<std::uint8_t>(EnemyTelemetryIndex(*boss)),
+                      action.cast_id);
+    }
+
+    const auto collect_enemy = [&](ConstEnemyRow enemy) {
+        add_enemy(static_cast<std::uint8_t>(EnemyTelemetryIndex(enemy)),
+                  enemy.action.attack_cast_id);
+        // This cause can still be consulted by a later death/proc path.
+        add_player(enemy.cold.last_damage_cast);
+    };
+    for (const auto &enemy : actors->enemies) collect_enemy(enemy);
+    for (const auto &enemy : actors->pending_enemy_spawns) collect_enemy(enemy);
+
+    add_player(actors->player.basic_attack_cast_id);
+    add_player(actors->player.charge_cast_id);
+    for (const auto &command : combat_state->combat.commands)
+    {
+        if (command.target == 0)
+            add_enemy(command.source_enemy, command.cast_id);
+        else if (command.skill < SkillKind::Count)
+            add_player(command.cast_id);
+    }
+    observer.RetireInactiveCauses();
 }
 
 GameplayChecksum GameSimulation::SimulationWorld::CalculateChecksum() const
@@ -1290,14 +1363,12 @@ void GameSimulation::SimulationWorld::SpawnPhase()
     }
 }
 
-float GameSimulation::SimulationWorld::SlowMultiplier(EnemyRow enemy)
+float GameSimulation::SimulationWorld::SlowMultiplier(ConstEnemyRow enemy) const
 {
-    std::erase_if(enemy.status.slows,
-                  [this](const SlowEffect &slow) { return slow.expires <= tick; });
     float multiplier = 1.0f;
     for (const auto &slow : enemy.status.slows)
     {
-        multiplier *= 1.0f - slow.reduction;
+        if(slow.expires>tick) multiplier *= 1.0f-slow.reduction;
     }
     return multiplier;
 }
@@ -1406,6 +1477,9 @@ void GameSimulation::SimulationWorld::BossAi(EnemyRow boss)
     const auto cast_id = TakeSimulationIdentity(next_cast_id);
     ++Metrics().enemy_attack_attempts[EnemyTelemetryIndex(boss)];
     const auto add = [&](BossAction action) {
+        if(combat_state->next_boss_schedule_sequence==std::numeric_limits<std::uint64_t>::max())
+            throw std::overflow_error("Boss action ordering sequence exhausted.");
+        action.schedule_sequence=combat_state->next_boss_schedule_sequence++;
         const auto previous = std::ranges::find_if(
             combat_state->boss_actions.rbegin(), combat_state->boss_actions.rend(), [&](const BossAction &candidate) {
                 return candidate.cast_id == action.cast_id;
@@ -1417,6 +1491,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyRow boss)
         action.warning_sequence = PendingSimulationSequence(event_sequence);
         action.warning_started = tick;
         combat_state->boss_actions.push_back(action);
+        combat_state->boss_actions_dirty=true;
         const auto context = static_cast<std::uint8_t>(kind);
         const auto position = action.kind == BossActionKind::Dash ||
                                       action.kind == BossActionKind::Volley
